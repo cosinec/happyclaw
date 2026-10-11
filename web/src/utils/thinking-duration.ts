@@ -17,3 +17,13 @@ export function formatThinkingDuration(ms: number): string {
   if (seconds === 0) return `已思考 ${minutes} 分`;
   return `已思考 ${minutes} 分 ${seconds} 秒`;
 }
+
+/**
+ * The collapsed reasoning label: how long it thought, or just that it did.
+ * Under a second reads as noise ("已思考 0.2 秒").
+ */
+export function thinkingLabel(durationMs: number | undefined): string {
+  return durationMs != null && durationMs >= 1000
+    ? formatThinkingDuration(durationMs)
+    : '思考过程';
+}

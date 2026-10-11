@@ -1,4 +1,4 @@
-import { memo, useState } from 'react';
+import { memo, useId, useState } from 'react';
 import {
   ChevronDown,
   ChevronRight,
@@ -32,22 +32,29 @@ export function countTraceTools(traceEvents: StreamingTraceEvent[]): number {
 export const TracePanel = memo(function TracePanel({
   traceEvents,
   taskCount,
+  defaultExpanded = false,
 }: {
   traceEvents: StreamingTraceEvent[];
   taskCount: number;
+  /** Start open: the reader asked for it (a trace loaded on request). */
+  defaultExpanded?: boolean;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(defaultExpanded);
+  const panelId = useId();
+  const shown = traceEvents.filter(
+    (e) => e.displayLevel !== 'debug' && e.kind !== 'context',
+  );
+  // Count the tools before the duplicate rows go: two calls with the same
+  // input are two tools.
+  const toolCount = countTraceTools(shown);
   const seenTrace = new Set<string>();
-  const visibleTrace = traceEvents
-    .filter((e) => e.displayLevel !== 'debug' && e.kind !== 'context')
-    .filter((event) => {
-      const key = `${event.kind}\u0000${event.taskId ?? ''}\u0000${event.title}\u0000${event.summary ?? ''}\u0000${event.detail ?? ''}`;
-      if (seenTrace.has(key)) return false;
-      seenTrace.add(key);
-      return true;
-    });
+  const visibleTrace = shown.filter((event) => {
+    const key = `${event.kind}\u0000${event.taskId ?? ''}\u0000${event.toolUseId ?? ''}\u0000${event.title}\u0000${event.summary ?? ''}\u0000${event.detail ?? ''}`;
+    if (seenTrace.has(key)) return false;
+    seenTrace.add(key);
+    return true;
+  });
   if (visibleTrace.length === 0 && taskCount === 0) return null;
-  const toolCount = countTraceTools(visibleTrace);
 
   const groups = [
     {
@@ -90,9 +97,10 @@ export const TracePanel = memo(function TracePanel({
         type="button"
         onClick={() => setExpanded(!expanded)}
         aria-expanded={expanded}
-        className="-ml-1.5 inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-md px-1.5 text-caption text-muted-foreground transition-colors hover:bg-surface-hover hover:text-foreground"
+        aria-controls={expanded ? panelId : undefined}
+        className="-ml-1.5 inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-md px-1.5 text-caption text-muted-foreground transition-colors hover:bg-surface-hover hover:text-foreground pointer-coarse:h-10"
       >
-        <ListTree className="size-3.5" />
+        <ListTree className="size-3.5" aria-hidden="true" />
         <span>执行详情</span>
         <span className="tabular-nums text-faint-foreground">
           {toolCount > 0 && `已使用 ${toolCount} 个工具 · `}
@@ -100,10 +108,14 @@ export const TracePanel = memo(function TracePanel({
         </span>
         <ChevronRight
           className={`size-3.5 transition-transform duration-150 ${expanded ? 'rotate-90' : ''}`}
+          aria-hidden="true"
         />
       </button>
       {expanded && (
-        <div className="mt-1 max-h-72 space-y-3 overflow-y-auto border-l-2 border-surface-border py-1 pl-3">
+        <div
+          id={panelId}
+          className="mt-1 max-h-72 space-y-3 overflow-y-auto overscroll-contain border-l-2 border-surface-border py-1 pl-3"
+        >
           {groups.map((group) => (
             <div key={group.key}>
               <div className="mb-1 text-micro font-medium text-faint-foreground">

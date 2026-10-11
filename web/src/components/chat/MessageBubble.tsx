@@ -1,12 +1,10 @@
-import { useState, memo, lazy, Suspense } from 'react';
+import { useState, useMemo, memo, lazy, Suspense } from 'react';
 import {
   Copy,
   Check,
-  ChevronRight,
   Ellipsis,
   ImageDown,
   OctagonAlert,
-  Sparkles,
   TriangleAlert,
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
@@ -24,10 +22,11 @@ import { useAuthStore } from '../../stores/auth';
 import { EmojiAvatar } from '../common/EmojiAvatar';
 import { FinalMarkdown } from './StreamingMarkdown';
 import { PermissionAlert, TracePanel } from './ExecutionTrace';
+import { ThinkingBlock } from './ThinkingBlock';
 import { MessageContextMenu } from './MessageContextMenu';
 import { ImageLightbox } from './ImageLightbox';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
-import { formatThinkingDuration } from '../../utils/thinking-duration';
+import { extractThinkingTitle } from '../../lib/thinking-text';
 import { resolveAgentDisplayIdentity } from '../../utils/agent-identity';
 import {
   getPresentedMessageContent,
@@ -105,47 +104,6 @@ function formatShortTime(value: string): string {
   return date.getFullYear() === now.getFullYear()
     ? `${md} ${hm}`
     : `${date.getFullYear()}-${md} ${hm}`;
-}
-
-/** Collapsible reasoning block for AI messages */
-function ReasoningBlock({
-  content,
-  durationMs,
-}: {
-  content: string;
-  durationMs?: number;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  // Under a second reads as noise ("已思考 0.2 秒").
-  const label =
-    durationMs != null && durationMs >= 1000
-      ? formatThinkingDuration(durationMs)
-      : '思考过程';
-
-  return (
-    <div className="mb-2">
-      <button
-        type="button"
-        onClick={() => setExpanded(!expanded)}
-        aria-expanded={expanded}
-        className="-ml-1.5 inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-md px-1.5 font-sans text-caption text-muted-foreground transition-colors hover:bg-surface-hover hover:text-foreground"
-      >
-        <Sparkles className="size-3.5" />
-        <span>{label}</span>
-        <ChevronRight
-          className={cn(
-            'size-3.5 transition-transform duration-150',
-            expanded && 'rotate-90',
-          )}
-        />
-      </button>
-      {expanded && (
-        <div className="mt-1 mb-3 max-h-72 overflow-y-auto border-l-2 border-surface-border pl-3 font-sans text-label leading-6 break-words whitespace-pre-wrap text-muted-foreground">
-          {content}
-        </div>
-      )}
-    </div>
-  );
 }
 
 /** Parse and display token usage for AI messages */
@@ -279,6 +237,15 @@ export const MessageBubble = memo(
           : undefined,
     });
     const { mode: displayMode } = useDisplayMode();
+    const thinkingTitle = useMemo(
+      () =>
+        thinkingContent
+          ? extractThinkingTitle(thinkingContent, { final: true })
+          : undefined,
+      [thinkingContent],
+    );
+    // Reasoning without a summary still says how long the model thought.
+    const hasReasoning = !!thinkingContent || (thinkingDurationMs ?? 0) >= 1000;
     const isUser = !message.is_from_me;
     const presentedContent = getPresentedMessageContent(message);
     const completedWorkflowRuns = message.workflow_runs?.filter(
@@ -568,10 +535,12 @@ export const MessageBubble = memo(
           </div>
 
           {/* Reasoning */}
-          {thinkingContent && (
-            <ReasoningBlock
-              content={thinkingContent}
+          {hasReasoning && (
+            <ThinkingBlock
+              text={thinkingContent ?? ''}
+              title={thinkingTitle}
               durationMs={thinkingDurationMs}
+              groupJid={markdownJid}
             />
           )}
 
@@ -682,10 +651,12 @@ export const MessageBubble = memo(
 
         {/* Claude-style: no card container, direct content */}
         <div className="overflow-hidden font-serif">
-          {thinkingContent && (
-            <ReasoningBlock
-              content={thinkingContent}
+          {hasReasoning && (
+            <ThinkingBlock
+              text={thinkingContent ?? ''}
+              title={thinkingTitle}
               durationMs={thinkingDurationMs}
+              groupJid={markdownJid}
             />
           )}
 

@@ -1,9 +1,11 @@
 import { memo } from 'react';
-import { Loader2 } from 'lucide-react';
+import { Check, Loader2, X } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import { formatElapsedMs } from '../../utils/format-elapsed';
 
 /**
- * ToolActivityCard — structured mini-card for active tool calls.
- * Replaces the tiny pill rendering in StreamingDisplay for better readability.
+ * ToolActivityCard — structured mini-card for tool calls: a running one
+ * spins, a finished one keeps its row with a mark and how long it took.
  */
 
 interface ToolInfo {
@@ -17,6 +19,8 @@ interface ToolInfo {
   toolInputSummary?: string;
   toolInput?: Record<string, unknown>;
 }
+
+export type ToolRowStatus = 'running' | 'done' | 'error';
 
 interface ToolActivityCardProps {
   tool: ToolInfo;
@@ -137,45 +141,122 @@ export function describeToolActivity(toolName: string): string {
   }
 }
 
-export const ToolActivityCard = memo(function ToolActivityCard({
-  tool,
-  localElapsed,
-}: ToolActivityCardProps) {
-  const elapsed = tool.elapsedSeconds ?? localElapsed;
-  const isNested = tool.isNested === true;
-  const { verb, hint } = describeToolName(tool.toolName, tool.skillName);
+export interface ToolRowProps {
+  toolName: string;
+  skillName?: string;
+  /** What the call was given: a path, a command, a pattern. */
+  summary?: string;
+  status?: ToolRowStatus;
+  nested?: boolean;
+  /** A running call's time so far. */
+  elapsedSeconds?: number;
+  /** A finished call's time. */
+  durationMs?: number;
+  /** The start of what the call returned; a failed call always shows it. */
+  resultPreview?: string;
+  /** Show the result of a call that did not fail too. */
+  showResult?: boolean;
+}
 
-  const param = parseToolParam(tool.toolName, tool.toolInputSummary);
-  const isBash = tool.toolName === 'Bash';
+/** One tool call as a row: mark · tool · parameter · time. */
+export const ToolRow = memo(function ToolRow({
+  toolName,
+  skillName,
+  summary,
+  status = 'running',
+  nested = false,
+  elapsedSeconds,
+  durationMs,
+  resultPreview,
+  showResult = false,
+}: ToolRowProps) {
+  const { verb, hint } = describeToolName(toolName, skillName);
+  const param = parseToolParam(toolName, summary);
+  const isBash = toolName === 'Bash';
+  const running = status === 'running';
+  const failed = status === 'error';
+  const time = running
+    ? elapsedSeconds != null
+      ? `${Math.round(elapsedSeconds)}s`
+      : undefined
+    : durationMs != null
+      ? formatElapsedMs(durationMs)
+      : undefined;
+  const result = resultPreview && (failed || showResult) ? resultPreview : '';
 
-  // Codex-style activity row: spinner · tool name · parameter · elapsed.
+  // Codex-style activity row: mark · tool name · parameter · time.
   return (
-    <div
-      className={isNested ? 'ml-3 border-l border-surface-border pl-2.5' : ''}
-    >
+    <div className={nested ? 'ml-3 border-l border-surface-border pl-2.5' : ''}>
       <div className="flex min-h-7 items-center gap-2 rounded-md px-1 py-1 font-sans text-label">
-        <Loader2
-          aria-hidden="true"
-          className="size-3.5 shrink-0 animate-spin text-muted-foreground"
-        />
-        <span className="shrink-0 font-medium text-foreground" title={hint}>
+        {running ? (
+          <Loader2
+            aria-hidden="true"
+            className="size-3.5 shrink-0 animate-spin text-muted-foreground"
+          />
+        ) : failed ? (
+          <X aria-hidden="true" className="size-3.5 shrink-0 text-error" />
+        ) : (
+          <Check
+            aria-hidden="true"
+            className="size-3.5 shrink-0 text-faint-foreground"
+          />
+        )}
+        <span
+          className={cn(
+            'shrink-0 font-medium',
+            running || failed ? 'text-foreground' : 'text-muted-foreground',
+          )}
+          title={hint}
+        >
           {verb}
         </span>
         {param && (
           <span
-            className={`min-w-0 flex-1 truncate text-muted-foreground ${isBash ? 'font-mono text-caption leading-5' : ''}`}
-            title={tool.toolInputSummary}
+            className={cn(
+              'min-w-0 flex-1 truncate text-muted-foreground',
+              isBash && 'font-mono text-caption leading-5',
+              !running && !failed && 'text-faint-foreground',
+            )}
+            title={summary}
           >
             {param.value}
           </span>
         )}
         {!param && <span className="flex-1" />}
-        {elapsed != null && (
+        {time && (
           <span className="shrink-0 text-caption text-faint-foreground tabular-nums">
-            {Math.round(elapsed)}s
+            {time}
           </span>
         )}
+        <span className="sr-only">
+          {running ? '，运行中' : failed ? '，失败' : '，已完成'}
+        </span>
       </div>
+      {result && (
+        <p
+          className={cn(
+            'mb-1 ml-6 line-clamp-2 text-caption break-words',
+            failed ? 'text-error' : 'text-muted-foreground',
+          )}
+        >
+          {result}
+        </p>
+      )}
     </div>
+  );
+});
+
+export const ToolActivityCard = memo(function ToolActivityCard({
+  tool,
+  localElapsed,
+}: ToolActivityCardProps) {
+  return (
+    <ToolRow
+      toolName={tool.toolName}
+      skillName={tool.skillName}
+      summary={tool.toolInputSummary}
+      nested={tool.isNested === true}
+      elapsedSeconds={tool.elapsedSeconds ?? localElapsed}
+    />
   );
 });
