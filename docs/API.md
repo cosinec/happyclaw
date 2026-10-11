@@ -191,7 +191,8 @@ Workspace↔AgentProfile 绑定行上，因此：仅 `web:` 前缀工作区可�
 }
 ```
 
-`trace` 的行与 Web 实时累积的一致（标题格式相同）。访问检查与消息列表相同
+`trace` 的行与 Web 实时累积的一致（标题格式相同；工具进度不逐帧追加，只把输入摘要、
+技能名更新到该工具自己的“工具 X”行）。访问检查与消息列表相同
 （Runtime Session 的 `:jid` 为 `{workspaceJid}#agent:{sessionId}`）；主动模式工作区
 按**当前**可见性过滤：`hidden` 返回 404 且消息不带 `has_trace`，`activity` 返回空的
 `thinking`。消息、聊天或工作区被删除时对应的轨迹一并清除，服务启动时清理孤儿轨迹。

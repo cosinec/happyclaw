@@ -283,6 +283,44 @@ describe('stream_snapshot of a run in progress', () => {
     expect(snapshot.traceEvents![0].summary).toBe('command: ls');
   });
 
+  test('tool progress updates the tool row, so a reconnect shows what the live view did', () => {
+    const run = startRun();
+    run.emit('tool_use_start', { toolName: 'Skill', toolUseId: 's1' });
+    run.emit('tool_use_start', { toolName: 'Bash', toolUseId: 'b1' });
+    for (let i = 0; i < 30; i += 1) {
+      run.emit('tool_progress', {
+        toolName: 'Bash',
+        toolUseId: 'b1',
+        elapsedSeconds: i,
+      });
+    }
+    run.emit('tool_progress', {
+      toolName: 'Skill',
+      toolUseId: 's1',
+      skillName: 'pdf',
+    });
+    run.emit('tool_progress', {
+      toolName: 'Bash',
+      toolUseId: 'b1',
+      toolInputSummary: 'command: make test',
+    });
+
+    const { snapshot } = web.buildStreamSnapshot(run.jid)!;
+    expect(
+      snapshot.traceEvents!.map((r) => [r.kind, r.title, r.summary]),
+    ).toEqual([
+      ['skill', '技能 pdf', undefined],
+      ['tool', '工具 Bash', 'command: make test'],
+    ]);
+    // the running tools themselves are tracked separately, and still advance
+    expect(
+      snapshot.activeTools.find((t) => t.toolUseId === 'b1'),
+    ).toMatchObject({
+      elapsedSeconds: 29,
+      toolInputSummary: 'command: make test',
+    });
+  });
+
   test('the trace keeps the newest 200 rows', () => {
     const run = startRun();
     for (let i = 0; i < 230; i += 1) {

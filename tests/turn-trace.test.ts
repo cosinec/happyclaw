@@ -144,6 +144,49 @@ describe('TurnTraceAccumulator', () => {
     });
   });
 
+  test('tool_progress updates the tool row instead of adding rows', () => {
+    const acc = new TurnTraceAccumulator(0);
+    acc.observe(ev('tool_use_start', { toolName: 'Bash', toolUseId: 'b' }), 10);
+    acc.observe(
+      ev('tool_use_start', { toolName: 'Skill', toolUseId: 's' }),
+      20,
+    );
+    // a long-running tool reports its elapsed time again and again
+    for (let i = 0; i < 100; i += 1) {
+      acc.observe(
+        ev('tool_progress', {
+          toolName: 'Bash',
+          toolUseId: 'b',
+          elapsedSeconds: i,
+        }),
+        30 + i,
+      );
+    }
+    acc.observe(
+      ev('tool_progress', {
+        toolName: 'Bash',
+        toolUseId: 'b',
+        toolInputSummary: 'command: sleep 100',
+      }),
+      200,
+    );
+    acc.observe(
+      ev('tool_progress', {
+        toolName: 'Skill',
+        toolUseId: 's',
+        skillName: 'pdf',
+      }),
+      210,
+    );
+    acc.observe(ev('tool_use_end', { toolUseId: 'b' }), 300);
+    const { trace } = acc.toContent({ includeThinking: false })!;
+    expect(trace.map((row) => [row.kind, row.title, row.summary])).toEqual([
+      ['tool', '工具 Bash', 'command: sleep 100'],
+      ['skill', '技能 pdf', undefined],
+      ['tool', '工具完成 b', undefined],
+    ]);
+  });
+
   test('keeps the newest 200 trace rows', () => {
     const acc = new TurnTraceAccumulator(0);
     for (let i = 0; i < MAX_TURN_TRACE_EVENTS + 25; i += 1) {
