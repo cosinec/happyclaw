@@ -12,16 +12,17 @@ import {
 } from '../web/src/lib/thinking-text';
 import { answerStart } from '../web/src/lib/stream-steps';
 
-const { apiGetMock, apiPostMock } = vi.hoisted(() => ({
+const { apiGetMock, apiPostMock, apiPatchMock } = vi.hoisted(() => ({
   apiGetMock: vi.fn(),
   apiPostMock: vi.fn(),
+  apiPatchMock: vi.fn(),
 }));
 
 vi.mock('../web/src/api/client', () => ({
   api: {
     get: apiGetMock,
     post: apiPostMock,
-    patch: vi.fn(),
+    patch: apiPatchMock,
     delete: vi.fn(),
   },
   computeUploadTimeoutMs: vi.fn(() => 8000),
@@ -684,5 +685,67 @@ describe('a reconnect snapshot', () => {
       .getState()
       .handleStreamSnapshot(JID, snapshot(), undefined, RUN);
     expect(live().steps).toBe(before);
+  });
+});
+
+describe('changing the process visibility', () => {
+  beforeEach(() => {
+    reset();
+    apiPatchMock.mockResolvedValue({ success: true });
+  });
+
+  it('sends the level, keeps the mode and needs no restart', async () => {
+    setWorkspace('proactive', 'hidden');
+    const saved = await useChatStore
+      .getState()
+      .updateProcessVisibility(JID, 'activity');
+    expect(saved).toBe(true);
+    expect(apiPatchMock).toHaveBeenCalledWith(
+      `/api/groups/${encodeURIComponent(JID)}`,
+      { process_visibility: 'activity' },
+    );
+    const group = useChatStore.getState().groups[JID];
+    expect(group.process_visibility).toBe('activity');
+    expect(group.interaction_mode).toBe('proactive');
+  });
+
+  it('reports a failed save and keeps the old level', async () => {
+    setWorkspace('proactive', 'activity');
+    apiPatchMock.mockRejectedValueOnce(new Error('forbidden'));
+    const saved = await useChatStore
+      .getState()
+      .updateProcessVisibility(JID, 'full');
+    expect(saved).toBe(false);
+    expect(useChatStore.getState().groups[JID].process_visibility).toBe(
+      'activity',
+    );
+    expect(useChatStore.getState().error).toBe('forbidden');
+  });
+
+  it('drops what a lowered level hides from a turn that is running', async () => {
+    setWorkspace('proactive', 'full');
+    useChatStore.getState().handleRunStarted(JID, RUN);
+    emit({ eventType: 'thinking_start' });
+    delta('thinking_delta', '**检查**\n\n不该再显示的思考。');
+    tool('t1', 'Bash', 'npm test');
+    expect(live().thinkingText).toContain('不该再显示');
+
+    await useChatStore.getState().updateProcessVisibility(JID, 'activity');
+    const kept = live();
+    expect(kept.thinkingText).toBe('');
+    expect(kept.steps!.map((step) => step.kind)).toEqual(['thinking', 'tool']);
+    expect(kept.steps![0].text).toBe('');
+
+    await useChatStore.getState().updateProcessVisibility(JID, 'hidden');
+    expect(live().steps ?? []).toEqual([]);
+    expect(live().activeTools).toEqual([]);
+  });
+
+  it('does not touch an Assistant workspace turn', async () => {
+    setWorkspace('assistant', 'full');
+    useChatStore.getState().handleRunStarted(JID, RUN);
+    delta('thinking_delta', '助手的思考。');
+    await useChatStore.getState().updateProcessVisibility(JID, 'hidden');
+    expect(live().thinkingText).toBe('助手的思考。');
   });
 });

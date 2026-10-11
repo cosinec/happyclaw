@@ -147,6 +147,7 @@ import {
 import { CHANNEL_LABEL } from '../settings/channel-meta';
 import { getAgentProfileDisplayName } from '../../utils/agent-product';
 import { normalizeInteractionMode } from '../../lib/interaction-mode';
+import { normalizeProcessVisibility } from '../../lib/process-visibility';
 
 /** Sentinel value for binding the main conversation (vs. a specific agent) */
 const MAIN_BINDING = '__main__' as const;
@@ -269,6 +270,9 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const resetSession = useChatStore((s) => s.resetSession);
   const handleWsNewMessage = useChatStore((s) => s.handleWsNewMessage);
   const updateInteractionMode = useChatStore((s) => s.updateInteractionMode);
+  const updateProcessVisibility = useChatStore(
+    (s) => s.updateProcessVisibility,
+  );
 
   const agents = useChatStore((s) => s.agents[groupJid] ?? EMPTY_AGENTS);
   const activeAgentTab = useChatStore(
@@ -361,6 +365,9 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   // single source of truth to avoid frontend/backend divergence.
   const canModifyWorkspaceConfig = !!group?.can_modify;
   const interactionMode = normalizeInteractionMode(group?.interaction_mode);
+  const processVisibility = normalizeProcessVisibility(
+    group?.process_visibility,
+  );
 
   useEffect(() => {
     if (!canModifyWorkspaceConfig && contextPanelView === 'env') {
@@ -817,6 +824,30 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     setBindingAgentId(bindingRequest.target);
     clearBindingRequest();
   }, [bindingRequest, clearBindingRequest, groupJid]);
+
+  // The transcript's "show the process" entry opens the workspace settings,
+  // which live here with the rest of the workspace's configuration.
+  const workspaceSettingsRequest = useShellStore(
+    (s) => s.workspaceSettingsRequest,
+  );
+  const clearWorkspaceSettingsRequest = useShellStore(
+    (s) => s.clearWorkspaceSettingsRequest,
+  );
+  useEffect(() => {
+    if (
+      !workspaceSettingsRequest ||
+      workspaceSettingsRequest.groupJid !== groupJid
+    ) {
+      return;
+    }
+    if (canModifyWorkspaceConfig) setShowInteractionModeDialog(true);
+    clearWorkspaceSettingsRequest();
+  }, [
+    workspaceSettingsRequest,
+    clearWorkspaceSettingsRequest,
+    groupJid,
+    canModifyWorkspaceConfig,
+  ]);
 
   // --- Drag resize handlers (mouse + touch) ---
   const startDrag = useCallback(
@@ -1479,8 +1510,12 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
           open={showInteractionModeDialog}
           workspaceName={workspaceDisplayName}
           currentMode={interactionMode}
+          currentVisibility={processVisibility}
           onClose={() => setShowInteractionModeDialog(false)}
           onSave={(mode) => updateInteractionMode(groupJid, mode)}
+          onSaveVisibility={(visibility) =>
+            updateProcessVisibility(groupJid, visibility)
+          }
         />
       )}
 

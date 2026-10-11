@@ -20,6 +20,7 @@ import type {
   AvailableImGroup,
   CreateWorkspaceOptions,
   InteractionMode,
+  ProcessVisibility,
   WorkspaceDeleteImpact,
 } from '../types';
 import {
@@ -682,6 +683,35 @@ function isProactiveRuntime(
   );
 }
 
+/**
+ * A proactive turn's state cut down to what `visibility` shows: nothing but
+ * the spinner at `hidden`, no reasoning text at `activity`. The owner can
+ * lower the level while a turn runs; what the new level hides is dropped.
+ */
+function scrubForVisibility(
+  state: StreamingState,
+  visibility: ProcessVisibility,
+): StreamingState {
+  if (visibility === 'full') return state;
+  if (visibility === 'hidden') {
+    return {
+      ...DEFAULT_STREAMING_STATE,
+      turnId: state.turnId,
+      sessionId: state.sessionId,
+      systemStatus: state.systemStatus,
+    };
+  }
+  return {
+    ...state,
+    thinkingText: '',
+    thinkingTitle: undefined,
+    thinkingGap: false,
+    steps: state.steps?.map((step) =>
+      step.kind === 'thinking' ? { ...step, text: '', title: undefined } : step,
+    ),
+  };
+}
+
 /** Thinking time so far, including a burst still in progress. */
 function totalThinkingMs(state: StreamingState): number | undefined {
   if (state.isThinking && state.thinkingStartedAt != null) {
@@ -924,6 +954,11 @@ interface ChatState {
   updateInteractionMode: (
     jid: string,
     interactionMode: InteractionMode,
+  ) => Promise<boolean>;
+  /** Change how much of a proactive turn's process the Web shows (no restart). */
+  updateProcessVisibility: (
+    jid: string,
+    visibility: ProcessVisibility,
   ) => Promise<boolean>;
   togglePin: (jid: string) => Promise<void>;
   inspectDeleteFlow: (jid: string) => Promise<WorkspaceDeleteImpact>;
@@ -3386,6 +3421,59 @@ export const useChatStore = create<ChatState>((set, get) => ({
         groups: patchGroups(state.groups),
         error: null,
       }));
+      useGroupsStore.setState((state) => ({
+        groups: patchGroups(state.groups),
+      }));
+      return true;
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+      return false;
+    }
+  },
+
+  updateProcessVisibility: async (jid, processVisibility) => {
+    try {
+      await api.patch<{ success: boolean }>(
+        `/api/groups/${encodeURIComponent(jid)}`,
+        { process_visibility: processVisibility },
+      );
+      const patchGroups = (groups: Record<string, GroupInfo>) => {
+        const group = groups[jid];
+        if (!group) return groups;
+        return {
+          ...groups,
+          [jid]: { ...group, process_visibility: processVisibility },
+        };
+      };
+      set((state) => {
+        // A level lowered mid-run must not leave what it hides in memory.
+        const scrub = isProactiveRuntime(state, jid);
+        const nextStreaming = { ...state.streaming };
+        if (scrub && nextStreaming[jid]) {
+          nextStreaming[jid] = scrubForVisibility(
+            nextStreaming[jid],
+            processVisibility,
+          );
+        }
+        const nextAgentStreaming = { ...state.agentStreaming };
+        for (const agent of state.agents[jid] ?? []) {
+          if (
+            isProactiveRuntime(state, `${jid}#agent:${agent.id}`) &&
+            nextAgentStreaming[agent.id]
+          ) {
+            nextAgentStreaming[agent.id] = scrubForVisibility(
+              nextAgentStreaming[agent.id],
+              processVisibility,
+            );
+          }
+        }
+        return {
+          groups: patchGroups(state.groups),
+          streaming: nextStreaming,
+          agentStreaming: nextAgentStreaming,
+          error: null,
+        };
+      });
       useGroupsStore.setState((state) => ({
         groups: patchGroups(state.groups),
       }));

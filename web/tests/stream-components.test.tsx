@@ -6,6 +6,12 @@ import { StepTimeline } from '../src/components/chat/StepTimeline';
 import { SubAgentCard } from '../src/components/chat/SubAgentCard';
 import { TracePanel } from '../src/components/chat/ExecutionTrace';
 import { ModelWaitRow } from '../src/components/chat/ModelWaitRow';
+import {
+  ProcessPanel,
+  summarizeProcess,
+} from '../src/components/chat/ProcessPanel';
+import { ProcessVisibilitySelector } from '../src/components/chat/ProcessVisibilitySelector';
+import type { StreamingState } from '../src/stores/chat';
 import type { StreamingStep } from '../src/lib/stream-steps';
 import type { StreamingTaskRuntimeState } from '../src/stores/chat';
 import { describeRunPhase } from '../src/lib/run-phase';
@@ -398,5 +404,134 @@ describe('describeRunPhase', () => {
     expect(
       describeRunPhase({ ...base, taskStates: { 'task-1': task } }, false),
     ).toBe('正在等待子 Agent');
+  });
+});
+
+describe('ProcessPanel', () => {
+  const streaming: StreamingState = {
+    partialText: '内部的回复文字不能出现',
+    thinkingText: '**不该出现的思考**\n\n细节',
+    isThinking: false,
+    activeTools: [],
+    activeHook: null,
+    systemStatus: null,
+    recentEvents: [],
+    traceEvents: [],
+    taskStates: {},
+    steps: [
+      step({
+        id: 'tool-a',
+        kind: 'tool',
+        toolName: 'Grep',
+        toolUseId: 'a',
+        summary: 'useVirtualizer',
+      }),
+      step({
+        id: 'tool-b',
+        kind: 'tool',
+        toolName: 'Bash',
+        toolUseId: 'b',
+        summary: 'npm test',
+        status: 'running',
+      }),
+      step({
+        id: 'task-1',
+        kind: 'task',
+        taskId: 'task-1',
+        status: 'running',
+      }),
+    ],
+    activeTools: [
+      {
+        toolName: 'Bash',
+        toolUseId: 'b',
+        startTime: 1,
+        toolInputSummary: 'npm test',
+      },
+    ],
+  };
+
+  it('is one folded line with the phase, the latest tool, the sub-agents and the time', () => {
+    expect(summarizeProcess(streaming, 47)).toEqual({
+      headline: '正在运行命令 · 1 个子 Agent 运行中 · 47s',
+      recent: '运行 npm test',
+    });
+    const html = renderToStaticMarkup(
+      <ProcessPanel
+        streaming={streaming}
+        groupJid="web:test"
+        runtimeJid="web:test"
+        visibility="activity"
+      />,
+    );
+    expect(html).toContain('处理过程');
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain('正在运行命令 · 1 个子 Agent 运行中');
+    expect(html).toContain('最近：运行 npm test');
+    expect(html).not.toContain('data-hc-step-timeline');
+  });
+
+  it('never shows the reply text or the reasoning text of the state it is given', () => {
+    for (const visibility of ['activity', 'full'] as const) {
+      const html = renderToStaticMarkup(
+        <ProcessPanel
+          streaming={streaming}
+          groupJid="web:test"
+          runtimeJid="web:test"
+          visibility={visibility}
+        />,
+      );
+      expect(html).not.toContain('内部的回复文字不能出现');
+      expect(html).not.toContain('不该出现的思考');
+    }
+  });
+
+  it('says it is waiting on a run that has not started anything yet', () => {
+    expect(
+      summarizeProcess(
+        { ...streaming, steps: [], activeTools: [], awaitingModel: true },
+        null,
+      ),
+    ).toEqual({ headline: '正在思考', recent: undefined });
+  });
+
+  it('keeps a long command short so the count and the time stay in view', () => {
+    const long = {
+      ...streaming,
+      steps: [
+        step({
+          id: 'tool-x',
+          kind: 'tool',
+          toolName: 'Bash',
+          toolUseId: 'x',
+          summary: `npx vitest run ${'tests/frontend-session-sidebar-copy.test.ts '.repeat(3)}`,
+          status: 'running',
+        }),
+      ],
+    };
+    const { recent } = summarizeProcess(long, 3);
+    expect(recent!.length).toBeLessThan(48);
+    expect(recent!.endsWith('…')).toBe(true);
+  });
+});
+
+describe('ProcessVisibilitySelector', () => {
+  it('offers the three levels and says what it does not change', () => {
+    const html = renderToStaticMarkup(
+      <ProcessVisibilitySelector
+        value="activity"
+        onChange={() => undefined}
+        name="visibility"
+      />,
+    );
+    for (const label of ['隐藏', '仅活动', '活动 + 思考摘要']) {
+      expect(html).toContain(label);
+    }
+    expect(html.match(/type="radio"/g)).toHaveLength(3);
+    expect(html).toMatch(
+      /value="activity"[^>]*checked|checked[^>]*value="activity"/,
+    );
+    expect(html).toContain('不重启运行时');
+    expect(html).toContain('不影响飞书等渠道');
   });
 });

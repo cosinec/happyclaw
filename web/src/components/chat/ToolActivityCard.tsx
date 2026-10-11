@@ -108,6 +108,16 @@ export function describeToolName(
   }
 }
 
+/** A call in a few words: its verb and, if it was given one, its parameter. */
+export function describeToolCall(
+  toolName: string,
+  summary?: string,
+  skillName?: string,
+): { verb: string; param?: string } {
+  const { verb } = describeToolName(toolName, skillName);
+  return { verb, param: parseToolParam(toolName, summary)?.value };
+}
+
 /** Phrase for the status line while a tool of this kind is running. */
 export function describeToolActivity(toolName: string): string {
   switch (toolName) {

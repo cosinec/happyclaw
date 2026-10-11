@@ -20,6 +20,8 @@ import { ThinkingBlock } from './ThinkingBlock';
 import { WorkflowRunCard } from './WorkflowRunCard';
 import { isWorkflowTask, workflowRunOf } from './workflow-run';
 import { PermissionAlert, TracePanel } from './ExecutionTrace';
+import { ProcessPanel } from './ProcessPanel';
+import { useShellStore } from '../../stores/shell';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
 import { useConnectionStatus } from '../../hooks/useConnectionStatus';
 import { useRunElapsed } from '../../hooks/useRunElapsed';
@@ -30,6 +32,7 @@ import {
 import { useThrottledValue } from '../../hooks/useThrottledValue';
 import { useTick } from '../../hooks/useTick';
 import { shouldShowStreamingPartialText } from '../../lib/interaction-mode';
+import { normalizeProcessVisibility } from '../../lib/process-visibility';
 import {
   DEEP_THINKING_STATUS,
   describeRunPhase,
@@ -72,6 +75,17 @@ function classicToolSteps(
     finished.slice(0, Math.max(0, finished.length - CLASSIC_FINISHED_TOOLS)),
   );
   return tools.filter((step) => !hidden.has(step));
+}
+
+/** How long this run has gone on, ticking by itself so its parent need not. */
+function RunElapsed({ runtimeJid }: { runtimeJid: string }) {
+  const elapsed = useRunElapsed(runtimeJid);
+  if (elapsed == null) return null;
+  return (
+    <span className="text-caption text-faint-foreground tabular-nums">
+      {formatRunElapsed(elapsed)}
+    </span>
+  );
 }
 
 /** Codex-style run status: current phase plus time since the run started. */
@@ -446,6 +460,14 @@ export function StreamingDisplay({
   const showPartialText = shouldShowStreamingPartialText(
     effectiveInteractionMode,
   );
+  // How much of a proactive turn's process its owner chose to show, and
+  // whether this reader may change that.
+  const processVisibility = useChatStore((s) =>
+    normalizeProcessVisibility(s.groups[groupJid]?.process_visibility),
+  );
+  const canChangeVisibility = useChatStore(
+    (s) => !!s.groups[groupJid]?.can_modify,
+  );
   const { layout } = useStreamLayout();
   const appearance = useAuthStore((state) => state.appearance);
   const agentIdentity = resolveAgentDisplayIdentity({
@@ -600,23 +622,59 @@ export function StreamingDisplay({
   // it is not an unfinished Assistant reply and must not look like another card.
   if (effectiveInteractionMode === 'proactive') {
     if (!isWaiting) return null;
+    const showProcess =
+      processVisibility !== 'hidden' && !!streaming && !streaming.interrupted;
     return (
       <div
-        role="status"
-        aria-live="polite"
-        aria-atomic="true"
-        aria-label={`${senderName}正在处理`}
         className={
-          isCompact
-            ? 'mb-2 flex min-h-10 items-center gap-2 border-b border-surface-border pb-2 text-body text-muted-foreground'
-            : 'flex min-h-10 w-full items-center gap-2 py-2 text-body text-muted-foreground'
+          isCompact ? 'mb-2 border-b border-surface-border pb-2' : 'w-full'
         }
       >
-        <Loader2
-          aria-hidden="true"
-          className="h-4 w-4 shrink-0 animate-spin text-muted-foreground motion-reduce:animate-none"
-        />
-        <span>正在处理…</span>
+        <div
+          className={
+            isCompact
+              ? 'flex min-h-10 items-center gap-2 text-body text-muted-foreground'
+              : 'flex min-h-10 w-full items-center gap-2 py-2 text-body text-muted-foreground'
+          }
+        >
+          <div
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+            aria-label={`${senderName}正在处理`}
+            className="flex items-center gap-2"
+          >
+            <Loader2
+              aria-hidden="true"
+              className="h-4 w-4 shrink-0 animate-spin text-muted-foreground motion-reduce:animate-none"
+            />
+            <span>正在处理…</span>
+          </div>
+          {processVisibility === 'hidden' && (
+            <>
+              <RunElapsed runtimeJid={runtimeJid} />
+              {canChangeVisibility && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    useShellStore.getState().requestWorkspaceSettings(groupJid)
+                  }
+                  className="ml-auto inline-flex h-7 shrink-0 cursor-pointer items-center rounded-md px-2 text-caption text-faint-foreground transition-colors hover:bg-surface-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none pointer-coarse:h-10"
+                >
+                  显示过程
+                </button>
+              )}
+            </>
+          )}
+        </div>
+        {showProcess && streaming && (
+          <ProcessPanel
+            streaming={streaming}
+            groupJid={groupJid}
+            runtimeJid={runtimeJid}
+            visibility={processVisibility}
+          />
+        )}
       </div>
     );
   }
