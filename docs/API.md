@@ -148,6 +148,28 @@ Workspace↔AgentProfile 绑定行上，因此：仅 `web:` 前缀工作区可�
 它与 `execution_mode` 共享同一道 quiesce 边界，暖 Runner 只能观察到旧契约或新
 契约；停机失败返回 503 并带 `persisted` 标记。
 
+`process_visibility`（`hidden`、`activity` 或 `full`）决定主动模式工作区的 Web
+能看到一个回合的多少过程，存放在同一条绑定行上。`GET /api/groups` 的每个 `web:`
+工作区都带解析后的有效值（没有绑定行时为 `hidden`）；`POST /api/groups` 可在创建时
+指定，缺省 `activity`，此前已存在的工作区保持 `hidden`；`PATCH /api/groups/:jid`
+同样接受它，响应回显当前值。权限与 `interaction_mode` 相同（仅 `web:` 前缀工作区、
+仅 owner，没有绑定行时 409 `WORKSPACE_AGENT_PROFILE_MISSING`），但它只改变展示：
+不经过 quiesce、不重启运行时，正在运行的回合从下一个事件起按新值投影。Assistant
+模式的工作区始终展示完整过程，该字段可以设置但没有效果。三个级别对 Web 的投影：
+
+| 级别       | 广播给 Web 的 Runner 事件                                                                                                                       |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hidden`   | 仅运行生命周期 `status`（`requesting`、`idle`、`interrupted`），即转圈                                                                          |
+| `activity` | 再加工具、子 Agent 任务、todo、hook、权限拒绝、上下文压缩和其余阶段状态，以及不含文本的 `thinking_start`/`thinking_end`；不含任何模型产出的文字 |
+| `full`     | `activity` 加上主 Agent 与子 Agent 的 `thinking_delta`（推理摘要）                                                                              |
+
+任何级别都不会发送 `text_delta`（含子 Agent 文本）、`usage`、`memory_recall`、
+`prompt_suggestion`、`raw_sdk_event`、`notification` 和未知事件类型；`tool_result`
+只保留 `toolUseId`，工具的 `toolInput`、子 Agent 的提示词与 Workflow 的预览文本也
+会被剥离。过程事件永远不会进入 IM 渠道的流式卡片。`context_audit` 从不发给 Web，但
+在所有模式下都会记录到宿主的运行上下文快照。`activity` 及以上还会广播子 Agent 任务的
+`agent_status`，使 Task 标签与任务事件一致。
+
 Home Workspace 固定归属当前用户的内置 HappyClaw。尝试通过
 `PATCH /api/groups/:jid/agent-profile` 将 Home 迁移到自定义 Agent 时返回：
 

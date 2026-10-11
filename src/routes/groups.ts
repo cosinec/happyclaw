@@ -18,6 +18,7 @@ import type {
   RegisteredGroup,
   ExecutionMode,
   InteractionMode,
+  ProcessVisibility,
 } from '../types.js';
 import { checkGroupLimit } from '../billing.js';
 import { DATA_DIR, GROUPS_DIR, isDockerAvailable } from '../config.js';
@@ -79,6 +80,8 @@ import {
   getWorkspaceAgentProfileId,
   getWorkspaceInteractionMode,
   setWorkspaceInteractionMode,
+  getWorkspaceProcessVisibility,
+  setWorkspaceProcessVisibility,
   getUserById,
   getSessionModelSelectionDetail,
   setSessionModelSelection,
@@ -359,6 +362,7 @@ interface GroupPayloadItem {
   lastMessageTime?: string;
   execution_mode: 'container' | 'host';
   interaction_mode?: InteractionMode;
+  process_visibility?: ProcessVisibility;
   custom_cwd?: string;
   is_home?: boolean;
   is_my_home?: boolean;
@@ -452,6 +456,9 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
       execution_mode: group.executionMode || 'container',
       interaction_mode: isWeb
         ? getWorkspaceInteractionMode(group.folder)
+        : undefined,
+      process_visibility: isWeb
+        ? getWorkspaceProcessVisibility(group.folder)
         : undefined,
       custom_cwd: isAdmin ? group.customCwd : undefined,
       is_home: isHome || undefined,
@@ -666,6 +673,9 @@ groupRoutes.post('/', authMiddleware, async (c) => {
         ? 'host'
         : 'container');
   const interactionMode = validation.data.interaction_mode ?? 'assistant';
+  // New workspaces show the activity of a proactive turn by default; existing
+  // ones stay hidden until their owner opts in.
+  const processVisibility = validation.data.process_visibility ?? 'activity';
   const customCwd = validation.data.custom_cwd; // Schema already trims and converts empty to undefined
   const initSourcePath = validation.data.init_source_path;
   const initGitUrl = validation.data.init_git_url;
@@ -1081,6 +1091,7 @@ groupRoutes.post('/', authMiddleware, async (c) => {
               folder,
               lockedProfile.id,
               interactionMode,
+              processVisibility,
             );
             setRegisteredGroup(jid, group);
             updateChatName(jid, name);
@@ -1152,6 +1163,7 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     lastMessageTime: now,
     execution_mode: group.executionMode || 'container',
     interaction_mode: interactionMode,
+    process_visibility: processVisibility,
     custom_cwd: isAdmin ? group.customCwd : undefined,
     is_my_home: undefined,
     can_modify: canModifyGroup(authUser, groupWithJid),
@@ -1196,6 +1208,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     activation_mode,
     execution_mode,
     interaction_mode,
+    process_visibility,
   } = validation.data;
   const name = rawName ? normalizeGroupName(rawName) : undefined;
 
@@ -1205,7 +1218,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     is_pinned === undefined &&
     activation_mode === undefined &&
     execution_mode === undefined &&
-    interaction_mode === undefined
+    interaction_mode === undefined &&
+    process_visibility === undefined
   ) {
     return c.json({ error: 'No fields to update' }, 400);
   }
@@ -1246,7 +1260,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     !name &&
     activation_mode === undefined &&
     execution_mode === undefined &&
-    interaction_mode === undefined;
+    interaction_mode === undefined &&
+    process_visibility === undefined;
   if (isPinOnly) {
     if (
       !canAccessGroup(
@@ -1284,6 +1299,12 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
         403,
       );
     }
+    if (process_visibility !== undefined && !jid.startsWith('web:')) {
+      return c.json(
+        { error: 'Only web workspaces can change process visibility' },
+        403,
+      );
+    }
   }
 
   // Handle pin/unpin (per-user, separate table)
@@ -1300,12 +1321,15 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
   // unbound. Refuse up front: throwing inside commitUpdate would surface as a
   // 500 and, on the quiesce path, only after the runtime was already stopped.
   if (
-    interaction_mode !== undefined &&
+    (interaction_mode !== undefined || process_visibility !== undefined) &&
     !getWorkspaceAgentProfileId(existing.folder)
   ) {
     return c.json(
       {
-        error: '该工作区未绑定智能体配置，因此无法修改回复模式。',
+        error:
+          interaction_mode !== undefined
+            ? '该工作区未绑定智能体配置，因此无法修改回复模式。'
+            : '该工作区未绑定智能体配置，因此无法修改过程可见性。',
         code: 'WORKSPACE_AGENT_PROFILE_MISSING',
       },
       409,
@@ -1479,10 +1503,28 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     }
   }
 
+  // Process visibility is presentation only: unlike the interaction mode it
+  // changes nothing the Agent does, so it neither waits for the runtime to
+  // quiesce nor restarts it. A running turn follows the new value on its next
+  // event.
+  if (
+    process_visibility !== undefined &&
+    !setWorkspaceProcessVisibility(existing.folder, process_visibility)
+  ) {
+    return c.json(
+      {
+        error: '该工作区未绑定智能体配置，因此无法修改过程可见性。',
+        code: 'WORKSPACE_AGENT_PROFILE_MISSING',
+      },
+      409,
+    );
+  }
+
   return c.json({
     success: true,
     pinned_at,
     interaction_mode: getWorkspaceInteractionMode(existing.folder),
+    process_visibility: getWorkspaceProcessVisibility(existing.folder),
   });
 });
 

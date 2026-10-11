@@ -70,6 +70,8 @@ function makeOutputRuntime(lane: 'main' | 'session') {
     ...replyDelivery,
     ...interactionRuntime,
     ...replySource,
+    // The Web projection is covered by its own tests.
+    resolveProcessVisibility: () => 'full',
     crypto,
     getChannelType,
     channelTurnScope,

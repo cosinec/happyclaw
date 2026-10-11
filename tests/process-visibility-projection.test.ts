@@ -1,0 +1,201 @@
+import { describe, expect, test } from 'vitest';
+
+import type {
+  StreamEvent,
+  StreamEventType,
+} from '../src/stream-event.types.js';
+import type { ProcessVisibility } from '../src/types.js';
+import {
+  projectSdkStreamEventForWeb,
+  shouldBroadcastTaskAgentStatus,
+} from '../src/workspace-interaction-runtime.js';
+
+const LEVELS: ProcessVisibility[] = ['hidden', 'activity', 'full'];
+
+function event(
+  eventType: StreamEventType | 'future_event',
+  extra: Partial<StreamEvent> = {},
+): StreamEvent {
+  return { eventType, ...extra } as StreamEvent;
+}
+
+const proactive = (level: ProcessVisibility, e: StreamEvent) =>
+  projectSdkStreamEventForWeb('proactive', level, e);
+
+/** Which levels let an event through unchanged in shape: [hidden, activity, full]. */
+const PASSES: Array<[StreamEvent, [boolean, boolean, boolean]]> = [
+  // The run lifecycle is what the spinner needs; it is always there.
+  [event('status', { statusText: 'requesting' }), [true, true, true]],
+  [event('status', { statusText: 'idle' }), [true, true, true]],
+  [event('status', { statusText: 'interrupted' }), [true, true, true]],
+  // Phase statuses written by the SDK, the Runner or the host.
+  [event('status', { statusText: 'compacting' }), [false, true, true]],
+  [event('status', { statusText: '正在深入分析…' }), [false, true, true]],
+  [event('status', { statusText: null }), [false, true, true]],
+  // The structure of the work.
+  [event('tool_use_start', { toolName: 'Bash' }), [false, true, true]],
+  [event('tool_use_end', { toolUseId: 't1' }), [false, true, true]],
+  [event('tool_progress', { toolUseId: 't1' }), [false, true, true]],
+  [event('tool_result', { toolUseId: 't1' }), [false, true, true]],
+  [event('task_start', { taskId: 'k1' }), [false, true, true]],
+  [event('task_progress', { taskId: 'k1' }), [false, true, true]],
+  [event('task_updated', { taskId: 'k1' }), [false, true, true]],
+  [event('task_notification', { taskId: 'k1' }), [false, true, true]],
+  [event('todo_update', { todos: [] }), [false, true, true]],
+  [event('hook_started'), [false, true, true]],
+  [event('hook_progress'), [false, true, true]],
+  [event('hook_response'), [false, true, true]],
+  [event('permission_denied'), [false, true, true]],
+  [event('compact_boundary'), [false, true, true]],
+  // That the model is reasoning, without a word of it.
+  [event('thinking_start'), [false, true, true]],
+  [event('thinking_end', { thinkingDurationMs: 900 }), [false, true, true]],
+  // The reasoning summary itself, main Agent or sub-Agent.
+  [event('thinking_delta', { text: '先看' }), [false, false, true]],
+  [
+    event('thinking_delta', { text: '子', parentToolUseId: 'k1' }),
+    [false, false, true],
+  ],
+  // Never, at any level.
+  [event('text_delta', { text: '答' }), [false, false, false]],
+  [
+    event('text_delta', { text: '子答', parentToolUseId: 'k1' }),
+    [false, false, false],
+  ],
+  [event('usage'), [false, false, false]],
+  [event('memory_recall'), [false, false, false]],
+  [event('prompt_suggestion'), [false, false, false]],
+  [
+    event('raw_sdk_event', { rawType: 'stream_event/message_stop' }),
+    [false, false, false],
+  ],
+  [event('notification'), [false, false, false]],
+  [event('init'), [false, false, false]],
+  [event('future_event'), [false, false, false]],
+];
+
+describe('process visibility projection for the Web', () => {
+  test.each(PASSES)('proactive %j', (e, expected) => {
+    LEVELS.forEach((level, index) => {
+      const projected = proactive(level, e);
+      expect(projected !== null, `${e.eventType} at ${level}`).toBe(
+        expected[index],
+      );
+      if (projected) expect(projected.eventType).toBe(e.eventType);
+    });
+  });
+
+  test('assistant workspaces show everything, unchanged, at any level', () => {
+    for (const [e] of PASSES) {
+      for (const level of LEVELS) {
+        expect(projectSdkStreamEventForWeb('assistant', level, e)).toBe(e);
+      }
+    }
+  });
+
+  test('context_audit always reaches the recorder, which never forwards it', () => {
+    const audit = event('context_audit');
+    for (const level of LEVELS) {
+      expect(proactive(level, audit)).toBe(audit);
+      expect(projectSdkStreamEventForWeb('assistant', level, audit)).toBe(
+        audit,
+      );
+    }
+  });
+
+  test('a tool result keeps its identity but loses what the tool returned', () => {
+    const result = event('tool_result', {
+      toolUseId: 't1',
+      toolResult: 'secret output',
+      detail: 'secret output',
+      parentToolUseId: 'k1',
+    });
+    for (const level of ['activity', 'full'] as const) {
+      const projected = proactive(level, result)!;
+      expect(projected).toMatchObject({
+        eventType: 'tool_result',
+        toolUseId: 't1',
+        parentToolUseId: 'k1',
+      });
+      expect(projected.toolResult).toBeUndefined();
+      expect(projected.detail).toBeUndefined();
+    }
+    // The input event is not mutated: the host still feeds it to the trace.
+    expect(result.toolResult).toBe('secret output');
+  });
+
+  test('the words a tool, a sub-agent or a workflow carries are stripped', () => {
+    const progress = event('tool_progress', {
+      toolUseId: 't1',
+      toolInput: { questions: [{ question: '选哪个?' }] },
+      toolInputSummary: 'command: ls',
+    });
+    expect(proactive('full', progress)).toMatchObject({
+      toolInputSummary: 'command: ls',
+    });
+    expect(proactive('full', progress)!.toolInput).toBeUndefined();
+
+    const started = event('task_start', {
+      taskId: 'k1',
+      taskDescription: '审查代码',
+      detail: '你是一个代码审查员，请逐行检查……',
+    });
+    expect(proactive('activity', started)).toMatchObject({
+      taskDescription: '审查代码',
+    });
+    expect(proactive('activity', started)!.detail).toBeUndefined();
+
+    const done = event('task_notification', {
+      taskId: 'k1',
+      taskSummary: '完成',
+      taskResult: '子 Agent 的最终回答',
+    });
+    expect(proactive('full', done)).toMatchObject({ taskSummary: '完成' });
+    expect(proactive('full', done)!.taskResult).toBeUndefined();
+
+    const workflow = event('task_progress', {
+      taskId: 'k1',
+      workflowRun: {
+        taskId: 'k1',
+        summary: 'wf',
+        status: 'running',
+        phases: [],
+        agents: [
+          {
+            index: 0,
+            label: 'reviewer',
+            state: 'running',
+            lastToolSummary: 'Read a.ts',
+            promptPreview: '请审查……',
+            resultPreview: '结论……',
+          },
+        ],
+      },
+    });
+    const projected = proactive('activity', workflow)!;
+    expect(projected.workflowRun?.agents[0]).toEqual({
+      index: 0,
+      label: 'reviewer',
+      state: 'running',
+      lastToolSummary: 'Read a.ts',
+    });
+    expect(workflow.workflowRun?.agents[0].promptPreview).toBe('请审查……');
+  });
+
+  test('events without model text pass as the very same object', () => {
+    const start = event('tool_use_start', {
+      toolName: 'Read',
+      toolUseId: 't1',
+    });
+    expect(proactive('activity', start)).toBe(start);
+    const lifecycle = event('status', { statusText: 'idle' });
+    expect(proactive('hidden', lifecycle)).toBe(lifecycle);
+  });
+
+  test('task tabs follow the task events: sent unless a proactive workspace is hidden', () => {
+    expect(shouldBroadcastTaskAgentStatus('assistant', 'hidden')).toBe(true);
+    expect(shouldBroadcastTaskAgentStatus('proactive', 'hidden')).toBe(false);
+    expect(shouldBroadcastTaskAgentStatus('proactive', 'activity')).toBe(true);
+    expect(shouldBroadcastTaskAgentStatus('proactive', 'full')).toBe(true);
+  });
+});

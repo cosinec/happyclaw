@@ -105,6 +105,8 @@ Host Workspace 在 Access 之外还要求 admin。
 `canModifyGroup()` 是 owner-only。需要 Modify 的典型操作：
 
 - 重命名、切换 Agent、修改执行方式
+- 修改回复模式与过程可见性（`PATCH /api/groups/:jid` 的 `interaction_mode`、
+  `process_visibility`，仅 `web:` 工作区；后者不重启运行时）
 - stop、interrupt、reset-session、clear-history
 - 切换会话模型与推理档位（`PUT /api/groups/:jid/model-selection`）；其中高于 `max` 的
   推理档位（目前是 `ultra`）另需 `manage_system_config`
@@ -127,6 +129,19 @@ Home Workspace 永远不可删除。其他工作区必须通过 Modify，删除�
 自定义 AgentProfile 创建后默认不拥有 Workspace，因此也没有可访问的 Session 或
 Workspace Memory。只有 owner 显式新建/迁移非 Home Workspace 才建立归属；迁移时
 Memory 随 Workspace 保留，不跨 Workspace 复制。
+
+### 4.3.1 过程可见性
+
+主动模式工作区的 `process_visibility` 约束实时广播给 Web 的过程事件：
+
+| 级别       | 实时 WebSocket 过程事件 |
+| ---------- | ----------------------- |
+| `hidden`   | 仅运行生命周期          |
+| `activity` | 工具、任务、todo 等结构 |
+| `full`     | 再加推理摘要            |
+
+模型自己产出的文字（`text_delta`、工具结果文本、子 Agent 的提示词与回答）在任何级别
+都不会广播。Assistant 模式工作区与 fire-and-forget 的 Spawn Agent 不受该设置影响。
 
 ### 4.4 环境变量
 

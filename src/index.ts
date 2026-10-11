@@ -228,6 +228,7 @@ import {
   getSessionAgentIdentity,
   getAgentProfileForWorkspace,
   getWorkspaceInteractionMode,
+  getWorkspaceProcessVisibility,
   getSessionInteractionMode,
   setSessionInteractionMode,
   listAgentsByJid,
@@ -379,10 +380,11 @@ import {
   PROACTIVE_TAIL_INTERRUPTION_NOTICE,
   buildInteractionTextOutboxPayload,
   isProactiveControlPlaneSuccess,
+  projectSdkStreamEventForWeb,
   publishesFrameworkAnswer,
   resolveFrozenIpcInteractionMode,
   resolveRuntimeInteractionMode,
-  shouldBroadcastSdkStreamEvent,
+  shouldBroadcastTaskAgentStatus,
   shouldResolveFrameworkPrimaryAnswer,
   shouldSendProactiveTailInterruptionNotice,
   usesNativeMessagePresentation,
@@ -582,6 +584,7 @@ import {
   NewMessage,
   RegisteredGroup,
   InteractionMode,
+  ProcessVisibility,
   StreamEvent,
   SubAgent,
   ChannelAccount,
@@ -7868,6 +7871,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   >();
   let streamingAccumulatedText = '';
   let streamingAccumulatedThinking = '';
+  // How much of a proactive turn's process the Web shows. Read where it
+  // matters, never cached: PATCH /api/groups/:jid changes it while this run is
+  // alive, without a runtime restart. Assistant workspaces show everything.
+  const resolveProcessVisibility = (): ProcessVisibility =>
+    interactionMode === 'proactive'
+      ? getWorkspaceProcessVisibility(effectiveGroup.folder)
+      : 'full';
   let streamInterrupted = false;
   let streamSteered = false;
   let runnerClosedBySteer = false;
@@ -8974,16 +8984,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               streamingAccumulatedText = answerProjection.visibleAnswerText;
             }
 
-            if (
-              shouldBroadcastSdkStreamEvent(interactionMode, result.streamEvent)
-            ) {
+            const webStreamEvent = projectSdkStreamEventForWeb(
+              interactionMode,
+              resolveProcessVisibility(),
+              result.streamEvent,
+            );
+            if (webStreamEvent) {
               if (
-                result.streamEvent.eventType !== 'usage' ||
+                webStreamEvent.eventType !== 'usage' ||
                 usageProjectionEvent
               ) {
                 broadcastStreamEvent(
                   chatJid,
-                  usageProjectionEvent ?? result.streamEvent,
+                  usageProjectionEvent ?? webStreamEvent,
                 );
               }
             }
@@ -9039,7 +9052,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               streamingSession = undefined;
               activeDurableCardLifecycle = undefined;
             }
-            if (streamingSession) {
+            // Only an Assistant workspace ever has a provider card; a proactive
+            // turn's process must never reach an IM channel.
+            if (streamingSession && publishesFrameworkAnswer(interactionMode)) {
               const se = result.streamEvent;
               if (answerProjection?.visibleAnswerChanged) {
                 appendStreamingSessionAnswer(
@@ -9239,7 +9254,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                     description: desc,
                   });
                 }
-                if (publishesFrameworkAnswer(interactionMode)) {
+                if (
+                  shouldBroadcastTaskAgentStatus(
+                    interactionMode,
+                    resolveProcessVisibility(),
+                  )
+                ) {
                   broadcastAgentStatus(
                     chatJid,
                     taskId,
@@ -9267,7 +9287,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                 ) {
                   updateAgentStatus(se.toolUseId, 'completed');
                   queryTaskIds.delete(existing.id);
-                  if (publishesFrameworkAnswer(interactionMode)) {
+                  if (
+                    shouldBroadcastTaskAgentStatus(
+                      interactionMode,
+                      resolveProcessVisibility(),
+                    )
+                  ) {
                     broadcastAgentStatus(
                       chatJid,
                       existing.id,
@@ -9327,7 +9352,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                     last_im_jid: null,
                     spawned_from_jid: null,
                   });
-                  if (publishesFrameworkAnswer(interactionMode)) {
+                  if (
+                    shouldBroadcastTaskAgentStatus(
+                      interactionMode,
+                      resolveProcessVisibility(),
+                    )
+                  ) {
                     broadcastAgentStatus(
                       chatJid,
                       targetTaskId,
@@ -9341,7 +9371,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                 } else if (existing.kind === 'task') {
                   updateAgentStatus(existing.id, status, summary);
                   queryTaskIds.delete(existing.id);
-                  if (publishesFrameworkAnswer(interactionMode)) {
+                  if (
+                    shouldBroadcastTaskAgentStatus(
+                      interactionMode,
+                      resolveProcessVisibility(),
+                    )
+                  ) {
                     broadcastAgentStatus(
                       chatJid,
                       existing.id,
@@ -10964,7 +10999,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           { chatJid, marked },
           'Marked remaining running task agents as error',
         );
-        if (publishesFrameworkAnswer(interactionMode)) {
+        if (
+          shouldBroadcastTaskAgentStatus(
+            interactionMode,
+            resolveProcessVisibility(),
+          )
+        ) {
           for (const agent of runningAgents) {
             broadcastAgentStatus(
               chatJid,
@@ -11000,7 +11040,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           'completed',
           agent.result_summary || '任务已完成',
         );
-        if (publishesFrameworkAnswer(interactionMode)) {
+        if (
+          shouldBroadcastTaskAgentStatus(
+            interactionMode,
+            resolveProcessVisibility(),
+          )
+        ) {
           broadcastAgentStatus(
             chatJid,
             taskId,
@@ -17090,6 +17135,12 @@ async function processAgentConversation(
     { session: NonNullable<typeof agentStreamingSession>; jid: string }
   >();
   let agentStreamingAccText = '';
+  // Same as the main session: process visibility is read live
+  // (PATCH /api/groups/:jid changes it without a restart).
+  const resolveProcessVisibility = (): ProcessVisibility =>
+    interactionMode === 'proactive'
+      ? getWorkspaceProcessVisibility(effectiveGroup.folder)
+      : 'full';
   let agentStreamInterrupted = false;
   let agentStreamSteered = false;
   let agentInterruptFinalized = false;
@@ -18053,18 +18104,25 @@ async function processAgentConversation(
       if (agentAnswerProjection?.visibleAnswerChanged) {
         agentStreamingAccText = agentAnswerProjection.visibleAnswerText;
       }
-      if (shouldBroadcastSdkStreamEvent(interactionMode, output.streamEvent)) {
-        if (output.streamEvent.eventType !== 'usage' || usageProjectionEvent) {
+      const webStreamEvent = projectSdkStreamEventForWeb(
+        interactionMode,
+        resolveProcessVisibility(),
+        output.streamEvent,
+      );
+      if (webStreamEvent) {
+        if (webStreamEvent.eventType !== 'usage' || usageProjectionEvent) {
           broadcastStreamEvent(
             chatJid,
-            usageProjectionEvent ?? output.streamEvent,
+            usageProjectionEvent ?? webStreamEvent,
             agentId,
           );
         }
       }
 
       // ── Feed stream events into Feishu streaming card ──
-      if (agentStreamingSession) {
+      // Only an Assistant conversation ever has a provider card; a proactive
+      // turn's process must never reach an IM channel.
+      if (agentStreamingSession && publishesFrameworkAnswer(interactionMode)) {
         const se = output.streamEvent;
         if (
           agentAnswerProjection?.visibleAnswerChanged &&

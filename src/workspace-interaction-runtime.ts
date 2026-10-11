@@ -1,4 +1,5 @@
-import type { InteractionMode } from './types.js';
+import type { InteractionMode, ProcessVisibility } from './types.js';
+import type { StreamEvent } from './stream-event.types.js';
 
 export type PublicAgentKind = 'main' | 'conversation' | 'spawn';
 
@@ -138,22 +139,129 @@ export function resolveFrozenIpcInteractionMode(
   };
 }
 
+/** Status texts that only mark a run's lifecycle, never carry news. */
+const LIFECYCLE_STATUS_TEXTS: ReadonlySet<string> = new Set([
+  'requesting',
+  'idle',
+  'interrupted',
+]);
+
 /**
- * Proactive mode exposes only lifecycle boundaries required to start/stop the
- * public spinner. Model thoughts, tools, usage, workflows and free-form status
- * narration remain private.
+ * What a proactive Workspace may show of a turn's process beside the spinner,
+ * by event type. `activity` is the structure of the work (tools, sub-agents,
+ * todos, hooks, phase); `full` adds the reasoning summary. These sets name
+ * what is allowed: every other event type, including any a newer Runner
+ * invents, is withheld.
  */
-export function shouldBroadcastSdkStreamEvent(
+const ACTIVITY_EVENT_TYPES: ReadonlySet<string> = new Set([
+  'tool_use_start',
+  'tool_use_end',
+  'tool_progress',
+  'tool_result',
+  'task_start',
+  'task_progress',
+  'task_updated',
+  'task_notification',
+  'todo_update',
+  'hook_started',
+  'hook_progress',
+  'hook_response',
+  'permission_denied',
+  'compact_boundary',
+  'thinking_start',
+  'thinking_end',
+]);
+
+function isLifecycleStatus(statusText: string | null | undefined): boolean {
+  return statusText != null && LIFECYCLE_STATUS_TEXTS.has(statusText);
+}
+
+/**
+ * A copy of `event` without the fields that carry the model's own words.
+ * Returns `event` itself when there is nothing to remove. Hook output and the
+ * short SDK/Runner summaries of tasks stay: they describe the work, they are
+ * not the model speaking.
+ */
+function withoutModelText(event: StreamEvent): StreamEvent {
+  const stripped: StreamEvent = { ...event };
+  let changed = false;
+  const drop = (key: keyof StreamEvent): void => {
+    if (stripped[key] !== undefined) {
+      delete stripped[key];
+      changed = true;
+    }
+  };
+  // What a tool returned, what a sub-agent finally answered and the questions
+  // an AskUserQuestion call would put to the user.
+  drop('toolResult');
+  drop('taskResult');
+  drop('toolInput');
+  if (event.eventType === 'tool_result') drop('detail');
+  // The prompt handed to a sub-agent rides on task_started.
+  if (event.eventType === 'task_start') drop('detail');
+  if (
+    event.workflowRun?.agents.some((a) => a.promptPreview || a.resultPreview)
+  ) {
+    stripped.workflowRun = {
+      ...event.workflowRun,
+      agents: event.workflowRun.agents.map(
+        ({ promptPreview: _prompt, resultPreview: _result, ...agent }) => agent,
+      ),
+    };
+    changed = true;
+  }
+  return changed ? stripped : event;
+}
+
+/**
+ * The part of a turn's stream a Workspace lets the Web see, or null for none.
+ *
+ * - Assistant Workspaces show their whole process: the event passes unchanged.
+ * - A proactive Workspace's SDK output is private model-loop state, so what
+ *   the Web may see depends on its process visibility. `hidden` keeps the run
+ *   lifecycle only (requesting/idle/interrupted: the spinner). `activity` adds
+ *   the structure of the work, stripped of any text the model produced.
+ *   `full` also streams the main Agent's and sub-Agents' reasoning summary.
+ * - Never, at any level: text_delta (the model's own answer text, which
+ *   reaches the user only through send_message), usage, memory_recall,
+ *   prompt_suggestion, raw_sdk_event, notification and unknown event types.
+ *
+ * Status events in this stream are written by the SDK, the Runner or the host,
+ * never by the model (model-authored progress text is announced by
+ * TurnOutputCoordinator, which does not pass through here), so beyond the
+ * lifecycle ones they are plain phase information and follow `activity`.
+ *
+ * `context_audit` passes through at every level: broadcastStreamEvent records
+ * it for the Agent's context explainability and never forwards it to a
+ * WebSocket.
+ */
+export function projectSdkStreamEventForWeb(
   mode: InteractionMode,
-  event: { eventType: string; statusText?: string | null },
+  visibility: ProcessVisibility,
+  event: StreamEvent,
+): StreamEvent | null {
+  if (mode === 'assistant') return event;
+  const type = event.eventType;
+  if (type === 'context_audit') return event;
+  if (type === 'status') {
+    if (isLifecycleStatus(event.statusText)) return event;
+    return visibility === 'hidden' ? null : event;
+  }
+  if (visibility === 'hidden') return null;
+  if (type === 'thinking_delta') return visibility === 'full' ? event : null;
+  if (!ACTIVITY_EVENT_TYPES.has(type)) return null;
+  return withoutModelText(event);
+}
+
+/**
+ * Whether the Web is told about sub-agent task lifecycle (agent_status) so its
+ * Task tabs match the task events it receives.
+ */
+export function shouldBroadcastTaskAgentStatus(
+  mode: InteractionMode,
+  visibility: ProcessVisibility,
 ): boolean {
-  if (mode === 'assistant') return true;
-  if (event.eventType !== 'status') return false;
-  return (
-    event.statusText === 'requesting' ||
-    event.statusText === 'idle' ||
-    event.statusText === 'interrupted'
-  );
+  return mode === 'assistant' || visibility !== 'hidden';
 }
 
 export const PROACTIVE_TAIL_INTERRUPTION_NOTICE =
