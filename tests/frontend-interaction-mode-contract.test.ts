@@ -141,7 +141,7 @@ describe('frontend workspace interaction mode contract', () => {
     );
     expect(chatView).toContain('updateProcessVisibility(groupJid, visibility)');
     expect(chatView).toContain('workspaceSettingsRequest');
-    expect(store).toContain('{ process_visibility: processVisibility }');
+    expect(store).toContain('process_visibility: requested,');
     expect(store).not.toMatch(/process_visibility[\s\S]{0,200}restart/i);
   });
 

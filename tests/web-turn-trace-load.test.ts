@@ -231,6 +231,39 @@ describe('loading the reasoning and trace the server kept', () => {
 });
 
 describe('has_trace on a message', () => {
+  it('is kept from a message the WebSocket delivers', () => {
+    useChatStore.getState().handleWsNewMessage(JID, {
+      id: 'ws-1',
+      chat_jid: JID,
+      sender: 'happyclaw-agent',
+      sender_name: 'HappyClaw',
+      content: '终稿',
+      timestamp: '2026-10-10T00:00:00.000Z',
+      is_from_me: true,
+      source_kind: 'sdk_final',
+      turn_id: 'turn-ws',
+      has_trace: true,
+    });
+    const [stored] = useChatStore.getState().messages[JID];
+    expect(stored).toMatchObject({ id: 'ws-1', turn_id: 'turn-ws' });
+    expect(stored.has_trace).toBe(true);
+  });
+
+  it('is left out when the server did not say so', () => {
+    useChatStore.getState().handleWsNewMessage(JID, {
+      id: 'ws-2',
+      chat_jid: JID,
+      sender: 'happyclaw-agent',
+      sender_name: 'HappyClaw',
+      content: '没有轨迹的回复',
+      timestamp: '2026-10-10T00:00:00.000Z',
+      is_from_me: true,
+      source_kind: 'sdk_final',
+      turn_id: 'turn-ws-2',
+    });
+    expect(useChatStore.getState().messages[JID][0].has_trace).toBeUndefined();
+  });
+
   it('reaches the stored message when the server adds it later', () => {
     const before = [message('m1', { has_trace: undefined })];
     const after = mergeMessagesChronologically(before, [message('m1')]);

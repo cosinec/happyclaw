@@ -38,6 +38,7 @@ import {
 import {
   filterProactiveStreamEvent,
   normalizeProcessVisibility,
+  scrubTaskStates,
 } from '../lib/process-visibility';
 import { useGroupsStore } from './groups';
 import {
@@ -231,6 +232,7 @@ export interface StreamSnapshotData {
     parentToolUseId?: string | null;
     isNested?: boolean;
     skillName?: string;
+    toolInput?: Record<string, unknown>;
   }>;
   recentEvents: Array<{
     id: string;
@@ -575,6 +577,11 @@ function markThinkingStarted(
   next.awaitingModel = false;
 }
 
+/** Whether the event is a sub-agent's: its text and reasoning are its card's. */
+function isSubagentEvent(event: StreamEvent): boolean {
+  return !!event.parentToolUseId || event.agentScope === 'subagent';
+}
+
 /** The reply's step list, to be edited and written back with `setSteps`. */
 function stepsOf(state: StreamingState): StepList {
   return stepList(state.steps, state.stepsDropped);
@@ -704,7 +711,6 @@ function scrubForVisibility(
   state: StreamingState,
   visibility: ProcessVisibility,
 ): StreamingState {
-  if (visibility === 'full') return state;
   if (visibility === 'hidden') {
     return {
       ...DEFAULT_STREAMING_STATE,
@@ -713,8 +719,19 @@ function scrubForVisibility(
       systemStatus: state.systemStatus,
     };
   }
-  return {
+  // The reply is never shown, whatever the level; so is what a tool was given.
+  const shown: StreamingState = {
     ...state,
+    partialText: '',
+    partialBase: 0,
+    taskStates: scrubTaskStates(state.taskStates, visibility),
+    activeTools: state.activeTools.map(
+      ({ toolInput: _input, ...tool }) => tool,
+    ),
+  };
+  if (visibility === 'full') return shown;
+  return {
+    ...shown,
     thinkingText: '',
     thinkingTitle: undefined,
     thinkingGap: false,
@@ -1902,6 +1919,9 @@ function pushToolProgress(
   if (!event.toolUseId) return events;
   const index = toolTraceIndex(events, event.toolUseId);
   if (index < 0) {
+    // A bare elapsed-time heartbeat says nothing the trace could keep; the
+    // host does not keep it either.
+    if (!event.toolInputSummary && !event.skillName) return events;
     const row = traceRow({ ...event, eventType: 'tool_use_start' });
     return [...events, row].slice(-MAX_TRACE_EVENTS);
   }
@@ -2226,17 +2246,18 @@ function applyStreamEvent(
     }
     case 'thinking_start': {
       // Sub-agents do not send these; their reasoning is their task's tail.
-      if (event.parentToolUseId || event.agentScope === 'subagent') break;
+      if (isSubagentEvent(event)) break;
       beginThinkingBurst(prev, next, runStartedAt, at);
       break;
     }
     case 'thinking_end': {
-      if (event.parentToolUseId || event.agentScope === 'subagent') break;
+      if (isSubagentEvent(event)) break;
       endThinkingBurst(prev, next, at, event.thinkingDurationMs);
       break;
     }
     case 'tool_use_start': {
-      endThinkingBurst(prev, next, at);
+      // A sub-agent's tool is not the main agent's: its own reasoning goes on.
+      if (!isSubagentEvent(event)) endThinkingBurst(prev, next, at);
       if (!event.parentToolUseId) {
         next.awaitingModel = false;
         next.phaseStartedAt = undefined;
@@ -2515,6 +2536,8 @@ function applyStreamEvent(
       // A new model request: thinking that follows started here, and until
       // something comes back the model is the one at work.
       if (event.statusText === 'requesting' && !event.parentToolUseId) {
+        // The previous request is over: reasoning that follows is a new block.
+        endThinkingBurst(prev, next, at);
         next.phaseStartedAt = at;
         next.awaitingModel = true;
       }
@@ -3461,11 +3484,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  updateProcessVisibility: async (jid, processVisibility) => {
+  updateProcessVisibility: async (jid, requested) => {
     try {
-      await api.patch<{ success: boolean }>(
-        `/api/groups/${encodeURIComponent(jid)}`,
-        { process_visibility: processVisibility },
+      const saved = await api.patch<{
+        success: boolean;
+        process_visibility?: string;
+      }>(`/api/groups/${encodeURIComponent(jid)}`, {
+        process_visibility: requested,
+      });
+      // The server echoes the level now in force; an older one says nothing.
+      const processVisibility = normalizeProcessVisibility(
+        saved?.process_visibility ?? requested,
       );
       const patchGroups = (groups: Record<string, GroupInfo>) => {
         const group = groups[jid];
@@ -4318,6 +4347,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       workflow_runs:
         completedWorkflowRuns.length > 0 ? completedWorkflowRuns : undefined,
       turn_id: wsMsg.turn_id ?? null,
+      ...(wsMsg.has_trace ? { has_trace: true } : {}),
       session_id: wsMsg.session_id ?? null,
       sdk_message_uuid: wsMsg.sdk_message_uuid ?? null,
       source_kind: wsMsg.source_kind ?? null,
@@ -5510,7 +5540,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // WS 重连时接收后端推送的流式快照，恢复 StreamingDisplay
   handleStreamSnapshot: (chatJid, snapshot, agentId, runId) => {
     const runtimeJid = agentId ? `${chatJid}#agent:${agentId}` : chatJid;
-    const restore = (local: StreamingState | undefined): StreamingState => {
+    // A proactive workspace's snapshot is cut to the level its owner chose,
+    // whatever the host put in it.
+    const levelOf = (s: ChatState): ProcessVisibility | null =>
+      isProactiveRuntime(s, runtimeJid)
+        ? normalizeProcessVisibility(s.groups[chatJid]?.process_visibility)
+        : null;
+    const restore = (
+      local: StreamingState | undefined,
+      level: ProcessVisibility | null,
+    ): StreamingState => {
       const restored: StreamingState = {
         ...DEFAULT_STREAMING_STATE,
         partialText: snapshot.partialText || '',
@@ -5530,6 +5569,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           parentToolUseId: t.parentToolUseId,
           ...(t.isNested != null ? { isNested: t.isNested } : {}),
           ...(t.skillName ? { skillName: t.skillName } : {}),
+          ...(t.toolInput ? { toolInput: t.toolInput } : {}),
         })),
         recentEvents: (
           (snapshot.recentEvents || []) as StreamingTimelineEvent[]
@@ -5610,7 +5650,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         restored.steps = rebuilt.steps;
         restored.stepsDropped = rebuilt.dropped;
       }
-      return restored;
+      return level ? scrubForVisibility(restored, level) : restored;
     };
 
     if (agentId) {
@@ -5623,7 +5663,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           agentWaiting: { ...s.agentWaiting, [agentId]: true },
           agentStreaming: {
             ...s.agentStreaming,
-            [agentId]: restore(s.agentStreaming[agentId]),
+            [agentId]: restore(s.agentStreaming[agentId], levelOf(s)),
           },
         };
       });
@@ -5637,7 +5677,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           waiting: { ...s.waiting, [chatJid]: true },
           streaming: {
             ...s.streaming,
-            [chatJid]: restore(s.streaming[chatJid]),
+            [chatJid]: restore(s.streaming[chatJid], levelOf(s)),
           },
         };
       });

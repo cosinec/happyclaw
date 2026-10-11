@@ -180,6 +180,57 @@ describe('reasoning text', () => {
     expect(live().steps?.filter((s) => s.kind === 'thinking')).toHaveLength(2);
   });
 
+  it('starts a new block after the answer text', () => {
+    delta('thinking_delta', '先想。');
+    delta('text_delta', '部分回答。');
+    delta('thinking_delta', '再想。');
+    expect(live().thinkingText).toBe('先想。\n\n再想。');
+  });
+
+  it('ends the reasoning so far when a new request begins', () => {
+    delta('thinking_delta', '第一段。');
+    emit({ eventType: 'status', statusText: 'requesting' });
+    expect(live().isThinking).toBe(false);
+    expect(live().awaitingModel).toBe(true);
+    delta('thinking_delta', '第二段。');
+    expect(live().thinkingText).toBe('第一段。\n\n第二段。');
+    expect(live().steps?.filter((s) => s.kind === 'thinking')).toHaveLength(2);
+  });
+
+  it('keeps one block through events that are not text, a tool or a request', () => {
+    delta('thinking_delta', '先想');
+    emit({
+      eventType: 'hook_started',
+      hookName: 'check',
+      hookEvent: 'PreToolUse',
+    });
+    emit({ eventType: 'task_progress', taskId: 'task-1', summary: '子任务' });
+    emit({ eventType: 'todo_update', todos: [] });
+    emit({ eventType: 'status', statusText: 'compacting' });
+    delta('thinking_delta', '下去。');
+    // One block of text; the sub-agent that started in between is a step of
+    // its own, so the reasoning continues in a second step.
+    expect(live().thinkingText).toBe('先想下去。');
+    expect(live().steps?.map((s) => s.kind)).toEqual([
+      'thinking',
+      'task',
+      'thinking',
+    ]);
+  });
+
+  it('keeps the main reasoning going through a sub-agents tool', () => {
+    delta('thinking_delta', '先想');
+    emit({
+      eventType: 'tool_use_start',
+      toolName: 'Read',
+      toolUseId: 'sub-t1',
+      parentToolUseId: 'task-1',
+    });
+    expect(live().isThinking).toBe(true);
+    delta('thinking_delta', '下去。');
+    expect(live().thinkingText).toBe('先想下去。');
+  });
+
   it('is thinking from thinking_start even with no text at all', () => {
     emit({ eventType: 'status', statusText: 'requesting' });
     emit({ eventType: 'thinking_start' });
@@ -341,6 +392,16 @@ describe('steps', () => {
       summary: 'foo',
     });
     expect(live().traceEvents.map((r) => r.title)).toEqual(['工具 Grep']);
+  });
+
+  it('keeps no trace row for a bare heartbeat of a tool it never saw start', () => {
+    emit({
+      eventType: 'tool_progress',
+      toolUseId: 'late',
+      toolName: 'Grep',
+      elapsedSeconds: 4,
+    });
+    expect(live().traceEvents).toEqual([]);
   });
 
   it('marks a failed result and a denied call as errors', () => {
@@ -571,6 +632,103 @@ describe('a proactive workspace', () => {
     expect(live().thinkingTitle).toBe('检查文件');
   });
 
+  it('keeps what a sub-agent was asked and answered out, at every level', () => {
+    for (const level of ['activity', 'full'] as const) {
+      reset();
+      setWorkspace('proactive', level);
+      start();
+      emit({
+        eventType: 'task_start',
+        taskId: 'task-1',
+        toolUseId: 'task-1',
+        taskDescription: '检查滚动',
+        detail: '子 Agent 的提示词：不要泄露',
+      });
+      emit({
+        eventType: 'task_notification',
+        taskId: 'task-1',
+        toolUseId: 'task-1',
+        taskStatus: 'completed',
+        taskResult: '子 Agent 的答复',
+        toolResult: '子 Agent 的答复',
+      });
+      emit({
+        eventType: 'task_progress',
+        taskId: 'wf-1',
+        taskType: 'local_workflow',
+        workflowRun: {
+          taskId: 'wf-1',
+          summary: '并行审查',
+          status: 'running',
+          phases: [],
+          agents: [
+            {
+              index: 0,
+              label: '审查员',
+              state: 'running',
+              promptPreview: '提示词原文',
+              resultPreview: '结果原文',
+              lastToolSummary: 'a.ts',
+            },
+          ],
+        },
+      });
+      const state = live();
+      const text = JSON.stringify(state);
+      for (const secret of [
+        '子 Agent 的提示词',
+        '子 Agent 的答复',
+        '提示词原文',
+        '结果原文',
+      ]) {
+        expect(text, `${level} shows "${secret}"`).not.toContain(secret);
+      }
+      // The progress itself is still there.
+      expect(state.taskStates['wf-1'].workflowRun?.agents[0]).toMatchObject({
+        label: '审查员',
+        lastToolSummary: 'a.ts',
+      });
+      expect(state.taskStates['task-1'].title).toBe('检查滚动');
+    }
+  });
+
+  it('takes the compaction notice from the activity level up', () => {
+    const notice = {
+      eventType: 'compact_boundary' as const,
+      title: 'Context compacted',
+      summary: 'auto: 150000 → 20000 tokens',
+    };
+    setWorkspace('proactive', 'hidden');
+    start();
+    emit(notice);
+    expect(
+      JSON.stringify(useChatStore.getState().streaming[JID] ?? {}),
+    ).not.toContain('Context compacted');
+
+    for (const level of ['activity', 'full'] as const) {
+      reset();
+      setWorkspace('proactive', level);
+      start();
+      emit(notice);
+      expect(live().traceEvents.map((row) => row.title)).toContain(
+        'Context compacted',
+      );
+    }
+  });
+
+  it('never takes a notification or an init, at any level', () => {
+    for (const level of ['hidden', 'activity', 'full'] as const) {
+      reset();
+      setWorkspace('proactive', level);
+      start();
+      emit({ eventType: 'notification', text: '通知' });
+      emit({ eventType: 'init' });
+      expect(
+        JSON.stringify(useChatStore.getState().streaming[JID] ?? {}),
+      ).not.toContain('通知');
+    }
+  });
+
   it('treats a missing level as hidden', () => {
     setWorkspace('proactive', undefined);
     start();
@@ -672,6 +830,116 @@ describe('a reconnect snapshot', () => {
     expect(state.thinkingDurationMs).toBe(4000);
   });
 
+  it('carries the input of a running tool for its card', () => {
+    useChatStore.getState().handleStreamSnapshot(
+      JID,
+      snapshot({
+        activeTools: [
+          {
+            toolName: 'AskUserQuestion',
+            toolUseId: 'q1',
+            startTime: Date.now(),
+            toolInput: { questions: [{ question: '继续吗？' }] },
+            skillName: undefined,
+            isNested: false,
+            elapsedSeconds: 3,
+          },
+        ],
+      }),
+      undefined,
+      RUN,
+    );
+    expect(live().activeTools[0]).toMatchObject({
+      toolUseId: 'q1',
+      toolInput: { questions: [{ question: '继续吗？' }] },
+      elapsedSeconds: 3,
+      isNested: false,
+    });
+  });
+
+  describe('of a proactive workspace', () => {
+    const leaky = () =>
+      snapshot({
+        partialText: '没发出去的回复',
+        thinkingText: '**检查**\n\n主 Agent 的思考。',
+        activeTools: [
+          {
+            toolName: 'Bash',
+            toolUseId: 't2',
+            startTime: Date.now(),
+            toolInputSummary: 'ls',
+            toolInput: { command: 'ls' },
+          },
+        ],
+        taskStates: {
+          'task-1': {
+            id: 'task-1',
+            title: '检查滚动',
+            status: 'running',
+            thinkingTail: '子 Agent 的思考',
+            textTail: '子 Agent 的话',
+            activeTools: [],
+            recentTools: [],
+            updatedAt: 1,
+          },
+        },
+      });
+    const restore = (level: 'hidden' | 'activity' | 'full') => {
+      reset();
+      setWorkspace('proactive', level);
+      useChatStore.getState().handleRunStarted(JID, RUN);
+      useChatStore
+        .getState()
+        .handleStreamSnapshot(JID, leaky(), undefined, RUN);
+      return live();
+    };
+
+    it('shows nothing but the spinner when the process is hidden', () => {
+      const state = restore('hidden');
+      expect(state.partialText).toBe('');
+      expect(state.thinkingText).toBe('');
+      expect(state.activeTools).toEqual([]);
+      expect(state.steps ?? []).toEqual([]);
+      expect(state.taskStates).toEqual({});
+    });
+
+    it('keeps the activity, not the reasoning or the text, at the activity level', () => {
+      const state = restore('activity');
+      expect(state.partialText).toBe('');
+      expect(state.thinkingText).toBe('');
+      expect(state.steps!.every((s) => (s.text ?? '') === '')).toBe(true);
+      expect(state.activeTools[0].toolInputSummary).toBe('ls');
+      expect(state.activeTools[0].toolInput).toBeUndefined();
+      expect(state.taskStates['task-1']).toMatchObject({
+        title: '检查滚动',
+        thinkingTail: '',
+        textTail: '',
+      });
+    });
+
+    it('adds the reasoning at the full level, still not the reply or sub-agent text', () => {
+      const state = restore('full');
+      expect(state.thinkingText).toContain('主 Agent 的思考');
+      expect(state.partialText).toBe('');
+      expect(state.activeTools[0].toolInput).toBeUndefined();
+      expect(state.taskStates['task-1']).toMatchObject({
+        thinkingTail: '子 Agent 的思考',
+        textTail: '',
+      });
+    });
+
+    it('leaves an Assistant workspace snapshot whole', () => {
+      reset();
+      setWorkspace('assistant', 'hidden');
+      useChatStore.getState().handleRunStarted(JID, RUN);
+      useChatStore
+        .getState()
+        .handleStreamSnapshot(JID, leaky(), undefined, RUN);
+      expect(live().partialText).toBe('没发出去的回复');
+      expect(live().taskStates['task-1'].textTail).toBe('子 Agent 的话');
+    });
+  });
+
   it('keeps the steps this tab already has for the same turn', () => {
     emit({
       eventType: 'tool_use_start',
@@ -707,6 +975,19 @@ describe('changing the process visibility', () => {
     const group = useChatStore.getState().groups[JID];
     expect(group.process_visibility).toBe('activity');
     expect(group.interaction_mode).toBe('proactive');
+  });
+
+  it('takes the level the server says is now in force', async () => {
+    setWorkspace('proactive', 'hidden');
+    apiPatchMock.mockResolvedValueOnce({
+      success: true,
+      interaction_mode: 'proactive',
+      process_visibility: 'activity',
+    });
+    await useChatStore.getState().updateProcessVisibility(JID, 'full');
+    expect(useChatStore.getState().groups[JID].process_visibility).toBe(
+      'activity',
+    );
   });
 
   it('reports a failed save and keeps the old level', async () => {
