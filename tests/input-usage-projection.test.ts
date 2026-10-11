@@ -323,6 +323,9 @@ describe('input cumulative display projection', () => {
       storeMessageDirect: db.storeMessageDirect,
       updateLatestMessageTokenUsage: db.updateLatestMessageTokenUsage,
       broadcastNewMessage: (_jid: string, row: any) => projected.push(row),
+      // Turn traces are covered by turn-trace.test.ts; the final's usage is
+      // what matters here.
+      turnTraces: { persist: () => false },
       agentId: 'projection-agent',
     };
     db.ensureChatExists(args.virtualChatJid);
@@ -440,6 +443,7 @@ describe('input cumulative display projection', () => {
         storeMessageDirect: db.storeMessageDirect,
         updateLatestMessageTokenUsage: db.updateLatestMessageTokenUsage,
         logger: { warn: vi.fn() },
+        turnTraces: { persist: () => false },
         broadcastNewMessage: (_jid: string, row: any) => projected.push(row),
         sendMessage: async (_jid: string, content: string, opts: any) => {
           db.storeMessageDirect(

@@ -55,6 +55,7 @@ vi.mock('../src/web.js', () => ({
 const db = await import('../src/db.js');
 const webContext = await import('../src/web-context.js');
 const groupRoutes = (await import('../src/routes/groups.js')).default;
+const turnTraceRoutes = (await import('../src/routes/turn-traces.js')).default;
 
 const OWNER_ID = 'visibility-owner';
 const STRANGER_ID = 'visibility-stranger';
@@ -299,5 +300,196 @@ describe('workspace process_visibility API', () => {
     await expect(response.json()).resolves.toMatchObject({
       code: 'WORKSPACE_AGENT_PROFILE_MISSING',
     });
+  });
+});
+
+/** A turn of a workspace: a user message, two agent messages, a stored trace. */
+function seedTurn(
+  chatJid: string,
+  turnId: string,
+  options: { thinking?: string } = {},
+): void {
+  db.ensureChatExists(chatJid);
+  const at = (minute: number) =>
+    `2026-10-12T01:${String(minute).padStart(2, '0')}:00.000Z`;
+  db.storeMessageDirect(
+    `${turnId}-user`,
+    chatJid,
+    OWNER_ID,
+    'Owner',
+    'hi',
+    at(1),
+    false,
+    {
+      meta: { turnId },
+    },
+  );
+  db.storeMessageDirect(
+    `${turnId}-a`,
+    chatJid,
+    'happyclaw-agent',
+    'Agent',
+    'one',
+    at(2),
+    true,
+    {
+      meta: { turnId, sourceKind: 'sdk_send_message' },
+    },
+  );
+  db.storeMessageDirect(
+    `${turnId}-b`,
+    chatJid,
+    'happyclaw-agent',
+    'Agent',
+    'two',
+    at(3),
+    true,
+    {
+      meta: { turnId, sourceKind: 'sdk_send_message' },
+    },
+  );
+  db.upsertTurnTrace({
+    chatJid,
+    turnId,
+    thinking: options.thinking ?? '想了想',
+    thinkingDurationMs: 4_200,
+    traceJson: JSON.stringify([
+      { id: '1-a', timestamp: 1, kind: 'tool', title: '工具 Bash' },
+    ]),
+  });
+}
+
+const getMessages = async (jid: string) =>
+  (await (
+    await groupRoutes.request(`/${encodeURIComponent(jid)}/messages`, {
+      method: 'GET',
+    })
+  ).json()) as { messages: Array<{ id: string; has_trace?: boolean }> };
+
+const getTrace = (jid: string, turnId: string) =>
+  turnTraceRoutes.request(
+    `/${encodeURIComponent(jid)}/turn-traces/${encodeURIComponent(turnId)}`,
+    { method: 'GET' },
+  );
+
+describe('turn traces over HTTP', () => {
+  test('an Assistant workspace lists has_trace and serves the whole trace', async () => {
+    asUser(OWNER_ID);
+    const { jid } = workspace('trace-assistant', 'assistant', 'hidden');
+    seedTurn(jid, 'turn-a');
+
+    const { messages } = await getMessages(jid);
+    expect(messages.filter((m) => m.has_trace).map((m) => m.id)).toEqual([
+      'turn-a-b',
+    ]);
+
+    const response = await getTrace(jid, 'turn-a');
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toContain('no-store');
+    await expect(response.json()).resolves.toMatchObject({
+      turn_id: 'turn-a',
+      thinking: '想了想',
+      thinking_duration_ms: 4_200,
+      trace: [{ title: '工具 Bash', kind: 'tool' }],
+      created_at: expect.any(String),
+    });
+    expect((await getTrace(jid, 'no-such-turn')).status).toBe(404);
+  });
+
+  test('a proactive workspace follows its current visibility', async () => {
+    asUser(OWNER_ID);
+    const { jid, folder } = workspace('trace-proactive', 'proactive', 'full');
+    seedTurn(jid, 'turn-p');
+
+    expect((await (await getTrace(jid, 'turn-p')).json()).thinking).toBe(
+      '想了想',
+    );
+    expect((await getMessages(jid)).messages.some((m) => m.has_trace)).toBe(
+      true,
+    );
+
+    db.setWorkspaceProcessVisibility(folder, 'activity');
+    const activity = await getTrace(jid, 'turn-p');
+    expect(activity.status).toBe(200);
+    await expect(activity.json()).resolves.toMatchObject({
+      thinking: '',
+      thinking_duration_ms: 4_200,
+      trace: [{ title: '工具 Bash' }],
+    });
+    expect((await getMessages(jid)).messages.some((m) => m.has_trace)).toBe(
+      true,
+    );
+
+    db.setWorkspaceProcessVisibility(folder, 'hidden');
+    expect((await getTrace(jid, 'turn-p')).status).toBe(404);
+    expect((await getMessages(jid)).messages.some((m) => m.has_trace)).toBe(
+      false,
+    );
+  });
+
+  test('other users get a 404, like every other resource of the workspace', async () => {
+    const { jid } = workspace('trace-private', 'assistant');
+    seedTurn(jid, 'turn-x');
+    asUser(STRANGER_ID);
+    expect((await getTrace(jid, 'turn-x')).status).toBe(404);
+    expect((await getTrace('web:no-such-workspace', 'turn-x')).status).toBe(
+      404,
+    );
+  });
+
+  test('a Runtime Session trace is read through its virtual chat JID', async () => {
+    asUser(OWNER_ID);
+    const { jid } = workspace('trace-session', 'assistant');
+    const agentId = 'session-trace-1';
+    db.createAgent({
+      id: agentId,
+      group_folder: 'trace-session',
+      chat_jid: jid,
+      name: 'Session',
+      prompt: '',
+      status: 'idle',
+      kind: 'conversation',
+      created_by: OWNER_ID,
+      created_at: new Date().toISOString(),
+      completed_at: null,
+      result_summary: null,
+      last_im_jid: null,
+      spawned_from_jid: null,
+    });
+    const virtualJid = `${jid}#agent:${agentId}`;
+    seedTurn(virtualJid, 'turn-s', { thinking: '会话里的思考' });
+
+    const response = await getTrace(virtualJid, 'turn-s');
+    expect(response.status).toBe(200);
+    expect((await response.json()).thinking).toBe('会话里的思考');
+    // the session list flags its last agent message
+    const listed = (await (
+      await groupRoutes.request(
+        `/${encodeURIComponent(jid)}/messages?agentId=${agentId}`,
+        { method: 'GET' },
+      )
+    ).json()) as { messages: Array<{ id: string; has_trace?: boolean }> };
+    expect(listed.messages.filter((m) => m.has_trace).map((m) => m.id)).toEqual(
+      ['turn-s-b'],
+    );
+
+    // another workspace's session id does not open it
+    const otherWorkspace = workspace('trace-session-other', 'assistant');
+    expect(
+      (await getTrace(`${otherWorkspace.jid}#agent:${agentId}`, 'turn-s'))
+        .status,
+    ).toBe(404);
+  });
+
+  test('deleting the last message of a turn removes its trace', async () => {
+    asUser(OWNER_ID);
+    const { jid } = workspace('trace-delete', 'assistant');
+    seedTurn(jid, 'turn-d');
+    // user messages cannot be deleted by a member? they are the sender's own
+    db.deleteMessage(jid, 'turn-d-a');
+    expect((await getTrace(jid, 'turn-d')).status).toBe(200);
+    db.deleteMessage(jid, 'turn-d-b');
+    db.deleteMessage(jid, 'turn-d-user');
+    expect((await getTrace(jid, 'turn-d')).status).toBe(404);
   });
 });

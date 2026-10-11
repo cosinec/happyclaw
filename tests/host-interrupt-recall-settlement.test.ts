@@ -32,6 +32,7 @@ import {
   publishesFrameworkAnswer,
   shouldBroadcastTaskAgentStatus,
 } from '../src/workspace-interaction-runtime.js';
+import { TurnTraceTracker } from '../src/turn-trace.js';
 import { createRuntimeSourceHarness } from './helpers/runtime-source.js';
 
 const paths = vi.hoisted(() => ({ root: '' }));
@@ -152,6 +153,12 @@ function agentRun(name: string) {
     projectSdkStreamEventForWeb: () => null,
     resolveProcessVisibility: () => 'full',
     shouldBroadcastTaskAgentStatus: () => false,
+    turnTraces: {
+      observe: vi.fn(),
+      persist: vi.fn(() => false),
+      discard: vi.fn(),
+    },
+    persistProactiveTurnTrace: vi.fn(),
     getChannelType,
     isStreamingSessionSettled,
     getMessageChannelTurnContext: () => ({
@@ -949,6 +956,12 @@ function mainRun(name: string, options: { steered?: boolean } = {}) {
     projectSdkStreamEventForWeb: () => null,
     resolveProcessVisibility: () => 'full',
     shouldBroadcastTaskAgentStatus: () => false,
+    turnTraces: {
+      observe: vi.fn(),
+      persist: vi.fn(() => false),
+      discard: vi.fn(),
+    },
+    persistProactiveTurnTrace: vi.fn(),
     broadcastStreamEvent: vi.fn(),
     isStreamingSessionSettled,
     feedStreamEventToCard: vi.fn(),
@@ -1171,17 +1184,23 @@ describe('process visibility in the real output handlers (behavioural)', () => {
     level: Level,
   ) {
     const run = mainRun(name);
+    const traceStore = vi.fn();
     Object.assign(run.globals, {
       interactionMode: mode,
       projectSdkStreamEventForWeb,
       shouldBroadcastTaskAgentStatus,
       resolveProcessVisibility: () => (mode === 'proactive' ? level : 'full'),
+      turnTraces: new TurnTraceTracker({
+        mode,
+        getVisibility: () => level,
+        store: traceStore,
+      }),
     });
     const broadcasts = () =>
       (run.globals.broadcastStreamEvent as ReturnType<typeof vi.fn>).mock.calls
         .map(([, event]) => event)
         .filter((event) => event.eventType !== 'usage');
-    return { run, broadcasts };
+    return { run, traceStore, broadcasts };
   }
 
   test('a hidden proactive workspace shows the spinner and nothing of the process', async () => {
@@ -1239,6 +1258,34 @@ describe('process visibility in the real output handlers (behavioural)', () => {
       PROCESS.map((e) => e.eventType),
     );
     expect(run.globals.feedStreamEventToCard).toHaveBeenCalled();
+  });
+
+  test("every turn's process is collected for turn_traces, in the mode's own measure", async () => {
+    for (const [mode, level, expectThinking, expectTrace] of [
+      ['assistant', 'hidden', true, true],
+      ['proactive', 'hidden', false, false],
+      ['proactive', 'activity', false, true],
+      ['proactive', 'full', true, true],
+    ] as const) {
+      const { run, traceStore } = mainWith(
+        `trace-${mode}-${level}`,
+        mode,
+        level,
+      );
+      await streamThrough(run.output, run.inputId, PROCESS);
+      const stored = run.globals.turnTraces.persist({
+        chatJid: run.globals.chatJid,
+        inputId: run.inputId,
+      });
+      expect(stored, `${mode}/${level}`).toBe(expectTrace);
+      if (expectTrace) {
+        expect(traceStore.mock.calls[0][0].thinking !== '').toBe(
+          expectThinking,
+        );
+      } else {
+        expect(traceStore).not.toHaveBeenCalled();
+      }
+    }
   });
 
   test('Task tabs follow the task events: sent unless a proactive workspace is hidden', async () => {
@@ -1315,6 +1362,11 @@ describe('process visibility in the real output handlers (behavioural)', () => {
         agentStreamingSession: card,
         projectSdkStreamEventForWeb,
         resolveProcessVisibility: () => (mode === 'proactive' ? level : 'full'),
+        turnTraces: new TurnTraceTracker({
+          mode,
+          getVisibility: () => level,
+          store: vi.fn(),
+        }),
         broadcastStreamEvent: vi.fn(),
       });
       await streamThrough(run.output, run.inputId, PROCESS);
@@ -1334,5 +1386,57 @@ describe('process visibility in the real output handlers (behavioural)', () => {
         `${mode}/${level}`,
       ).toBe(mode === 'assistant');
     }
+  });
+
+  test("a proactive turn's trace is hung on the chats its utterances live in", () => {
+    const globals: Record<string, any> = {
+      chatJid: 'web:proactive-trace-home',
+      resolveIpcOutputWorkspaceJid: (jid: string) =>
+        jid === 'web:proactive-trace-home' ? null : 'web:proactive-trace-home',
+      getLastAgentMessageIdForTurn: db.getLastAgentMessageIdForTurn,
+      turnTraces: new TurnTraceTracker({
+        mode: 'proactive',
+        getVisibility: () => 'activity',
+      }),
+    };
+    createRuntimeSourceHarness(globals).install(
+      'persistProactiveTurnTrace',
+      'processGroupMessages',
+    );
+    const persist = globals.persistProactiveTurnTrace as (id: string) => void;
+    const collect = (turnId: string) =>
+      globals.turnTraces.observe(turnId, {
+        eventType: 'tool_use_start',
+        toolName: 'Bash',
+        toolUseId: `tool-${turnId}`,
+      });
+
+    db.ensureChatExists('web:proactive-trace-home');
+    db.storeMessageDirect(
+      'utterance-1',
+      'web:proactive-trace-home',
+      'happyclaw-agent',
+      'Agent',
+      '一句话',
+      '2026-10-12T02:00:00.000Z',
+      true,
+      { meta: { turnId: 'turn-spoke', sourceKind: 'sdk_send_message' } },
+    );
+    collect('turn-spoke');
+    persist('turn-spoke');
+    expect(
+      db.getTurnTrace('web:proactive-trace-home', 'turn-spoke'),
+    ).toBeDefined();
+
+    // a silent turn left no message to hang a trace on
+    collect('turn-silent');
+    persist('turn-silent');
+    expect(
+      db.getTurnTrace('web:proactive-trace-home', 'turn-silent'),
+    ).toBeUndefined();
+    globals.turnTraces.observe('turn-silent', {
+      eventType: 'status',
+      statusText: 'requesting',
+    });
   });
 });

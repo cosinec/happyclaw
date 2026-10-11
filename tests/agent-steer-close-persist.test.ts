@@ -68,6 +68,12 @@ function agentRunEnd(streamedText: string) {
     shouldSendProactiveTailInterruptionNotice,
     resolveOutputChannelReplySource,
     channelTurnScope,
+    // Turn traces are covered by turn-trace.test.ts.
+    turnTraces: {
+      observe: vi.fn(),
+      persist: vi.fn(() => false),
+      discard: vi.fn(),
+    },
     ensureChatExists: db.ensureChatExists,
     storeMessageDirect: db.storeMessageDirect,
     broadcastNewMessage: vi.fn(),

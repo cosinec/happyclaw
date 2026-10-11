@@ -134,6 +134,10 @@ import path from 'node:path';
 import { getStreamingSession } from '../feishu-streaming-card.js';
 import { attachSessionWorkflowRuns } from '../session-workflows.js';
 import {
+  markMessagesWithTrace,
+  resolveTurnTraceExposure,
+} from '../turn-trace.js';
+import {
   invalidateThumbnails,
   presentMessagesForWeb,
   readOriginalAttachment,
@@ -184,7 +188,7 @@ type RegisteredGroupWithJid = RegisteredGroup & { jid: string };
  * as message display and broadcasts. A declared but stale binding fails
  * closed: we cannot safely infer which workspace's execution policy applies.
  */
-function resolveMessageExecutionGroup(
+export function resolveMessageExecutionGroup(
   physicalJid: string,
   physicalGroup: RegisteredGroupWithJid,
 ): RegisteredGroupWithJid | null {
@@ -216,6 +220,45 @@ function resolveMessageExecutionGroup(
   // Standalone legacy IM rows have no workspace projection. Preserve their
   // own access/execution contract rather than making historical data undeletable.
   return physicalGroup;
+}
+
+/**
+ * The chat JIDs whose messages a workspace's history shows: the workspace
+ * itself plus, for a home group, the IM chats of the same owner and folder.
+ * An IM chat bound to another workspace must stay out: its folder/created_by
+ * still point at the channel account's owner, so merging by folder + owner
+ * alone would surface another workspace's conversation in the owner's Home
+ * history.
+ */
+export function resolveMessageQueryJids(
+  jid: string,
+  group: RegisteredGroupWithJid,
+): string[] {
+  const queryJids = [jid];
+  if (!group.is_home) return queryJids;
+  for (const siblingJid of getJidsByFolder(group.folder)) {
+    if (siblingJid === jid) continue;
+    const siblingGroup = getRegisteredGroup(siblingJid);
+    if (!siblingGroup) continue;
+    const ownerMatch =
+      group.created_by && siblingGroup.created_by === group.created_by;
+    if (!ownerMatch) continue;
+    const attributionDeps = {
+      getRegisteredGroup,
+      getAgent,
+      getJidsByFolder,
+      getChannelMount,
+    };
+    const boundJid = resolveBoundWorkspaceJid(siblingJid, attributionDeps);
+    if (
+      (boundJid && boundJid !== jid) ||
+      (!boundJid && hasBoundWorkspaceReference(siblingJid, attributionDeps))
+    ) {
+      continue;
+    }
+    queryJids.push(siblingJid);
+  }
+  return queryJids;
 }
 
 function normalizeGroupName(name: unknown): string {
@@ -2737,11 +2780,17 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
     }
 
     const virtualJid = `${jid}#agent:${agentIdParam}`;
+    const agentExposure = resolveTurnTraceExposure(group.folder, {
+      agentKind: agent.kind,
+    });
     if (afterSequence !== undefined || after) {
       const messages = await presentMessagesForWeb(
-        attachSessionWorkflowRuns(
-          getMessagesAfter(virtualJid, after, limit, afterSequence),
-          { groupFolder: group.folder, agentId: agentIdParam },
+        markMessagesWithTrace(
+          attachSessionWorkflowRuns(
+            getMessagesAfter(virtualJid, after, limit, afterSequence),
+            { groupFolder: group.folder, agentId: agentIdParam },
+          ),
+          agentExposure,
         ),
       );
       return c.json({ messages });
@@ -2749,52 +2798,34 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
     const rows = getMessagesPage(virtualJid, before, limit + 1, beforeSequence);
     const hasMore = rows.length > limit;
     const messages = await presentMessagesForWeb(
-      attachSessionWorkflowRuns(hasMore ? rows.slice(0, limit) : rows, {
-        groupFolder: group.folder,
-        agentId: agentIdParam,
-      }),
+      markMessagesWithTrace(
+        attachSessionWorkflowRuns(hasMore ? rows.slice(0, limit) : rows, {
+          groupFolder: group.folder,
+          agentId: agentIdParam,
+        }),
+        agentExposure,
+      ),
     );
     return c.json({ messages, hasMore });
   }
 
   // is_home 群组合并查询：将同一 owner、同 folder 下的 Web 与 IM 消息合并展示。
-  // 已绑定到其它工作区的 IM 会话必须排除：它的 folder/created_by 仍停留在渠道
-  // 账号归属人，若只按 folder + owner 合并，别的工作区的对话会出现在账号归属人
-  // 的 Home 历史里。
-  const queryJids = [jid];
-  if (group.is_home) {
-    const siblingJids = getJidsByFolder(group.folder);
-    for (const siblingJid of siblingJids) {
-      if (siblingJid === jid) continue;
-      const siblingGroup = getRegisteredGroup(siblingJid);
-      if (!siblingGroup) continue;
-      const ownerMatch =
-        group.created_by && siblingGroup.created_by === group.created_by;
-      if (!ownerMatch) continue;
-      const attributionDeps = {
-        getRegisteredGroup,
-        getAgent,
-        getJidsByFolder,
-        getChannelMount,
-      };
-      const boundJid = resolveBoundWorkspaceJid(siblingJid, attributionDeps);
-      if (
-        (boundJid && boundJid !== jid) ||
-        (!boundJid && hasBoundWorkspaceReference(siblingJid, attributionDeps))
-      ) {
-        continue;
-      }
-      queryJids.push(siblingJid);
-    }
-  }
+  const queryJids = resolveMessageQueryJids(jid, group);
+
+  // A turn's stored thinking/trace follows the workspace's current contract
+  // (a proactive workspace set to `hidden` lists none).
+  const exposure = resolveTurnTraceExposure(group.folder);
 
   if (queryJids.length === 1) {
     // 单 JID 走原路径
     if (afterSequence !== undefined || after) {
       const messages = await presentMessagesForWeb(
-        attachSessionWorkflowRuns(
-          getMessagesAfter(jid, after, limit, afterSequence),
-          { groupFolder: group.folder, agentId: null },
+        markMessagesWithTrace(
+          attachSessionWorkflowRuns(
+            getMessagesAfter(jid, after, limit, afterSequence),
+            { groupFolder: group.folder, agentId: null },
+          ),
+          exposure,
         ),
       );
       return c.json({ messages });
@@ -2802,10 +2833,13 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
     const rows = getMessagesPage(jid, before, limit + 1, beforeSequence);
     const hasMore = rows.length > limit;
     const messages = await presentMessagesForWeb(
-      attachSessionWorkflowRuns(hasMore ? rows.slice(0, limit) : rows, {
-        groupFolder: group.folder,
-        agentId: null,
-      }),
+      markMessagesWithTrace(
+        attachSessionWorkflowRuns(hasMore ? rows.slice(0, limit) : rows, {
+          groupFolder: group.folder,
+          agentId: null,
+        }),
+        exposure,
+      ),
     );
     return c.json({ messages, hasMore });
   }
@@ -2813,9 +2847,12 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
   // 多 JID 合并查询
   if (afterSequence !== undefined || after) {
     const messages = await presentMessagesForWeb(
-      attachSessionWorkflowRuns(
-        getMessagesAfterMulti(queryJids, after, limit, afterSequence),
-        { groupFolder: group.folder, agentId: null },
+      markMessagesWithTrace(
+        attachSessionWorkflowRuns(
+          getMessagesAfterMulti(queryJids, after, limit, afterSequence),
+          { groupFolder: group.folder, agentId: null },
+        ),
+        exposure,
       ),
     );
     return c.json({ messages });
@@ -2828,10 +2865,13 @@ groupRoutes.get('/:jid/messages', authMiddleware, async (c) => {
   );
   const hasMore = rows.length > limit;
   const messages = await presentMessagesForWeb(
-    attachSessionWorkflowRuns(hasMore ? rows.slice(0, limit) : rows, {
-      groupFolder: group.folder,
-      agentId: null,
-    }),
+    markMessagesWithTrace(
+      attachSessionWorkflowRuns(hasMore ? rows.slice(0, limit) : rows, {
+        groupFolder: group.folder,
+        agentId: null,
+      }),
+      exposure,
+    ),
   );
   return c.json({ messages, hasMore });
 });

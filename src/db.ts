@@ -8952,6 +8952,61 @@ export function pruneOrphanTurnTraces(): number {
      )`).run().changes;
 }
 
+/**
+ * Drop the trace of one turn when that turn no longer has any message in the
+ * chat (the last message of the turn was deleted). Cheap enough to run after
+ * every single-message delete.
+ */
+export function deleteTurnTraceIfOrphan(
+  chatJid: string,
+  turnId: string,
+): boolean {
+  if (!isDatabaseInitialized() || !turnId) return false;
+  return (
+    prepareCached(`DELETE FROM turn_traces
+       WHERE chat_jid = ? AND turn_id = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM messages m
+           WHERE m.chat_jid = ? AND m.turn_id = ?
+         )`).run(chatJid, turnId, chatJid, turnId).changes > 0
+  );
+}
+
+/** The chat and every Runtime Session chat (`{chat}#agent:{id}`) under it. */
+export function deleteTurnTracesForChatTree(chatJid: string): number {
+  if (!isDatabaseInitialized()) return 0;
+  const sessionPrefix = `${chatJid}#agent:`;
+  return (
+    prepareCached('DELETE FROM turn_traces WHERE chat_jid = ?').run(chatJid)
+      .changes +
+    // substr, not LIKE: a JID may contain the wildcard characters % and _.
+    prepareCached(
+      'DELETE FROM turn_traces WHERE substr(chat_jid, 1, ?) = ?',
+    ).run([...sessionPrefix].length, sessionPrefix).changes
+  );
+}
+
+/**
+ * The newest agent-authored message of one turn (system and billing notices
+ * excluded). The Web hangs a turn's trace on this message.
+ */
+export function getLastAgentMessageIdForTurn(
+  chatJid: string,
+  turnId: string,
+): string | undefined {
+  if (!isDatabaseInitialized() || !turnId) return undefined;
+  const row = prepareCached(`SELECT m.id
+       FROM messages m
+       LEFT JOIN message_ingest_sequences seq
+         ON seq.chat_jid = m.chat_jid AND seq.message_id = m.id
+       WHERE m.chat_jid = ? AND m.turn_id = ?
+         AND m.is_from_me = 1
+         AND m.sender NOT LIKE '\\_\\_%' ESCAPE '\\'
+       ORDER BY m.timestamp DESC, COALESCE(seq.sequence, 0) DESC
+       LIMIT 1`).get(chatJid, turnId) as { id: string } | undefined;
+  return row?.id;
+}
+
 /** Persisted session namespaces currently bound to one Provider account. */
 export function listSessionNamespacesForProviderId(providerId: string): Array<{
   groupFolder: string;
@@ -12556,6 +12611,7 @@ export function ensureUserHomeGroup(
 export function deleteChatHistory(chatJid: string): void {
   const tx = db.transaction((jid: string) => {
     prepareCached('DELETE FROM messages WHERE chat_jid = ?').run(jid);
+    prepareCached('DELETE FROM turn_traces WHERE chat_jid = ?').run(jid);
     prepareCached('DELETE FROM chats WHERE jid = ?').run(jid);
   });
   tx(chatJid);
@@ -12729,11 +12785,17 @@ export function rebuildWorkspacePersistentState(input: {
         prepareCached('DELETE FROM messages WHERE chat_jid = ?').run(
           siblingJid,
         );
+        prepareCached('DELETE FROM turn_traces WHERE chat_jid = ?').run(
+          siblingJid,
+        );
         prepareCached('DELETE FROM chats WHERE jid = ?').run(siblingJid);
       }
       for (const agent of agents) {
         const virtualJid = `${agent.chat_jid}#agent:${agent.id}`;
         prepareCached('DELETE FROM messages WHERE chat_jid = ?').run(
+          virtualJid,
+        );
+        prepareCached('DELETE FROM turn_traces WHERE chat_jid = ?').run(
           virtualJid,
         );
         prepareCached('DELETE FROM chats WHERE jid = ?').run(virtualJid);
@@ -12808,6 +12870,7 @@ export function deleteImGroupRecord(jid: string): void {
     );
     prepareCached('DELETE FROM registered_groups WHERE jid = ?').run(jid);
     prepareCached('DELETE FROM messages WHERE chat_jid = ?').run(jid);
+    prepareCached('DELETE FROM turn_traces WHERE chat_jid = ?').run(jid);
     prepareCached('DELETE FROM chats WHERE jid = ?').run(jid);
     prepareCached('DELETE FROM user_pinned_groups WHERE jid = ?').run(jid);
     prepareCached('DELETE FROM im_context_bindings WHERE source_jid = ?').run(
@@ -12933,6 +12996,7 @@ export function deleteGroupData(
     prepareCached('DELETE FROM messages WHERE chat_jid LIKE ?').run(
       `${jid}#agent:%`,
     );
+    deleteTurnTracesForChatTree(jid);
     prepareCached('DELETE FROM chats WHERE jid = ?').run(jid);
     prepareCached('DELETE FROM chats WHERE jid LIKE ?').run(`${jid}#agent:%`);
     // 7. 删除 pin 记录
@@ -14630,6 +14694,7 @@ function mapAgentRow(row: Record<string, unknown>): SubAgent {
 
 export function deleteMessagesForChatJid(chatJid: string): void {
   prepareCached('DELETE FROM messages WHERE chat_jid = ?').run(chatJid);
+  prepareCached('DELETE FROM turn_traces WHERE chat_jid = ?').run(chatJid);
   prepareCached('DELETE FROM chats WHERE jid = ?').run(chatJid);
 }
 
@@ -14760,9 +14825,16 @@ export function getAgentBuilderInputMessage(
 }
 
 export function deleteMessage(chatJid: string, messageId: string): boolean {
+  const turnId = (
+    prepareCached(
+      'SELECT turn_id FROM messages WHERE id = ? AND chat_jid = ?',
+    ).get(messageId, chatJid) as { turn_id: string | null } | undefined
+  )?.turn_id;
   const result = prepareCached(
     'DELETE FROM messages WHERE id = ? AND chat_jid = ?',
   ).run(messageId, chatJid);
+  // The turn's trace outlives a single message, not the turn itself.
+  if (result.changes > 0 && turnId) deleteTurnTraceIfOrphan(chatJid, turnId);
   return result.changes > 0;
 }
 

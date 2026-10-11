@@ -20,6 +20,7 @@
 | `/api/groups`                      | `src/routes/groups.ts`           | 工作区兼容模型、消息和环境    |
 | `/api/groups`                      | `src/routes/files.ts`            | 工作区文件                    |
 | `/api/groups`                      | `src/routes/agents.ts`           | Runtime Session 与渠道绑定    |
+| `/api/groups`                      | `src/routes/turn-traces.ts`      | 回合的思考摘要与执行轨迹      |
 | `/api/groups`                      | `src/routes/workspace-config.ts` | 项目 Skills/MCP               |
 | `/api/workspaces`                  | `src/routes/workspaces.ts`       | Agent-first 工作区投影        |
 | `/api/agent-profiles`              | `src/routes/agent-profiles.ts`   | 产品级 Agent                  |
@@ -91,6 +92,7 @@ Public：
   `data/extra/` 和任务运行历史
 - `POST /api/groups/:jid/reset-owner`，admin break-glass
 - `GET /api/groups/:jid/messages`
+- `GET /api/groups/:jid/turn-traces/:turnId`，已结算回合的思考摘要与执行轨迹
 - `DELETE /api/groups/:jid/messages/:messageId`
 - `GET /api/groups/:jid/messages/:messageId/attachments/:index/original`
 - `GET|PUT /api/groups/:jid/env`
@@ -169,6 +171,30 @@ Workspace↔AgentProfile 绑定行上，因此：仅 `web:` 前缀工作区可�
 会被剥离。过程事件永远不会进入 IM 渠道的流式卡片。`context_audit` 从不发给 Web，但
 在所有模式下都会记录到宿主的运行上下文快照。`activity` 及以上还会广播子 Agent 任务的
 `agent_status`，使 Task 标签与任务事件一致。
+
+回合结算时，宿主把该回合的思考摘要、思考耗时和执行轨迹写入 `turn_traces`
+（Assistant 模式总是写；主动模式仅当 `process_visibility` 不是 `hidden` 时写，且
+`activity` 级不保存思考文本；思考文本最多 64KB，保留尾部并以 `…` 开头标记被截断，
+轨迹最多 200 条）。`GET /api/groups/:jid/messages` 返回的消息带 `has_trace: true`
+表示它是所属回合最后一条 agent 消息且该回合有轨迹，WebSocket `new_message` 在写入
+轨迹的同时也带这个标记。`GET /api/groups/:jid/turn-traces/:turnId` 返回：
+
+```json
+{
+  "turn_id": "…",
+  "thinking": "…",
+  "thinking_duration_ms": 12400,
+  "trace": [
+    { "id": "…", "timestamp": 0, "kind": "tool", "title": "工具 Bash" }
+  ],
+  "created_at": "2026-01-01T00:00:00.000Z"
+}
+```
+
+`trace` 的行与 Web 实时累积的一致（标题格式相同）。访问检查与消息列表相同
+（Runtime Session 的 `:jid` 为 `{workspaceJid}#agent:{sessionId}`）；主动模式工作区
+按**当前**可见性过滤：`hidden` 返回 404 且消息不带 `has_trace`，`activity` 返回空的
+`thinking`。消息、聊天或工作区被删除时对应的轨迹一并清除，服务启动时清理孤儿轨迹。
 
 Home Workspace 固定归属当前用户的内置 HappyClaw。尝试通过
 `PATCH /api/groups/:jid/agent-profile` 将 Home 迁移到自定义 Agent 时返回：

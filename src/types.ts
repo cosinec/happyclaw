@@ -449,6 +449,12 @@ export interface NewMessage {
   channel_context?: ChannelTurnContext;
   /** Session-derived Claude Code Workflow snapshots for historical replay. */
   workflow_runs?: WorkflowRunSnapshot[];
+  /**
+   * Set on the last agent message of a turn whose thinking summary and
+   * execution trace were stored (GET /api/groups/:jid/turn-traces/:turnId).
+   * Derived when a message is listed or announced; never persisted.
+   */
+  has_trace?: boolean;
   turn_id?: string | null;
   session_id?: string | null;
   sdk_message_uuid?: string | null;
