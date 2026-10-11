@@ -12,6 +12,10 @@
 export type StreamEventType =
   | 'text_delta'
   | 'thinking_delta'
+  /** The model opened a reasoning block, whether or not it returns any text. */
+  | 'thinking_start'
+  /** The reasoning block closed; `thinkingDurationMs` is the Runner's timing. */
+  | 'thinking_end'
   | 'tool_use_start'
   | 'tool_use_end'
   | 'tool_progress'
@@ -320,6 +324,8 @@ export interface StreamEvent {
    *  aligning the trace with what Claude Code shows. */
   toolResult?: string;
   elapsedSeconds?: number;
+  /** Wall-clock length of one reasoning block, set on `thinking_end`. */
+  thinkingDurationMs?: number;
   hookName?: string;
   hookEvent?: string;
   hookOutcome?: string;

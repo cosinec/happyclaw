@@ -64,13 +64,18 @@ afterAll(() => {
 });
 
 describe('schema v78 session model selections', () => {
-  test('backs up the v77 database, creates the table and stamps v78', () => {
+  test('backs up the v77 database, creates the table and stamps the head version', () => {
     process.env.HAPPYCLAW_MIGRATION_BACKUP_DIR = backupDir;
     db.initDatabase();
-    expect(db.getRouterState('schema_version')).toBe('78');
+    // Later migrations stack on this one, so assert against the head.
+    expect(db.getRouterState('schema_version')).toBe(
+      String(db.CURRENT_SCHEMA_VERSION),
+    );
     const backups = fs.readdirSync(backupDir);
     expect(
-      backups.some((name) => name.startsWith('messages-v77-to-v78-')),
+      backups.some((name) =>
+        name.startsWith(`messages-v77-to-v${db.CURRENT_SCHEMA_VERSION}-`),
+      ),
     ).toBe(true);
 
     const backup = new Database(path.join(backupDir, backups[0]), {
@@ -111,10 +116,8 @@ describe('schema v78 session model selections', () => {
 
     const conn = new Database(databasePath);
     conn
-      .prepare(
-        "UPDATE router_state SET value = '79' WHERE key = 'schema_version'",
-      )
-      .run();
+      .prepare("UPDATE router_state SET value = ? WHERE key = 'schema_version'")
+      .run(String(db.CURRENT_SCHEMA_VERSION + 1));
     conn.close();
     expect(() => db.initDatabase()).toThrow('refusing downgrade');
   });

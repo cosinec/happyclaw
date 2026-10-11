@@ -37,6 +37,14 @@ export interface ContainerConfig {
 export type ExecutionMode = 'container' | 'host';
 /** User-visible interaction contract owned by one Workspace↔Agent binding. */
 export type InteractionMode = 'assistant' | 'proactive';
+/**
+ * How much of a proactive turn's process the Web shows beside the spinner:
+ * `hidden` keeps today's behavior (spinner only); `activity` adds the phase,
+ * tools, sub-agents and todos but never any model text; `full` also shows the
+ * model's reasoning summary. Assistant workspaces always show their whole
+ * process, so the setting only matters for `proactive`.
+ */
+export type ProcessVisibility = 'hidden' | 'activity' | 'full';
 export type ConversationSource = 'manual' | 'native_thread' | 'feishu_thread';
 export type ConversationNavMode = 'horizontal' | 'vertical_threads';
 export type ImBindingMode = 'single_context' | 'thread_map';
@@ -365,6 +373,8 @@ export interface WorkspaceAgentProfileBinding {
   group_folder: string;
   agent_profile_id: string;
   interaction_mode: InteractionMode;
+  /** Presentation only: no runtime restart when it changes. */
+  process_visibility: ProcessVisibility;
   created_at: string;
   updated_at: string;
 }

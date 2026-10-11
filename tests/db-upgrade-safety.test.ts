@@ -151,7 +151,7 @@ describe('database upgrade safety gate', () => {
     process.env.HAPPYCLAW_MIGRATION_BACKUP_DIR = migrationBackups;
     const backupsBeforeCurrentOnlyRefusal = fs.readdirSync(migrationBackups);
     expect(() => db.initDatabase({ requireCurrentSchema: true })).toThrow(
-      'Database must already be schema v78',
+      `Database must already be schema v${db.CURRENT_SCHEMA_VERSION}`,
     );
     expect(fs.readdirSync(migrationBackups)).toEqual(
       backupsBeforeCurrentOnlyRefusal,
@@ -193,6 +193,12 @@ describe('schema version head', () => {
     // v78: session_model_selections, the chat composer's per-conversation
     // model choice. Migration coverage:
     // schema-v78-session-model-selections.test.ts.
-    expect(db.CURRENT_SCHEMA_VERSION).toBe(78);
+    // v79: that choice also pins a model and a reasoning effort
+    // (schema-v79-session-model-effort.test.ts).
+    // v80: workspace_agent_profiles.process_visibility, how much of a proactive
+    // turn's process the Web shows (schema-v80-process-visibility.test.ts).
+    // v81: turn_traces, the persisted thinking summary and execution trace of a
+    // turn (schema-v81-turn-traces.test.ts).
+    expect(db.CURRENT_SCHEMA_VERSION).toBe(81);
   });
 });
