@@ -41,8 +41,11 @@ vi.mock(
   },
 );
 const { codexGatewayApp } = await import('../src/codex-gateway/gateway.js');
-const { issueCodexGatewayToken, revokeCodexGatewayToken } =
-  await import('../src/codex-gateway/runner-tokens.js');
+const {
+  issueCodexGatewayToken,
+  revokeCodexGatewayToken,
+  updateLiveSessionEffort,
+} = await import('../src/codex-gateway/runner-tokens.js');
 const { resetCodexTokenManagerForTests } =
   await import('../src/codex-gateway/token-manager.js');
 const { encodeReasoningSignature } =
@@ -1052,6 +1055,76 @@ describe('reasoning effort policy', () => {
     await request(adaptive({ model: 'claude-haiku-4-5' }));
     expect(sentBody(1).reasoning.effort).toBe('low');
     expect(sentBody(1).model).toBe('gpt-6-sol');
+  });
+
+  describe("the conversation's own pick", () => {
+    const withPick = (
+      owner: Partial<Parameters<typeof issueCodexGatewayToken>[1]> = {},
+    ) =>
+      issueCodexGatewayToken(provider.id as string, {
+        kind: 'container',
+        groupFolder: 'pick-workspace',
+        sessionAgentId: null,
+        ...owner,
+      });
+
+    test('reaches the upstream as is: ultra survives the CLI and beats the Agent and provider', async () => {
+      provider.customEnv = { CODEX_REASONING_EFFORT: 'low' };
+      const picked = withPick({
+        agentEffort: 'medium',
+        sessionEffort: 'ultra',
+      });
+      try {
+        // The real CLI sends its own max on every request.
+        await request(adaptive(), picked.token);
+        expect(sentBody().reasoning.effort).toBe('ultra');
+        await request(
+          adaptive({ output_config: { effort: 'high' } }),
+          picked.token,
+        );
+        expect(sentBody(1).reasoning.effort).toBe('ultra');
+      } finally {
+        revokeCodexGatewayToken(picked.token);
+      }
+    });
+
+    test('runs the model the runner asked for, background work stays cheap on the default model', async () => {
+      const picked = withPick({ sessionEffort: 'xhigh' });
+      try {
+        await request(adaptive({ model: 'gpt-6-astra' }), picked.token);
+        expect(sentBody(0)).toMatchObject({
+          model: 'gpt-6-astra',
+          reasoning: { effort: 'xhigh' },
+        });
+        await request(adaptive({ model: 'claude-haiku-5-5' }), picked.token);
+        expect(sentBody(1)).toMatchObject({
+          model: 'gpt-6-sol',
+          reasoning: { effort: 'low' },
+        });
+      } finally {
+        revokeCodexGatewayToken(picked.token);
+      }
+    });
+
+    test('a change made while the runner is warm applies from the next request', async () => {
+      const picked = withPick({ sessionEffort: 'low' });
+      try {
+        await request(adaptive(), picked.token);
+        expect(sentBody(0).reasoning.effort).toBe('low');
+        expect(
+          updateLiveSessionEffort({ groupFolder: 'pick-workspace' }, 'ultra'),
+        ).toBe(1);
+        await request(adaptive(), picked.token);
+        expect(sentBody(1).reasoning.effort).toBe('ultra');
+        // Back to the default: the provider and Agent rules apply again.
+        provider.customEnv = { CODEX_REASONING_EFFORT: 'high' };
+        updateLiveSessionEffort({ groupFolder: 'pick-workspace' }, undefined);
+        await request(adaptive(), picked.token);
+        expect(sentBody(2).reasoning.effort).toBe('high');
+      } finally {
+        revokeCodexGatewayToken(picked.token);
+      }
+    });
   });
 });
 

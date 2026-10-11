@@ -24,6 +24,7 @@ import {
 import {
   CODEX_KNOWN_EFFORTS,
   CODEX_MODEL_CATALOG,
+  filterCodexCatalogByPlan,
   isCodexModelSupportedByClient,
   setActiveCodexCatalog,
   type CodexModelCatalogEntry,
@@ -576,6 +577,36 @@ export function getCodexCatalogForProvider(
   accountId?: string | null,
 ): readonly CodexModelCatalogEntry[] {
   return resolveCodexCatalogForProvider(providerId, accountId).models;
+}
+
+/**
+ * The models one ChatGPT login may run: its account catalog (the global one
+ * until that is fetched) narrowed to the login's plan. Synchronous and never
+ * waits for the network, so the chat composer and a runner launch can call it;
+ * callers that want a fresher list kick off maybeRefreshCodexProviderCatalog.
+ */
+export function listCodexModelsForProvider(provider: {
+  id: string;
+  codexOAuthCredentials: {
+    accountId: string | null;
+    planType: string | null;
+  } | null;
+}): {
+  models: CodexModelCatalogEntry[];
+  source: ProviderCodexCatalog['source'];
+} {
+  const credentials = provider.codexOAuthCredentials;
+  const resolvedCatalog = resolveCodexCatalogForProvider(
+    provider.id,
+    credentials?.accountId ?? null,
+  );
+  return {
+    models: filterCodexCatalogByPlan(
+      resolvedCatalog.models,
+      credentials?.planType,
+    ),
+    source: resolvedCatalog.source,
+  };
 }
 
 /**

@@ -795,6 +795,7 @@ codexGatewayApp.post(
         model: requestModel,
         providerEffort: provider?.customEnv?.CODEX_REASONING_EFFORT,
         agentEffort: grant.owner.agentEffort,
+        sessionEffort: grant.sessionEffort,
       }),
       requestTools: !!anthropicRequest.tools?.length,
     });

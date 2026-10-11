@@ -286,6 +286,121 @@ export function resolveCodexDefaultEffort(
   return entry ? resolveEntryFallbackEffort(entry) : CODEX_DEFAULT_EFFORT;
 }
 
+// ─── Conversation-level model and effort ───────────────────────────────
+//
+// A conversation may pin one of the account's models and a reasoning effort
+// in the chat composer. The same rules run when the choice is made (strict),
+// when it is shown and when a runner starts (lenient): a stored choice can go
+// stale because the plan, the catalog or the chooser's permission changed.
+
+/**
+ * Highest effort a conversation may pick without `manage_system_config`.
+ * The levels above it spend the shared subscription much faster, so choosing
+ * them is an administrative decision. This constant is the single switch for
+ * opening them to everyone.
+ */
+export const CODEX_SESSION_EFFORT_CEILING = 'max';
+
+/** Position in the fixed low → ultra order; unknown levels sort last. */
+function effortRank(effort: string): number {
+  const rank = EFFORT_RANK.indexOf(effort);
+  return rank < 0 ? EFFORT_RANK.length : rank;
+}
+
+/** Orders efforts low → ultra. */
+export function compareCodexEfforts(a: string, b: string): number {
+  return effortRank(a) - effortRank(b);
+}
+
+/** Whether picking this effort needs `manage_system_config`. */
+export function isCodexEffortAboveCeiling(effort: string): boolean {
+  return effortRank(effort) > effortRank(CODEX_SESSION_EFFORT_CEILING);
+}
+
+/** A stored or submitted effort in the catalog's spelling; empty means unset. */
+export function normalizeCodexSessionEffort(
+  effort: string | null | undefined,
+): string | null {
+  const normalized = effort?.trim().toLowerCase();
+  if (!normalized) return null;
+  return normalized === 'minimal' ? 'low' : normalized;
+}
+
+/** The efforts a chooser may pick on a model, in low → ultra order. */
+export function codexPickableEfforts(
+  efforts: readonly string[],
+  canExceedCeiling: boolean,
+): string[] {
+  return [...efforts]
+    .filter((effort) => canExceedCeiling || !isCodexEffortAboveCeiling(effort))
+    .sort(compareCodexEfforts);
+}
+
+export type CodexSessionChoiceProblem =
+  | { kind: 'model_unavailable'; model: string }
+  | { kind: 'effort_unsupported'; effort: string; model: string }
+  | { kind: 'effort_restricted'; effort: string };
+
+export interface CodexSessionChoice {
+  /** The model to run on; null follows the configuration's own model. */
+  model: string | null;
+  /** The effort to run at; null follows the default. */
+  effort: string | null;
+  /** Why a requested value was dropped. */
+  problems: CodexSessionChoiceProblem[];
+}
+
+/**
+ * Check a conversation's model and effort against the account's catalog.
+ *
+ * `strict` (a new choice) accepts only what the catalog confirms. Otherwise a
+ * stored value the catalog cannot judge is kept: the catalog is only
+ * authoritative once it is the account's live list (`authoritative`), and a
+ * model missing from a global fallback may simply not be loaded yet. The
+ * gateway clamps a catalog-less model's effort itself, as it always has.
+ */
+export function resolveCodexSessionChoice(input: {
+  catalog: readonly CodexModelCatalogEntry[];
+  /** The configuration's own model, after legacy normalization. */
+  defaultModel: string;
+  model?: string | null;
+  effort?: string | null;
+  canExceedCeiling: boolean;
+  strict: boolean;
+  authoritative: boolean;
+}): CodexSessionChoice {
+  const problems: CodexSessionChoiceProblem[] = [];
+  const find = (value: string) =>
+    input.catalog.find((entry) => entry.value === value);
+  const unjudgeable = !input.strict && !input.authoritative;
+
+  let model: string | null = null;
+  const requestedModel = input.model?.trim();
+  if (requestedModel) {
+    if (find(requestedModel) || unjudgeable) model = requestedModel;
+    else problems.push({ kind: 'model_unavailable', model: requestedModel });
+  }
+
+  let effort: string | null = null;
+  const requestedEffort = normalizeCodexSessionEffort(input.effort);
+  if (requestedEffort) {
+    const effectiveModel = model ?? input.defaultModel;
+    const entry = find(effectiveModel);
+    if (!input.canExceedCeiling && isCodexEffortAboveCeiling(requestedEffort)) {
+      problems.push({ kind: 'effort_restricted', effort: requestedEffort });
+    } else if (entry ? entry.efforts.includes(requestedEffort) : unjudgeable) {
+      effort = requestedEffort;
+    } else {
+      problems.push({
+        kind: 'effort_unsupported',
+        effort: requestedEffort,
+        model: effectiveModel,
+      });
+    }
+  }
+  return { model, effort, problems };
+}
+
 /**
  * Request-shape traits of one upstream model, taken from the official
  * models.json (`use_responses_lite`, `default_verbosity`, ...). Unknown

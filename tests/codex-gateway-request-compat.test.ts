@@ -798,6 +798,7 @@ describe('reasoning replay and request intent', () => {
         model?: string;
         providerEffort?: string;
         agentEffort?: string;
+        sessionEffort?: string;
       } = {},
     ) =>
       resolveGatewayReasoningEffort(request, {
@@ -805,6 +806,7 @@ describe('reasoning replay and request intent', () => {
         model: policy.model ?? 'gpt-6-sol',
         providerEffort: policy.providerEffort,
         agentEffort: policy.agentEffort,
+        sessionEffort: policy.sessionEffort,
       });
 
     test('inheriting Agents get the provider effort or the catalog default', () => {
@@ -836,6 +838,75 @@ describe('reasoning replay and request intent', () => {
           { model: 'capped', agentEffort: 'max' },
         ),
       ).toBe('high');
+    });
+
+    test("the conversation's own pick beats the Agent and the provider, and the CLI's effort", () => {
+      // The CLI always sends its own output_config.effort (the third-party
+      // default is max); the pick is not the request's to override.
+      expect(
+        resolve(adaptive, {
+          sessionEffort: 'low',
+          agentEffort: 'xhigh',
+          providerEffort: 'high',
+        }),
+      ).toBe('low');
+      expect(
+        resolve(
+          { thinking: { type: 'adaptive' }, output_config: { effort: 'high' } },
+          { sessionEffort: 'xhigh', agentEffort: 'low' },
+        ),
+      ).toBe('xhigh');
+      // A sub-agent asking for a different level does not move it either.
+      expect(
+        resolve(
+          { thinking: { type: 'adaptive' }, output_config: { effort: 'low' } },
+          { sessionEffort: 'high' },
+        ),
+      ).toBe('high');
+    });
+
+    test('ultra reaches the upstream untouched where the model has it', () => {
+      expect(resolve(adaptive, { sessionEffort: 'ultra' })).toBe('ultra');
+      expect(resolve(adaptive, { sessionEffort: ' ULTRA ' })).toBe('ultra');
+      expect(resolve(adaptive, { sessionEffort: 'minimal' })).toBe('low');
+    });
+
+    test('the pick is clamped to the model the request runs on', () => {
+      // The pick predates a model change, or the model lacks that level.
+      expect(
+        resolve(adaptive, { sessionEffort: 'ultra', model: 'capped' }),
+      ).toBe('high');
+      expect(resolve(adaptive, { sessionEffort: 'low', model: 'capped' })).toBe(
+        'high',
+      );
+      // A model outside the catalog is passed through, like every other level.
+      expect(
+        resolve(adaptive, { sessionEffort: 'ultra', model: 'gpt-7-future' }),
+      ).toBe('ultra');
+    });
+
+    test('disabled thinking and background requests still win over the pick', () => {
+      const pick = { sessionEffort: 'ultra', agentEffort: 'max' };
+      expect(resolve({ thinking: { type: 'disabled' } }, pick)).toBe('low');
+      expect(resolve({ model: 'claude-haiku-4-5', ...adaptive }, pick)).toBe(
+        'low',
+      );
+      expect(
+        resolve(
+          { model: 'claude-haiku-4-5', ...adaptive },
+          { ...pick, model: 'capped' },
+        ),
+      ).toBe('medium');
+    });
+
+    test('without a pick the Agent and provider rules are unchanged', () => {
+      expect(
+        resolve(
+          { thinking: { type: 'adaptive' } },
+          { providerEffort: 'low', agentEffort: 'xhigh', sessionEffort: '' },
+        ),
+      ).toBe('xhigh');
+      expect(resolve(adaptive, { providerEffort: 'xhigh' })).toBe('xhigh');
     });
 
     test('disabled thinking maps to the lowest supported level, never none', () => {

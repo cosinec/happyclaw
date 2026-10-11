@@ -19,6 +19,7 @@ import {
   resolveCodexGatewayLaunchConfig,
   resolveCodexGatewayToken,
   revokeCodexGatewayToken,
+  updateLiveSessionEffort,
 } from '../src/codex-gateway/runner-tokens.js';
 import {
   isLocalNetworkAddress,
@@ -81,6 +82,127 @@ describe('runner gateway tokens', () => {
     expect(resolveCodexGatewayToken(a)).toBeNull();
     expect(resolveCodexGatewayToken(b)).toBeNull();
     expect(() => lease.issue('provider')).toThrow();
+  });
+});
+
+describe('conversation reasoning effort on a grant', () => {
+  const issue = (
+    owner: Parameters<typeof issueCodexGatewayToken>[1],
+    providerId = 'provider',
+  ) => issueCodexGatewayToken(providerId, owner);
+
+  test('a grant starts with the effort the runner was launched with', () => {
+    const picked = issue({
+      kind: 'container',
+      groupFolder: 'folder',
+      sessionAgentId: 'agent',
+      sessionEffort: 'ultra',
+    });
+    const none = issue({ kind: 'container', groupFolder: 'folder' });
+    expect(resolveCodexGatewayToken(picked.token)?.sessionEffort).toBe('ultra');
+    expect(resolveCodexGatewayToken(none.token)?.sessionEffort).toBeUndefined();
+    revokeCodexGatewayToken(picked.token);
+    revokeCodexGatewayToken(none.token);
+  });
+
+  test('changes only the live runners of the addressed conversation', () => {
+    const main = issue({
+      kind: 'container',
+      groupFolder: 'folder',
+      agentId: null,
+      sessionAgentId: null,
+      sessionEffort: 'low',
+    });
+    const mainHost = issue({ kind: 'host', groupFolder: 'folder' });
+    const session = issue({
+      kind: 'container',
+      groupFolder: 'folder',
+      agentId: 'agent-1',
+      sessionAgentId: 'agent-1',
+      sessionEffort: 'low',
+    });
+    const otherWorkspace = issue({
+      kind: 'container',
+      groupFolder: 'other',
+      sessionEffort: 'low',
+    });
+    const isolatedTask = issue({
+      kind: 'container',
+      groupFolder: 'folder',
+      taskRunId: 'run-1',
+      sessionEffort: 'low',
+    });
+    const oneShot = issue({ kind: 'sdk-query' });
+    const effortOf = (token: string) =>
+      resolveCodexGatewayToken(token)?.sessionEffort;
+
+    expect(updateLiveSessionEffort({ groupFolder: 'folder' }, 'ultra')).toBe(2);
+    expect(effortOf(main.token)).toBe('ultra');
+    expect(effortOf(mainHost.token)).toBe('ultra');
+    expect(effortOf(session.token)).toBe('low');
+    expect(effortOf(otherWorkspace.token)).toBe('low');
+    expect(effortOf(isolatedTask.token)).toBe('low');
+    expect(effortOf(oneShot.token)).toBeUndefined();
+
+    // A Runtime Session is addressed by its own id; undefined clears the pick.
+    expect(
+      updateLiveSessionEffort(
+        { groupFolder: 'folder', sessionAgentId: 'agent-1' },
+        undefined,
+      ),
+    ).toBe(1);
+    expect(effortOf(session.token)).toBeUndefined();
+    expect(effortOf(main.token)).toBe('ultra');
+    // Nothing live for a conversation: nothing changes and nothing throws.
+    expect(
+      updateLiveSessionEffort({ groupFolder: 'nobody-home' }, 'high'),
+    ).toBe(0);
+
+    for (const issued of [
+      main,
+      mainHost,
+      session,
+      otherWorkspace,
+      isolatedTask,
+      oneShot,
+    ]) {
+      revokeCodexGatewayToken(issued.token);
+    }
+  });
+
+  test('can leave runners of other configurations alone', () => {
+    const onChatGpt = issueCodexGatewayToken('chatgpt', {
+      kind: 'container',
+      groupFolder: 'folder',
+      sessionEffort: 'low',
+    });
+    const leaving = issueCodexGatewayToken('other-chatgpt', {
+      kind: 'container',
+      groupFolder: 'folder',
+      sessionEffort: 'low',
+    });
+    expect(
+      updateLiveSessionEffort(
+        { groupFolder: 'folder', providerId: 'chatgpt' },
+        'high',
+      ),
+    ).toBe(1);
+    expect(resolveCodexGatewayToken(onChatGpt.token)?.sessionEffort).toBe(
+      'high',
+    );
+    expect(resolveCodexGatewayToken(leaving.token)?.sessionEffort).toBe('low');
+    revokeCodexGatewayToken(onChatGpt.token);
+    revokeCodexGatewayToken(leaving.token);
+  });
+
+  test('a revoked runner is no longer updated', () => {
+    const lease = new CodexGatewayRunnerLease({
+      kind: 'host',
+      groupFolder: 'folder',
+    });
+    lease.issue('provider');
+    lease.revoke();
+    expect(updateLiveSessionEffort({ groupFolder: 'folder' }, 'high')).toBe(0);
   });
 });
 
