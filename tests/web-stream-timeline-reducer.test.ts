@@ -396,6 +396,58 @@ describe('steps', () => {
     expect(live().traceEvents.map((r) => r.title)).toEqual(['工具 Grep']);
   });
 
+  it('says on the tools row what its progress says, as any trace row does', () => {
+    tool('t1', 'Bash');
+    emit({
+      eventType: 'tool_progress',
+      toolUseId: 't1',
+      toolName: 'Bash',
+      summary: '正在安装依赖',
+    });
+    const rows = live().traceEvents.filter((r) => r.toolUseId === 't1');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      title: '工具 Bash',
+      summary: '正在安装依赖',
+    });
+  });
+
+  it('renames the row of a tool that turns out to be a skill, once', () => {
+    tool('t1', 'Skill');
+    emit({
+      eventType: 'tool_progress',
+      toolUseId: 't1',
+      toolName: 'Skill',
+      skillName: 'deploy',
+    });
+    emit({
+      eventType: 'tool_progress',
+      toolUseId: 't1',
+      toolName: 'Skill',
+      skillName: 'deploy',
+    });
+    const rows = live().traceEvents.filter((r) => r.toolUseId === 't1');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ kind: 'skill', title: '技能 deploy' });
+  });
+
+  it('writes the row of a skill whose start it never saw, named as a start would', () => {
+    emit({
+      eventType: 'tool_progress',
+      toolUseId: 'late',
+      toolName: 'Skill',
+      skillName: 'deploy',
+      parentToolUseId: 'task-1',
+    });
+    expect(live().traceEvents).toHaveLength(1);
+    expect(live().traceEvents[0]).toMatchObject({
+      kind: 'skill',
+      title: '技能 deploy',
+      toolUseId: 'late',
+      parentToolUseId: 'task-1',
+    });
+  });
+
   it('keeps no trace row for a bare heartbeat of a tool it never saw start', () => {
     emit({
       eventType: 'tool_progress',

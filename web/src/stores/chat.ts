@@ -1938,6 +1938,16 @@ function traceTitle(event: StreamEvent): string {
   }
 }
 
+/** What a trace row says about its event: the first of these it has. */
+function traceSummary(event: StreamEvent): string | undefined {
+  return (
+    event.summary ||
+    event.taskSummary ||
+    event.statusText ||
+    event.toolInputSummary
+  );
+}
+
 /** The row a tool's start wrote to the trace, if it is still there. */
 function toolTraceIndex(
   events: StreamingTraceEvent[],
@@ -1970,12 +1980,12 @@ function pushToolProgress(
   if (index < 0) {
     // A bare elapsed-time heartbeat says nothing the trace could keep; the
     // host does not keep it either.
-    if (!event.toolInputSummary && !event.skillName) return events;
+    if (!traceSummary(event) && !event.skillName) return events;
     const row = traceRow({ ...event, eventType: 'tool_use_start' });
     return [...events, row].slice(-MAX_TRACE_EVENTS);
   }
   const row = events[index];
-  const summary = event.toolInputSummary || row.summary;
+  const summary = traceSummary(event) || row.summary;
   const skillResolved = !!event.skillName && row.kind !== 'skill';
   if (summary === row.summary && !skillResolved) return events;
   const next = events.slice();
@@ -1996,11 +2006,7 @@ function traceRow(event: StreamEvent): StreamingTraceEvent {
     kind: traceKind(event),
     scope: event.agentScope,
     title: traceTitle(event),
-    summary:
-      event.summary ||
-      event.taskSummary ||
-      event.statusText ||
-      event.toolInputSummary,
+    summary: traceSummary(event),
     detail: event.detail,
     taskId: event.taskId,
     toolUseId: event.toolUseId,
