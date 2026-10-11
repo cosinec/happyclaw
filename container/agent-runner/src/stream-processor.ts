@@ -76,6 +76,13 @@ type MainThinkingBlock = {
   endEmitted: boolean;
 };
 
+/** SDK `tool_progress` heartbeats are forwarded at most once per interval. */
+type ToolProgressThrottle = {
+  lastEmitAt: number;
+  pending?: StreamEvent;
+  timer?: ReturnType<typeof setTimeout>;
+};
+
 export class StreamEventProcessor {
   private readonly emit: EmitFn;
   private readonly log: LogFn;
@@ -263,8 +270,28 @@ export class StreamEventProcessor {
   >();
   private readonly MAX_TRACKED_THINKING_MESSAGES = 8;
 
+  // SDK tool_progress 心跳按 tool_use_id 节流：首帧立即发，其后每个 id 至少间隔
+  // 1s，被节流的帧只留最新一帧并在间隔结束时补发。
+  private readonly toolProgressThrottles = new Map<
+    string,
+    ToolProgressThrottle
+  >();
+  private readonly TOOL_PROGRESS_MIN_INTERVAL_MS = 1_000;
+
   constructor(emit: EmitFn, log: LogFn) {
-    this.emit = emit;
+    // Every outgoing frame passes through here, so a finished tool drops its
+    // throttled heartbeat whichever of the many code paths ended it.
+    this.emit = (output) => {
+      const streamEvent = output.streamEvent;
+      if (
+        streamEvent?.toolUseId &&
+        (streamEvent.eventType === 'tool_use_end' ||
+          streamEvent.eventType === 'tool_result')
+      ) {
+        this.dropToolProgressThrottle(streamEvent.toolUseId);
+      }
+      emit(output);
+    };
     this.log = log;
   }
 
@@ -592,6 +619,58 @@ export class StreamEventProcessor {
       if (block) return block;
     }
     return undefined;
+  }
+
+  /**
+   * Forward an SDK tool_progress heartbeat, at most once per interval for each
+   * tool. A throttled frame is kept (only the latest) and sent when the
+   * interval ends.
+   */
+  private emitToolProgress(event: StreamEvent): void {
+    const toolUseId = event.toolUseId;
+    if (!toolUseId) {
+      this.emitStreamEvent(event);
+      return;
+    }
+    const now = Date.now();
+    const throttle = this.toolProgressThrottles.get(toolUseId);
+    if (
+      !throttle ||
+      now - throttle.lastEmitAt >= this.TOOL_PROGRESS_MIN_INTERVAL_MS
+    ) {
+      if (throttle?.timer) clearTimeout(throttle.timer);
+      this.toolProgressThrottles.set(toolUseId, { lastEmitAt: now });
+      this.emitStreamEvent(event);
+      return;
+    }
+    throttle.pending = event;
+    if (!throttle.timer) {
+      throttle.timer = setTimeout(
+        () => {
+          throttle.timer = undefined;
+          const pending = throttle.pending;
+          throttle.pending = undefined;
+          if (!pending) return;
+          throttle.lastEmitAt = Date.now();
+          this.emitStreamEvent(pending);
+        },
+        this.TOOL_PROGRESS_MIN_INTERVAL_MS - (now - throttle.lastEmitAt),
+      );
+    }
+  }
+
+  private dropToolProgressThrottle(toolUseId: string): void {
+    const throttle = this.toolProgressThrottles.get(toolUseId);
+    if (!throttle) return;
+    if (throttle.timer) clearTimeout(throttle.timer);
+    this.toolProgressThrottles.delete(toolUseId);
+  }
+
+  private dropAllToolProgressThrottles(): void {
+    for (const throttle of this.toolProgressThrottles.values()) {
+      if (throttle.timer) clearTimeout(throttle.timer);
+    }
+    this.toolProgressThrottles.clear();
   }
 
   /** Clean up tools associated with a Task. */
@@ -1122,24 +1201,23 @@ export class StreamEventProcessor {
   }
 
   /**
-   * Process a tool_progress message.
+   * Process a tool_progress message: the SDK's elapsed-time heartbeat of a
+   * running tool. It arrives several times a second, so it is throttled per
+   * tool (see emitToolProgress); the one-shot tool_progress events built from
+   * streamed tool input are not.
    */
   processToolProgress(message: any): void {
     const parentToolUseId =
       message.parent_tool_use_id === undefined
         ? null
         : message.parent_tool_use_id;
-    this.emit({
-      status: 'stream',
-      result: null,
-      streamEvent: {
-        eventType: 'tool_progress',
-        toolName: message.tool_name,
-        toolUseId: message.tool_use_id,
-        parentToolUseId,
-        isNested: parentToolUseId !== null,
-        elapsedSeconds: message.elapsed_time_seconds,
-      },
+    this.emitToolProgress({
+      eventType: 'tool_progress',
+      toolName: message.tool_name,
+      toolUseId: message.tool_use_id,
+      parentToolUseId,
+      isNested: parentToolUseId !== null,
+      elapsedSeconds: message.elapsed_time_seconds,
     });
   }
 
@@ -2402,8 +2480,10 @@ export class StreamEventProcessor {
     this.streamBufs.clear();
     this.fullTextAccumulator = '';
     this.lastThinkingTokenStatusAt = null;
-    // The spent stream stays hidden: no thinking_end for its open blocks.
+    // The spent stream stays hidden: no thinking_end for its open blocks and no
+    // late heartbeat of its tools.
     this.forgetMainThinkingBlocks();
+    this.dropAllToolProgressThrottles();
     // Make cleanup clear rather than flush any late buffer from the spent SDK stream.
     this.seenTextualResult = true;
   }
@@ -2426,9 +2506,11 @@ export class StreamEventProcessor {
     }
 
     // Reasoning blocks the stream never closed (interrupt, error, cut stream):
-    // announce their end so downstream state machines settle.
+    // announce their end so downstream state machines settle. Pending
+    // heartbeats of tools that are about to be ended below are dropped.
     this.closeMainThinkingBlocks();
     this.forgetMainThinkingBlocks();
+    this.dropAllToolProgressThrottles();
 
     // Emit tool_use_end for active top-level tool (except Task tools)
     if (this.activeTopLevelToolUseId) {
