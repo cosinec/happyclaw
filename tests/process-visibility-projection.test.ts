@@ -183,6 +183,42 @@ describe('process visibility projection for the Web', () => {
     expect(workflow.workflowRun?.agents[0].promptPreview).toBe('请审查……');
   });
 
+  test('a message the Agent sends is not repeated as a process row', () => {
+    // send_message's whole input is the reply the user already gets as a chat
+    // message; its summary would show it a second time, as raw JSON, in the
+    // process, and `activity` promises no text the model wrote.
+    const sentence = '{"text":"这是发给用户的回复","delivery_role":"final"}';
+    const start = event('tool_use_start', {
+      toolName: 'mcp__happyclaw__send_message',
+      toolUseId: 't9',
+      toolInputSummary: sentence,
+    });
+    const progress = event('tool_progress', {
+      toolName: 'mcp__happyclaw__send_message',
+      toolUseId: 't9',
+      toolInputSummary: sentence,
+      summary: sentence,
+    });
+    for (const level of ['activity', 'full'] as const) {
+      for (const sent of [start, progress]) {
+        const projected = proactive(level, sent)!;
+        expect(projected.toolName).toBe('mcp__happyclaw__send_message');
+        expect(projected.toolUseId).toBe('t9');
+        expect(projected.toolInputSummary).toBeUndefined();
+        expect(projected.summary).toBeUndefined();
+        expect(JSON.stringify(projected)).not.toContain('发给用户');
+      }
+    }
+    // Other tools keep their summary: it is the structure of the work.
+    const bash = event('tool_progress', {
+      toolName: 'Bash',
+      toolInputSummary: 'command: ls',
+    });
+    expect(proactive('activity', bash)).toBe(bash);
+    // Assistant workspaces are untouched.
+    expect(projectSdkStreamEventForWeb('assistant', 'full', start)).toBe(start);
+  });
+
   test('events without model text pass as the very same object', () => {
     const start = event('tool_use_start', {
       toolName: 'Read',

@@ -172,6 +172,15 @@ const ACTIVITY_EVENT_TYPES: ReadonlySet<string> = new Set([
   'thinking_end',
 ]);
 
+/**
+ * Tools whose input is a message the Agent sends the user. In a proactive
+ * Workspace that message is delivered as a chat message of its own, so the
+ * process view must not carry it a second time.
+ */
+const MESSAGE_DELIVERY_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'mcp__happyclaw__send_message',
+]);
+
 function isLifecycleStatus(statusText: string | null | undefined): boolean {
   return statusText != null && LIFECYCLE_STATUS_TEXTS.has(statusText);
 }
@@ -199,6 +208,13 @@ function withoutModelText(event: StreamEvent): StreamEvent {
   if (event.eventType === 'tool_result') drop('detail');
   // The prompt handed to a sub-agent rides on task_started.
   if (event.eventType === 'task_start') drop('detail');
+  // The input of send_message is the reply the user already receives as a chat
+  // message; summarizing it again would repeat it, as raw JSON, in the process.
+  if (event.toolName && MESSAGE_DELIVERY_TOOL_NAMES.has(event.toolName)) {
+    drop('toolInputSummary');
+    drop('summary');
+    drop('detail');
+  }
   if (
     event.workflowRun?.agents.some((a) => a.promptPreview || a.resultPreview)
   ) {
