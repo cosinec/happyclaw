@@ -11428,7 +11428,21 @@ async function runTerminalWarmup(chatJid: string): Promise<void> {
       undefined,
       async (result) => {
         if (result.status === 'stream' && result.streamEvent) {
-          broadcastStreamEvent(chatJid, result.streamEvent);
+          // A system-triggered run, but its events reach the same Web
+          // clients: a proactive Workspace's contract holds for it too. Mode
+          // and level are read per event, as for any other turn.
+          const warmupMode = resolveRuntimeInteractionMode(
+            getWorkspaceInteractionMode(group.folder),
+            { agentKind: 'main' },
+          );
+          const webEvent = projectSdkStreamEventForWeb(
+            warmupMode,
+            warmupMode === 'proactive'
+              ? getWorkspaceProcessVisibility(group.folder)
+              : 'full',
+            result.streamEvent,
+          );
+          if (webEvent) broadcastStreamEvent(chatJid, webEvent);
           return;
         }
 
