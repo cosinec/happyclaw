@@ -152,6 +152,7 @@ function toolProgressRow(
     scope: event.agentScope,
     title: toolRowTitle(event),
     summary,
+    taskId: event.taskId,
     toolUseId: event.toolUseId,
     parentToolUseId: event.parentToolUseId,
     displayLevel: event.displayLevel,
@@ -195,7 +196,13 @@ export function traceEventFor(
 function findToolRow(events: TraceEventRecord[], toolUseId: string): number {
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const row = events[i];
-    if (row.toolUseId === toolUseId && TOOL_ROW_TITLE.test(row.title)) return i;
+    if (
+      row.toolUseId === toolUseId &&
+      (row.kind === 'tool' || row.kind === 'skill') &&
+      TOOL_ROW_TITLE.test(row.title)
+    ) {
+      return i;
+    }
   }
   return -1;
 }
@@ -203,12 +210,13 @@ function findToolRow(events: TraceEventRecord[], toolUseId: string): number {
 /**
  * Update a tool's start row from a tool_progress instead of adding a row per
  * frame, the way the Web does: the input summary fills the row's summary, and
- * a Skill call that turned out to be a skill becomes a "技能 X" row.
+ * a Skill call that turned out to be a skill becomes a "技能 X" row (a row that
+ * already is one keeps its name).
  */
 function foldToolProgress(row: TraceEventRecord, event: StreamEvent): void {
   const summary = traceSummaryFor(event);
   if (summary) row.summary = summary;
-  if (event.skillName) {
+  if (event.skillName && row.kind !== 'skill') {
     row.kind = 'skill';
     row.title = `技能 ${event.skillName}`;
   }
@@ -224,7 +232,11 @@ export function appendTraceEvent(
   max: number,
   now?: number,
 ): TraceEventRecord[] {
-  if (event.eventType === 'tool_progress' && event.toolUseId) {
+  if (
+    event.eventType === 'tool_progress' &&
+    event.toolUseId &&
+    event.displayLevel !== 'debug'
+  ) {
     const index = findToolRow(events, event.toolUseId);
     if (index >= 0) {
       foldToolProgress(events[index], event);

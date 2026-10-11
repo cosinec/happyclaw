@@ -288,6 +288,95 @@ describe('trace rows mirror the Web', () => {
     ]);
   });
 
+  test('details of the update: the newest start row, a skill keeps its name, debug is ignored', () => {
+    let rows: ReturnType<typeof appendTraceEvent> = [];
+    const add = (event: StreamEvent) => {
+      rows = appendTraceEvent(rows, event, 200, 1);
+    };
+    // the same id started twice: the newest row is the one updated
+    add(ev('tool_use_start', { toolName: 'Bash', toolUseId: 'dup' }));
+    add(ev('tool_use_start', { toolName: 'Bash', toolUseId: 'dup' }));
+    add(
+      ev('tool_progress', {
+        toolUseId: 'dup',
+        toolInputSummary: 'command: ls',
+      }),
+    );
+    expect(rows.map((row) => row.summary)).toEqual([undefined, 'command: ls']);
+
+    // a row that already is a skill is not renamed, though its summary follows
+    add(
+      ev('tool_use_start', {
+        toolName: 'Skill',
+        toolUseId: 'sk',
+        skillName: 'pdf',
+      }),
+    );
+    add(
+      ev('tool_progress', {
+        toolUseId: 'sk',
+        skillName: 'other',
+        toolInputSummary: 'skill: pdf',
+      }),
+    );
+    expect(rows[2]).toMatchObject({
+      kind: 'skill',
+      title: '技能 pdf',
+      summary: 'skill: pdf',
+    });
+
+    // a debug-level frame neither updates a row nor makes one
+    add(
+      ev('tool_progress', {
+        toolUseId: 'dup',
+        toolInputSummary: 'command: rm -rf',
+        displayLevel: 'debug',
+      }),
+    );
+    add(
+      ev('tool_progress', {
+        toolName: 'Bash',
+        toolUseId: 'none',
+        toolInputSummary: 'command: pwd',
+        displayLevel: 'debug',
+      }),
+    );
+    expect(rows).toHaveLength(3);
+    expect(rows[1].summary).toBe('command: ls');
+
+    // a row that merely shares the id, and is not a tool's own, is skipped
+    const foreign = [
+      {
+        id: 'x',
+        timestamp: 1,
+        kind: 'status',
+        title: '工具 看起来像工具行',
+        toolUseId: 'shared',
+      },
+    ] as ReturnType<typeof appendTraceEvent>;
+    const after = appendTraceEvent(
+      foreign,
+      ev('tool_progress', {
+        toolName: 'Bash',
+        toolUseId: 'shared',
+        taskId: 'task-1',
+        toolInputSummary: 'command: ls',
+      }),
+      200,
+      5,
+    );
+    expect(after).toHaveLength(2);
+    expect(foreign[0].summary).toBeUndefined();
+    // and the row that had to be added carries what the tool's own row would
+    expect(after[1]).toMatchObject({
+      kind: 'tool',
+      title: '工具 Bash',
+      summary: 'command: ls',
+      taskId: 'task-1',
+      toolUseId: 'shared',
+    });
+  });
+
   test('appendTraceEvent keeps the newest rows', () => {
     let rows = [] as ReturnType<typeof appendTraceEvent>;
     for (let i = 0; i < 12; i += 1) {
