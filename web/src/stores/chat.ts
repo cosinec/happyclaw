@@ -34,6 +34,10 @@ import {
   normalizeGroupInteractionMode,
   normalizeInteractionMode,
 } from '../lib/interaction-mode';
+import {
+  filterProactiveStreamEvent,
+  normalizeProcessVisibility,
+} from '../lib/process-visibility';
 import { useGroupsStore } from './groups';
 import {
   applyRunFinished,
@@ -47,6 +51,33 @@ import {
 } from './run-lifecycle';
 import { extractErrorMessage } from '../utils/error';
 import { markdownTail } from '../lib/markdown-blocks';
+import {
+  MAX_THINKING_TEXT,
+  capThinkingText,
+  extractThinkingTitle,
+  thinkingSeparator,
+} from '../lib/thinking-text';
+import {
+  appendThinkingText,
+  closeOpenSteps,
+  closeThinkingStep,
+  endToolStep,
+  ensureTaskStep,
+  failToolStep,
+  finishSteps,
+  hasTaskStep,
+  isUnderTask,
+  openTextStep,
+  openThinkingStep,
+  progressToolStep,
+  rebuildSteps,
+  setTaskStepStatus,
+  startToolStep,
+  stepList,
+  type StepList,
+  type StepStatus,
+  type StreamingStep,
+} from '../lib/stream-steps';
 
 export type { GroupInfo, AgentInfo };
 
@@ -183,12 +214,20 @@ export interface StreamingTaskRuntimeState {
 export interface StreamSnapshotData {
   partialText: string;
   thinkingText?: string;
+  /** Reasoning time of the finished bursts, and the open one's start. */
+  thinkingDurationMs?: number;
+  thinkingStartedAt?: number;
+  phaseStartedAt?: number;
+  awaitingModel?: boolean;
   activeTools: Array<{
     toolName: string;
     toolUseId: string;
     startTime: number;
+    elapsedSeconds?: number;
     toolInputSummary?: string;
     parentToolUseId?: string | null;
+    isNested?: boolean;
+    skillName?: string;
   }>;
   recentEvents: Array<{
     id: string;
@@ -241,8 +280,28 @@ export interface StreamingState {
   thinkingDurationMs?: number;
   /** When the model's current request began; the next burst starts there. */
   phaseStartedAt?: number;
-  /** A tool returned and the model has not produced anything since. */
+  /**
+   * The model's request is in flight and nothing has come back from it yet:
+   * a model request began (`requesting`), or a tool returned.
+   */
   awaitingModel?: boolean;
+  /** Summary title of the latest reasoning, for the collapsed label. */
+  thinkingTitle?: string;
+  /** A new burst of reasoning began: its first text starts a paragraph. */
+  thinkingGap?: boolean;
+  /**
+   * The reply's steps in the order they happened (reasoning, tools,
+   * sub-agents, commentary), for the step timeline. Written next to the
+   * fields above, which the classic layout still reads.
+   */
+  steps?: StreamingStep[];
+  /** Steps dropped from the front of `steps` at its cap. */
+  stepsDropped?: number;
+  /**
+   * Characters cut from the head of `partialText` at its cap, so the offsets
+   * text steps hold into the whole text stay valid.
+   */
+  partialBase?: number;
   /**
    * The run ended (run_finished) and this frozen projection waits, in
    * `settledStreaming`, for the turn's final message, which replaces it in
@@ -503,14 +562,124 @@ function markThinkingStarted(
   next.awaitingModel = false;
 }
 
-/** Add the finished burst to the reply's thinking time (isThinking:true → false). */
-function markThinkingEnded(prev: StreamingState, next: StreamingState): void {
+/** The reply's step list, to be edited and written back with `setSteps`. */
+function stepsOf(state: StreamingState): StepList {
+  return stepList(state.steps, state.stepsDropped);
+}
+
+function setSteps(next: StreamingState, list: StepList): void {
+  next.steps = list.steps;
+  next.stepsDropped = list.dropped;
+}
+
+/**
+ * A burst of reasoning ends (isThinking:true → false): add it to the reply's
+ * thinking time and close its step. `reportedMs` is the model's own timing
+ * from `thinking_end`; without it the clock decides.
+ */
+function endThinkingBurst(
+  prev: StreamingState,
+  next: StreamingState,
+  at: number,
+  reportedMs?: number,
+): void {
+  const reported =
+    reportedMs != null && Number.isFinite(reportedMs) && reportedMs >= 0
+      ? reportedMs
+      : undefined;
   if (prev.isThinking && prev.thinkingStartedAt != null) {
     next.thinkingDurationMs =
       (prev.thinkingDurationMs ?? 0) +
-      Math.max(0, Date.now() - prev.thinkingStartedAt);
+      (reported ?? Math.max(0, at - prev.thinkingStartedAt));
     next.thinkingStartedAt = undefined;
+  } else if (prev.isThinking && reported != null) {
+    next.thinkingDurationMs = (prev.thinkingDurationMs ?? 0) + reported;
   }
+  next.isThinking = false;
+  setSteps(next, closeThinkingStep(stepsOf(next), at, reported));
+}
+
+/**
+ * Reasoning began: a `thinking_start`, or the first delta of a burst when the
+ * runner sends none. A new burst after earlier reasoning opens a new step and
+ * its text a new paragraph; the first delta after a `thinking_start` is part
+ * of the burst that start opened.
+ */
+function beginThinkingBurst(
+  prev: StreamingState,
+  next: StreamingState,
+  runStartedAt: number | undefined,
+  at: number,
+): void {
+  markThinkingStarted(prev, next, runStartedAt);
+  if (!prev.isThinking) {
+    next.thinkingGap = prev.thinkingText.length > 0;
+    setSteps(next, openThinkingStep(stepsOf(prev), at));
+  }
+  next.isThinking = true;
+}
+
+/** Add reasoning text: bursts are separated, the whole is bounded and titled. */
+function appendThinking(
+  prev: StreamingState,
+  next: StreamingState,
+  text: string,
+  at: number,
+): void {
+  const gap = next.thinkingGap ? thinkingSeparator(prev.thinkingText) : '';
+  next.thinkingText = capThinkingText(
+    prev.thinkingText + gap + text,
+    MAX_THINKING_TEXT,
+  );
+  next.thinkingGap = false;
+  next.thinkingTitle =
+    extractThinkingTitle(next.thinkingText) ?? prev.thinkingTitle;
+  setSteps(next, appendThinkingText(stepsOf(next), text, at));
+}
+
+/** Add reply text; the text after the last tool is what the host delivers. */
+function appendReplyText(
+  prev: StreamingState,
+  next: StreamingState,
+  text: string,
+  at: number,
+  maxText: number,
+): void {
+  const base = prev.partialBase ?? 0;
+  const combined = prev.partialText + text;
+  next.partialText = capStreamingText(combined, maxText);
+  next.partialBase =
+    base + Math.max(0, combined.length - next.partialText.length);
+  setSteps(
+    next,
+    openTextStep(stepsOf(next), at, base + prev.partialText.length),
+  );
+}
+
+/**
+ * Whether a runtime delivers its messages itself (a proactive workspace's
+ * main and conversation sessions), so no final reply ever replaces its
+ * card. Fire-and-forget spawn Agents keep the Assistant contract.
+ */
+function isProactiveRuntime(
+  s: Pick<ChatState, 'groups' | 'agents'>,
+  runtimeJid: string,
+): boolean {
+  const marker = '#agent:';
+  const markerIndex = runtimeJid.indexOf(marker);
+  const chatJid =
+    markerIndex >= 0 ? runtimeJid.slice(0, markerIndex) : runtimeJid;
+  if (
+    normalizeInteractionMode(s.groups[chatJid]?.interaction_mode) !==
+    'proactive'
+  ) {
+    return false;
+  }
+  if (markerIndex < 0) return true;
+  const agentId = runtimeJid.slice(markerIndex + marker.length);
+  return (
+    s.agents[chatJid]?.find((agent) => agent.id === agentId)?.kind !== 'spawn'
+  );
 }
 
 /** Thinking time so far, including a burst still in progress. */
@@ -552,6 +721,7 @@ function applyDeltaChunks(
 ): StreamingState {
   let state = prev;
   let index = 0;
+  const at = Date.now();
   while (index < chunks.length) {
     const thinking = chunks[index].thinking;
     let text = '';
@@ -562,23 +732,14 @@ function applyDeltaChunks(
     if (!text) continue;
     const next = { ...state };
     if (thinking) {
-      const combined = state.thinkingText + text;
-      next.thinkingText =
-        combined.length > MAX_THINKING_TEXT
-          ? combined.slice(-MAX_THINKING_TEXT)
-          : combined;
-      next.isThinking = true;
-      markThinkingStarted(state, next, runStartedAt);
+      beginThinkingBurst(state, next, runStartedAt, at);
+      appendThinking(state, next, text, at);
     } else {
-      next.partialText = capStreamingText(
-        state.partialText + text,
-        MAX_STREAMING_TEXT,
-      );
-      next.isThinking = false;
+      endThinkingBurst(state, next, at);
+      appendReplyText(state, next, text, at, MAX_STREAMING_TEXT);
       next.awaitingModel = false;
       next.phaseStartedAt = undefined;
       if (isPhaseStatus(state.systemStatus)) next.systemStatus = null;
-      markThinkingEnded(state, next);
     }
     state = next;
   }
@@ -976,6 +1137,7 @@ function freezeStreamingState(
   // as soon as it arrives.
   const hasData = state.partialText || state.thinkingText;
   if (!hasData) return null;
+  const steps = finishSteps(stepsOf(state), Date.now(), true);
   return {
     ...state,
     isThinking: false,
@@ -987,6 +1149,8 @@ function freezeStreamingState(
     // Keep an in-flight burst so the interrupted card still shows "已思考 Xs".
     thinkingDurationMs: totalThinkingMs(state),
     thinkingStartedAt: undefined,
+    steps: steps.steps,
+    stepsDropped: steps.dropped,
   };
 }
 
@@ -1001,7 +1165,15 @@ function settleStreamingState(
   runId: string | undefined,
 ): StreamingState | null {
   if (!state) return null;
-  if (!state.partialText && !state.thinkingText) return null;
+  // Reasoning without a summary still leaves "已思考 Xs" to carry over.
+  if (
+    !state.partialText &&
+    !state.thinkingText &&
+    !((totalThinkingMs(state) ?? 0) > 0)
+  ) {
+    return null;
+  }
+  const steps = finishSteps(stepsOf(state), Date.now(), false);
   return {
     ...state,
     isThinking: false,
@@ -1011,6 +1183,8 @@ function settleStreamingState(
     awaitingModel: false,
     thinkingDurationMs: totalThinkingMs(state),
     thinkingStartedAt: undefined,
+    steps: steps.steps,
+    stepsDropped: steps.dropped,
     settling: true,
     runId,
   };
@@ -1062,7 +1236,7 @@ function finalizedReplyCaches(
           }),
         }
       : {}),
-    ...(thinkingText && duration != null
+    ...(duration != null && (thinkingText || duration >= 1000)
       ? {
           thinkingDurationCache: capThinkingCache({
             ...s.thinkingDurationCache,
@@ -1106,7 +1280,6 @@ function resolveStreamingPrev(
 // The whole streamed reply is rendered (finished blocks are memoized), so
 // this is only a memory guard; past it the tail is kept from a block boundary.
 const MAX_STREAMING_TEXT = 200_000;
-const MAX_THINKING_TEXT = 8000;
 
 /**
  * Past the cap, keep a block-bounded tail with headroom: cutting to exactly
@@ -1639,22 +1812,56 @@ function traceTitle(event: StreamEvent): string {
   }
 }
 
-function pushTrace(
+/** The row a tool's start wrote to the trace, if it is still there. */
+function toolTraceIndex(
+  events: StreamingTraceEvent[],
+  toolUseId: string,
+): number {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const row = events[index];
+    if (
+      row.toolUseId === toolUseId &&
+      (row.kind === 'tool' || row.kind === 'skill') &&
+      /^(?:工具|技能) /.test(row.title)
+    ) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+/**
+ * A running tool reports progress many times: say it on the row it already
+ * has (its input becomes known, its skill name resolves) instead of writing
+ * a row per report, which pushed the rest of the trace out of its bound.
+ */
+function pushToolProgress(
   events: StreamingTraceEvent[],
   event: StreamEvent,
 ): StreamingTraceEvent[] {
-  if (
-    event.eventType === 'text_delta' ||
-    event.eventType === 'thinking_delta' ||
-    event.eventType === 'usage' ||
-    event.eventType === 'init' ||
-    event.eventType === 'context_audit' ||
-    (event.eventType === 'status' &&
-      isInternalLifecycleStatus(event.statusText))
-  ) {
-    return events;
+  if (!event.toolUseId) return events;
+  const index = toolTraceIndex(events, event.toolUseId);
+  if (index < 0) {
+    const row = traceRow({ ...event, eventType: 'tool_use_start' });
+    return [...events, row].slice(-MAX_TRACE_EVENTS);
   }
-  const item: StreamingTraceEvent = {
+  const row = events[index];
+  const summary = event.toolInputSummary || row.summary;
+  const skillResolved = !!event.skillName && row.kind !== 'skill';
+  if (summary === row.summary && !skillResolved) return events;
+  const next = events.slice();
+  next[index] = {
+    ...row,
+    summary,
+    ...(skillResolved
+      ? { kind: 'skill' as const, title: `技能 ${event.skillName}` }
+      : {}),
+  };
+  return next;
+}
+
+function traceRow(event: StreamEvent): StreamingTraceEvent {
+  return {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     timestamp: Date.now(),
     kind: traceKind(event),
@@ -1671,7 +1878,31 @@ function pushTrace(
     parentToolUseId: event.parentToolUseId,
     displayLevel: event.displayLevel,
   };
-  return [...events, item].slice(-MAX_TRACE_EVENTS);
+}
+
+function pushTrace(
+  events: StreamingTraceEvent[],
+  event: StreamEvent,
+): StreamingTraceEvent[] {
+  if (
+    event.eventType === 'text_delta' ||
+    event.eventType === 'thinking_delta' ||
+    event.eventType === 'thinking_start' ||
+    event.eventType === 'thinking_end' ||
+    event.eventType === 'usage' ||
+    event.eventType === 'init' ||
+    event.eventType === 'context_audit' ||
+    // Debug rows are never shown; they only used up the trace's bound.
+    event.displayLevel === 'debug' ||
+    (event.eventType === 'status' &&
+      isInternalLifecycleStatus(event.statusText))
+  ) {
+    return events;
+  }
+  if (event.eventType === 'tool_progress') {
+    return pushToolProgress(events, event);
+  }
+  return [...events, traceRow(event)].slice(-MAX_TRACE_EVENTS);
 }
 
 function taskIdFromEvent(event: StreamEvent): string | null {
@@ -1847,6 +2078,55 @@ function updateTaskRuntime(
 /** Tools whose end comes from their own lifecycle, not their tool_result. */
 const TOOLS_ENDED_BY_LIFECYCLE = new Set(['Task', 'Agent', 'Skill']);
 
+function stepStatusOfTask(
+  status: StreamingTaskRuntimeState['status'],
+): StepStatus {
+  if (status === 'completed') return 'done';
+  return status === 'error' ? 'error' : 'running';
+}
+
+/**
+ * Mirror a task event into the step list: the task's card keeps its details
+ * in `taskStates`; the step holds its place in the order and its summary.
+ * Runs after `updateTaskRuntime`, so the status is the task's own.
+ */
+function applyTaskToSteps(
+  event: StreamEvent,
+  prev: StreamingState,
+  next: StreamingState,
+  at: number,
+): void {
+  // A task event with a parent belongs to a task nested in another.
+  if (event.parentToolUseId) return;
+  const taskId = taskIdFromEvent(event);
+  if (!taskId) return;
+  let list = stepsOf(next);
+  if (!hasTaskStep(list, taskId)) {
+    list = closeOpenSteps(list, at, prev.partialText, prev.partialBase ?? 0);
+  }
+  const task = next.taskStates[taskId];
+  list = ensureTaskStep(
+    list,
+    {
+      taskId,
+      toolUseId: event.toolUseId,
+      title: event.taskDescription || event.toolInputSummary || task?.title,
+      summary: task?.latestSummary,
+    },
+    at,
+  );
+  if (task) {
+    list = setTaskStepStatus(
+      list,
+      taskId,
+      stepStatusOfTask(task.status),
+      at,
+      task.latestSummary,
+    );
+  }
+  setSteps(next, list);
+}
+
 /**
  * Apply a single StreamEvent to a StreamingState object.
  * Shared by main conversation and SDK subagent streaming.
@@ -1856,23 +2136,23 @@ function applyStreamEvent(
   prev: StreamingState,
   next: StreamingState,
   maxText: number,
+  runStartedAt?: number,
 ): void {
   if (event.turnId) next.turnId = event.turnId;
   if (event.sessionId) next.sessionId = event.sessionId;
   next.traceEvents = pushTrace(prev.traceEvents || [], event);
+  const at = Date.now();
   switch (event.eventType) {
     case 'text_delta': {
       if (event.parentToolUseId) {
         updateTaskRuntime(prev, next, event);
         break;
       }
-      const combined = prev.partialText + (event.text || '');
-      next.partialText = capStreamingText(combined, maxText);
-      next.isThinking = false;
+      endThinkingBurst(prev, next, at);
+      if (event.text) appendReplyText(prev, next, event.text, at, maxText);
       next.awaitingModel = false;
       next.phaseStartedAt = undefined;
       if (isPhaseStatus(prev.systemStatus)) next.systemStatus = null;
-      markThinkingEnded(prev, next);
       break;
     }
     case 'thinking_delta': {
@@ -1880,24 +2160,50 @@ function applyStreamEvent(
         updateTaskRuntime(prev, next, event);
         break;
       }
-      const combined = prev.thinkingText + (event.text || '');
-      next.thinkingText =
-        combined.length > MAX_THINKING_TEXT
-          ? combined.slice(-MAX_THINKING_TEXT)
-          : combined;
-      next.isThinking = true;
-      markThinkingStarted(prev, next);
+      beginThinkingBurst(prev, next, runStartedAt, at);
+      appendThinking(prev, next, event.text || '', at);
+      break;
+    }
+    case 'thinking_start': {
+      // Sub-agents do not send these; their reasoning is their task's tail.
+      if (event.parentToolUseId || event.agentScope === 'subagent') break;
+      beginThinkingBurst(prev, next, runStartedAt, at);
+      break;
+    }
+    case 'thinking_end': {
+      if (event.parentToolUseId || event.agentScope === 'subagent') break;
+      endThinkingBurst(prev, next, at, event.thinkingDurationMs);
       break;
     }
     case 'tool_use_start': {
-      next.isThinking = false;
-      markThinkingEnded(prev, next);
+      endThinkingBurst(prev, next, at);
       if (!event.parentToolUseId) {
         next.awaitingModel = false;
         next.phaseStartedAt = undefined;
         if (isPhaseStatus(prev.systemStatus)) next.systemStatus = null;
       }
       const toolUseId = event.toolUseId || '';
+      if (toolUseId && !isUnderTask(stepsOf(next), event.parentToolUseId)) {
+        // Text before a tool was commentary; the tool is the next step.
+        setSteps(
+          next,
+          startToolStep(
+            closeOpenSteps(
+              stepsOf(next),
+              at,
+              prev.partialText,
+              prev.partialBase ?? 0,
+            ),
+            {
+              toolUseId,
+              toolName: event.toolName || 'unknown',
+              skillName: event.skillName,
+              summary: event.toolInputSummary,
+            },
+            at,
+          ),
+        );
+      }
       const existing = prev.activeTools.find(
         (t) => t.toolUseId === toolUseId && toolUseId,
       );
@@ -1939,6 +2245,9 @@ function applyStreamEvent(
         next.activeTools = prev.activeTools.filter(
           (t) => t.toolUseId !== event.toolUseId,
         );
+        if (!isUnderTask(stepsOf(next), event.parentToolUseId)) {
+          setSteps(next, endToolStep(stepsOf(next), event.toolUseId, at));
+        }
         if (ended) {
           const rawSec = (Date.now() - ended.startTime) / 1000;
           const elapsedSec =
@@ -1973,6 +2282,10 @@ function applyStreamEvent(
       // "正在运行命令" while the model is already on its next step. Task and
       // Skill keep their own lifecycle (sub-agent events, nested tools).
       if (!event.toolUseId || event.parentToolUseId) break;
+      setSteps(
+        next,
+        endToolStep(stepsOf(next), event.toolUseId, at, event.toolResult),
+      );
       const ended = prev.activeTools.find(
         (t) => t.toolUseId === event.toolUseId,
       );
@@ -2036,6 +2349,24 @@ function applyStreamEvent(
           },
         ];
       }
+      if (
+        event.toolUseId &&
+        !isUnderTask(stepsOf(next), event.parentToolUseId)
+      ) {
+        setSteps(
+          next,
+          progressToolStep(
+            stepsOf(next),
+            {
+              toolUseId: event.toolUseId,
+              toolName: event.toolName,
+              skillName: event.skillName,
+              summary: event.toolInputSummary,
+            },
+            at,
+          ),
+        );
+      }
       if (event.parentToolUseId) {
         updateTaskRuntime(prev, next, event);
       }
@@ -2043,6 +2374,7 @@ function applyStreamEvent(
     }
     case 'task_start': {
       updateTaskRuntime(prev, next, event);
+      applyTaskToSteps(event, prev, next, at);
       const desc =
         event.taskDescription ||
         event.toolInputSummary ||
@@ -2057,6 +2389,7 @@ function applyStreamEvent(
     }
     case 'task_progress': {
       updateTaskRuntime(prev, next, event);
+      applyTaskToSteps(event, prev, next, at);
       const label = event.lastToolName
         ? `Task 进度 [${event.lastToolName}]`
         : 'Task 进度';
@@ -2069,6 +2402,7 @@ function applyStreamEvent(
     }
     case 'task_updated': {
       updateTaskRuntime(prev, next, event);
+      applyTaskToSteps(event, prev, next, at);
       next.recentEvents = pushEvent(
         prev.recentEvents,
         'task',
@@ -2078,6 +2412,7 @@ function applyStreamEvent(
     }
     case 'task_notification': {
       updateTaskRuntime(prev, next, event);
+      applyTaskToSteps(event, prev, next, at);
       next.recentEvents = pushEvent(
         prev.recentEvents,
         'task',
@@ -2117,9 +2452,11 @@ function applyStreamEvent(
       break;
     case 'status': {
       next.systemStatus = event.statusText || null;
-      // A new model request: thinking that follows started here.
+      // A new model request: thinking that follows started here, and until
+      // something comes back the model is the one at work.
       if (event.statusText === 'requesting' && !event.parentToolUseId) {
-        next.phaseStartedAt = Date.now();
+        next.phaseStartedAt = at;
+        next.awaitingModel = true;
       }
       if (event.statusText && !isInternalLifecycleStatus(event.statusText)) {
         next.recentEvents = pushEvent(
@@ -2144,6 +2481,9 @@ function applyStreamEvent(
         'permission',
         `🚫 ${tool ? `${tool}: ` : ''}${why}`.trim(),
       );
+      if (pd?.toolUseId) {
+        setSteps(next, failToolStep(stepsOf(next), pd.toolUseId, at, why));
+      }
       break;
     }
     case 'memory_recall':
@@ -3277,6 +3617,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
 
+    // A proactive workspace shows the process at the level its owner chose and
+    // never its model text: whatever else reaches the Web is dropped here,
+    // even if the host sent it.
+    if (isProactiveRuntime(get(), runtimeJid)) {
+      const allowed = filterProactiveStreamEvent(
+        normalizeProcessVisibility(get().groups[chatJid]?.process_visibility),
+        event,
+      );
+      if (!allowed) return;
+      event = allowed;
+    }
+
     // Clear in receive order: an older rAF batch must not erase a newer retry.
     // Child activity does not mean the parent request has recovered.
     if (
@@ -3303,11 +3655,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
     }
 
-    // ⓪ text_delta / thinking_delta — rAF batch for both agent and main conversation
+    // ⓪ text_delta / thinking_delta — rAF batch for both agent and main
+    // conversation. A sub-agent's own text and reasoning (it has a parent tool)
+    // is its task's tail, not the reply's, in a session as in the main stream.
     if (
       (event.eventType === 'text_delta' ||
         event.eventType === 'thinking_delta') &&
-      (agentId || !event.parentToolUseId)
+      !event.parentToolUseId
     ) {
       const key = agentId ? `agent:${agentId}` : `main:${chatJid}`;
       let entry = pendingDeltas.get(key);
@@ -3402,7 +3756,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (current?.interrupted) return s;
         const prev = resolveStreamingPrev(current, event);
         const next = { ...prev };
-        applyStreamEvent(event, prev, next, MAX_STREAMING_TEXT);
+        applyStreamEvent(
+          event,
+          prev,
+          next,
+          MAX_STREAMING_TEXT,
+          runStartedAtMs(s.activeRuns, runtimeJid),
+        );
         return { agentStreaming: { ...s.agentStreaming, [agentId]: next } };
       });
       return;
@@ -3579,7 +3939,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (!current || current.interrupted) return s;
         const prev = resolveStreamingPrev(current, event);
         const next = { ...prev };
-        applyStreamEvent(event, prev, next, MAX_STREAMING_TEXT);
+        applyStreamEvent(
+          event,
+          prev,
+          next,
+          MAX_STREAMING_TEXT,
+          runStartedAtMs(s.activeRuns, runtimeJid),
+        );
         return {
           streaming: { ...s.streaming, [chatJid]: next },
         };
@@ -3705,7 +4071,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       const prev = resolveStreamingPrev(current, event);
       const next = { ...prev };
-      applyStreamEvent(event, prev, next, MAX_STREAMING_TEXT);
+      applyStreamEvent(
+        event,
+        prev,
+        next,
+        MAX_STREAMING_TEXT,
+        runStartedAtMs(s.activeRuns, runtimeJid),
+      );
       return {
         waiting: { ...s.waiting, [chatJid]: true },
         streaming: { ...s.streaming, [chatJid]: next },
@@ -4941,13 +5313,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const restored: StreamingState = {
         ...DEFAULT_STREAMING_STATE,
         partialText: snapshot.partialText || '',
-        thinkingText: snapshot.thinkingText || '',
+        thinkingText: capThinkingText(snapshot.thinkingText || ''),
+        thinkingDurationMs: snapshot.thinkingDurationMs,
+        thinkingStartedAt: snapshot.thinkingStartedAt,
+        phaseStartedAt: snapshot.phaseStartedAt,
+        awaitingModel: snapshot.awaitingModel,
         activeTools: (snapshot.activeTools || []).map((t) => ({
           toolName: t.toolName,
           toolUseId: t.toolUseId,
           startTime: t.startTime,
+          ...(t.elapsedSeconds != null
+            ? { elapsedSeconds: t.elapsedSeconds }
+            : {}),
           toolInputSummary: t.toolInputSummary,
           parentToolUseId: t.parentToolUseId,
+          ...(t.isNested != null ? { isNested: t.isNested } : {}),
+          ...(t.skillName ? { skillName: t.skillName } : {}),
         })),
         recentEvents: (
           (snapshot.recentEvents || []) as StreamingTimelineEvent[]
@@ -4979,8 +5360,54 @@ export const useChatStore = create<ChatState>((set, get) => ({
         restored.thinkingStartedAt = local.thinkingStartedAt;
         restored.thinkingDurationMs = local.thinkingDurationMs;
         restored.phaseStartedAt = local.phaseStartedAt;
+        restored.awaitingModel = local.awaitingModel;
         restored.sessionId = local.sessionId;
         restored.interrupted = local.interrupted;
+      }
+      restored.thinkingTitle = extractThinkingTitle(restored.thinkingText, {
+        final: !restored.isThinking,
+      });
+      // The snapshot has the pieces but not their order. This tab's own steps
+      // of the same turn know it; otherwise rebuild a plausible order.
+      if (local && sameTurn && local.steps && local.steps.length > 0) {
+        restored.steps = local.steps;
+        restored.stepsDropped = local.stepsDropped;
+        restored.partialBase = local.partialBase;
+        restored.thinkingGap = local.thinkingGap;
+        if (local.thinkingTitle) restored.thinkingTitle = local.thinkingTitle;
+      } else {
+        const rebuilt = rebuildSteps({
+          thinkingText: restored.thinkingText,
+          thinkingDurationMs: restored.thinkingDurationMs,
+          isThinking: restored.isThinking,
+          partialText: restored.partialText,
+          activeTools: restored.activeTools,
+          tasks: Object.values(restored.taskStates).map((task) => ({
+            id: task.id,
+            status: task.status,
+            title: task.title,
+          })),
+          tracedTools: restored.traceEvents.flatMap((row) =>
+            (row.kind === 'tool' || row.kind === 'skill') &&
+            !row.parentToolUseId &&
+            row.toolUseId &&
+            /^(?:工具|技能) /.test(row.title)
+              ? [
+                  {
+                    toolUseId: row.toolUseId,
+                    timestamp: row.timestamp,
+                    summary: row.summary,
+                    ...(row.kind === 'skill'
+                      ? { skillName: row.title.slice(3), toolName: 'Skill' }
+                      : { toolName: row.title.slice(3) }),
+                  },
+                ]
+              : [],
+          ),
+          now: Date.now(),
+        });
+        restored.steps = rebuilt.steps;
+        restored.stepsDropped = rebuilt.dropped;
       }
       return restored;
     };
@@ -5063,7 +5490,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const previous = agentId
         ? s.agentStreaming[agentId]
         : s.streaming[chatJid];
-      if (replacingAttempt) {
+      if (replacingAttempt && !isProactiveRuntime(s, chatJid)) {
         settled.state = settleStreamingState(
           previous,
           s.activeRuns[chatJid]?.runId,
@@ -5116,10 +5543,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // message. Freeze the card (settled) so the final replaces it in one
       // update instead of leaving a blank frame in between; the next queued
       // run streams into a separate live projection meanwhile.
-      settled.state = settleStreamingState(
-        agentId ? s.agentStreaming[agentId] : s.streaming[chatJid],
-        runId,
-      );
+      // A proactive workspace's messages are not replies to a card.
+      settled.state = isProactiveRuntime(s, chatJid)
+        ? null
+        : settleStreamingState(
+            agentId ? s.agentStreaming[agentId] : s.streaming[chatJid],
+            runId,
+          );
       const settledStreaming = settled.state
         ? { ...s.settledStreaming, [chatJid]: settled.state }
         : s.settledStreaming;
