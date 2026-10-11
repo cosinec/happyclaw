@@ -52,6 +52,7 @@ beforeAll(() => {
   legacy.exec(
     'ALTER TABLE session_model_selections DROP COLUMN reasoning_effort',
   );
+  legacy.exec('ALTER TABLE sessions DROP COLUMN model');
   legacy
     .prepare(
       "UPDATE router_state SET value = '78' WHERE key = 'schema_version'",
@@ -67,7 +68,7 @@ afterAll(() => {
 });
 
 describe('schema v79 session model and effort', () => {
-  test('backs up the v78 database, adds both columns and keeps existing pins', () => {
+  test('backs up the v78 database, adds the columns and keeps existing pins', () => {
     process.env.HAPPYCLAW_MIGRATION_BACKUP_DIR = backupDir;
     db.initDatabase();
     expect(db.getRouterState('schema_version')).toBe(
@@ -87,6 +88,7 @@ describe('schema v79 session model and effort', () => {
       expect(columnNames(backup, 'session_model_selections')).not.toContain(
         'model',
       );
+      expect(columnNames(backup, 'sessions')).not.toContain('model');
     } finally {
       backup.close();
     }
@@ -96,6 +98,7 @@ describe('schema v79 session model and effort', () => {
       expect(columnNames(conn, 'session_model_selections')).toEqual(
         expect.arrayContaining(['model', 'reasoning_effort']),
       );
+      expect(columnNames(conn, 'sessions')).toContain('model');
     } finally {
       conn.close();
     }
@@ -106,6 +109,7 @@ describe('schema v79 session model and effort', () => {
       modelConfigId: 'provider-a',
       model: null,
       effort: null,
+      updatedBy: 'user-1',
     });
   });
 
@@ -118,6 +122,7 @@ describe('schema v79 session model and effort', () => {
       modelConfigId: 'provider-a',
       model: 'gpt-6-astra',
       effort: 'ultra',
+      updatedBy: 'user-1',
     });
     // The legacy accessor still answers with the configuration alone.
     expect(db.getSessionModelSelection('main', null)).toBe('provider-a');
@@ -130,6 +135,7 @@ describe('schema v79 session model and effort', () => {
       modelConfigId: 'provider-b',
       model: null,
       effort: 'low',
+      updatedBy: 'user-1',
     });
     expect(db.getSessionModelSelectionDetail('main', null)?.model).toBe(
       'gpt-6-astra',
@@ -146,6 +152,7 @@ describe('schema v79 session model and effort', () => {
       modelConfigId: 'provider-a',
       model: null,
       effort: null,
+      updatedBy: 'user-1',
     });
 
     // Empty strings are "unset", never a model or effort named "".
@@ -157,6 +164,7 @@ describe('schema v79 session model and effort', () => {
       modelConfigId: 'provider-a',
       model: null,
       effort: null,
+      updatedBy: null,
     });
   });
 
@@ -184,6 +192,33 @@ describe('schema v79 session model and effort', () => {
     expect(db.getSessionModelSelectionDetail('main', null)).toBeNull();
   });
 
+  test('records the model a Session runs on beside its provider binding', () => {
+    // Nothing is bound yet: there is no row to annotate, and none is invented.
+    db.setSessionModel('main', 'agent-9', 'gpt-6-astra');
+    expect(db.getSessionModel('main', 'agent-9')).toBeNull();
+
+    db.setSessionProviderId('main', 'agent-9', 'provider-a');
+    db.setSessionModel('main', 'agent-9', 'gpt-6-astra');
+    expect(db.getSessionModel('main', 'agent-9')).toBe('gpt-6-astra');
+    // Each logical Session has its own record.
+    expect(db.getSessionModel('main', null)).toBeNull();
+
+    // Binding again (a new provider, a resumed session id) keeps the model...
+    db.setSessionProviderId('main', 'agent-9', 'provider-b');
+    db.setSession('main', 'sdk-session-1', 'agent-9');
+    expect(db.getSessionModel('main', 'agent-9')).toBe('gpt-6-astra');
+
+    // ...and the row that holds it is the one a session reset deletes.
+    db.deleteSession('main', 'agent-9');
+    expect(db.getSessionModel('main', 'agent-9')).toBeNull();
+
+    db.setSessionProviderId('main', 'agent-9', 'provider-a');
+    db.setSessionModel('main', 'agent-9', 'gpt-6-astra');
+    db.setSessionModel('main', 'agent-9', null);
+    expect(db.getSessionModel('main', 'agent-9')).toBeNull();
+    db.deleteSession('main', 'agent-9');
+  });
+
   test('re-running the current schema is a no-op and newer schemas are refused', () => {
     db.setSessionModelSelection('main', null, 'provider-a', 'user-1', {
       model: 'gpt-6-sol',
@@ -197,6 +232,7 @@ describe('schema v79 session model and effort', () => {
       modelConfigId: 'provider-a',
       model: 'gpt-6-sol',
       effort: 'low',
+      updatedBy: 'user-1',
     });
     db.closeDatabase();
 

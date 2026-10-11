@@ -249,6 +249,64 @@ describe('container launch substitution', () => {
     lease.revoke();
     expect(resolveCodexGatewayToken(token!)).toBeNull();
   });
+
+  test("a conversation's model runs the main tiers, background work stays on the configuration, and the pick travels in the grant", () => {
+    const provider = createCodexProvider({ anthropicModel: 'gpt-6-sol' });
+    const resolved = runtimeConfig.resolveProviderById(provider.id);
+    const lease = new CodexGatewayRunnerLease({
+      kind: 'container',
+      groupFolder: 'codex-pick',
+      sessionAgentId: null,
+      sessionEffort: 'ultra',
+    });
+    fs.mkdirSync(path.join(root, 'groups', 'codex-pick'), { recursive: true });
+    buildVolumeMounts(
+      {
+        name: 'codex-pick',
+        folder: 'codex-pick',
+        added_at: new Date().toISOString(),
+      } as never,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      // What trySelectPoolProvider hands over for a pinned model.
+      {
+        config: { ...resolved.config, anthropicModel: 'gpt-6-astra' },
+        customEnv: resolved.customEnv,
+      },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { envLines: [], addHostGateway: false },
+      lease,
+    );
+    const envFile = fs.readFileSync(
+      path.join(getContainerRuntimeEnvDir('codex-pick'), 'env'),
+      'utf8',
+    );
+    const value = (key: string) =>
+      new RegExp(`^${key}='([^']*)'$`, 'm').exec(envFile)?.[1];
+    expect(value('ANTHROPIC_MODEL')).toBe('gpt-6-astra');
+    expect(value('ANTHROPIC_DEFAULT_OPUS_MODEL')).toBe('gpt-6-astra');
+    expect(value('ANTHROPIC_DEFAULT_SONNET_MODEL')).toBe('gpt-6-astra');
+    expect(value('CLAUDE_CODE_SUBAGENT_MODEL')).toBe('gpt-6-astra');
+    // The gateway maps the haiku tier to the configuration's model at low effort.
+    expect(value('ANTHROPIC_DEFAULT_HAIKU_MODEL')).toBe('claude-haiku-5-5');
+    // The effort is the gateway's to apply: it never becomes a runner variable
+    // that the CLI would round down (ultra) or override.
+    expect(envFile).not.toContain('ultra');
+    const token = /ANTHROPIC_API_KEY='(hcgw_[^']+)'/.exec(envFile)?.[1];
+    expect(resolveCodexGatewayToken(token!)).toMatchObject({
+      providerId: provider.id,
+      sessionEffort: 'ultra',
+      owner: { groupFolder: 'codex-pick', sessionEffort: 'ultra' },
+    });
+    lease.revoke();
+  });
 });
 
 describe('applyCodexGatewayVerdict', () => {

@@ -1152,6 +1152,11 @@ export function initDatabase(
   // pin both. NULL keeps following the configuration's own default.
   ensureColumn('session_model_selections', 'model', 'TEXT');
   ensureColumn('session_model_selections', 'reasoning_effort', 'TEXT');
+  // The upstream model the SDK session of a Session ran on. Encrypted
+  // reasoning only verifies for the model that issued it, so a session that
+  // changes model has to start over; this is what the next launch compares.
+  // NULL: not recorded (a session from before models were tracked).
+  ensureColumn('sessions', 'model', 'TEXT');
 
   // v80 -> v81: per-turn thinking summary and execution trace. The Web shows
   // them next to the reply, but they used to live only in browser memory and
@@ -8694,6 +8699,39 @@ export function setSessionProviderId(
 }
 
 /**
+ * The upstream model the SDK session of a logical Session last ran on, or null
+ * when none was recorded. Only ChatGPT-gateway runs record it: it is what
+ * tells a launch that the model changed under a session it could resume.
+ */
+export function getSessionModel(
+  groupFolder: string,
+  agentId?: string | null,
+): string | null {
+  if (!isDatabaseInitialized()) return null;
+  const row = prepareCached(
+    'SELECT model FROM sessions WHERE group_folder = ? AND agent_id = ?',
+  ).get(groupFolder, agentId || '') as { model: string | null } | undefined;
+  return row?.model || null;
+}
+
+/**
+ * Record the model a Session's SDK session runs on. Like the provider binding
+ * it belongs to the row that `deleteSession` removes, so a launch that resets
+ * the session records it again afterwards. A Session without a row (nothing
+ * is bound or resumable yet) records nothing.
+ */
+export function setSessionModel(
+  groupFolder: string,
+  agentId: string | null | undefined,
+  model: string | null,
+): void {
+  if (!isDatabaseInitialized()) return;
+  prepareCached(
+    'UPDATE sessions SET model = ? WHERE group_folder = ? AND agent_id = ?',
+  ).run(model || null, groupFolder, agentId || '');
+}
+
+/**
  * The model configuration the user picked for one logical Session in the chat
  * composer, or null to follow the Agent/system default. Callers must still
  * check that the configuration exists: deleting a provider clears its rows,
@@ -8720,6 +8758,11 @@ export interface SessionModelSelectionDetail {
   model: string | null;
   /** Reasoning effort chosen for the conversation; null follows the model default. */
   effort: string | null;
+  /**
+   * Who made the choice. What they may choose depends on their permissions, so
+   * a launch re-checks the choice against the chooser as they are now.
+   */
+  updatedBy: string | null;
 }
 
 /**
@@ -8732,7 +8775,8 @@ export function getSessionModelSelectionDetail(
   agentId?: string | null,
 ): SessionModelSelectionDetail | null {
   if (!isDatabaseInitialized()) return null;
-  const row = prepareCached(`SELECT model_config_id, model, reasoning_effort
+  const row = prepareCached(`SELECT model_config_id, model, reasoning_effort,
+         updated_by
        FROM session_model_selections
        WHERE group_folder = ? AND agent_id = ?`).get(
     groupFolder,
@@ -8742,6 +8786,7 @@ export function getSessionModelSelectionDetail(
         model_config_id: string;
         model: string | null;
         reasoning_effort: string | null;
+        updated_by: string | null;
       }
     | undefined;
   if (!row?.model_config_id) return null;
@@ -8749,6 +8794,7 @@ export function getSessionModelSelectionDetail(
     modelConfigId: row.model_config_id,
     model: row.model || null,
     effort: row.reasoning_effort || null,
+    updatedBy: row.updated_by || null,
   };
 }
 
