@@ -254,6 +254,38 @@ export function projectSdkStreamEventForWeb(
 }
 
 /**
+ * The status line announcing a progress statement the Agent wrote
+ * (`send_message` with `delivery_role=progress`), or null when the Workspace
+ * keeps its process private.
+ *
+ * Unlike the status events the SDK, the Runner and the host write, this one
+ * carries the model's own sentence. It therefore goes through the same gate as
+ * every other event instead of relying on the output router never staging
+ * progress for a proactive Workspace, which would silently stop being true the
+ * day that router changes. And because `activity` promises the structure of
+ * the work without any text the model produced, a proactive Workspace shows the
+ * sentence only at `full`, the level that shows the model's reasoning too.
+ */
+export function projectProgressStatusForWeb(
+  mode: InteractionMode,
+  visibility: ProcessVisibility,
+  text: string,
+  turn: { turnId?: string; sessionId?: string },
+): StreamEvent | null {
+  if (mode === 'proactive' && visibility !== 'full') return null;
+  return projectSdkStreamEventForWeb(mode, visibility, {
+    eventType: 'status',
+    agentScope: 'system',
+    statusText: text.slice(0, 160),
+    summary: text.slice(0, 500),
+    isSynthetic: true,
+    displayLevel: 'primary',
+    turnId: turn.turnId,
+    sessionId: turn.sessionId,
+  });
+}
+
+/**
  * Whether the Web is told about sub-agent task lifecycle (agent_status) so its
  * Task tabs match the task events it receives.
  */

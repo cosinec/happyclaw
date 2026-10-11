@@ -382,6 +382,7 @@ import {
   PROACTIVE_TAIL_INTERRUPTION_NOTICE,
   buildInteractionTextOutboxPayload,
   isProactiveControlPlaneSuccess,
+  projectProgressStatusForWeb,
   projectSdkStreamEventForWeb,
   publishesFrameworkAnswer,
   resolveFrozenIpcInteractionMode,
@@ -8052,16 +8053,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             `🔄 ${text.replace(/\s+/g, ' ').slice(0, 80)}`,
           );
         }
-        broadcastStreamEvent(chatJid, {
-          eventType: 'status',
-          agentScope: 'system',
-          statusText: text.slice(0, 160),
-          summary: text.slice(0, 500),
-          isSynthetic: true,
-          displayLevel: 'primary',
-          turnId: inputTurnId,
-          sessionId: activeSessionId,
-        });
+        const progressStatus = projectProgressStatusForWeb(
+          interactionMode,
+          resolveProcessVisibility(),
+          text,
+          { turnId: inputTurnId, sessionId: activeSessionId },
+        );
+        if (progressStatus) broadcastStreamEvent(chatJid, progressStatus);
         return true;
       },
       onFinalCandidate: (text) => {
@@ -17383,20 +17381,15 @@ async function processAgentConversation(
             `🔄 ${text.replace(/\s+/g, ' ').slice(0, 80)}`,
           );
         }
-        broadcastStreamEvent(
-          chatJid,
-          {
-            eventType: 'status',
-            agentScope: 'system',
-            statusText: text.slice(0, 160),
-            summary: text.slice(0, 500),
-            isSynthetic: true,
-            displayLevel: 'primary',
-            turnId: inputTurnId,
-            sessionId: currentAgentSessionId,
-          },
-          agentId,
+        const progressStatus = projectProgressStatusForWeb(
+          interactionMode,
+          resolveProcessVisibility(),
+          text,
+          { turnId: inputTurnId, sessionId: currentAgentSessionId },
         );
+        if (progressStatus) {
+          broadcastStreamEvent(chatJid, progressStatus, agentId);
+        }
         return true;
       },
       onFinalCandidate: (text) => {

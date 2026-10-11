@@ -4,8 +4,9 @@ import type {
   StreamEvent,
   StreamEventType,
 } from '../src/stream-event.types.js';
-import type { ProcessVisibility } from '../src/types.js';
+import type { InteractionMode, ProcessVisibility } from '../src/types.js';
 import {
+  projectProgressStatusForWeb,
   projectSdkStreamEventForWeb,
   shouldBroadcastTaskAgentStatus,
 } from '../src/workspace-interaction-runtime.js';
@@ -197,5 +198,55 @@ describe('process visibility projection for the Web', () => {
     expect(shouldBroadcastTaskAgentStatus('proactive', 'hidden')).toBe(false);
     expect(shouldBroadcastTaskAgentStatus('proactive', 'activity')).toBe(true);
     expect(shouldBroadcastTaskAgentStatus('proactive', 'full')).toBe(true);
+  });
+});
+
+describe('progress statements written by the Agent', () => {
+  // The Agent's send_message(delivery_role=progress) is announced to the Web as
+  // a status line. It is the model's own sentence, so it must go through the
+  // same gate as every other event instead of relying on the router never
+  // staging progress for a proactive workspace.
+  const SENTENCE = '正在核对 /etc/secret-looking-path 下的配置';
+  const progress = (
+    mode: InteractionMode,
+    visibility: ProcessVisibility,
+    text = SENTENCE,
+  ) =>
+    projectProgressStatusForWeb(mode, visibility, text, {
+      turnId: 'turn-1',
+      sessionId: 'session-1',
+    });
+
+  test('an assistant workspace announces it at every level, unchanged in meaning', () => {
+    for (const level of LEVELS) {
+      expect(progress('assistant', level)).toEqual({
+        eventType: 'status',
+        agentScope: 'system',
+        statusText: SENTENCE,
+        summary: SENTENCE,
+        isSynthetic: true,
+        displayLevel: 'primary',
+        turnId: 'turn-1',
+        sessionId: 'session-1',
+      });
+    }
+  });
+
+  test('a proactive workspace keeps the sentence out of the activity level too', () => {
+    // `activity` is the structure of the work and promises no model text; a
+    // sentence the model wrote is shown only where its reasoning is.
+    expect(progress('proactive', 'hidden')).toBeNull();
+    expect(progress('proactive', 'activity')).toBeNull();
+  });
+
+  test('a proactive workspace announces it once its reasoning is shown', () => {
+    expect(progress('proactive', 'full')?.statusText).toBe(SENTENCE);
+  });
+
+  test('the line and the summary are bounded like the other status lines', () => {
+    const long = '长'.repeat(900);
+    const event = progress('assistant', 'full', long)!;
+    expect(event.statusText).toHaveLength(160);
+    expect(event.summary).toHaveLength(500);
   });
 });
