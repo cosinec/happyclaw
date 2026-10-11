@@ -115,6 +115,69 @@ async function streamReply(page: Page, runId: string) {
   await page.waitForTimeout(500);
 }
 
+/**
+ * Streams REPLY as a timeline run: two reasoning blocks (with their timing),
+ * two tool calls that return, then the answer.
+ */
+async function streamTimelineReply(page: Page, runId: string) {
+  const turn = { turnId: 'turn-1' };
+  await page.evaluate((id) => window.__chatScroll.runStarted(id), runId);
+  await streamEvent(page, runId, {
+    eventType: 'status',
+    statusText: 'requesting',
+    ...turn,
+  });
+  await page.waitForTimeout(1100);
+  await streamEvent(page, runId, { eventType: 'thinking_start', ...turn });
+  await streamEvent(page, runId, {
+    eventType: 'thinking_delta',
+    text: '**确认需求**\n\n先看项目结构，再决定读哪些文件。',
+    ...turn,
+  });
+  await streamEvent(page, runId, {
+    eventType: 'thinking_end',
+    thinkingDurationMs: 3200,
+    ...turn,
+  });
+  for (const [id, name, summary] of [
+    ['tool-read', 'Read', 'README.md'],
+    ['tool-bash', 'Bash', 'npm test'],
+  ]) {
+    await streamEvent(page, runId, {
+      eventType: 'tool_use_start',
+      toolName: name,
+      toolUseId: id,
+      toolInputSummary: summary,
+      ...turn,
+    });
+    await streamEvent(page, runId, {
+      eventType: 'tool_result',
+      toolUseId: id,
+      toolResult: 'ok',
+      ...turn,
+    });
+  }
+  await streamEvent(page, runId, { eventType: 'thinking_start', ...turn });
+  await streamEvent(page, runId, {
+    eventType: 'thinking_delta',
+    text: '**整理结论**\n\n测试通过，可以回答了。',
+    ...turn,
+  });
+  await streamEvent(page, runId, {
+    eventType: 'thinking_end',
+    thinkingDurationMs: 1800,
+    ...turn,
+  });
+  const chunks = REPLY.match(/[\s\S]{1,400}/g) ?? [];
+  for (const text of chunks) {
+    await streamEvent(page, runId, { eventType: 'text_delta', text, ...turn });
+  }
+  await expect(
+    page.locator('[data-hc-streaming-block]').getByText('Paragraph 59:'),
+  ).toBeVisible();
+  await page.waitForTimeout(500);
+}
+
 /** Samples every frame: scroll position, reply presence, anchor offset. */
 async function startSampling(page: Page, anchor: string) {
   await page.evaluate((anchorText) => {
@@ -422,4 +485,98 @@ test('a returned tool stops claiming to run and the status moves on', async ({
     toolUseId: 'tool-bash',
   });
   await expect(block.getByText('正在思考', { exact: true })).toBeVisible();
+});
+
+test('a timeline of steps folds into the finished message and the answer does not move', async ({
+  page,
+}) => {
+  await openHarness(page);
+  await streamTimelineReply(page, 'run-timeline');
+  expect((await metrics(page)).gap).toBeLessThan(24);
+
+  // While it runs, the steps are rows in order and the answer is below them.
+  const timeline = page.getByRole('list', { name: '处理步骤' });
+  await expect(timeline.getByRole('listitem')).toHaveCount(4);
+  await expect(
+    timeline.getByRole('button', { name: /已思考 3.2 秒.*确认需求/ }),
+  ).toBeVisible();
+  await expect(
+    timeline.getByRole('button', { name: /已思考 1.8 秒.*整理结论/ }),
+  ).toBeVisible();
+
+  await startSampling(page, 'Paragraph 59:');
+  const frames = await finishLikeServer(page, 'run-timeline');
+
+  expect(frames.at(-1)?.final).toBe(true);
+  expect(frames.filter((f) => !f.whole)).toEqual([]);
+  expect(Math.max(...frames.map((f) => f.gap))).toBeLessThan(30);
+  // The steps fold away above the answer, which stays where the reader has
+  // it: the page may shrink by the rows' height, the answer does not move.
+  const ys = frames.map((f) => f.anchorY);
+  expect(ys.every((y) => y !== null)).toBe(true);
+  expect(
+    Math.max(...(ys as number[])) - Math.min(...(ys as number[])),
+  ).toBeLessThan(3);
+  await expect(page.getByRole('button', { name: /^回到底部/ })).toHaveCount(0);
+
+  // The final message folds the steps into the two rows every reply has:
+  // reasoning (both blocks, 3.2s + 1.8s) and execution details (both tools).
+  const reply = page
+    .locator('[data-index]')
+    .filter({ hasText: 'Paragraph 59:' });
+  await expect(
+    reply.getByRole('button', { name: /已思考 5 秒/ }),
+  ).toBeVisible();
+  await expect(
+    reply.getByRole('button', { name: /执行详情.*已使用 2 个工具/ }),
+  ).toBeVisible();
+  await expect(page.getByRole('list', { name: '处理步骤' })).toHaveCount(0);
+});
+
+test('a pinned reader stays pinned while the wait row gives way to reasoning and a tool', async ({
+  page,
+}) => {
+  await openHarness(page);
+  // The race: the placeholder for the model's wait gives way to a shorter
+  // thinking row (the card shrinks, the browser clamps the scroll position and
+  // queues its scroll event), then a tool row grows the card again before that
+  // event is delivered. Delivered late, the clamp reads as the reader
+  // scrolling up. It depends on frame timing, so it runs several rounds.
+  for (let round = 0; round < 8; round += 1) {
+    const runId = `run-race-${round}`;
+    const turn = { turnId: `turn-race-${round}` };
+    await page.evaluate((id) => window.__chatScroll.runStarted(id), runId);
+    await streamEvent(page, runId, {
+      eventType: 'status',
+      statusText: 'requesting',
+      ...turn,
+    });
+    await expect(page.locator('[data-hc-model-wait]')).toBeVisible();
+    await page.waitForTimeout(400);
+    expect((await metrics(page)).gap).toBeLessThan(24);
+
+    await streamEvent(page, runId, {
+      eventType: 'thinking_delta',
+      text: '先确认需求，再组织答案。',
+      ...turn,
+    });
+    await streamEvent(page, runId, {
+      eventType: 'tool_use_start',
+      toolName: 'Read',
+      toolUseId: `tool-race-${round}`,
+      toolInputSummary: 'README.md',
+      ...turn,
+    });
+    await expect(
+      page.getByRole('list', { name: '处理步骤' }).getByText('README.md'),
+    ).toBeVisible();
+    await page.waitForTimeout(250);
+    expect((await metrics(page)).gap, `round ${round}`).toBeLessThan(24);
+    await expect(page.getByRole('button', { name: /^回到底部/ })).toHaveCount(
+      0,
+    );
+
+    await page.evaluate((id) => window.__chatScroll.runFinished(id), runId);
+    await page.waitForTimeout(100);
+  }
 });

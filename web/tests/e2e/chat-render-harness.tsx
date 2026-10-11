@@ -1,8 +1,14 @@
 // Visual harness for the chat canvas: renders ChatView with representative
 // history, streaming and queue states from mocked stores (no backend).
-//   ?scenario=history | streaming | waiting | empty | proactive
+//   ?scenario=history | streaming | waiting | silent | settled | live | empty
+//            | proactive (&visibility=hidden|activity|full)
+//            | thinking-markdown
+//            | lazy-trace (a reply whose reasoning and trace the server kept;
+//              &mode=proactive&visibility=hidden|activity|full for a proactive one)
 //            | markdown | markdown-streaming (&cut=fence|list|table)
 //   &display=compact   &theme=dark   &scheme=default|neutral
+//   &layout=classic|timeline (the streaming layout; timeline by default)
+// window.renderHarness drives the `live` scenario through the real reducer.
 import { createRoot } from 'react-dom/client';
 import { MemoryRouter } from 'react-router-dom';
 import { ChatView } from '../../src/components/chat/ChatView';
@@ -18,6 +24,8 @@ import {
   type StreamingState,
 } from '../../src/stores/chat';
 import { useFileStore } from '../../src/stores/files';
+import type { StreamingStep } from '../../src/lib/stream-steps';
+import type { StreamEvent } from '../../src/stream-event.types';
 import '@fontsource-variable/inter';
 import '@fontsource-variable/geist-mono';
 import '../../src/styles/globals.css';
@@ -38,6 +46,16 @@ if (params.get('display') === 'compact') {
 } else {
   localStorage.removeItem(`happyclaw-display-mode:${userId}`);
 }
+if (params.get('layout') === 'classic') {
+  localStorage.setItem(`happyclaw-stream-layout:${userId}`, 'classic');
+} else {
+  localStorage.removeItem(`happyclaw-stream-layout:${userId}`);
+}
+const visibilityParam = params.get('visibility');
+const processVisibility =
+  visibilityParam === 'activity' || visibilityParam === 'full'
+    ? visibilityParam
+    : 'hidden';
 
 const user: UserPublic = {
   id: userId,
@@ -514,41 +532,194 @@ const chatHistory: Message[] =
         }),
       ];
 
+// Replies of an earlier session: the server kept their reasoning and trace,
+// this tab holds neither until a row is opened.
+const lazyTraceHistory: Message[] = [
+  msg('lz-u1', 6, false, '帮我看看侧栏为什么在流式输出时频繁重渲染？'),
+  msg(
+    'lz-a1',
+    5,
+    true,
+    '原因是侧栏订阅了整个 `useChatStore`，每个 delta 都会触发重渲染。\n\n改成窄 selector 即可。',
+    {
+      turn_id: 'turn-kept',
+      has_trace: true,
+      token_usage: usage(4_200, 310, 9_800),
+    },
+  ),
+];
+
 const history: Message[] =
   scenario === 'markdown'
     ? markdownHistory
     : scenario === 'markdown-streaming'
       ? markdownHistory.slice(0, 1)
-      : chatHistory;
+      : scenario === 'lazy-trace'
+        ? lazyTraceHistory
+        : chatHistory;
+
+// Reasoning the way the models write it: a bold title, then short paragraphs.
+const thinkingA =
+  '**确认订阅范围**\n\n用户希望保持排序。现有排序基于 `last_active_at`，虚拟列表只负责渲染，不影响排序。';
+const thinkingB =
+  '**比较方案**\n\n有两种做法：\n\n- 窄 selector，只订阅需要的字段\n- 拆分 store，改动更大\n\n先选改动最小的一种。';
+const thinkingC =
+  '**核对行高估算**\n\n需要注意行高估算与实际高度不一致时的滚动跳动……';
+const commentary = '我先把渲染循环换成虚拟列表，再跑测试。';
+const answerText =
+  '正在把会话列表改成虚拟滚动。目前已经替换了 `SessionSidebar` 的渲染循环，接下来验证';
+
+const ago = (seconds: number) => now - seconds * 1000;
+
+/** The steps of a run that is part-way: finished ones, then what is running. */
+const liveSteps: StreamingStep[] = [
+  {
+    id: 'thinking-0',
+    kind: 'thinking',
+    at: ago(46),
+    endedAt: ago(40),
+    status: 'done',
+    durationMs: 5_800,
+    title: '确认订阅范围',
+    text: thinkingA,
+  },
+  {
+    id: 'tool-t0',
+    kind: 'tool',
+    at: ago(39),
+    endedAt: ago(38),
+    status: 'done',
+    toolUseId: 't0',
+    toolName: 'Grep',
+    summary: 'useVirtualizer in web/src',
+  },
+  {
+    id: 'tool-t4',
+    kind: 'tool',
+    at: ago(37),
+    endedAt: ago(36),
+    status: 'done',
+    toolUseId: 't4',
+    toolName: 'Read',
+    summary:
+      '/workspace/group/happyclaw/web/src/components/chat/SessionSidebar.tsx',
+  },
+  {
+    id: 'tool-t5',
+    kind: 'tool',
+    at: ago(35),
+    endedAt: ago(34),
+    status: 'error',
+    toolUseId: 't5',
+    toolName: 'Bash',
+    summary: 'rm -rf node_modules',
+    resultPreview: '被权限策略拒绝',
+  },
+  {
+    id: 'thinking-1',
+    kind: 'thinking',
+    at: ago(33),
+    endedAt: ago(26),
+    status: 'done',
+    durationMs: 7_000,
+    title: '比较方案',
+    text: thinkingB,
+  },
+  {
+    id: 'text-0',
+    kind: 'text',
+    at: ago(25),
+    endedAt: ago(24),
+    status: 'done',
+    from: 0,
+    text: commentary,
+  },
+  {
+    id: 'tool-t1',
+    kind: 'tool',
+    at: ago(12),
+    status: 'running',
+    toolUseId: 't1',
+    toolName: 'Bash',
+    summary:
+      "bash -lc 'npx vitest run tests/frontend-session-sidebar-copy.test.ts'",
+  },
+  {
+    id: 'task-task1',
+    kind: 'task',
+    at: ago(9),
+    status: 'running',
+    taskId: 'task1',
+    toolUseId: 'task1',
+    toolName: 'Task',
+    title: '检查移动端滚动性能',
+    summary: '已用 Playwright 录制 3 组滚动帧率',
+  },
+  {
+    id: 'tool-t2',
+    kind: 'tool',
+    at: ago(3),
+    status: 'running',
+    toolUseId: 't2',
+    toolName: 'Read',
+    summary:
+      '/workspace/group/happyclaw/web/src/components/chat/SessionSidebar.tsx',
+  },
+  {
+    id: 'thinking-2',
+    kind: 'thinking',
+    at: ago(2),
+    status: 'running',
+    title: '核对行高估算',
+    text: thinkingC,
+  },
+  {
+    id: 'text-1',
+    kind: 'text',
+    at: ago(1),
+    status: 'running',
+    from: commentary.length,
+  },
+];
+
+const taskStates: StreamingState['taskStates'] = {
+  task1: {
+    id: 'task1',
+    title: '检查移动端滚动性能',
+    status: 'running',
+    subagentType: 'general-purpose',
+    thinkingTail: '',
+    textTail: '正在用 Playwright 录制 390×844 下的滚动帧率…',
+    activeTools: [],
+    recentTools: [],
+    lastToolName: 'Bash',
+    latestSummary: '已用 Playwright 录制 3 组滚动帧率',
+    updatedAt: ago(2),
+  },
+};
 
 const streaming: StreamingState = {
-  partialText:
-    '正在把会话列表改成虚拟滚动。目前已经替换了 `SessionSidebar` 的渲染循环，接下来验证',
-  thinkingText:
-    '用户希望保持排序。现有排序基于 last_active_at，虚拟列表只负责渲染，不影响排序。需要注意行高估算与实际高度不一致时的滚动跳动……',
+  partialText: commentary + answerText,
+  partialBase: 0,
+  thinkingText: [thinkingA, thinkingB, thinkingC].join('\n\n'),
+  thinkingTitle: '核对行高估算',
   isThinking: scenario === 'streaming',
-  thinkingDurationMs: 7_800,
+  thinkingDurationMs: 12_800,
+  steps: liveSteps,
   activeTools: [
     {
       toolName: 'Bash',
       toolUseId: 't1',
-      startTime: now - 12_000,
+      startTime: ago(12),
       toolInputSummary:
         "bash -lc 'npx vitest run tests/frontend-session-sidebar-copy.test.ts'",
     },
     {
       toolName: 'Read',
       toolUseId: 't2',
-      startTime: now - 3_000,
+      startTime: ago(3),
       toolInputSummary:
         '/workspace/group/happyclaw/web/src/components/chat/SessionSidebar.tsx',
-    },
-    {
-      toolName: 'Skill',
-      skillName: 'ui-optimizer',
-      toolUseId: 't3',
-      startTime: now - 1_000,
-      isNested: true,
     },
   ],
   activeHook: null,
@@ -557,47 +728,191 @@ const streaming: StreamingState = {
   traceEvents: [
     {
       id: 'tr1',
-      timestamp: now - 30_000,
+      timestamp: ago(39),
       kind: 'tool',
-      title: 'Grep',
+      title: '工具 Grep',
       summary: 'useVirtualizer in web/src',
+      toolUseId: 't0',
     },
     {
       id: 'tr2',
-      timestamp: now - 25_000,
+      timestamp: ago(37),
       kind: 'tool',
-      title: 'Edit',
-      summary: 'SessionSidebar.tsx (+42 −18)',
+      title: '工具 Read',
+      summary: 'SessionSidebar.tsx',
+      toolUseId: 't4',
     },
     {
       id: 'tr3',
-      timestamp: now - 20_000,
+      timestamp: ago(35),
       kind: 'permission',
       title: 'Bash',
       summary: 'rm -rf node_modules',
       detail: '被权限策略拒绝',
     },
   ],
-  taskStates: {
-    task1: {
-      id: 'task1',
-      title: '检查移动端滚动性能',
-      status: 'running',
-      subagentType: 'general-purpose',
-      thinkingTail: '',
-      textTail: '正在用 Playwright 录制 390×844 下的滚动帧率…',
-      activeTools: [],
-      recentTools: [],
-      lastToolName: 'Bash',
-      updatedAt: now - 2_000,
-    },
-  },
+  taskStates,
   todos: [
     { id: '1', content: '替换渲染循环为虚拟列表', status: 'completed' },
     { id: '2', content: '保持 last_active_at 排序', status: 'completed' },
     { id: '3', content: '移动端滚动性能验证', status: 'in_progress' },
     { id: '4', content: '补充回归测试', status: 'pending' },
   ],
+};
+
+/** The model's request is out and nothing has come back: no text, no thinking. */
+const silentStreaming: StreamingState = {
+  partialText: '',
+  thinkingText: '',
+  isThinking: false,
+  awaitingModel: true,
+  phaseStartedAt: ago(9),
+  activeTools: [],
+  activeHook: null,
+  systemStatus: 'requesting',
+  recentEvents: [],
+  traceEvents: [],
+  taskStates: {},
+};
+
+/** A finished run's card, waiting for its final message. */
+const settledStreaming: StreamingState = {
+  ...streaming,
+  isThinking: false,
+  activeTools: [],
+  thinkingDurationMs: 21_300,
+  steps: liveSteps.map((step) => ({
+    ...step,
+    status: step.status === 'running' ? 'done' : step.status,
+    endedAt: step.endedAt ?? now,
+  })),
+  taskStates: {
+    task1: { ...taskStates.task1, status: 'completed' },
+  },
+  todos: undefined,
+  settling: true,
+  runId: 'run-harness',
+};
+
+// A proactive turn's state as the render must treat it. The host sends no
+// reply text and, below `full`, no reasoning text; the state here carries both
+// at every level, so what the page leaves out is the component's doing.
+const draft = '这段是还没发出去的回复草稿，主动模式下不会显示在界面里。';
+
+/** What a proactive workspace shows of a turn, by visibility. */
+const proactiveSteps: StreamingStep[] = [
+  {
+    id: 'thinking-0',
+    kind: 'thinking',
+    at: ago(40),
+    endedAt: ago(33),
+    status: 'done',
+    durationMs: 6_400,
+    title: '确认订阅范围',
+    text: thinkingA,
+  },
+  {
+    id: 'tool-t0',
+    kind: 'tool',
+    at: ago(32),
+    endedAt: ago(31),
+    status: 'done',
+    toolUseId: 't0',
+    toolName: 'Grep',
+    summary: 'useVirtualizer in web/src',
+  },
+  {
+    id: 'tool-t1',
+    kind: 'tool',
+    at: ago(12),
+    status: 'running',
+    toolUseId: 't1',
+    toolName: 'Bash',
+    summary:
+      "bash -lc 'npx vitest run tests/frontend-session-sidebar-copy.test.ts'",
+  },
+  {
+    id: 'task-task1',
+    kind: 'task',
+    at: ago(9),
+    status: 'running',
+    taskId: 'task1',
+    toolUseId: 'task1',
+    toolName: 'Task',
+    title: '检查移动端滚动性能',
+    summary: '已用 Playwright 录制 3 组滚动帧率',
+  },
+];
+
+const proactiveStreaming: StreamingState = {
+  partialText: draft,
+  thinkingText: thinkingA,
+  thinkingTitle: '确认订阅范围',
+  isThinking: false,
+  thinkingDurationMs: 6_400,
+  steps: proactiveSteps,
+  activeTools: [
+    {
+      toolName: 'Bash',
+      toolUseId: 't1',
+      startTime: ago(12),
+      toolInputSummary:
+        "bash -lc 'npx vitest run tests/frontend-session-sidebar-copy.test.ts'",
+    },
+  ],
+  activeHook: null,
+  systemStatus: null,
+  recentEvents: [],
+  traceEvents: [],
+  taskStates,
+  todos: [
+    { id: '1', content: '替换渲染循环为虚拟列表', status: 'completed' },
+    { id: '3', content: '移动端滚动性能验证', status: 'in_progress' },
+  ],
+};
+
+/** Reasoning with the Markdown the models write: titles, lists, code. */
+const markdownThinking = [
+  '**检查流式渲染的开销**',
+  '',
+  '先看每个 delta 触发的重渲染范围：`StreamingDisplay` 订阅了整个 streaming 对象，所以每帧都会重渲染。',
+  '',
+  '**对比两种做法**',
+  '',
+  '- 窄 selector：只订阅需要的字段，改动最小',
+  '- 拆分 store：更彻底，但要改动所有订阅方',
+  '',
+  '```ts',
+  'const text = useChatStore((s) => s.streaming[jid]?.partialText);',
+  '```',
+  '',
+  '**确认行高估算**',
+  '',
+  '估算与实测不一致时，终稿替换流式卡片会出现滚动跳动，需要用卡片实测高度播种。',
+].join('\n');
+
+const thinkingMarkdownStreaming: StreamingState = {
+  partialText: '',
+  thinkingText: markdownThinking,
+  thinkingTitle: '确认行高估算',
+  isThinking: true,
+  thinkingDurationMs: 4_200,
+  steps: [
+    {
+      id: 'thinking-0',
+      kind: 'thinking',
+      at: ago(14),
+      status: 'running',
+      title: '确认行高估算',
+      text: markdownThinking,
+    },
+  ],
+  activeTools: [],
+  activeHook: null,
+  systemStatus: null,
+  recentEvents: [],
+  traceEvents: [],
+  taskStates: {},
 };
 
 const markdownStreaming: StreamingState = {
@@ -652,7 +967,24 @@ const isRunning =
   scenario === 'streaming' ||
   scenario === 'markdown-streaming' ||
   scenario === 'waiting' ||
+  scenario === 'silent' ||
+  scenario === 'thinking-markdown' ||
   scenario === 'proactive';
+
+const scenarioStreaming: StreamingState | undefined =
+  scenario === 'streaming'
+    ? streaming
+    : scenario === 'silent'
+      ? silentStreaming
+      : scenario === 'thinking-markdown'
+        ? thinkingMarkdownStreaming
+        : scenario === 'markdown-streaming'
+          ? markdownStreaming
+          : scenario === 'proactive'
+            ? processVisibility === 'hidden'
+              ? { ...silentStreaming, awaitingModel: false, partialText: draft }
+              : proactiveStreaming
+            : undefined;
 
 useChatStore.setState({
   groups: {
@@ -660,7 +992,11 @@ useChatStore.setState({
       name: '前端重构',
       folder: 'render-harness',
       added_at: '2026-01-01T00:00:00.000Z',
-      interaction_mode: scenario === 'proactive' ? 'proactive' : 'assistant',
+      interaction_mode:
+        scenario === 'proactive' || params.get('mode') === 'proactive'
+          ? 'proactive'
+          : 'assistant',
+      process_visibility: processVisibility,
       kind: 'web',
       is_home: false,
       is_my_home: false,
@@ -682,14 +1018,34 @@ useChatStore.setState({
         },
       }
     : {},
-  streaming:
-    scenario === 'streaming'
-      ? { [groupJid]: streaming }
-      : scenario === 'markdown-streaming'
-        ? { [groupJid]: markdownStreaming }
-        : {},
-  thinkingCache: { m4: '先确认订阅范围，再比较几种方案的复杂度与收益。' },
-  thinkingDurationCache: { m4: 12_400 },
+  streaming: scenarioStreaming ? { [groupJid]: scenarioStreaming } : {},
+  settledStreaming:
+    scenario === 'settled' ? { [groupJid]: settledStreaming } : {},
+  thinkingCache: {
+    m4: '**确认订阅范围**\n\n先看订阅层级，再比较几种方案的复杂度与收益。',
+  },
+  // A reply whose model gave no reasoning text still says how long it thought.
+  thinkingDurationCache: { m4: 12_400, m8: 3_400 },
+  traceCache: {
+    m4: [
+      {
+        id: 'h1',
+        timestamp: now - 60_000,
+        kind: 'tool',
+        title: '工具 Grep',
+        summary: 'useVirtualizer in web/src',
+        toolUseId: 'ht1',
+      },
+      {
+        id: 'h2',
+        timestamp: now - 59_000,
+        kind: 'tool',
+        title: '工具 Read',
+        summary: 'SessionSidebar.tsx',
+        toolUseId: 'ht2',
+      },
+    ],
+  },
   hasMore: { [groupJid]: false },
   agents: { [groupJid]: [] },
   activeAgentTab: { [groupJid]: null },
@@ -714,6 +1070,38 @@ useFileStore.setState({
   loadFiles: async () => undefined,
   navigateTo: () => undefined,
 });
+
+// The `live` scenario: a spec drives a run through the real reducer, event by
+// event, and finishes it like the server does (run_finished, then the final).
+if (scenario === 'live') {
+  const runId = 'run-live';
+  Object.assign(window, {
+    renderHarness: {
+      start() {
+        useChatStore.getState().handleRunStarted(groupJid, runId);
+      },
+      emit(event: StreamEvent) {
+        useChatStore
+          .getState()
+          .handleStreamEvent(
+            groupJid,
+            { turnId: 'turn-live', ...event },
+            undefined,
+            runId,
+          );
+      },
+      finish(content: string) {
+        useChatStore.getState().handleRunFinished(groupJid, runId);
+        window.setTimeout(() => {
+          useChatStore.getState().handleWsNewMessage(groupJid, {
+            ...msg('live-final', 0, true, content),
+            turn_id: 'turn-live',
+          });
+        }, 60);
+      },
+    },
+  });
+}
 
 // Lets a test drive markdown-streaming: stream more text, then settle the
 // turn into the final message the way a finished run does. `finish(content)`
