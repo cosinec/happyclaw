@@ -43,42 +43,43 @@ export const SubAgentCard = memo(function SubAgentCard({
     STREAMING_MARKDOWN_INTERVAL_MS,
   );
 
-  return (
-    <div className="overflow-hidden rounded-lg bg-surface-raised font-sans ring-1 ring-surface-border">
-      <button
-        type="button"
-        onClick={() => setExpanded(!expanded)}
-        aria-expanded={expanded}
-        aria-controls={expanded ? bodyId : undefined}
-        className="flex min-h-9 w-full cursor-pointer flex-wrap items-center gap-x-2 gap-y-0.5 px-3 py-1.5 text-left transition-colors hover:bg-surface-hover focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none focus-visible:ring-inset pointer-coarse:min-h-11"
-      >
-        <span
-          aria-hidden="true"
-          className={`size-2 shrink-0 rounded-full ${isRunning ? 'animate-pulse bg-primary' : task.status === 'error' ? 'bg-error' : 'bg-success'}`}
-        />
-        <span className="min-w-0 max-w-full truncate text-label font-medium text-foreground sm:max-w-[45%]">
-          <span className="sr-only">子 Agent：</span>
-          {task.title}
+  // A card with nothing under its title (no tool yet, none of its text shown)
+  // has nothing to open: its title row is a plain row, not a button.
+  const hasBody =
+    task.activeTools.length > 0 ||
+    task.recentTools.length > 0 ||
+    !!task.thinkingTail ||
+    !!task.textTail;
+  const titleRow = (
+    <>
+      <span
+        aria-hidden="true"
+        className={`size-2 shrink-0 rounded-full ${isRunning ? 'animate-pulse bg-primary' : task.status === 'error' ? 'bg-error' : 'bg-success'}`}
+      />
+      <span className="min-w-0 max-w-full truncate text-label font-medium text-foreground sm:max-w-[45%]">
+        <span className="sr-only">子 Agent：</span>
+        {task.title}
+      </span>
+      {task.subagentType && (
+        <span className="shrink-0 text-caption text-faint-foreground">
+          {task.subagentType}
         </span>
-        {task.subagentType && (
-          <span className="shrink-0 text-caption text-faint-foreground">
-            {task.subagentType}
-          </span>
-        )}
-        {task.latestSummary && (
-          <span className="order-last min-w-0 basis-full truncate text-caption text-muted-foreground sm:order-none sm:basis-auto sm:flex-1">
-            {task.lastToolName && (
-              <span className="text-faint-foreground">
-                {task.lastToolName} ·{' '}
-              </span>
-            )}
-            {task.latestSummary}
-          </span>
-        )}
-        <span className="ml-auto shrink-0 text-caption text-muted-foreground">
-          {STATUS_LABELS[task.status]}
+      )}
+      {task.latestSummary && (
+        <span className="order-last min-w-0 basis-full truncate text-caption text-muted-foreground sm:order-none sm:basis-auto sm:flex-1">
+          {task.lastToolName && (
+            <span className="text-faint-foreground">
+              {task.lastToolName} ·{' '}
+            </span>
+          )}
+          {task.latestSummary}
         </span>
-        {expanded ? (
+      )}
+      <span className="ml-auto shrink-0 text-caption text-muted-foreground">
+        {STATUS_LABELS[task.status]}
+      </span>
+      {hasBody &&
+        (expanded ? (
           <ChevronUp
             className="size-3.5 shrink-0 text-muted-foreground"
             aria-hidden="true"
@@ -88,9 +89,28 @@ export const SubAgentCard = memo(function SubAgentCard({
             className="size-3.5 shrink-0 text-muted-foreground"
             aria-hidden="true"
           />
-        )}
-      </button>
-      {expanded && (
+        ))}
+    </>
+  );
+  const titleRowClass =
+    'flex min-h-9 w-full flex-wrap items-center gap-x-2 gap-y-0.5 px-3 py-1.5 text-left pointer-coarse:min-h-11';
+
+  return (
+    <div className="overflow-hidden rounded-lg bg-surface-raised font-sans ring-1 ring-surface-border">
+      {hasBody ? (
+        <button
+          type="button"
+          onClick={() => setExpanded(!expanded)}
+          aria-expanded={expanded}
+          aria-controls={expanded ? bodyId : undefined}
+          className={`${titleRowClass} cursor-pointer transition-colors hover:bg-surface-hover focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none focus-visible:ring-inset`}
+        >
+          {titleRow}
+        </button>
+      ) : (
+        <div className={titleRowClass}>{titleRow}</div>
+      )}
+      {hasBody && expanded && (
         <div
           id={bodyId}
           className="space-y-2 border-t border-surface-border px-3 py-2"

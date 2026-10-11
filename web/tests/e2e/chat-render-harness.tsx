@@ -798,6 +798,12 @@ const settledStreaming: StreamingState = {
 // reply text and, below `full`, no reasoning text; the state here carries both
 // at every level, so what the page leaves out is the component's doing.
 const draft = '这段是还没发出去的回复草稿，主动模式下不会显示在界面里。';
+const proactiveTaskStates: StreamingState['taskStates'] = {
+  task1: {
+    ...taskStates.task1,
+    thinkingTail: '子 Agent 的思考：先核对帧率采样方式。',
+  },
+};
 
 /** What a proactive workspace shows of a turn, by visibility. */
 const proactiveSteps: StreamingStep[] = [
@@ -864,7 +870,7 @@ const proactiveStreaming: StreamingState = {
   systemStatus: null,
   recentEvents: [],
   traceEvents: [],
-  taskStates,
+  taskStates: proactiveTaskStates,
   todos: [
     { id: '1', content: '替换渲染循环为虚拟列表', status: 'completed' },
     { id: '3', content: '移动端滚动性能验证', status: 'in_progress' },

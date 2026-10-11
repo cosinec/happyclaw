@@ -1,10 +1,11 @@
-import { memo, useId, useState } from 'react';
+import { memo, useId, useMemo, useState } from 'react';
 import { ChevronRight, ListTree } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { StreamingState } from '../../stores/chat';
 import type { ProcessVisibility } from '../../types';
 import { useRunElapsed } from '../../hooks/useRunElapsed';
 import { describeRunPhase, formatRunElapsed } from '../../lib/run-phase';
+import { scrubTaskStates } from '../../lib/process-visibility';
 import { StepTimeline } from './StepTimeline';
 import { TodoProgressPanel } from './TodoProgressPanel';
 import { describeToolCall } from './ToolActivityCard';
@@ -58,8 +59,8 @@ export function summarizeProcess(
 /**
  * A proactive workspace's process, read-only and folded to one line: its
  * summary, then (opened) the steps in the order they happened and the plan.
- * It never shows the model's text; reasoning only at the `full` level, and
- * the model's commentary between steps never.
+ * It never shows the model's text, a sub-agent's included; reasoning only at
+ * the `full` level, and the model's commentary between steps never.
  */
 export const ProcessPanel = memo(function ProcessPanel({
   streaming,
@@ -76,6 +77,10 @@ export const ProcessPanel = memo(function ProcessPanel({
   const bodyId = useId();
   const elapsed = useRunElapsed(runtimeJid);
   const summary = summarizeProcess(streaming, elapsed);
+  const taskStates = useMemo(
+    () => scrubTaskStates(streaming.taskStates, visibility),
+    [streaming.taskStates, visibility],
+  );
   const waiting =
     !!streaming.awaitingModel &&
     !streaming.isThinking &&
@@ -116,7 +121,7 @@ export const ProcessPanel = memo(function ProcessPanel({
           <StepTimeline
             steps={streaming.steps}
             stepsDropped={streaming.stepsDropped}
-            taskStates={streaming.taskStates}
+            taskStates={taskStates}
             activeTools={streaming.activeTools}
             waiting={waiting}
             waitingSince={streaming.phaseStartedAt}

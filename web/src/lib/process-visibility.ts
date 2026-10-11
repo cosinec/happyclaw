@@ -1,4 +1,5 @@
-import type { StreamEvent } from '../stream-event.types';
+import type { StreamEvent, WorkflowRunSnapshot } from '../stream-event.types';
+import type { StreamingTaskRuntimeState } from '../stores/chat';
 import type { ProcessVisibility } from '../types';
 
 export const DEFAULT_PROCESS_VISIBILITY: ProcessVisibility = 'hidden';
@@ -52,7 +53,57 @@ const ACTIVITY_EVENTS = new Set<string>([
   'permission_denied',
   'thinking_start',
   'thinking_end',
+  // "Context compacted" with its sizes and duration: no model text.
+  'compact_boundary',
 ]);
+
+/** What a sub-agent was asked and what it answered are model text. */
+function withoutWorkflowPreviews(
+  run: WorkflowRunSnapshot,
+): WorkflowRunSnapshot {
+  if (!run.agents.some((a) => a.promptPreview || a.resultPreview)) return run;
+  return {
+    ...run,
+    agents: run.agents.map(
+      ({ promptPreview: _prompt, resultPreview: _result, ...agent }) => agent,
+    ),
+  };
+}
+
+/**
+ * The sub-agents of a proactive turn as the Web may show them: never their
+ * text, their reasoning only at `full`, and never a Workflow agent's prompt or
+ * result.
+ */
+export function scrubTaskStates(
+  taskStates: Record<string, StreamingTaskRuntimeState>,
+  visibility: ProcessVisibility,
+): Record<string, StreamingTaskRuntimeState> {
+  let changed = false;
+  const next: Record<string, StreamingTaskRuntimeState> = {};
+  for (const [id, task] of Object.entries(taskStates)) {
+    const keepThinking = visibility === 'full';
+    const workflowRun = task.workflowRun
+      ? withoutWorkflowPreviews(task.workflowRun)
+      : task.workflowRun;
+    if (
+      !task.textTail &&
+      (keepThinking || !task.thinkingTail) &&
+      workflowRun === task.workflowRun
+    ) {
+      next[id] = task;
+      continue;
+    }
+    changed = true;
+    next[id] = {
+      ...task,
+      textTail: '',
+      thinkingTail: keepThinking ? task.thinkingTail : '',
+      workflowRun,
+    };
+  }
+  return changed ? next : taskStates;
+}
 
 /**
  * The part of a proactive turn's stream the Web may show. The host already
@@ -75,9 +126,35 @@ export function filterProactiveStreamEvent(
   }
   if (type === 'thinking_delta') return visibility === 'full' ? event : null;
   if (!ACTIVITY_EVENTS.has(type)) return null;
+  return scrubEvent(event);
+}
+
+/**
+ * What an allowed event still carries that is model text or what a tool or a
+ * sub-agent was given or returned: the host strips these too.
+ */
+function scrubEvent(event: StreamEvent): StreamEvent {
+  const type = event.eventType;
+  const strip: Partial<StreamEvent> = {};
+  if (event.toolInput) strip.toolInput = undefined;
   if (type === 'tool_result') {
-    return { ...event, toolResult: undefined, detail: undefined };
+    strip.toolResult = undefined;
+    strip.detail = undefined;
   }
-  if (event.toolInput) return { ...event, toolInput: undefined };
-  return event;
+  if (type.startsWith('task_')) {
+    if (type === 'task_start') strip.detail = undefined;
+    strip.toolResult = undefined;
+    strip.taskResult = undefined;
+  }
+  if (
+    event.workflowRun &&
+    withoutWorkflowPreviews(event.workflowRun) !== event.workflowRun
+  ) {
+    strip.workflowRun = withoutWorkflowPreviews(event.workflowRun);
+  }
+  const keys = Object.keys(strip) as Array<keyof StreamEvent>;
+  const dirty = keys.some(
+    (key) => key === 'workflowRun' || event[key] !== undefined,
+  );
+  return dirty ? { ...event, ...strip } : event;
 }

@@ -168,15 +168,45 @@ describe('formatElapsedMs', () => {
 });
 
 describe('SubAgentCard', () => {
+  const withTools = {
+    ...task,
+    recentTools: [{ id: 'r1', timestamp: 1, kind: 'tool', text: '读取 a.ts' }],
+  } as StreamingTaskRuntimeState;
+
   it('carries the latest progress summary on its title row', () => {
     const html = renderToStaticMarkup(
-      <SubAgentCard task={task} groupJid="web:test" defaultExpanded={false} />,
+      <SubAgentCard
+        task={withTools}
+        groupJid="web:test"
+        defaultExpanded={false}
+      />,
     );
     expect(html).toContain('检查移动端滚动');
     expect(html).toContain('已读完 3 个文件');
     expect(html).toContain('执行中');
     expect(html).toContain('子 Agent：');
     expect(html).toContain('aria-expanded="false"');
+    expect(html).not.toContain('读取 a.ts');
+  });
+
+  it('opens to its tools and text', () => {
+    const html = renderToStaticMarkup(
+      <SubAgentCard task={withTools} groupJid="web:test" defaultExpanded />,
+    );
+    expect(html).toContain('aria-expanded="true"');
+    expect(html).toContain('读取 a.ts');
+  });
+
+  it('is a plain row, with no empty body, when it has nothing to open', () => {
+    const html = renderToStaticMarkup(
+      <SubAgentCard task={task} groupJid="web:test" defaultExpanded />,
+    );
+    expect(html).toContain('检查移动端滚动');
+    expect(html).toContain('已读完 3 个文件');
+    expect(html).not.toContain('<button');
+    expect(html).not.toContain('aria-expanded');
+    expect(html).not.toContain('aria-controls');
+    expect(html).not.toContain('border-t');
   });
 });
 

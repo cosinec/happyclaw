@@ -265,6 +265,9 @@ test.describe('a proactive workspace', () => {
     '用户希望保持排序',
     '确认订阅范围',
     '核对行高估算',
+    // A sub-agent's text is never shown, its reasoning only at the full level.
+    '正在用 Playwright 录制',
+    '子 Agent 的思考',
   ];
 
   async function expectNoModelText(page: Page, except: string[] = []) {
@@ -309,6 +312,10 @@ test.describe('a proactive workspace', () => {
       steps.getByText(/npx vitest run tests\/frontend-session-sidebar-copy/),
     ).toBeVisible();
     await expect(steps.getByText('检查移动端滚动性能')).toBeVisible();
+    // With none of its text to show, the sub-agent is a row, not a card to open.
+    await expect(
+      steps.getByRole('button', { name: /检查移动端滚动性能/ }),
+    ).toHaveCount(0);
     // The model reasoned for 6.4 seconds; what it wrote stays out of view.
     await expect(steps.getByText('已思考 6.4 秒')).toBeVisible();
     await expect(panel.getByText('计划')).toBeVisible();
@@ -326,10 +333,22 @@ test.describe('a proactive workspace', () => {
     const reasoning = steps.getByRole('button', { name: /已思考 6.4 秒/ });
     await expect(reasoning).toContainText('确认订阅范围');
     await reasoning.click();
-    await expect(steps.locator('[data-hc-thinking-body]')).toContainText(
+    await expect(
+      steps
+        .locator('[data-hc-thinking-body]')
+        .filter({ hasText: '用户希望保持排序' }),
+    ).toBeVisible();
+    // A sub-agent's reasoning comes with it, in a card that opens; its text
+    // never does.
+    await expect(
+      steps.getByRole('button', { name: /检查移动端滚动性能/ }),
+    ).toBeVisible();
+    await expect(steps.getByText('子 Agent 的思考')).toBeVisible();
+    await expectNoModelText(page, [
+      '确认订阅范围',
       '用户希望保持排序',
-    );
-    await expectNoModelText(page, ['确认订阅范围', '用户希望保持排序']);
+      '子 Agent 的思考',
+    ]);
     await expectNoSidewaysOverflow(page);
   });
 

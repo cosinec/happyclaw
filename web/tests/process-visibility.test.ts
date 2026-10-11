@@ -3,10 +3,12 @@ import {
   PROCESS_VISIBILITY_OPTIONS,
   filterProactiveStreamEvent,
   normalizeProcessVisibility,
+  scrubTaskStates,
 } from '../src/lib/process-visibility';
 import { normalizeGroupInteractionMode } from '../src/lib/interaction-mode';
 import type { GroupInfo } from '../src/types';
 import type { StreamEvent } from '../src/stream-event.types';
+import type { StreamingTaskRuntimeState } from '../src/stores/chat';
 
 const event = (
   over: Partial<StreamEvent> & { eventType: StreamEvent['eventType'] },
@@ -70,6 +72,7 @@ describe('filterProactiveStreamEvent', () => {
     'permission_denied',
     'thinking_start',
     'thinking_end',
+    'compact_boundary',
   ] as const;
 
   it('lets only the spinner lifecycle through when hidden', () => {
@@ -161,15 +164,155 @@ describe('filterProactiveStreamEvent', () => {
     expect(start.toolName).toBe('AskUserQuestion');
   });
 
+  it('strips what a sub-agent was asked and answered', () => {
+    const start = filterProactiveStreamEvent(
+      'full',
+      event({
+        eventType: 'task_start',
+        taskId: 'task-1',
+        taskDescription: '检查滚动',
+        detail: '子 Agent 的提示词',
+      }),
+    )!;
+    expect(start.detail).toBeUndefined();
+    expect(start.taskDescription).toBe('检查滚动');
+
+    const done = filterProactiveStreamEvent(
+      'activity',
+      event({
+        eventType: 'task_notification',
+        taskId: 'task-1',
+        taskStatus: 'completed',
+        taskResult: '答复',
+        toolResult: '答复',
+        summary: '完成',
+      }),
+    )!;
+    expect(done.taskResult).toBeUndefined();
+    expect(done.toolResult).toBeUndefined();
+    expect(done.summary).toBe('完成');
+  });
+
+  it('strips the prompts and results of a Workflow agents', () => {
+    const run = {
+      taskId: 'wf-1',
+      summary: '并行审查',
+      status: 'running' as const,
+      phases: [],
+      agents: [
+        {
+          index: 0,
+          label: '审查员',
+          state: 'running' as const,
+          promptPreview: '提示词',
+          resultPreview: '结果',
+          lastToolSummary: 'a.ts',
+        },
+      ],
+    };
+    const result = filterProactiveStreamEvent(
+      'full',
+      event({ eventType: 'task_progress', workflowRun: run }),
+    )!;
+    expect(result.workflowRun?.agents[0]).toEqual({
+      index: 0,
+      label: '审查员',
+      state: 'running',
+      lastToolSummary: 'a.ts',
+    });
+    // The event it was given is not changed.
+    expect(run.agents[0].promptPreview).toBe('提示词');
+  });
+
+  it('returns an event with nothing to strip as it is', () => {
+    const e = event({ eventType: 'tool_use_start', toolName: 'Read' });
+    expect(filterProactiveStreamEvent('activity', e)).toBe(e);
+  });
+
+  it('lets the compaction notice through from the activity level up', () => {
+    const e = event({
+      eventType: 'compact_boundary',
+      title: 'Context compacted',
+    });
+    expect(filterProactiveStreamEvent('hidden', e)).toBeNull();
+    expect(filterProactiveStreamEvent('activity', e)).toBe(e);
+    expect(filterProactiveStreamEvent('full', e)).toBe(e);
+  });
+
   it('drops event types it does not know', () => {
     for (const eventType of [
       'raw_sdk_event',
       'memory_recall',
       'prompt_suggestion',
+      'notification',
+      'init',
     ] as const) {
       expect(
         filterProactiveStreamEvent('full', event({ eventType })),
       ).toBeNull();
     }
+  });
+});
+
+describe('scrubTaskStates', () => {
+  const task = (over: Partial<StreamingTaskRuntimeState> = {}) =>
+    ({
+      id: 'task-1',
+      title: '检查滚动',
+      status: 'running',
+      thinkingTail: '子 Agent 的思考',
+      textTail: '子 Agent 的话',
+      activeTools: [],
+      recentTools: [],
+      updatedAt: 1,
+      ...over,
+    }) as StreamingTaskRuntimeState;
+
+  it('never shows a sub-agents text, and its reasoning only at the full level', () => {
+    const states = { 'task-1': task() };
+    expect(scrubTaskStates(states, 'activity')['task-1']).toMatchObject({
+      title: '检查滚动',
+      thinkingTail: '',
+      textTail: '',
+    });
+    expect(scrubTaskStates(states, 'full')['task-1']).toMatchObject({
+      thinkingTail: '子 Agent 的思考',
+      textTail: '',
+    });
+  });
+
+  it('strips the prompts of a Workflow agents', () => {
+    const states = {
+      'wf-1': task({
+        id: 'wf-1',
+        thinkingTail: '',
+        textTail: '',
+        workflowRun: {
+          taskId: 'wf-1',
+          summary: '并行审查',
+          status: 'running',
+          phases: [],
+          agents: [
+            {
+              index: 0,
+              label: '审查员',
+              state: 'running',
+              promptPreview: '提示词',
+              resultPreview: '结果',
+            },
+          ],
+        },
+      }),
+    };
+    const agent = scrubTaskStates(states, 'full')['wf-1'].workflowRun!
+      .agents[0];
+    expect(agent.promptPreview).toBeUndefined();
+    expect(agent.resultPreview).toBeUndefined();
+    expect(agent.label).toBe('审查员');
+  });
+
+  it('returns what it was given when there is nothing to strip', () => {
+    const states = { 'task-1': task({ thinkingTail: '', textTail: '' }) };
+    expect(scrubTaskStates(states, 'activity')).toBe(states);
   });
 });
