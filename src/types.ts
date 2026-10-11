@@ -1062,7 +1062,11 @@ export type WsMessageOut =
           toolName: string;
           toolUseId: string;
           startTime: number;
+          elapsedSeconds?: number;
           toolInputSummary?: string;
+          toolInput?: Record<string, unknown>;
+          skillName?: string;
+          isNested?: boolean;
           parentToolUseId?: string | null;
         }>;
         recentEvents: Array<{
@@ -1107,6 +1111,14 @@ export type WsMessageOut =
         todos?: Array<{ id: string; content: string; status: string }>;
         systemStatus: string | null;
         isThinking?: boolean;
+        /** Epoch ms the open reasoning burst began (backdated to the model request). */
+        thinkingStartedAt?: number;
+        /** Reasoning time of the bursts already finished, summed. */
+        thinkingDurationMs?: number;
+        /** Epoch ms the model's current request began; the next burst starts there. */
+        phaseStartedAt?: number;
+        /** A tool returned and the model has produced nothing since. */
+        awaitingModel?: boolean;
         activeHook?: { hookName: string; hookEvent: string } | null;
         turnId?: string;
       };

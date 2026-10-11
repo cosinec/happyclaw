@@ -131,6 +131,14 @@ import {
   startWebSocketHeartbeat,
 } from './ws-heartbeat.js';
 import { recordRunContextSnapshot } from './run-context-snapshot.js';
+import {
+  appendTraceEvent,
+  capTailAtParagraph,
+  isInternalLifecycleStatus,
+  ThinkingClock,
+  ThinkingTextBuffer,
+  type TraceEventRecord,
+} from './stream-trace.js';
 import { RunStreamFence } from './run-stream-fence.js';
 import { sweepStaleStreamingEntries } from './streaming-state-sweep.js';
 import {
@@ -1717,17 +1725,8 @@ function setupWebSocket(server: any): WebSocketServer {
         }
         // Skip empty or unowned snapshots. Every live query projection must
         // have a terminal-capable run identity before it can restore waiting.
-        if (
-          !snap.runId ||
-          (!snap.partialText &&
-            !snap.thinkingText &&
-            snap.activeTools.length === 0 &&
-            snap.recentEvents.length === 0 &&
-            snap.traceEvents.length === 0 &&
-            Object.keys(snap.taskStates).length === 0)
-        ) {
-          continue;
-        }
+        const restorable = buildStreamSnapshot(jid);
+        if (!restorable) continue;
         // Strip #agent: suffix for ACL lookup (virtual JIDs not in registered_groups)
         const baseJid = jid.includes('#agent:') ? jid.split('#agent:')[0] : jid;
         const allowed = getGroupAllowedUserIds(baseJid);
@@ -1737,20 +1736,8 @@ function setupWebSocket(server: any): WebSocketServer {
             JSON.stringify({
               type: 'stream_snapshot',
               chatJid: jid,
-              runId: snap.runId,
-              snapshot: {
-                partialText: snapshotResyncText(jid, snap.partialText),
-                thinkingText: snap.thinkingText,
-                activeTools: snap.activeTools,
-                recentEvents: snap.recentEvents,
-                traceEvents: snap.traceEvents,
-                taskStates: snap.taskStates,
-                todos: snap.todos,
-                systemStatus: snap.systemStatus,
-                isThinking: snap.isThinking,
-                activeHook: snap.activeHook,
-                turnId: snap.turnId,
-              },
+              runId: restorable.runId,
+              snapshot: restorable.snapshot,
             } satisfies WsMessageOut),
           );
         } catch {
@@ -2689,51 +2676,44 @@ export function broadcastTyping(chatJid: string, isTyping: boolean): void {
 // ─── Streaming Snapshot Accumulation ─────────────────────────────────
 // Tracks current streaming state per group so WS reconnects can recover.
 
+/** A running tool as the Web shows it (the Web's StreamingState.activeTools). */
+interface SnapshotTool {
+  toolName: string;
+  toolUseId: string;
+  startTime: number;
+  elapsedSeconds?: number;
+  parentToolUseId?: string | null;
+  isNested?: boolean;
+  skillName?: string;
+  toolInputSummary?: string;
+  /** Structured input some tools stream (AskUserQuestion's questions). */
+  toolInput?: Record<string, unknown>;
+}
+
+interface SnapshotTimelineEvent {
+  id: string;
+  timestamp: number;
+  text: string;
+  kind:
+    | 'tool'
+    | 'skill'
+    | 'hook'
+    | 'status'
+    | 'task'
+    | 'memory'
+    | 'debug'
+    | 'permission';
+}
+
 interface StreamingSnapshotEntry {
   partialText: string;
-  thinkingText: string;
-  activeTools: Array<{
-    toolName: string;
-    toolUseId: string;
-    startTime: number;
-    toolInputSummary?: string;
-    parentToolUseId?: string | null;
-  }>;
-  recentEvents: Array<{
-    id: string;
-    timestamp: number;
-    text: string;
-    kind:
-      | 'tool'
-      | 'skill'
-      | 'hook'
-      | 'status'
-      | 'task'
-      | 'memory'
-      | 'debug'
-      | 'permission';
-  }>;
-  traceEvents: Array<{
-    id: string;
-    timestamp: number;
-    kind:
-      | 'tool'
-      | 'skill'
-      | 'hook'
-      | 'status'
-      | 'task'
-      | 'memory'
-      | 'debug'
-      | 'permission';
-    scope?: StreamEvent['agentScope'];
-    title: string;
-    summary?: string;
-    detail?: string;
-    taskId?: string;
-    toolUseId?: string;
-    parentToolUseId?: string | null;
-    displayLevel?: StreamEvent['displayLevel'];
-  }>;
+  /** The main Agent's reasoning text, bounded to MAX_SNAPSHOT_THINKING. */
+  thinking: ThinkingTextBuffer;
+  /** Reasoning timing, kept the way the Web keeps it ("已思考 Xs"). */
+  clock: ThinkingClock;
+  activeTools: SnapshotTool[];
+  recentEvents: SnapshotTimelineEvent[];
+  traceEvents: TraceEventRecord[];
   taskStates: Record<
     string,
     {
@@ -2749,8 +2729,8 @@ interface StreamingSnapshotEntry {
       lastToolName?: string;
       thinkingTail: string;
       textTail: string;
-      activeTools: StreamingSnapshotEntry['activeTools'];
-      recentTools: StreamingSnapshotEntry['recentEvents'];
+      activeTools: SnapshotTool[];
+      recentTools: SnapshotTimelineEvent[];
       updatedAt: number;
     }
   >;
@@ -2894,28 +2874,18 @@ function openFenceLineAt(text: string, index: number): string | null {
   }
   return fence?.line ?? null;
 }
-const MAX_SNAPSHOT_THINKING = 8000;
+/** A reconnect restores this much of the run's reasoning (cut at a paragraph). */
+const MAX_SNAPSHOT_THINKING = 32_000;
 const MAX_SNAPSHOT_EVENTS = 20;
 const MAX_SNAPSHOT_TRACE_EVENTS = 200;
 const MAX_SNAPSHOT_TASK_TAIL = 4000;
+/** Recent-tool rows kept per sub-agent task (the Web keeps the same). */
+const MAX_SNAPSHOT_TASK_RECENT_TOOLS = 30;
 
 /** Push a recent event entry and truncate to MAX_SNAPSHOT_EVENTS. */
 function pushRecentEvent(
   snap: StreamingSnapshotEntry,
-  event: {
-    id: string;
-    timestamp: number;
-    text: string;
-    kind:
-      | 'tool'
-      | 'skill'
-      | 'hook'
-      | 'status'
-      | 'task'
-      | 'memory'
-      | 'debug'
-      | 'permission';
-  },
+  event: SnapshotTimelineEvent,
 ): void {
   snap.recentEvents.push(event);
   if (snap.recentEvents.length > MAX_SNAPSHOT_EVENTS) {
@@ -2923,73 +2893,8 @@ function pushRecentEvent(
   }
 }
 
-function pushTraceEvent(
-  snap: StreamingSnapshotEntry,
-  event: StreamEvent,
-): void {
-  if (
-    event.eventType === 'text_delta' ||
-    event.eventType === 'thinking_delta' ||
-    event.eventType === 'usage' ||
-    event.eventType === 'init' ||
-    event.eventType === 'context_audit' ||
-    (event.eventType === 'status' &&
-      isInternalLifecycleStatus(event.statusText))
-  )
-    return;
-  const kind = event.eventType.startsWith('tool_')
-    ? event.skillName
-      ? 'skill'
-      : 'tool'
-    : event.eventType.startsWith('hook_')
-      ? 'hook'
-      : event.eventType.startsWith('task_')
-        ? 'task'
-        : event.eventType === 'memory_recall' ||
-            event.eventType === 'compact_boundary'
-          ? 'memory'
-          : event.eventType === 'permission_denied'
-            ? 'permission'
-            : event.eventType === 'raw_sdk_event'
-              ? 'debug'
-              : 'status';
-  const title =
-    event.title ||
-    event.summary ||
-    event.taskSummary ||
-    event.statusText ||
-    event.toolName ||
-    event.rawType ||
-    event.eventType;
-  snap.traceEvents.push({
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    timestamp: Date.now(),
-    kind,
-    scope: event.agentScope,
-    title,
-    summary: event.summary || event.taskSummary || event.toolInputSummary,
-    detail: event.detail,
-    taskId: event.taskId,
-    toolUseId: event.toolUseId,
-    parentToolUseId: event.parentToolUseId,
-    displayLevel: event.displayLevel,
-  });
-  if (snap.traceEvents.length > MAX_SNAPSHOT_TRACE_EVENTS) {
-    snap.traceEvents = snap.traceEvents.slice(-MAX_SNAPSHOT_TRACE_EVENTS);
-  }
-}
-
 function tailText(text: string, max: number): string {
   return text.length > max ? text.slice(-max) : text;
-}
-
-function isInternalLifecycleStatus(statusText?: string | null): boolean {
-  return (
-    statusText === 'requesting' ||
-    statusText === 'compacting' ||
-    statusText === 'idle' ||
-    statusText === 'interrupted'
-  );
 }
 
 function snapshotTaskId(event: StreamEvent): string | null {
@@ -2998,6 +2903,22 @@ function snapshotTaskId(event: StreamEvent): string | null {
     event.taskId ||
     (event.eventType.startsWith('task_') ? event.toolUseId || null : null)
   );
+}
+
+function pushTaskRecentTool(
+  task: StreamingSnapshotEntry['taskStates'][string],
+  kind: SnapshotTimelineEvent['kind'],
+  text: string,
+): void {
+  task.recentTools = [
+    ...task.recentTools,
+    {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      timestamp: Date.now(),
+      kind,
+      text,
+    },
+  ].slice(-MAX_SNAPSHOT_TASK_RECENT_TOOLS);
 }
 
 function updateSnapshotTask(
@@ -3098,12 +3019,15 @@ function updateSnapshotTask(
       };
     }
   } else if (event.eventType === 'tool_use_start' && event.parentToolUseId) {
-    const tool = {
+    const tool: SnapshotTool = {
       toolName: event.toolName || 'unknown',
       toolUseId: event.toolUseId || '',
       startTime: Date.now(),
-      toolInputSummary: event.toolInputSummary,
       parentToolUseId: event.parentToolUseId,
+      isNested: event.isNested,
+      skillName: event.skillName,
+      toolInputSummary: event.toolInputSummary,
+      toolInput: event.toolInput,
     };
     task.activeTools = task.activeTools.some(
       (t) => t.toolUseId === tool.toolUseId && tool.toolUseId,
@@ -3112,12 +3036,79 @@ function updateSnapshotTask(
           t.toolUseId === tool.toolUseId ? { ...t, ...tool } : t,
         )
       : [...task.activeTools, tool];
+    pushTaskRecentTool(
+      task,
+      event.skillName ? 'skill' : 'tool',
+      `${event.skillName ? `技能 ${event.skillName}` : `工具 ${event.toolName || 'unknown'}`}${event.toolInputSummary ? ` (${event.toolInputSummary})` : ''}`,
+    );
   } else if (event.eventType === 'tool_use_end' && event.parentToolUseId) {
     task.activeTools = task.activeTools.filter(
       (t) => t.toolUseId !== event.toolUseId,
     );
+    pushTaskRecentTool(
+      task,
+      'tool',
+      `✓ ${event.toolName || event.toolUseId || '工具'}`,
+    );
+  } else if (event.eventType === 'tool_progress' && event.parentToolUseId) {
+    task.activeTools = task.activeTools.map((t) =>
+      t.toolUseId === event.toolUseId
+        ? {
+            ...t,
+            elapsedSeconds: event.elapsedSeconds,
+            toolInputSummary: event.toolInputSummary || t.toolInputSummary,
+          }
+        : t,
+    );
   }
   snap.taskStates[taskId] = task;
+}
+
+type StreamSnapshotMessage = Extract<WsMessageOut, { type: 'stream_snapshot' }>;
+
+/**
+ * What a client that (re)connects mid-run needs to rebuild the run's card: the
+ * stream_snapshot body of one runtime JID, or null when there is nothing to
+ * restore (no exact run owns it, or nothing visible happened yet). The
+ * reasoning text, timings, running tools, sub-agent states and trace come from
+ * the same reducers that feed the live events.
+ */
+export function buildStreamSnapshot(
+  jid: string,
+): { runId: string; snapshot: StreamSnapshotMessage['snapshot'] } | null {
+  const snap = streamingSnapshots.get(jid);
+  if (
+    !snap?.runId ||
+    (!snap.partialText &&
+      !snap.thinking.text &&
+      !snap.clock.sawThinking &&
+      snap.activeTools.length === 0 &&
+      snap.recentEvents.length === 0 &&
+      snap.traceEvents.length === 0 &&
+      Object.keys(snap.taskStates).length === 0)
+  ) {
+    return null;
+  }
+  return {
+    runId: snap.runId,
+    snapshot: {
+      partialText: snapshotResyncText(jid, snap.partialText),
+      thinkingText: snap.thinking.text,
+      activeTools: snap.activeTools,
+      recentEvents: snap.recentEvents,
+      traceEvents: snap.traceEvents,
+      taskStates: snap.taskStates,
+      todos: snap.todos,
+      systemStatus: snap.systemStatus,
+      isThinking: snap.isThinking,
+      thinkingStartedAt: snap.clock.startedAt,
+      thinkingDurationMs: snap.clock.durationMs || undefined,
+      phaseStartedAt: snap.clock.phaseStartedAt,
+      awaitingModel: snap.clock.awaitingModel || undefined,
+      activeHook: snap.activeHook,
+      turnId: snap.turnId,
+    },
+  };
 }
 
 function updateStreamingSnapshot(
@@ -3164,7 +3155,12 @@ function updateStreamingSnapshot(
   if (!snap) {
     snap = {
       partialText: '',
-      thinkingText: '',
+      thinking: new ThinkingTextBuffer((text) =>
+        capTailAtParagraph(text, MAX_SNAPSHOT_THINKING),
+      ),
+      // A burst that arrives whole after silent reasoning started at the
+      // model request, or at the run's start for the first one.
+      clock: new ThinkingClock(activeLogicalRuns.get(normalizedJid)?.startedAt),
       activeTools: [],
       recentEvents: [],
       traceEvents: [],
@@ -3179,14 +3175,21 @@ function updateStreamingSnapshot(
   snap.updatedAt = Date.now();
   if (event.turnId) snap.turnId = event.turnId;
   if (runId) snap.runId = runId;
-  pushTraceEvent(snap, event);
+  snap.traceEvents = appendTraceEvent(
+    snap.traceEvents,
+    event,
+    MAX_SNAPSHOT_TRACE_EVENTS,
+  );
   updateSnapshotTask(snap, event);
+  // Reasoning text and timing follow the main Agent's stream; real answer
+  // text or a tool call ends the current thinking burst.
+  snap.thinking.observe(event);
+  snap.clock.observe(event);
+  snap.isThinking = snap.clock.isThinking;
 
   switch (event.eventType) {
     case 'text_delta':
       if (event.text && !event.parentToolUseId) {
-        // Real assistant text means the current thinking burst is over.
-        snap.isThinking = false;
         snap.partialText += event.text;
         if (snap.partialText.length > MAX_SNAPSHOT_TEXT) {
           snap.partialText = snap.partialText.slice(-MAX_SNAPSHOT_TEXT);
@@ -3199,27 +3202,24 @@ function updateStreamingSnapshot(
       }
       break;
 
-    case 'thinking_delta':
-      if (event.text && !event.parentToolUseId) {
-        snap.isThinking = true;
-        snap.thinkingText += event.text;
-        if (snap.thinkingText.length > MAX_SNAPSHOT_THINKING) {
-          snap.thinkingText = snap.thinkingText.slice(-MAX_SNAPSHOT_THINKING);
-        }
-      }
-      break;
-
     case 'tool_use_start':
       if (event.toolUseId && event.toolName) {
-        // A tool call ends the current thinking burst.
-        snap.isThinking = false;
-        snap.activeTools.push({
+        const tool: SnapshotTool = {
           toolName: event.toolName,
           toolUseId: event.toolUseId,
           startTime: Date.now(),
-          toolInputSummary: event.toolInputSummary,
           parentToolUseId: event.parentToolUseId,
-        });
+          isNested: event.isNested,
+          skillName: event.skillName,
+          toolInputSummary: event.toolInputSummary,
+        };
+        snap.activeTools = snap.activeTools.some(
+          (t) => t.toolUseId === tool.toolUseId,
+        )
+          ? snap.activeTools.map((t) =>
+              t.toolUseId === tool.toolUseId ? { ...t, ...tool } : t,
+            )
+          : [...snap.activeTools, tool];
         pushRecentEvent(snap, {
           id: event.toolUseId,
           timestamp: Date.now(),
@@ -3243,8 +3243,24 @@ function updateStreamingSnapshot(
           (t) => t.toolUseId === event.toolUseId,
         );
         if (tool) {
+          tool.elapsedSeconds = event.elapsedSeconds ?? tool.elapsedSeconds;
+          if (event.skillName) tool.skillName = event.skillName;
+          if (event.toolInput) tool.toolInput = event.toolInput;
           if (event.toolInputSummary)
             tool.toolInputSummary = event.toolInputSummary;
+        } else {
+          // Progress for a tool whose start predates this snapshot.
+          snap.activeTools.push({
+            toolName: event.toolName || 'unknown',
+            toolUseId: event.toolUseId,
+            startTime: Date.now(),
+            elapsedSeconds: event.elapsedSeconds,
+            parentToolUseId: event.parentToolUseId,
+            isNested: event.isNested,
+            skillName: event.skillName,
+            toolInputSummary: event.toolInputSummary,
+            toolInput: event.toolInput,
+          });
         }
       }
       break;

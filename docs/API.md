@@ -740,6 +740,8 @@ Agent 镜像只由 `main` 分支的 GitHub Actions 构建并发布。该接口�
 - `typing`
 - `status_update`
 - `stream_event`
+- `stream_snapshot`，连接建立时推送进行中回合的快照（含推理文本尾部、推理计时、
+  活动工具、子 Agent 状态和轨迹）
 - `agent_status`
 - `terminal_output`
 - `terminal_started`
