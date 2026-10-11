@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   PROCESS_VISIBILITY_OPTIONS,
+  SPEECH_TOOL_NAME,
   filterProactiveStreamEvent,
+  isSpeechToolEvent,
   normalizeProcessVisibility,
   scrubTaskStates,
+  speechToolCallsIn,
+  withoutSpeechTool,
 } from '../src/lib/process-visibility';
 import { normalizeGroupInteractionMode } from '../src/lib/interaction-mode';
 import type { GroupInfo } from '../src/types';
@@ -314,5 +318,99 @@ describe('scrubTaskStates', () => {
   it('returns what it was given when there is nothing to strip', () => {
     const states = { 'task-1': task({ thinkingTail: '', textTail: '' }) };
     expect(scrubTaskStates(states, 'activity')).toBe(states);
+  });
+});
+
+describe('the speech tool of a proactive turn', () => {
+  it('is named by its start and followed by its call id', () => {
+    const none = new Set<string>();
+    expect(
+      isSpeechToolEvent(
+        event({
+          eventType: 'tool_use_start',
+          toolName: SPEECH_TOOL_NAME,
+          toolUseId: 'say-1',
+        }),
+        none,
+      ),
+    ).toBe(true);
+    // Its later events say only which call they belong to.
+    const known = new Set(['say-1']);
+    for (const eventType of [
+      'tool_progress',
+      'tool_result',
+      'tool_use_end',
+    ] as const) {
+      expect(
+        isSpeechToolEvent(event({ eventType, toolUseId: 'say-1' }), known),
+      ).toBe(true);
+      expect(
+        isSpeechToolEvent(event({ eventType, toolUseId: 'bash-1' }), known),
+      ).toBe(false);
+    }
+  });
+
+  it('leaves every other tool and event alone', () => {
+    const known = new Set(['say-1']);
+    expect(
+      isSpeechToolEvent(
+        event({
+          eventType: 'tool_use_start',
+          toolName: 'Bash',
+          toolUseId: 'bash-1',
+        }),
+        known,
+      ),
+    ).toBe(false);
+    expect(
+      isSpeechToolEvent(
+        event({ eventType: 'status', toolUseId: 'say-1' }),
+        known,
+      ),
+    ).toBe(false);
+  });
+
+  const row = (title: string, toolUseId?: string) => ({
+    id: `${title}-${toolUseId}`,
+    timestamp: 1,
+    kind: 'tool' as const,
+    title,
+    toolUseId,
+  });
+
+  it('is found in a trace by the rows that name it', () => {
+    const rows = [
+      row('工具 Read', 't1'),
+      row(`工具 ${SPEECH_TOOL_NAME}`, 'say-1'),
+      row('工具结果', 'say-1'),
+    ];
+    expect([...speechToolCallsIn(rows)]).toEqual(['say-1']);
+  });
+
+  it('is taken out of a trace with every row of its call', () => {
+    const rows = [
+      row('工具 Read', 't1'),
+      row('工具结果', 't1'),
+      row(`工具 ${SPEECH_TOOL_NAME}`, 'say-1'),
+      row(`工具进度 ${SPEECH_TOOL_NAME}`, 'say-1'),
+      row('工具结果', 'say-1'),
+      row(`工具完成 ${SPEECH_TOOL_NAME}`, 'say-1'),
+    ];
+    expect(
+      withoutSpeechTool(rows).map((r) => `${r.title}:${r.toolUseId}`),
+    ).toEqual(['工具 Read:t1', '工具结果:t1']);
+  });
+
+  it('drops a row that names it even when its start fell out of the trace', () => {
+    const rows = [
+      row('工具 Read', 't1'),
+      row(`工具完成 ${SPEECH_TOOL_NAME}`, 'say-1'),
+    ];
+    expect(withoutSpeechTool(rows).map((r) => r.title)).toEqual(['工具 Read']);
+  });
+
+  it('returns a trace without it as it is', () => {
+    const rows = [row('工具 Read', 't1'), row('工具结果', 't1')];
+    expect(withoutSpeechTool(rows)).toBe(rows);
   });
 });

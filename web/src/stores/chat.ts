@@ -36,9 +36,13 @@ import {
   normalizeInteractionMode,
 } from '../lib/interaction-mode';
 import {
+  SPEECH_TOOL_NAME,
   filterProactiveStreamEvent,
+  isSpeechToolEvent,
   normalizeProcessVisibility,
   scrubTaskStates,
+  speechToolCallsIn,
+  withoutSpeechTool,
 } from '../lib/process-visibility';
 import { useGroupsStore } from './groups';
 import {
@@ -1454,6 +1458,51 @@ interface PendingDelta {
   turnId?: string;
 }
 const pendingDeltas = new Map<string, PendingDelta>();
+
+/**
+ * The calls of a proactive turn's speech tool, per runtime: its start names
+ * the tool, its later events carry only the id of the call. Kept for the
+ * run that made them, so a new run starts empty.
+ */
+const speechToolCalls = new Map<
+  string,
+  { runId: string; calls: Set<string> }
+>();
+const MAX_SPEECH_CALLS = 64;
+
+function speechCallsOf(runtimeJid: string, runId?: string): Set<string> {
+  const entry = speechToolCalls.get(runtimeJid);
+  return entry && entry.runId === (runId ?? '') ? entry.calls : new Set();
+}
+
+/** The speech tool's calls in a reconnect snapshot: its rows and running calls. */
+function speechCallsOfSnapshot(snapshot: StreamSnapshotData): Set<string> {
+  const calls = speechToolCallsIn(snapshot.traceEvents ?? []);
+  for (const tool of snapshot.activeTools ?? []) {
+    if (tool.toolName === SPEECH_TOOL_NAME) calls.add(tool.toolUseId);
+  }
+  return calls;
+}
+
+function rememberSpeechCalls(
+  runtimeJid: string,
+  runId: string | undefined,
+  ids: Iterable<string>,
+): void {
+  const key = runId ?? '';
+  let entry = speechToolCalls.get(runtimeJid);
+  if (!entry || entry.runId !== key) {
+    entry = { runId: key, calls: new Set() };
+    speechToolCalls.set(runtimeJid, entry);
+  }
+  for (const id of ids) {
+    if (entry.calls.size >= MAX_SPEECH_CALLS) {
+      const oldest = entry.calls.values().next().value;
+      if (oldest !== undefined) entry.calls.delete(oldest);
+    }
+    entry.calls.add(id);
+  }
+}
 
 // Match the runner's retry banner (including unknown SDK counters), not user
 // progress text that happens to mention a retry or a file named retry.ts.
@@ -3698,9 +3747,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       );
       const thinking = capThinkingText(data.thinking || '');
       const duration = data.thinking_duration_ms ?? undefined;
-      const trace = (Array.isArray(data.trace) ? data.trace : [])
-        .filter(isUserVisibleTraceEvent)
-        .slice(-MAX_CACHED_TRACE_EVENTS);
+      const rows = (Array.isArray(data.trace) ? data.trace : []).filter(
+        isUserVisibleTraceEvent,
+      );
+      // The host keeps the speech tool's rows of a proactive turn; the live
+      // view leaves them out, so the reloaded one does too.
+      const trace = (
+        isProactiveRuntime(get(), jid) ? withoutSpeechTool(rows) : rows
+      ).slice(-MAX_CACHED_TRACE_EVENTS);
       const keepsDuration =
         duration !== undefined &&
         Number.isFinite(duration) &&
@@ -3857,6 +3911,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
       );
       if (!allowed) return;
       event = allowed;
+      // Calling the speech tool is the reply itself, not work to watch: it is
+      // neither a step nor the latest tool, and does not count among the tools
+      // used. Its start still ends the reasoning before it.
+      if (isSpeechToolEvent(event, speechCallsOf(runtimeJid, runId))) {
+        if (event.eventType === 'tool_use_start' && event.toolUseId) {
+          rememberSpeechCalls(runtimeJid, runId, [event.toolUseId]);
+          // Keep arrival order: reasoning still waiting for its frame came first.
+          flushPendingDeltaForRuntime(runtimeJid, set);
+          set((s) => {
+            const prev = agentId
+              ? s.agentStreaming[agentId]
+              : s.streaming[chatJid];
+            if (!prev || prev.interrupted) return s;
+            const next = { ...prev };
+            endThinkingBurst(prev, next, Date.now());
+            next.awaitingModel = false;
+            next.phaseStartedAt = undefined;
+            return agentId
+              ? { agentStreaming: { ...s.agentStreaming, [agentId]: next } }
+              : { streaming: { ...s.streaming, [chatJid]: next } };
+          });
+        }
+        return;
+      }
     }
 
     // Clear in receive order: an older rAF batch must not erase a newer retry.
@@ -5540,6 +5618,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // WS 重连时接收后端推送的流式快照，恢复 StreamingDisplay
   handleStreamSnapshot: (chatJid, snapshot, agentId, runId) => {
     const runtimeJid = agentId ? `${chatJid}#agent:${agentId}` : chatJid;
+    // The speech tool of a proactive turn is not work to watch: the calls the
+    // snapshot shows are remembered so their later events are left out too.
+    const speech = isProactiveRuntime(get(), runtimeJid)
+      ? speechCallsOfSnapshot(snapshot)
+      : null;
+    if (speech) rememberSpeechCalls(runtimeJid, runId, speech);
     // A proactive workspace's snapshot is cut to the level its owner chose,
     // whatever the host put in it.
     const levelOf = (s: ChatState): ProcessVisibility | null =>
@@ -5558,25 +5642,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
         thinkingStartedAt: snapshot.thinkingStartedAt,
         phaseStartedAt: snapshot.phaseStartedAt,
         awaitingModel: snapshot.awaitingModel,
-        activeTools: (snapshot.activeTools || []).map((t) => ({
-          toolName: t.toolName,
-          toolUseId: t.toolUseId,
-          startTime: t.startTime,
-          ...(t.elapsedSeconds != null
-            ? { elapsedSeconds: t.elapsedSeconds }
-            : {}),
-          toolInputSummary: t.toolInputSummary,
-          parentToolUseId: t.parentToolUseId,
-          ...(t.isNested != null ? { isNested: t.isNested } : {}),
-          ...(t.skillName ? { skillName: t.skillName } : {}),
-          ...(t.toolInput ? { toolInput: t.toolInput } : {}),
-        })),
+        activeTools: (snapshot.activeTools || [])
+          .filter((t) => !level || !speech?.has(t.toolUseId))
+          .map((t) => ({
+            toolName: t.toolName,
+            toolUseId: t.toolUseId,
+            startTime: t.startTime,
+            ...(t.elapsedSeconds != null
+              ? { elapsedSeconds: t.elapsedSeconds }
+              : {}),
+            toolInputSummary: t.toolInputSummary,
+            parentToolUseId: t.parentToolUseId,
+            ...(t.isNested != null ? { isNested: t.isNested } : {}),
+            ...(t.skillName ? { skillName: t.skillName } : {}),
+            ...(t.toolInput ? { toolInput: t.toolInput } : {}),
+          })),
         recentEvents: (
           (snapshot.recentEvents || []) as StreamingTimelineEvent[]
         ).filter(isUserVisibleTimelineEvent),
-        traceEvents: (snapshot.traceEvents || []).filter(
-          isUserVisibleTraceEvent,
-        ),
+        traceEvents: (() => {
+          const rows = (snapshot.traceEvents || []).filter(
+            isUserVisibleTraceEvent,
+          );
+          return level && speech ? withoutSpeechTool(rows) : rows;
+        })(),
         taskStates: snapshot.taskStates || {},
         todos: snapshot.todos,
         systemStatus: snapshot.systemStatus || null,

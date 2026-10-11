@@ -445,6 +445,53 @@ test.describe('the reasoning and trace the server kept', () => {
     expect(calls).toBe(2);
   });
 
+  test('a proactive turn does not count its speech tool among the tools used', async ({
+    page,
+  }) => {
+    const SAY = 'mcp__happyclaw__send_message';
+    await route(page, (r) =>
+      r.fulfill({
+        json: {
+          ...TURN,
+          thinking: '',
+          trace: [
+            ...TURN.trace,
+            {
+              id: 's1',
+              timestamp: 2,
+              kind: 'tool',
+              title: `工具 ${SAY}`,
+              toolUseId: 'say-1',
+            },
+            {
+              id: 's2',
+              timestamp: 3,
+              kind: 'tool',
+              title: '工具结果',
+              toolUseId: 'say-1',
+            },
+            {
+              id: 's3',
+              timestamp: 4,
+              kind: 'tool',
+              title: `工具完成 ${SAY}`,
+              toolUseId: 'say-1',
+            },
+          ],
+        },
+      }),
+    );
+    await open(page, 'scenario=lazy-trace&mode=proactive&visibility=activity');
+    await page.getByRole('button', { name: '执行详情' }).click();
+    const loaded = page.getByRole('button', {
+      name: /执行详情.*已使用 1 个工具/,
+    });
+    await expect(loaded).toHaveAttribute('aria-expanded', 'true');
+    await expect(loaded).toContainText('1 条');
+    await expect(page.getByText('useChatStore in web/src')).toBeVisible();
+    await expect(page.getByText(SAY)).toHaveCount(0);
+  });
+
   for (const [visibility, reasoning, trace] of [
     ['hidden', false, false],
     ['activity', false, true],
@@ -497,6 +544,50 @@ test.describe('on a wide screen', () => {
     // Rows are 28px tall with a mouse; the touch-sized variant does not apply.
     const folded = timeline.getByRole('button', { name: /较早 4 步/ });
     expect((await folded.boundingBox())!.height).toBeLessThan(32);
+  });
+
+  test('the speech tool of a proactive turn is not its latest tool or a step', async ({
+    page,
+  }) => {
+    await open(page, 'scenario=live&mode=proactive&visibility=activity');
+    await page.evaluate(() => {
+      const { start, emit } = window.renderHarness;
+      start();
+      emit({ eventType: 'status', statusText: 'requesting' });
+      emit({
+        eventType: 'tool_use_start',
+        toolName: 'Bash',
+        toolUseId: 'b1',
+        toolInputSummary: 'npm test',
+      });
+      emit({ eventType: 'tool_result', toolUseId: 'b1' });
+      emit({ eventType: 'tool_use_end', toolUseId: 'b1' });
+      emit({
+        eventType: 'tool_use_start',
+        toolName: 'mcp__happyclaw__send_message',
+        toolUseId: 'say-1',
+        toolInputSummary: '{"text":"已发送的回复"}',
+      });
+    });
+    const panel = page.locator('[data-hc-process-panel]');
+    const toggle = panel.getByRole('button', { name: /处理过程/ });
+    await expect(toggle).toContainText('最近：运行 npm test');
+    await toggle.click();
+    const steps = panel.getByRole('list', { name: '处理步骤' });
+    await expect(steps.getByRole('listitem')).toHaveCount(1);
+
+    // The rest of that call changes nothing.
+    await page.evaluate(() => {
+      const { emit } = window.renderHarness;
+      emit({ eventType: 'tool_result', toolUseId: 'say-1' });
+      emit({ eventType: 'tool_use_end', toolUseId: 'say-1' });
+    });
+    await page.waitForTimeout(150);
+    await expect(steps.getByRole('listitem')).toHaveCount(1);
+    await expect(toggle).toContainText('最近：运行 npm test');
+    await expect(page.locator('[data-hc-streaming-block]')).not.toContainText(
+      /send_message|已发送的回复/,
+    );
   });
 
   test('the process line of a proactive workspace names its latest tool', async ({

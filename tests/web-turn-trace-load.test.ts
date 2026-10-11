@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { GroupInfo, Message } from '../web/src/stores/chat';
+import { countTraceTools } from '../web/src/components/chat/ExecutionTrace';
 
 const { apiGetMock } = vi.hoisted(() => ({ apiGetMock: vi.fn() }));
 
@@ -204,6 +205,61 @@ describe('loading the reasoning and trace the server kept', () => {
         .loadTurnTrace(message('m3', { turn_id: null })),
     ).toBe(false);
     expect(apiGetMock).not.toHaveBeenCalled();
+  });
+
+  describe('the speech tool of a proactive turn', () => {
+    const SAY = 'mcp__happyclaw__send_message';
+    const turn = () => ({
+      turn_id: 'turn-1',
+      thinking: '',
+      trace: [
+        row('a', '工具 Grep', { toolUseId: 't1' }),
+        row('b', '工具结果', { toolUseId: 't1' }),
+        row('c', `工具 ${SAY}`, { toolUseId: 'say-1' }),
+        row('d', '工具结果', { toolUseId: 'say-1' }),
+        row('e', `工具完成 ${SAY}`, { toolUseId: 'say-1' }),
+      ],
+    });
+    const proactive = () =>
+      useChatStore.setState({
+        groups: {
+          [JID]: {
+            name: 'w',
+            folder: 'trace',
+            added_at: '2026-01-01T00:00:00.000Z',
+            interaction_mode: 'proactive',
+            process_visibility: 'activity',
+          } as GroupInfo,
+        },
+      });
+
+    it('is left out of the trace a proactive workspace loads', async () => {
+      proactive();
+      apiGetMock.mockResolvedValueOnce(turn());
+      await useChatStore.getState().loadTurnTrace(message('m5'));
+      const rows = useChatStore.getState().traceCache.m5;
+      expect(rows.map((r) => r.id)).toEqual(['a', 'b']);
+      expect(countTraceTools(rows)).toBe(1);
+    });
+
+    it('leaves a turn that only spoke with nothing to open', async () => {
+      proactive();
+      apiGetMock.mockResolvedValueOnce({
+        turn_id: 'turn-1',
+        thinking: '',
+        trace: turn().trace.slice(2),
+      });
+      await useChatStore.getState().loadTurnTrace(message('m6'));
+      expect(useChatStore.getState().turnTraceStatus.m6).toBe('empty');
+      expect(useChatStore.getState().traceCache.m6).toBeUndefined();
+    });
+
+    it('is one tool like any other in an Assistant workspace', async () => {
+      apiGetMock.mockResolvedValueOnce(turn());
+      await useChatStore.getState().loadTurnTrace(message('m7'));
+      expect(useChatStore.getState().traceCache.m7).toHaveLength(5);
+      expect(countTraceTools(useChatStore.getState().traceCache.m7)).toBe(2);
+    });
   });
 
   it('shows a proactive reply of a visible workspace the same way', async () => {

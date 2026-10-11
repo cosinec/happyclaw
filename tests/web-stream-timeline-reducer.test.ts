@@ -11,6 +11,8 @@ import {
   MAX_THINKING_TEXT,
 } from '../web/src/lib/thinking-text';
 import { answerStart } from '../web/src/lib/stream-steps';
+import { SPEECH_TOOL_NAME } from '../web/src/lib/process-visibility';
+import { countTraceTools } from '../web/src/components/chat/ExecutionTrace';
 
 const { apiGetMock, apiPostMock, apiPatchMock } = vi.hoisted(() => ({
   apiGetMock: vi.fn(),
@@ -692,6 +694,124 @@ describe('a proactive workspace', () => {
     }
   });
 
+  describe('and its speech tool', () => {
+    const say = (id = 'say-1') =>
+      emit({
+        eventType: 'tool_use_start',
+        toolName: SPEECH_TOOL_NAME,
+        toolUseId: id,
+        toolInputSummary: '{"text":"已发送的回复"}',
+      });
+    const finishSaying = (id = 'say-1') => {
+      emit({ eventType: 'tool_progress', toolUseId: id, elapsedSeconds: 1 });
+      emit({ eventType: 'tool_result', toolUseId: id });
+      emit({ eventType: 'tool_use_end', toolUseId: id });
+    };
+
+    it('is the reply, not work: no step, no latest tool, no count', () => {
+      for (const level of ['activity', 'full'] as const) {
+        reset();
+        setWorkspace('proactive', level);
+        start();
+        emit({ eventType: 'status', statusText: 'requesting' });
+        tool('t1', 'Bash', 'npm test');
+        emit({ eventType: 'tool_result', toolUseId: 't1' });
+        emit({ eventType: 'tool_use_end', toolUseId: 't1' });
+        say();
+        expect(live().activeTools.map((t) => t.toolName)).toEqual([]);
+        finishSaying();
+
+        const state = live();
+        expect(state.steps!.map((s) => s.toolName)).toEqual(['Bash']);
+        expect(state.activeTools).toEqual([]);
+        const text = JSON.stringify(state);
+        expect(text, level).not.toContain(SPEECH_TOOL_NAME);
+        expect(text, level).not.toContain('已发送的回复');
+        // One tool used, live as after a reload.
+        expect(countTraceTools(state.traceEvents)).toBe(1);
+      }
+    });
+
+    it('still ends the reasoning before it', () => {
+      setWorkspace('proactive', 'full');
+      start();
+      emit({ eventType: 'status', statusText: 'requesting' });
+      emit({ eventType: 'thinking_start' });
+      delta('thinking_delta', '想一想。');
+      expect(live().isThinking).toBe(true);
+      say();
+      expect(live().isThinking).toBe(false);
+      expect(live().awaitingModel).toBe(false);
+    });
+
+    it('applies the reasoning that came before it first', () => {
+      setWorkspace('proactive', 'full');
+      start();
+      emit({ eventType: 'status', statusText: 'requesting' });
+      emit({ eventType: 'thinking_start' });
+      // This delta still waits for its frame when the speech tool starts.
+      emit({ eventType: 'thinking_delta', text: '最后想一想。' });
+      say();
+      flushRaf();
+      expect(live().thinkingText).toBe('最后想一想。');
+      expect(live().isThinking).toBe(false);
+      expect(live().steps!.filter((s) => s.kind === 'thinking')).toHaveLength(
+        1,
+      );
+    });
+
+    it('is one tool like any other for an Assistant workspace', () => {
+      setWorkspace('assistant');
+      start();
+      say();
+      expect(live().steps!.map((s) => s.toolName)).toEqual([SPEECH_TOOL_NAME]);
+      expect(live().activeTools.map((t) => t.toolName)).toEqual([
+        SPEECH_TOOL_NAME,
+      ]);
+    });
+
+    it('is one tool like any other for a spawn agent', () => {
+      setWorkspace('proactive', 'activity');
+      useChatStore.setState({
+        agents: { [JID]: [{ id: 'spawn-1', kind: 'spawn' } as never] },
+      });
+      useChatStore.getState().handleRunStarted(`${JID}#agent:spawn-1`, 'run-s');
+      useChatStore.getState().handleStreamEvent(
+        JID,
+        {
+          eventType: 'tool_use_start',
+          toolName: SPEECH_TOOL_NAME,
+          toolUseId: 'say-s',
+        },
+        'spawn-1',
+        'run-s',
+      );
+      expect(
+        useChatStore.getState().agentStreaming['spawn-1']?.activeTools,
+      ).toHaveLength(1);
+    });
+
+    it('is followed by call id only for the run that made it', () => {
+      setWorkspace('proactive', 'activity');
+      start();
+      say('say-1');
+      // A later run reusing the id for another tool is not the speech tool.
+      useChatStore.getState().handleRunFinished(JID, RUN);
+      useChatStore.getState().handleRunStarted(JID, 'run-2');
+      useChatStore.getState().handleStreamEvent(
+        JID,
+        {
+          eventType: 'tool_use_start',
+          toolName: 'Bash',
+          toolUseId: 'say-1',
+        },
+        undefined,
+        'run-2',
+      );
+      expect(live().steps!.map((s) => s.toolName)).toEqual(['Bash']);
+    });
+  });
+
   it('takes the compaction notice from the activity level up', () => {
     const notice = {
       eventType: 'compact_boundary' as const,
@@ -926,6 +1046,59 @@ describe('a reconnect snapshot', () => {
         thinkingTail: '子 Agent 的思考',
         textTail: '',
       });
+    });
+
+    it('leaves the speech tool out and follows its call to the end', () => {
+      reset();
+      setWorkspace('proactive', 'activity');
+      useChatStore.getState().handleRunStarted(JID, RUN);
+      const row = (title: string, toolUseId: string) => ({
+        id: `${title}-${toolUseId}`,
+        timestamp: 1,
+        kind: 'tool' as const,
+        title,
+        toolUseId,
+      });
+      useChatStore.getState().handleStreamSnapshot(
+        JID,
+        snapshot({
+          activeTools: [
+            {
+              toolName: SPEECH_TOOL_NAME,
+              toolUseId: 'say-1',
+              startTime: Date.now(),
+            },
+            {
+              toolName: 'Bash',
+              toolUseId: 't2',
+              startTime: Date.now(),
+              toolInputSummary: 'ls',
+            },
+          ],
+          traceEvents: [
+            row('工具 Read', 't1'),
+            row('工具 Bash', 't2'),
+            row(`工具 ${SPEECH_TOOL_NAME}`, 'say-1'),
+          ],
+        }),
+        undefined,
+        RUN,
+      );
+      expect(live().activeTools.map((t) => t.toolName)).toEqual(['Bash']);
+      expect(live().traceEvents.map((r) => r.title)).toEqual([
+        '工具 Read',
+        '工具 Bash',
+      ]);
+      expect(live().steps!.map((s) => s.toolName ?? s.kind)).not.toContain(
+        SPEECH_TOOL_NAME,
+      );
+      // The rest of that call arrives with only its id.
+      emit({ eventType: 'tool_result', toolUseId: 'say-1' });
+      emit({ eventType: 'tool_use_end', toolUseId: 'say-1' });
+      expect(live().traceEvents.map((r) => r.title)).toEqual([
+        '工具 Read',
+        '工具 Bash',
+      ]);
     });
 
     it('leaves an Assistant workspace snapshot whole', () => {

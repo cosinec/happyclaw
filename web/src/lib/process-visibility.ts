@@ -57,6 +57,60 @@ const ACTIVITY_EVENTS = new Set<string>([
   'compact_boundary',
 ]);
 
+/**
+ * The tool a proactive turn speaks through. Calling it is the reply itself,
+ * not work the owner watches, so the process leaves it out: it is not the
+ * "latest tool", and it does not count among the tools used.
+ */
+export const SPEECH_TOOL_NAME = 'mcp__happyclaw__send_message';
+
+/** The part of a trace row the speech tool is told apart by. */
+interface TraceRowLike {
+  title: string;
+  toolUseId?: string;
+}
+
+/**
+ * Whether the event is one of the speech tool's: its start names the tool,
+ * the rest (progress, result, end) carry only the id of the call.
+ */
+export function isSpeechToolEvent(
+  event: Pick<StreamEvent, 'eventType' | 'toolName' | 'toolUseId'>,
+  knownCalls: ReadonlySet<string>,
+): boolean {
+  if (!event.eventType.startsWith('tool_')) return false;
+  if (event.toolName === SPEECH_TOOL_NAME) return true;
+  return !!event.toolUseId && knownCalls.has(event.toolUseId);
+}
+
+/** The ids of the speech tool's calls in a trace; its rows name the tool. */
+export function speechToolCallsIn(
+  rows: ReadonlyArray<TraceRowLike>,
+): Set<string> {
+  const calls = new Set<string>();
+  for (const row of rows) {
+    if (row.toolUseId && row.title.includes(SPEECH_TOOL_NAME)) {
+      calls.add(row.toolUseId);
+    }
+  }
+  return calls;
+}
+
+/**
+ * A proactive turn's trace without the speech tool's rows (start, progress,
+ * result, end), as the live view leaves them out, so "used N tools" reads the
+ * same live and after a reload. A trace without any is returned as it is.
+ */
+export function withoutSpeechTool<T extends TraceRowLike>(rows: T[]): T[] {
+  const calls = speechToolCallsIn(rows);
+  const kept = rows.filter(
+    (row) =>
+      !row.title.includes(SPEECH_TOOL_NAME) &&
+      !(row.toolUseId && calls.has(row.toolUseId)),
+  );
+  return kept.length === rows.length ? rows : kept;
+}
+
 /** What a sub-agent was asked and what it answered are model text. */
 function withoutWorkflowPreviews(
   run: WorkflowRunSnapshot,
