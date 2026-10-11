@@ -705,6 +705,12 @@ async function runScenario(ctx, { label, interaction, visibility, expect }) {
           t.trace.some((x) => /Bash/.test(x.title || '')),
         JSON.stringify(t.trace)?.slice(0, 200),
       );
+      check(
+        label,
+        "a tool's progress is folded into its own row, as in the live view",
+        !t.trace.some((x) => /^工具进度/.test(x.title || '')),
+        JSON.stringify(t.trace.map((x) => x.title)),
+      );
       const rowsJson = JSON.stringify(t.trace);
       check(
         label,
