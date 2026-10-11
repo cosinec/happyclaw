@@ -2996,8 +2996,10 @@ async function runQueryAttempt(
       skills:
         containerInput.skillManifest?.selectedSkillIds ?? ('all' as const),
       includePartialMessages: true,
-      // Forward sub-agent (Agent tool, legacy name Task) text/thinking as
-      // stream events so the card's sub-agent transcript lights up live
+      // Forward sub-agent (Agent tool, legacy name Task) text/thinking. The SDK
+      // delivers them as complete assistant/user messages carrying
+      // parent_tool_use_id, one per finished content block, not as token-level
+      // stream events: the card's sub-agent transcript advances block by block
       // instead of only filling in when the subagent completes.
       forwardSubagentText: true,
       ...(Object.keys(flagSettings).length > 0
