@@ -501,6 +501,40 @@ describe('ProcessPanel', () => {
     expect(html).not.toContain('data-hc-step-timeline');
   });
 
+  it('does not call a shell command, a monitor or an MCP call a sub-agent', () => {
+    // The SDK registers a long-running Bash command as a task of its own; the
+    // phase already says "正在运行命令", so it must not also count as an agent.
+    const runningTask = (id: string) =>
+      step({ id: `task-${id}`, kind: 'task', taskId: id, status: 'running' });
+    const nonAgents: Record<string, StreamingTaskRuntimeState> = {
+      'sh-1': { ...task, id: 'sh-1', taskType: 'local_bash' },
+      'mon-1': { ...task, id: 'mon-1', taskType: 'monitor' },
+      'mcp-1': { ...task, id: 'mcp-1', taskType: 'mcp_task' },
+    };
+    const baseSteps = (streaming.steps ?? []).filter(
+      (item) => item.kind !== 'task',
+    );
+    const onlyShell: StreamingState = {
+      ...streaming,
+      steps: [...baseSteps, ...Object.keys(nonAgents).map(runningTask)],
+      taskStates: nonAgents,
+    };
+    expect(summarizeProcess(onlyShell, 12).headline).toBe('正在运行命令 · 12s');
+
+    // A real sub-agent beside them is still counted, once.
+    const withAgent: StreamingState = {
+      ...onlyShell,
+      steps: [...(onlyShell.steps ?? []), runningTask('task-1')],
+      taskStates: {
+        ...nonAgents,
+        'task-1': { ...task, taskType: 'local_agent' },
+      },
+    };
+    expect(summarizeProcess(withAgent, 12).headline).toBe(
+      '正在运行命令 · 1 个子 Agent 运行中 · 12s',
+    );
+  });
+
   it('never shows the reply text or the reasoning text of the state it is given', () => {
     for (const visibility of ['activity', 'full'] as const) {
       const html = renderToStaticMarkup(

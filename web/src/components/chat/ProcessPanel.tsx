@@ -13,6 +13,13 @@ import { describeToolCall } from './ToolActivityCard';
 /** The most of a tool's parameter the summary line keeps. */
 const RECENT_PARAM_CHARS = 36;
 
+/** SDK task types that are not an agent (SDK `task_type` of the task events). */
+const NON_AGENT_TASK_TYPES: ReadonlySet<string> = new Set([
+  'local_bash',
+  'monitor',
+  'mcp_task',
+]);
+
 export interface ProcessSummary {
   /** What the turn is doing, how many sub-agents are at work, how long it ran. */
   headline: string;
@@ -30,9 +37,16 @@ export function summarizeProcess(
 ): ProcessSummary {
   const parts = [describeRunPhase(streaming, false)];
   const steps = streaming.steps ?? [];
-  const agents = steps.filter(
-    (step) => step.kind === 'task' && step.status === 'running',
-  ).length;
+  // A task of unknown kind counts as an agent; a shell command, a monitor or an
+  // MCP call that the SDK registered as a task does not (the phase already
+  // says it is running a command).
+  const agents = steps.filter((step) => {
+    if (step.kind !== 'task' || step.status !== 'running') return false;
+    const type = step.taskId
+      ? streaming.taskStates[step.taskId]?.taskType
+      : undefined;
+    return !type || !NON_AGENT_TASK_TYPES.has(type);
+  }).length;
   if (agents > 0) parts.push(`${agents} 个子 Agent 运行中`);
   if (elapsedSeconds != null) parts.push(formatRunElapsed(elapsedSeconds));
   const lastTool = [...steps]
