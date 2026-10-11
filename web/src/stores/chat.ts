@@ -97,6 +97,8 @@ export interface Message {
   token_usage?: string;
   workflow_runs?: import('../stream-event.types').WorkflowRunSnapshot[];
   turn_id?: string | null;
+  /** The turn kept its reasoning and execution trace on the server. */
+  has_trace?: boolean;
   session_id?: string | null;
   sdk_message_uuid?: string | null;
   source_kind?:
@@ -246,6 +248,15 @@ export interface StreamSnapshotData {
   turnId?: string;
 }
 
+/** What the server kept of one turn's reasoning and execution (GET turn-traces). */
+interface TurnTraceResponse {
+  turn_id: string;
+  thinking?: string | null;
+  thinking_duration_ms?: number | null;
+  trace?: StreamingTraceEvent[] | null;
+  created_at?: string;
+}
+
 export interface ActiveRunSnapshotData {
   chatJid: string;
   runId: string;
@@ -367,6 +378,7 @@ export function mergeMessagesChronologically(
       JSON.stringify(old.workflow_runs ?? []) !==
         JSON.stringify(next.workflow_runs ?? []) ||
       old.turn_id !== next.turn_id ||
+      old.has_trace !== next.has_trace ||
       old.session_id !== next.session_id ||
       old.sdk_message_uuid !== next.sdk_message_uuid ||
       old.source_kind !== next.source_kind ||
@@ -879,6 +891,12 @@ interface ChatState {
    * final message id, so the reply keeps its collapsed "执行详情".
    */
   traceCache: Record<string, StreamingTraceEvent[]>;
+  /**
+   * A message whose reasoning and trace the server kept but this tab has not
+   * loaded: `loading` while asked, `failed` to try again on the next ask,
+   * `empty` when the server had nothing (or no longer shows it).
+   */
+  turnTraceStatus: Record<string, 'loading' | 'failed' | 'empty'>;
   /** Stop requested for a runtime JID (ms); the run shows "正在停止…". */
   stopRequests: Record<string, number>;
   /**
@@ -966,6 +984,13 @@ interface ChatState {
     jid: string,
     options?: { unbindChannels?: boolean },
   ) => Promise<void>;
+  /**
+   * Load the reasoning and execution trace the server kept of a finished
+   * turn into the caches the message renders from. Quiet on failure.
+   */
+  loadTurnTrace: (
+    message: Pick<Message, 'id' | 'chat_jid' | 'turn_id'>,
+  ) => Promise<boolean>;
   handleStreamEvent: (
     chatJid: string,
     event: StreamEvent,
@@ -2575,6 +2600,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   thinkingCache: {},
   thinkingDurationCache: {},
   traceCache: {},
+  turnTraceStatus: {},
   stopRequests: {},
   settledStreaming: {},
   pendingThinking: {},
@@ -3226,6 +3252,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             { ...nextAgentMessages, ...nextMessages },
             s.traceCache,
           ),
+          turnTraceStatus: retainThinkingCacheForMessages(
+            { ...nextAgentMessages, ...nextMessages },
+            s.turnTraceStatus,
+          ),
           agents: nextAgents,
           pendingMessageUsage: clearPendingMessageUsage(
             s.pendingMessageUsage,
@@ -3575,6 +3605,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             { ...s.agentMessages, ...nextMessages },
             s.traceCache,
           ),
+          turnTraceStatus: retainThinkingCacheForMessages(
+            { ...s.agentMessages, ...nextMessages },
+            s.turnTraceStatus,
+          ),
           currentGroup: nextCurrent,
           error: null,
         };
@@ -3614,6 +3648,85 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   // 处理流式事件
+  loadTurnTrace: async (message) => {
+    const { id, chat_jid: jid, turn_id: turnId } = message;
+    if (!turnId) return false;
+    const current = get();
+    if (current.turnTraceStatus[id] === 'loading') return false;
+    if (
+      current.thinkingCache[id] !== undefined ||
+      current.thinkingDurationCache[id] !== undefined ||
+      current.traceCache[id] !== undefined
+    ) {
+      return true;
+    }
+    set((s) => ({
+      turnTraceStatus: { ...s.turnTraceStatus, [id]: 'loading' },
+    }));
+    try {
+      const data = await api.get<TurnTraceResponse>(
+        `/api/groups/${encodeURIComponent(jid)}/turn-traces/${encodeURIComponent(turnId)}`,
+      );
+      const thinking = capThinkingText(data.thinking || '');
+      const duration = data.thinking_duration_ms ?? undefined;
+      const trace = (Array.isArray(data.trace) ? data.trace : [])
+        .filter(isUserVisibleTraceEvent)
+        .slice(-MAX_CACHED_TRACE_EVENTS);
+      const keepsDuration =
+        duration !== undefined &&
+        Number.isFinite(duration) &&
+        duration > 0 &&
+        (!!thinking || duration >= 1000);
+      set((s) => {
+        const status = { ...s.turnTraceStatus };
+        if (!thinking && !keepsDuration && trace.length === 0) {
+          status[id] = 'empty';
+        } else {
+          delete status[id];
+        }
+        return {
+          turnTraceStatus: capThinkingCache(status),
+          ...(thinking
+            ? {
+                thinkingCache: capThinkingCache({
+                  ...s.thinkingCache,
+                  [id]: thinking,
+                }),
+              }
+            : {}),
+          ...(keepsDuration
+            ? {
+                thinkingDurationCache: capThinkingCache({
+                  ...s.thinkingDurationCache,
+                  [id]: duration,
+                }),
+              }
+            : {}),
+          ...(trace.length > 0
+            ? {
+                traceCache: capThinkingCache({
+                  ...s.traceCache,
+                  [id]: trace,
+                }),
+              }
+            : {}),
+        };
+      });
+      return true;
+    } catch (err) {
+      // A turn the server no longer shows (its owner hid the process) is
+      // nothing to load; anything else may work on the next ask.
+      const gone = (err as { status?: number } | null)?.status === 404;
+      set((s) => ({
+        turnTraceStatus: {
+          ...s.turnTraceStatus,
+          [id]: gone ? 'empty' : 'failed',
+        },
+      }));
+      return false;
+    }
+  },
+
   handleStreamEvent: (chatJid, event, agentId, runId) => {
     // Skip while clearHistory is in-flight
     if (get().clearing[chatJid]) return;

@@ -17,16 +17,23 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { IconButton } from '../common/IconButton';
 import { cn } from '@/lib/utils';
-import type { Message, StreamingTraceEvent } from '../../stores/chat';
+import {
+  useChatStore,
+  type Message,
+  type StreamingTraceEvent,
+} from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { EmojiAvatar } from '../common/EmojiAvatar';
 import { FinalMarkdown } from './StreamingMarkdown';
 import { PermissionAlert, TracePanel } from './ExecutionTrace';
 import { ThinkingBlock } from './ThinkingBlock';
+import { LazyTurnTrace } from './LazyTurnTrace';
 import { MessageContextMenu } from './MessageContextMenu';
 import { ImageLightbox } from './ImageLightbox';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
 import { extractThinkingTitle } from '../../lib/thinking-text';
+import { normalizeInteractionMode } from '../../lib/interaction-mode';
+import { normalizeProcessVisibility } from '../../lib/process-visibility';
 import { resolveAgentDisplayIdentity } from '../../utils/agent-identity';
 import {
   getPresentedMessageContent,
@@ -246,6 +253,26 @@ export const MessageBubble = memo(
     );
     // Reasoning without a summary still says how long the model thought.
     const hasReasoning = !!thinkingContent || (thinkingDurationMs ?? 0) >= 1000;
+    // What the server kept of a turn this tab did not stream, shown as the
+    // same rows and loaded when one is opened. A proactive workspace shows
+    // only what its owner chose: nothing when hidden, no reasoning text at
+    // the activity level.
+    const [openOnLoad, setOpenOnLoad] = useState<'thinking' | 'trace' | null>(
+      null,
+    );
+    const process = useChatStore((s) => {
+      const group = s.groups[message.chat_jid.replace(/#agent:.*$/, '')];
+      return normalizeInteractionMode(group?.interaction_mode) === 'proactive'
+        ? normalizeProcessVisibility(group?.process_visibility)
+        : 'full';
+    });
+    const traceOnServer =
+      message.is_from_me &&
+      !!message.has_trace &&
+      !!message.turn_id &&
+      process !== 'hidden' &&
+      !hasReasoning &&
+      !(traceEvents && traceEvents.length > 0);
     const isUser = !message.is_from_me;
     const presentedContent = getPresentedMessageContent(message);
     const completedWorkflowRuns = message.workflow_runs?.filter(
@@ -294,7 +321,11 @@ export const MessageBubble = memo(
     const executionTrace = traceEvents && traceEvents.length > 0 && (
       <>
         <PermissionAlert traceEvents={traceEvents} />
-        <TracePanel traceEvents={traceEvents} taskCount={0} />
+        <TracePanel
+          traceEvents={traceEvents}
+          taskCount={0}
+          defaultExpanded={openOnLoad === 'trace'}
+        />
       </>
     );
 
@@ -541,6 +572,14 @@ export const MessageBubble = memo(
               title={thinkingTitle}
               durationMs={thinkingDurationMs}
               groupJid={markdownJid}
+              defaultExpanded={openOnLoad === 'thinking'}
+            />
+          )}
+          {traceOnServer && (
+            <LazyTurnTrace
+              message={message}
+              reasoning={process === 'full'}
+              onRequest={setOpenOnLoad}
             />
           )}
 
@@ -657,6 +696,14 @@ export const MessageBubble = memo(
               title={thinkingTitle}
               durationMs={thinkingDurationMs}
               groupJid={markdownJid}
+              defaultExpanded={openOnLoad === 'thinking'}
+            />
+          )}
+          {traceOnServer && (
+            <LazyTurnTrace
+              message={message}
+              reasoning={process === 'full'}
+              onRequest={setOpenOnLoad}
             />
           )}
 
@@ -727,6 +774,8 @@ export const MessageBubble = memo(
     prev.message.attachments === next.message.attachments &&
     prev.message.workflow_runs === next.message.workflow_runs &&
     prev.message.source_kind === next.message.source_kind &&
+    prev.message.has_trace === next.message.has_trace &&
+    prev.message.turn_id === next.message.turn_id &&
     prev.message.finalization_reason === next.message.finalization_reason &&
     prev.message.timestamp === next.message.timestamp &&
     prev.message.delivery_updated_at === next.message.delivery_updated_at &&

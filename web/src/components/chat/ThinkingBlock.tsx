@@ -56,6 +56,7 @@ export function ThinkingBody({
       id={id}
       ref={scrollRef}
       onScroll={handleScroll}
+      data-hc-thinking-body=""
       className={cn(BODY_CLASS, className)}
     >
       {live ? (
