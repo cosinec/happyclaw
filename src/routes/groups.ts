@@ -80,8 +80,9 @@ import {
   getWorkspaceInteractionMode,
   setWorkspaceInteractionMode,
   getUserById,
-  getSessionModelSelection,
+  getSessionModelSelectionDetail,
   setSessionModelSelection,
+  type SessionModelSelectionDetail,
 } from '../db.js';
 import { releaseOwner, persistGroupUpdate } from '../group-owner.js';
 import { logger } from '../logger.js';
@@ -99,6 +100,17 @@ import {
   saveContainerEnvConfig,
   toPublicContainerEnvConfig,
 } from '../runtime-config.js';
+import { resolveAgentSdkEffort } from '../agent-effort.js';
+import { updateLiveSessionEffort } from '../codex-gateway/runner-tokens.js';
+import { maybeRefreshCodexProviderCatalog } from '../codex-gateway/model-catalog-sync.js';
+import { hasPermission } from '../permissions.js';
+import {
+  buildCodexSelectionView,
+  chatGptDefaultModel,
+  readStoredChoice,
+  validateSessionChoice,
+  type CodexSelectionView,
+} from '../session-model-overrides.js';
 import { clearTargetAgentBindingsForDeletedAgents } from '../im-context-isolation.js';
 import { getChannelType } from '../im-channel.js';
 import { buildUnmountUpdate } from '../channel-mount-service.js';
@@ -2198,14 +2210,17 @@ function resolveSessionModelSelectionScope(
 function buildSessionModelSelectionPayload(
   group: RegisteredGroup,
   agentId: string | null,
+  chooser: AuthUser,
 ) {
   const providers = getProviders();
   const exists = (id: string | null | undefined): id is string =>
     !!id && providers.some((provider) => provider.id === id);
-  const stored = getSessionModelSelection(group.folder, agentId);
+  const stored = getSessionModelSelectionDetail(group.folder, agentId);
   const profile = peekAgentProfileForWorkspace(group.folder, group.created_by);
   const enabled = providers.filter((provider) => provider.enabled);
   const envOverride = getContainerEnvConfig(group.folder);
+  const canExceedCeiling = hasPermission(chooser, 'manage_system_config');
+  const agentEffort = resolveAgentSdkEffort(profile?.runtime_policy);
 
   let defaultSource: 'agent' | 'single' | 'pool' | 'workspace_env' | 'none';
   let defaultModelConfigId: string | null = null;
@@ -2225,14 +2240,9 @@ function buildSessionModelSelectionPayload(
     defaultSource = enabled.length > 1 ? 'pool' : 'none';
   }
 
-  return {
-    selectedModelConfigId: exists(stored) ? stored : null,
-    default: {
-      source: defaultSource,
-      modelConfigId: defaultModelConfigId,
-      enabledCount: enabled.length,
-    },
-    options: providers.map((provider) => ({
+  const codexViews = new Map<string, CodexSelectionView>();
+  const options = providers.map((provider) => {
+    const option = {
       id: provider.id,
       name: provider.name,
       kind: provider.codexOAuthCredentials ? ('codex' as const) : provider.type,
@@ -2241,8 +2251,101 @@ function buildSessionModelSelectionPayload(
       // A configuration without a credential (e.g. an old copy that lost its
       // key) would fail every turn; the picker shows it but cannot pick it.
       usable: providerHasCredentials(provider),
-    })),
+    };
+    if (!provider.codexOAuthCredentials) return option;
+    // The list is the account's own once its catalog has been fetched; ask for
+    // a fresher one without making the picker wait for it.
+    maybeRefreshCodexProviderCatalog(provider.id, {
+      accountId: provider.codexOAuthCredentials.accountId,
+    });
+    const codex = buildCodexSelectionView(provider, {
+      canExceedCeiling,
+      agentEffort,
+    });
+    codexViews.set(provider.id, codex);
+    return { ...option, codex };
+  });
+
+  const selectedModelConfigId = exists(stored?.modelConfigId)
+    ? stored.modelConfigId
+    : null;
+  const view = selectedModelConfigId
+    ? codexViews.get(selectedModelConfigId)
+    : undefined;
+  // A stored model or effort the catalog or the chooser's permission no longer
+  // backs reads as unset, exactly as a runner launch would treat it.
+  const selected =
+    stored && view
+      ? readStoredChoice(view, stored, canExceedCeiling)
+      : { model: null, effort: null };
+
+  return {
+    selectedModelConfigId,
+    selectedModel: selected.model,
+    selectedEffort: selected.effort,
+    default: {
+      source: defaultSource,
+      modelConfigId: defaultModelConfigId,
+      enabledCount: enabled.length,
+    },
+    options,
   };
+}
+
+/**
+ * What the runners of a conversation must do about a change of its choice.
+ *
+ * A different configuration or model starts a new SDK session on the next
+ * message, so the warm runner is retired (one already on the chosen
+ * configuration is spared only when no model is involved). A different effort
+ * needs no restart at all: the gateway reads it per request, so the live
+ * runners of the chosen configuration are pointed at it and keep running.
+ * Choosing nothing new does nothing.
+ */
+function applySessionChoiceChange(
+  deps: NonNullable<ReturnType<typeof getWebDeps>>,
+  group: RegisteredGroup,
+  agentId: string | null,
+  jid: string,
+  previous: SessionModelSelectionDetail | null,
+  next: {
+    modelConfigId: string | null;
+    model: string | null;
+    effort: string | null;
+  },
+): { drained: number; liveUpdated: number } {
+  const providers = getProviders();
+  // The model a configuration actually runs: its pick, else its own.
+  const launchKey = (
+    choice: { modelConfigId: string | null; model: string | null } | null,
+  ): string => {
+    if (!choice?.modelConfigId) return '';
+    const provider = providers.find((item) => item.id === choice.modelConfigId);
+    const model = provider?.codexOAuthCredentials
+      ? (choice.model ?? chatGptDefaultModel(provider))
+      : '';
+    return `${choice.modelConfigId}\u0000${model}`;
+  };
+  let drained = 0;
+  if (launchKey(previous) !== launchKey(next)) {
+    const target = previous?.model || next.model ? null : next.modelConfigId;
+    drained = deps.queue.drainRunnersForModelSelection(
+      agentId ? [`${jid}#agent:${agentId}`] : getJidsByFolder(group.folder),
+      target,
+    );
+  }
+  let liveUpdated = 0;
+  if ((previous?.effort ?? null) !== next.effort) {
+    liveUpdated = updateLiveSessionEffort(
+      {
+        groupFolder: group.folder,
+        sessionAgentId: agentId,
+        providerId: next.modelConfigId ?? undefined,
+      },
+      next.effort ?? undefined,
+    );
+  }
+  return { drained, liveUpdated };
 }
 
 // GET /api/groups/:jid/model-selection?agentId= - 读取会话模型选择
@@ -2253,10 +2356,16 @@ groupRoutes.get('/:jid/model-selection', authMiddleware, (c) => {
     false,
   );
   if ('error' in scope) return scope.error;
-  return c.json(buildSessionModelSelectionPayload(scope.group, scope.agentId));
+  return c.json(
+    buildSessionModelSelectionPayload(
+      scope.group,
+      scope.agentId,
+      c.get('user') as AuthUser,
+    ),
+  );
 });
 
-// PUT /api/groups/:jid/model-selection - 切换会话模型（null 恢复默认）
+// PUT /api/groups/:jid/model-selection - 切换会话模型/推理档位（null 恢复默认）
 groupRoutes.put('/:jid/model-selection', authMiddleware, async (c) => {
   const deps = getWebDeps();
   if (!deps) return c.json({ error: 'Server not initialized' }, 500);
@@ -2269,7 +2378,12 @@ groupRoutes.put('/:jid/model-selection', authMiddleware, async (c) => {
   const scope = resolveSessionModelSelectionScope(c, parsed.data.agentId, true);
   if ('error' in scope) return scope.error;
   const { group, agentId } = scope;
+  const authUser = c.get('user') as AuthUser;
   const modelConfigId = parsed.data.modelConfigId;
+  const requestedModel = parsed.data.model || null;
+  const requestedEffort = parsed.data.effort || null;
+  let model: string | null = null;
+  let effort: string | null = null;
   if (modelConfigId) {
     const target = getProviders().find(
       (provider) => provider.id === modelConfigId,
@@ -2281,36 +2395,60 @@ groupRoutes.put('/:jid/model-selection', authMiddleware, async (c) => {
         400,
       );
     }
+    if (requestedModel || requestedEffort) {
+      const checked = validateSessionChoice(
+        target,
+        { model: requestedModel, effort: requestedEffort },
+        authUser,
+      );
+      if (!checked.ok) return c.json(checked.rejection, 400);
+      ({ model, effort } = checked);
+    }
+  } else if (requestedModel || requestedEffort) {
+    return c.json(
+      {
+        error: '选择模型或推理档位时需要同时指定模型配置',
+        code: 'MODEL_CONFIG_REQUIRED',
+      },
+      400,
+    );
   }
 
-  const authUser = c.get('user') as AuthUser;
   const jid = c.req.param('jid');
-  const previous = getSessionModelSelection(group.folder, agentId);
-  setSessionModelSelection(group.folder, agentId, modelConfigId, authUser.id);
+  const previous = getSessionModelSelectionDetail(group.folder, agentId);
+  setSessionModelSelection(group.folder, agentId, modelConfigId, authUser.id, {
+    model,
+    effort,
+  });
 
   // A warm runner keeps the provider environment it was spawned with; retire
   // it so the next message of this conversation starts on the new selection.
-  const drained =
-    previous === modelConfigId
-      ? 0
-      : deps.queue.drainRunnersForModelSelection(
-          agentId ? [`${jid}#agent:${agentId}`] : getJidsByFolder(group.folder),
-          modelConfigId,
-        );
+  const { drained, liveUpdated } = applySessionChoiceChange(
+    deps,
+    group,
+    agentId,
+    jid,
+    previous,
+    { modelConfigId, model, effort },
+  );
   logger.info(
     {
       jid,
       folder: group.folder,
       agentId,
-      previous,
+      previous: previous?.modelConfigId ?? null,
       modelConfigId,
+      model,
+      effort,
       drained,
+      liveUpdated,
     },
     'Session model selection updated',
   );
   return c.json({
-    ...buildSessionModelSelectionPayload(group, agentId),
+    ...buildSessionModelSelectionPayload(group, agentId, authUser),
     drained,
+    liveUpdated,
   });
 });
 

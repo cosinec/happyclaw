@@ -84,7 +84,7 @@ Public：
 - `POST /api/groups/:jid/stop`
 - `POST /api/groups/:jid/interrupt`
 - `POST /api/groups/:jid/reset-session`
-- `GET|PUT /api/groups/:jid/model-selection`，聊天输入框的会话级模型选择
+- `GET|PUT /api/groups/:jid/model-selection`，聊天输入框的会话级模型与推理档位选择
 - `POST /api/groups/:jid/clear-history`，重建工作区内容：永久清除聊天、
   Runtime Session、子对话、工作目录及 Workspace Memory（含版本历史和
   Home Owner Profile），关联定时任务停止并移入回收站；保留工作区外壳、
@@ -104,6 +104,31 @@ Public：
 PUT 的 `modelConfigId` 为 `null` 时恢复默认。会话选择优先于智能体绑定的模型配置，
 可以选择未启用的配置；切换后该会话的暖 Runner 在当前轮次结束后退出，下一条消息
 使用新配置。
+
+ChatGPT 订阅配置（`kind: "codex"`）还可以在配置内选择具体模型与推理档位。GET 为
+这类选项增加 `codex`：`defaultModel`（配置自己的模型）、`defaultEffort`（不选档位时
+实际使用的档位，Agent 显式档位优先，其次是配置档位，按模型目录钳制）、`source`
+（`live` 为该账号自己的目录，其余为兜底目录）、`needsReauth`，以及
+`models[]`（`value`、`label`、`efforts`、`defaultEffort`）。`models` 来自该账号的
+实时目录并按套餐过滤，同步读取、后台刷新，不等待网络；`efforts` 按 low 到 ultra
+排序，只含当前用户可以选择的档位。响应顶层另有 `selectedModel`、`selectedEffort`：
+已存的选择若不再被目录或当前用户权限支持，按未选择返回，与 Runner 启动时的处理
+一致。其他类型的选项形状不变，旧客户端不受影响。
+
+PUT 可以携带 `model`、`effort`，请求整体替换该会话的选择：只写 `modelConfigId`
+会清掉之前的模型和档位，换配置也不会继承旧配置的模型。`model` 必须在该账号当前
+目录内，`effort` 必须在（所选或配置自己的）模型的 `efforts` 内，且 `model` 与
+`effort` 只能用于 ChatGPT 订阅配置，并要同时给出 `modelConfigId`；否则返回 400 与
+`code`：`MODEL_UNAVAILABLE`、`EFFORT_UNSUPPORTED`、`EFFORT_RESTRICTED`、
+`MODEL_SELECTION_UNSUPPORTED`、`MODEL_CONFIG_REQUIRED`。高于 `max` 的档位（目前是
+`ultra`）只允许具备 `manage_system_config` 的用户选择，GET 不列出，PUT 返回
+`EFFORT_RESTRICTED`，Runner 启动时若选择者已失去该权限则回到默认档；放宽只需改
+`CODEX_SESSION_EFFORT_CEILING`。响应附带 `drained`（被退出的暖 Runner 数）与
+`liveUpdated`（被就地改档的存活网关授权数）。
+
+换配置或换模型会让下一条消息在新的底层会话上开始，并带上最近的对话记录（加密推理只对
+签发它的模型有效）；只改档位不会，存活 Runner 的下一个上游请求就使用新档位。
+选择的 (配置, 模型, 档位) 都没变时不退出任何 Runner。
 
 `POST /api/messages` 可以携带 Web 附件和 Runtime Session 标识。`/clear` 与
 `/fresh` 会进入与 `reset-session` 相同的 owner 级破坏性检查。`/fresh` 会开启

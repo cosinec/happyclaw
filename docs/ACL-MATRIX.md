@@ -106,7 +106,8 @@ Host Workspace 在 Access 之外还要求 admin。
 
 - 重命名、切换 Agent、修改执行方式
 - stop、interrupt、reset-session、clear-history
-- 切换会话模型（`PUT /api/groups/:jid/model-selection`）
+- 切换会话模型与推理档位（`PUT /api/groups/:jid/model-selection`）；其中高于 `max` 的
+  推理档位（目前是 `ultra`）另需 `manage_system_config`
 - 创建、修改、删除 Runtime Session
 - 写入工作区 Skills/MCP
 - 修改群聊绑定、激活方式、响应对象和 owner
