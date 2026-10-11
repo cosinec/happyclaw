@@ -228,6 +228,9 @@ import {
   getSessionAgentIdentity,
   getAgentProfileForWorkspace,
   getWorkspaceInteractionMode,
+  getWorkspaceProcessVisibility,
+  getLastAgentMessageIdForTurn,
+  pruneOrphanTurnTraces,
   getSessionInteractionMode,
   setSessionInteractionMode,
   listAgentsByJid,
@@ -379,10 +382,12 @@ import {
   PROACTIVE_TAIL_INTERRUPTION_NOTICE,
   buildInteractionTextOutboxPayload,
   isProactiveControlPlaneSuccess,
+  projectProgressStatusForWeb,
+  projectSdkStreamEventForWeb,
   publishesFrameworkAnswer,
   resolveFrozenIpcInteractionMode,
   resolveRuntimeInteractionMode,
-  shouldBroadcastSdkStreamEvent,
+  shouldBroadcastTaskAgentStatus,
   shouldResolveFrameworkPrimaryAnswer,
   shouldSendProactiveTailInterruptionNotice,
   usesNativeMessagePresentation,
@@ -574,6 +579,7 @@ import {
 } from './billing.js';
 import { recordUsageEvent } from './usage-service.js';
 import { InputUsageProjection } from './input-usage-projection.js';
+import { TurnTraceTracker } from './turn-trace.js';
 import {
   AgentProfile,
   ChannelMessageMeta,
@@ -582,6 +588,7 @@ import {
   NewMessage,
   RegisteredGroup,
   InteractionMode,
+  ProcessVisibility,
   StreamEvent,
   SubAgent,
   ChannelAccount,
@@ -6119,6 +6126,13 @@ interface SendMessageOptions {
   source?: string;
   /** Completed Claude Code Workflow snapshots associated with this reply. */
   workflowRuns?: NonNullable<StreamEvent['workflowRun']>[];
+  /**
+   * Store the thinking summary and execution trace collected for the turn this
+   * message belongs to (turn_traces), before the message is announced so the
+   * announcement can say `has_trace`. `keep` retains the collected trace for a
+   * later message of the same held reply sequence.
+   */
+  turnTrace?: { tracker: TurnTraceTracker; inputId: string; keep?: boolean };
   /** Metadata used to preserve Claude SDK turn semantics for persisted messages. */
   messageMeta?: {
     turnId?: string;
@@ -7868,6 +7882,30 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   >();
   let streamingAccumulatedText = '';
   let streamingAccumulatedThinking = '';
+  // How much of a proactive turn's process the Web shows. Read where it
+  // matters, never cached: PATCH /api/groups/:jid changes it while this run is
+  // alive, without a runtime restart. Assistant workspaces show everything.
+  const resolveProcessVisibility = (): ProcessVisibility =>
+    interactionMode === 'proactive'
+      ? getWorkspaceProcessVisibility(effectiveGroup.folder)
+      : 'full';
+  // Collects each turn's thinking summary and trace; stored when it settles.
+  const turnTraces = new TurnTraceTracker({
+    mode: interactionMode,
+    getVisibility: resolveProcessVisibility,
+  });
+  // A proactive turn has no single SDK reply to carry its trace. Hang it on the
+  // chat(s) its utterances were stored under, once the turn is complete.
+  const persistProactiveTurnTrace = (inputId: string): void => {
+    const chatJids = new Set<string>([chatJid]);
+    const bound = resolveIpcOutputWorkspaceJid(chatJid);
+    if (bound) chatJids.add(bound);
+    for (const jid of chatJids) {
+      if (!getLastAgentMessageIdForTurn(jid, inputId)) continue;
+      turnTraces.persist({ chatJid: jid, inputId, keep: true });
+    }
+    turnTraces.discard(inputId);
+  };
   let streamInterrupted = false;
   let streamSteered = false;
   let runnerClosedBySteer = false;
@@ -7911,6 +7949,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     await sendMessage(chatJid, joined, {
       sendToIM: false,
       tokenUsage: inputUsageProjection.snapshot(tid),
+      turnTrace: { tracker: turnTraces, inputId: tid },
       messageMeta: {
         turnId: tid,
         sessionId: activeSessionId,
@@ -8014,16 +8053,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             `🔄 ${text.replace(/\s+/g, ' ').slice(0, 80)}`,
           );
         }
-        broadcastStreamEvent(chatJid, {
-          eventType: 'status',
-          agentScope: 'system',
-          statusText: text.slice(0, 160),
-          summary: text.slice(0, 500),
-          isSynthetic: true,
-          displayLevel: 'primary',
-          turnId: inputTurnId,
-          sessionId: activeSessionId,
-        });
+        const progressStatus = projectProgressStatusForWeb(
+          interactionMode,
+          resolveProcessVisibility(),
+          text,
+          { turnId: inputTurnId, sessionId: activeSessionId },
+        );
+        if (progressStatus) broadcastStreamEvent(chatJid, progressStatus);
         return true;
       },
       onFinalCandidate: (text) => {
@@ -8974,16 +9010,25 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               streamingAccumulatedText = answerProjection.visibleAnswerText;
             }
 
-            if (
-              shouldBroadcastSdkStreamEvent(interactionMode, result.streamEvent)
-            ) {
+            // The turn's process is kept for turn_traces whatever the Web is
+            // shown live; the tracker applies the mode's own limits.
+            turnTraces.observe(
+              resolveContainerOutputInputTurnId(result, lastProcessed.id),
+              result.streamEvent,
+            );
+            const webStreamEvent = projectSdkStreamEventForWeb(
+              interactionMode,
+              resolveProcessVisibility(),
+              result.streamEvent,
+            );
+            if (webStreamEvent) {
               if (
-                result.streamEvent.eventType !== 'usage' ||
+                webStreamEvent.eventType !== 'usage' ||
                 usageProjectionEvent
               ) {
                 broadcastStreamEvent(
                   chatJid,
-                  usageProjectionEvent ?? result.streamEvent,
+                  usageProjectionEvent ?? webStreamEvent,
                 );
               }
             }
@@ -9039,7 +9084,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               streamingSession = undefined;
               activeDurableCardLifecycle = undefined;
             }
-            if (streamingSession) {
+            // Only an Assistant workspace ever has a provider card; a proactive
+            // turn's process must never reach an IM channel.
+            if (streamingSession && publishesFrameworkAnswer(interactionMode)) {
               const se = result.streamEvent;
               if (answerProjection?.visibleAnswerChanged) {
                 appendStreamingSessionAnswer(
@@ -9146,6 +9193,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                         tokenUsage: inputUsageProjection.snapshot(
                           result.inputTurnId,
                         ),
+                        turnTrace: {
+                          tracker: turnTraces,
+                          inputId: resolveContainerOutputInputTurnId(
+                            result,
+                            lastProcessed.id,
+                          ),
+                        },
                         messageMeta: {
                           turnId: result.inputTurnId || lastProcessed.id,
                           sessionId:
@@ -9239,7 +9293,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                     description: desc,
                   });
                 }
-                if (publishesFrameworkAnswer(interactionMode)) {
+                if (
+                  shouldBroadcastTaskAgentStatus(
+                    interactionMode,
+                    resolveProcessVisibility(),
+                  )
+                ) {
                   broadcastAgentStatus(
                     chatJid,
                     taskId,
@@ -9267,7 +9326,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                 ) {
                   updateAgentStatus(se.toolUseId, 'completed');
                   queryTaskIds.delete(existing.id);
-                  if (publishesFrameworkAnswer(interactionMode)) {
+                  if (
+                    shouldBroadcastTaskAgentStatus(
+                      interactionMode,
+                      resolveProcessVisibility(),
+                    )
+                  ) {
                     broadcastAgentStatus(
                       chatJid,
                       existing.id,
@@ -9327,7 +9391,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                     last_im_jid: null,
                     spawned_from_jid: null,
                   });
-                  if (publishesFrameworkAnswer(interactionMode)) {
+                  if (
+                    shouldBroadcastTaskAgentStatus(
+                      interactionMode,
+                      resolveProcessVisibility(),
+                    )
+                  ) {
                     broadcastAgentStatus(
                       chatJid,
                       targetTaskId,
@@ -9341,7 +9410,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                 } else if (existing.kind === 'task') {
                   updateAgentStatus(existing.id, status, summary);
                   queryTaskIds.delete(existing.id);
-                  if (publishesFrameworkAnswer(interactionMode)) {
+                  if (
+                    shouldBroadcastTaskAgentStatus(
+                      interactionMode,
+                      resolveProcessVisibility(),
+                    )
+                  ) {
                     broadcastAgentStatus(
                       chatJid,
                       existing.id,
@@ -9595,6 +9669,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                   resolveContainerOutputInputTurnId(result, lastProcessed.id),
                 );
                 finalizeProactiveOutputCoordinators(result);
+                persistProactiveTurnTrace(
+                  resolveContainerOutputInputTurnId(result, lastProcessed.id),
+                );
                 broadcastStreamEvent(chatJid, {
                   eventType: 'status',
                   statusText: 'idle',
@@ -10025,6 +10102,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                   workflowRuns: holdReason
                     ? activeWorkflowRuns
                     : completedWorkflowRuns,
+                  turnTrace: {
+                    tracker: turnTraces,
+                    inputId: effectiveTurnId,
+                    keep: !!holdReason,
+                  },
                   messageMeta: {
                     turnId: turnIdForDb,
                     sessionId: result.sessionId || activeSessionId,
@@ -10746,6 +10828,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             tokenUsage: inputUsageProjection.snapshot(
               ipcReplyTurnTracker.inputTurnId,
             ),
+            turnTrace: {
+              tracker: turnTraces,
+              inputId: ipcReplyTurnTracker.inputTurnId,
+            },
             messageMeta: {
               turnId: ipcReplyTurnTracker.inputTurnId,
               sessionId: activeSessionId,
@@ -10778,6 +10864,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           tokenUsage: inputUsageProjection.snapshot(
             ipcReplyTurnTracker.inputTurnId,
           ),
+          turnTrace: {
+            tracker: turnTraces,
+            inputId: ipcReplyTurnTracker.inputTurnId,
+          },
           messageMeta: {
             turnId: ipcReplyTurnTracker.inputTurnId,
             sessionId: activeSessionId,
@@ -10964,7 +11054,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           { chatJid, marked },
           'Marked remaining running task agents as error',
         );
-        if (publishesFrameworkAnswer(interactionMode)) {
+        if (
+          shouldBroadcastTaskAgentStatus(
+            interactionMode,
+            resolveProcessVisibility(),
+          )
+        ) {
           for (const agent of runningAgents) {
             broadcastAgentStatus(
               chatJid,
@@ -11000,7 +11095,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           'completed',
           agent.result_summary || '任务已完成',
         );
-        if (publishesFrameworkAnswer(interactionMode)) {
+        if (
+          shouldBroadcastTaskAgentStatus(
+            interactionMode,
+            resolveProcessVisibility(),
+          )
+        ) {
           broadcastAgentStatus(
             chatJid,
             taskId,
@@ -11328,7 +11428,21 @@ async function runTerminalWarmup(chatJid: string): Promise<void> {
       undefined,
       async (result) => {
         if (result.status === 'stream' && result.streamEvent) {
-          broadcastStreamEvent(chatJid, result.streamEvent);
+          // A system-triggered run, but its events reach the same Web
+          // clients: a proactive Workspace's contract holds for it too. Mode
+          // and level are read per event, as for any other turn.
+          const warmupMode = resolveRuntimeInteractionMode(
+            getWorkspaceInteractionMode(group.folder),
+            { agentKind: 'main' },
+          );
+          const webEvent = projectSdkStreamEventForWeb(
+            warmupMode,
+            warmupMode === 'proactive'
+              ? getWorkspaceProcessVisibility(group.folder)
+              : 'full',
+            result.streamEvent,
+          );
+          if (webEvent) broadcastStreamEvent(chatJid, webEvent);
           return;
         }
 
@@ -11811,6 +11925,14 @@ async function sendMessageWithOutcome(
       );
     }
     if (!sendToIM || !isIMChannel) targetDelivered = true;
+    const hasTrace = options.turnTrace
+      ? options.turnTrace.tracker.persist({
+          chatJid: jid,
+          inputId: options.turnTrace.inputId,
+          turnId: options.messageMeta?.turnId,
+          keep: options.turnTrace.keep,
+        })
+      : false;
 
     broadcastNewMessage(
       jid,
@@ -11822,6 +11944,7 @@ async function sendMessageWithOutcome(
         content: text,
         timestamp,
         is_from_me: true,
+        has_trace: hasTrace || undefined,
         turn_id: options.messageMeta?.turnId ?? null,
         token_usage: options.tokenUsage
           ? JSON.stringify(options.tokenUsage)
@@ -17090,6 +17213,23 @@ async function processAgentConversation(
     { session: NonNullable<typeof agentStreamingSession>; jid: string }
   >();
   let agentStreamingAccText = '';
+  // Same bookkeeping as the main session: process visibility is read live
+  // (PATCH /api/groups/:jid changes it without a restart) and every turn's
+  // thinking summary and trace is stored when the turn settles.
+  const resolveProcessVisibility = (): ProcessVisibility =>
+    interactionMode === 'proactive'
+      ? getWorkspaceProcessVisibility(effectiveGroup.folder)
+      : 'full';
+  const turnTraces = new TurnTraceTracker({
+    mode: interactionMode,
+    getVisibility: resolveProcessVisibility,
+  });
+  const persistProactiveTurnTrace = (inputId: string): void => {
+    if (getLastAgentMessageIdForTurn(virtualChatJid, inputId)) {
+      turnTraces.persist({ chatJid: virtualChatJid, inputId });
+    }
+    turnTraces.discard(inputId);
+  };
   let agentStreamInterrupted = false;
   let agentStreamSteered = false;
   let agentInterruptFinalized = false;
@@ -17168,6 +17308,13 @@ async function processAgentConversation(
           timestamp,
           is_from_me: true,
           token_usage: tokenUsage ? JSON.stringify(tokenUsage) : undefined,
+          has_trace:
+            (tid &&
+              turnTraces.persist({
+                chatJid: virtualChatJid,
+                inputId: tid,
+              })) ||
+            undefined,
           turn_id: tid,
           session_id: currentAgentSessionId,
           sdk_message_uuid: null,
@@ -17248,20 +17395,15 @@ async function processAgentConversation(
             `🔄 ${text.replace(/\s+/g, ' ').slice(0, 80)}`,
           );
         }
-        broadcastStreamEvent(
-          chatJid,
-          {
-            eventType: 'status',
-            agentScope: 'system',
-            statusText: text.slice(0, 160),
-            summary: text.slice(0, 500),
-            isSynthetic: true,
-            displayLevel: 'primary',
-            turnId: inputTurnId,
-            sessionId: currentAgentSessionId,
-          },
-          agentId,
+        const progressStatus = projectProgressStatusForWeb(
+          interactionMode,
+          resolveProcessVisibility(),
+          text,
+          { turnId: inputTurnId, sessionId: currentAgentSessionId },
         );
+        if (progressStatus) {
+          broadcastStreamEvent(chatJid, progressStatus, agentId);
+        }
         return true;
       },
       onFinalCandidate: (text) => {
@@ -18053,18 +18195,29 @@ async function processAgentConversation(
       if (agentAnswerProjection?.visibleAnswerChanged) {
         agentStreamingAccText = agentAnswerProjection.visibleAnswerText;
       }
-      if (shouldBroadcastSdkStreamEvent(interactionMode, output.streamEvent)) {
-        if (output.streamEvent.eventType !== 'usage' || usageProjectionEvent) {
+      turnTraces.observe(
+        resolveContainerOutputInputTurnId(output, lastProcessed.id),
+        output.streamEvent,
+      );
+      const webStreamEvent = projectSdkStreamEventForWeb(
+        interactionMode,
+        resolveProcessVisibility(),
+        output.streamEvent,
+      );
+      if (webStreamEvent) {
+        if (webStreamEvent.eventType !== 'usage' || usageProjectionEvent) {
           broadcastStreamEvent(
             chatJid,
-            usageProjectionEvent ?? output.streamEvent,
+            usageProjectionEvent ?? webStreamEvent,
             agentId,
           );
         }
       }
 
       // ── Feed stream events into Feishu streaming card ──
-      if (agentStreamingSession) {
+      // Only an Assistant conversation ever has a provider card; a proactive
+      // turn's process must never reach an IM channel.
+      if (agentStreamingSession && publishesFrameworkAnswer(interactionMode)) {
         const se = output.streamEvent;
         if (
           agentAnswerProjection?.visibleAnswerChanged &&
@@ -18199,6 +18352,15 @@ async function processAgentConversation(
                   token_usage: tokenUsage
                     ? JSON.stringify(tokenUsage)
                     : undefined,
+                  has_trace:
+                    turnTraces.persist({
+                      chatJid: virtualChatJid,
+                      inputId: resolveContainerOutputInputTurnId(
+                        output,
+                        lastProcessed.id,
+                      ),
+                      turnId: output.inputTurnId || lastProcessed.id,
+                    }) || undefined,
                   turn_id: output.inputTurnId || lastProcessed.id,
                   session_id:
                     output.streamEvent.sessionId || currentAgentSessionId,
@@ -18306,6 +18468,9 @@ async function processAgentConversation(
             resolveContainerOutputInputTurnId(output, lastProcessed.id),
           );
           finalizeProactiveAgentOutputCoordinators(output);
+          persistProactiveTurnTrace(
+            resolveContainerOutputInputTurnId(output, lastProcessed.id),
+          );
           broadcastStreamEvent(
             chatJid,
             {
@@ -18571,6 +18736,13 @@ async function processAgentConversation(
             timestamp,
             is_from_me: true,
             token_usage: tokenUsage ? JSON.stringify(tokenUsage) : undefined,
+            has_trace:
+              turnTraces.persist({
+                chatJid: virtualChatJid,
+                inputId: outputAgentScope.inputId,
+                turnId: dbTurnId,
+                keep: !!holdReason,
+              }) || undefined,
             turn_id: dbTurnId,
             session_id: output.sessionId || currentAgentSessionId,
             sdk_message_uuid: output.sdkMessageUuid ?? null,
@@ -19637,6 +19809,11 @@ async function processAgentConversation(
               timestamp,
               is_from_me: true,
               token_usage: tokenUsage ? JSON.stringify(tokenUsage) : undefined,
+              has_trace:
+                turnTraces.persist({
+                  chatJid: virtualChatJid,
+                  inputId: activeAgentInputTurnId,
+                }) || undefined,
               turn_id: activeAgentInputTurnId,
               session_id: currentAgentSessionId,
               sdk_message_uuid: null,
@@ -19708,6 +19885,11 @@ async function processAgentConversation(
             timestamp,
             is_from_me: true,
             token_usage: tokenUsage ? JSON.stringify(tokenUsage) : undefined,
+            has_trace:
+              turnTraces.persist({
+                chatJid: virtualChatJid,
+                inputId: partialInputId,
+              }) || undefined,
             turn_id: partialInputId,
             session_id: currentAgentSessionId,
             sdk_message_uuid: null,
@@ -23213,6 +23395,17 @@ async function main(): Promise<void> {
     }
   } catch (err) {
     logger.warn({ err }, 'Failed to mark stale spawn agents at startup');
+  }
+
+  // A turn's stored thinking/trace outlives the messages that carried it only
+  // by accident (history cleared, rows removed outside the app).
+  try {
+    const pruned = pruneOrphanTurnTraces();
+    if (pruned > 0) {
+      logger.info({ pruned }, 'Pruned orphan turn traces at startup');
+    }
+  } catch (err) {
+    logger.warn({ err }, 'Failed to prune orphan turn traces at startup');
   }
 
   // Migrate system-level IM config → admin's per-user config (one-time)

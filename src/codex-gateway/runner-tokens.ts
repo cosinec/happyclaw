@@ -33,10 +33,23 @@ export interface CodexGatewayRunnerOwner {
   agentId?: string | null;
   taskRunId?: string | null;
   /**
+   * The logical Session this runner serves: the namespace conversation-level
+   * choices (model, effort) are stored under. Differs from agentId only for
+   * runners that borrow another namespace.
+   */
+  sessionAgentId?: string | null;
+  /**
    * Explicit Agent reasoning effort for this runner. Undefined means the Agent
    * inherits, so the provider-level CODEX_REASONING_EFFORT applies.
    */
   agentEffort?: string;
+  /**
+   * Reasoning effort the user picked for this conversation in the composer, at
+   * launch. It travels out of band, not through the SDK: the SDK cannot carry
+   * every level the catalog has (`ultra`), and the CLI always sends its own
+   * output_config.effort. See CodexGatewayGrant.sessionEffort for the live value.
+   */
+  sessionEffort?: string;
 }
 
 /**
@@ -57,6 +70,12 @@ export interface CodexGatewayGrant {
   readonly owner: Readonly<CodexGatewayRunnerOwner>;
   readonly createdAt: number;
   lastVerdict: CodexGatewayVerdict | null;
+  /**
+   * The conversation's reasoning effort as of now: seeded from the owner and
+   * replaced in place by updateLiveSessionEffort, so a change of the effort
+   * button reaches a warm runner on its next request without a restart.
+   */
+  sessionEffort: string | undefined;
 }
 
 const TOKEN_PREFIX = 'hcgw_';
@@ -81,6 +100,7 @@ export function issueCodexGatewayToken(
     owner: { ...owner },
     createdAt: Date.now(),
     lastVerdict: null,
+    sessionEffort: owner.sessionEffort,
   };
   grants.set(digest.toString('hex'), { digest, grant });
   return { token, grant };
@@ -102,6 +122,42 @@ export function resolveCodexGatewayToken(
 export function revokeCodexGatewayToken(token: string): void {
   if (!TOKEN_PATTERN.test(token)) return;
   grants.delete(tokenDigest(token).toString('hex'));
+}
+
+/**
+ * Point the live runners of one conversation at a new reasoning effort
+ * (undefined: back to the default). The gateway reads the effort per request,
+ * so the next upstream request already uses it. Isolated task runs and
+ * host-side one-shot queries never serve a conversation and are left alone;
+ * with `providerId`, so do runners that are on another configuration (a runner
+ * that is being replaced by the choice that carries this effort).
+ * Returns how many grants changed.
+ */
+export function updateLiveSessionEffort(
+  conversation: {
+    groupFolder: string;
+    sessionAgentId?: string | null;
+    providerId?: string;
+  },
+  effort: string | undefined,
+): number {
+  const sessionAgentId = conversation.sessionAgentId || null;
+  let updated = 0;
+  for (const { grant } of grants.values()) {
+    const { owner } = grant;
+    if (
+      owner.kind === 'sdk-query' ||
+      owner.taskRunId ||
+      owner.groupFolder !== conversation.groupFolder ||
+      (owner.sessionAgentId ?? owner.agentId ?? null) !== sessionAgentId ||
+      (conversation.providerId && grant.providerId !== conversation.providerId)
+    ) {
+      continue;
+    }
+    grant.sessionEffort = effort;
+    updated += 1;
+  }
+  return updated;
 }
 
 /** Test/diagnostic hook: number of live runner tokens. */

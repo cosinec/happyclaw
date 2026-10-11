@@ -1,11 +1,5 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  ChevronDown,
-  ChevronRight,
-  ChevronUp,
-  Loader2,
-  Sparkles,
-} from 'lucide-react';
+import { memo, useEffect, useRef, useState } from 'react';
+import { Loader2 } from 'lucide-react';
 import {
   shouldRecoverStaleWaiting,
   useChatStore,
@@ -13,119 +7,41 @@ import {
 } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { resolveAgentDisplayIdentity } from '../../utils/agent-identity';
-import type { AgentInfo, InteractionMode } from '../../types';
+import type { InteractionMode } from '../../types';
 import { EmojiAvatar } from '../common/EmojiAvatar';
-import { MarkdownRenderer } from './MarkdownRenderer';
 import { StreamingMarkdown } from './StreamingMarkdown';
-import { markdownTail } from '../../lib/markdown-blocks';
 import { TodoProgressPanel } from './TodoProgressPanel';
-import { describeToolActivity, ToolActivityCard } from './ToolActivityCard';
+import { ToolActivityCard, ToolRow } from './ToolActivityCard';
+import { AskUserQuestionCard } from './AskUserQuestionCard';
+import { ModelWaitRow } from './ModelWaitRow';
+import { StepTimeline } from './StepTimeline';
+import { SubAgentCard } from './SubAgentCard';
+import { ThinkingBlock } from './ThinkingBlock';
+import { WorkflowRunCard } from './WorkflowRunCard';
+import { isWorkflowTask, workflowRunOf } from './workflow-run';
+import { PermissionAlert, TracePanel } from './ExecutionTrace';
+import { ProcessPanel } from './ProcessPanel';
+import { useShellStore } from '../../stores/shell';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
 import { useConnectionStatus } from '../../hooks/useConnectionStatus';
-import { useShellStore } from '../../stores/shell';
-import { formatThinkingDuration } from '../../utils/thinking-duration';
-import { WorkflowRunCard } from './WorkflowRunCard';
-import { PermissionAlert, TracePanel } from './ExecutionTrace';
-import { shouldShowStreamingPartialText } from '../../lib/interaction-mode';
+import { useRunElapsed } from '../../hooks/useRunElapsed';
+import {
+  useStreamLayout,
+  type StreamLayout,
+} from '../../hooks/useStreamLayout';
 import { useThrottledValue } from '../../hooks/useThrottledValue';
+import { useTick } from '../../hooks/useTick';
+import { shouldShowStreamingPartialText } from '../../lib/interaction-mode';
+import { normalizeProcessVisibility } from '../../lib/process-visibility';
+import {
+  DEEP_THINKING_STATUS,
+  describeRunPhase,
+  formatRunElapsed,
+  isCompactingStatus,
+} from '../../lib/run-phase';
+import { answerStart, type StreamingStep } from '../../lib/stream-steps';
+import { streamingMarkdownInterval } from '../../lib/streaming-interval';
 import { cn } from '@/lib/utils';
-
-/**
- * Streamed Markdown re-parses its open block on every update, so show it at
- * ~10 Hz instead of at frame rate. Status, tools and thinking stay live.
- */
-const STREAMING_MARKDOWN_INTERVAL_MS = 100;
-
-/** Sub-agent progress panels preview only the end of their streamed text. */
-const PROGRESS_TAIL_CHARS = 2000;
-
-/**
- * AskUserQuestion options. The runner has no interactive answer channel, so
- * the reply is the user's next message: an option click fills the composer.
- */
-function AskUserQuestionCard({
-  toolInput,
-}: {
-  toolInput: Record<string, unknown>;
-}) {
-  // Support both "question" (string) and "questions" (array) formats
-  const questions: Array<{
-    question: string;
-    options?: Array<{ value: string; label?: string }>;
-  }> = [];
-  if (Array.isArray(toolInput.questions)) {
-    for (const q of toolInput.questions) {
-      if (q && typeof q === 'object' && 'question' in q) {
-        questions.push(
-          q as {
-            question: string;
-            options?: Array<{ value: string; label?: string }>;
-          },
-        );
-      }
-    }
-  } else if (typeof toolInput.question === 'string') {
-    questions.push({
-      question: toolInput.question,
-      options: Array.isArray(toolInput.options) ? toolInput.options : undefined,
-    });
-  }
-
-  if (questions.length === 0) return null;
-
-  return (
-    <div className="mt-2 mb-2 space-y-2">
-      {questions.map((q, qi) => (
-        <div
-          key={qi}
-          className="rounded-lg bg-surface-raised p-3 font-sans ring-1 ring-surface-border"
-        >
-          <div className="mb-2 text-body font-medium text-foreground">
-            {q.question}
-          </div>
-          {q.options && q.options.length > 0 && (
-            <div className="flex flex-wrap gap-1.5">
-              {q.options.map((opt, oi) => {
-                const label = opt.label || opt.value || '';
-                return (
-                  <button
-                    key={oi}
-                    type="button"
-                    disabled={!label}
-                    onClick={() =>
-                      useShellStore.getState().requestComposerDraft(label)
-                    }
-                    className="inline-flex h-7 cursor-pointer items-center rounded-md bg-muted px-2.5 text-caption font-medium text-foreground ring-1 ring-surface-border transition-colors outline-none hover:bg-surface-hover focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-default pointer-coarse:h-10"
-                  >
-                    {label || '—'}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-          <div className="mt-2 text-caption text-muted-foreground">
-            点选项填入输入框，或直接输入回复后发送
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-const TASK_STATUS_LABELS: Record<string, string> = {
-  running: '执行中',
-  completed: '已完成',
-  error: '出错',
-  stopped: '已停止',
-  aborted: '已停止',
-};
-
-function isCompactingStatus(status: string | null | undefined): boolean {
-  return status === 'compacting' || !!status?.startsWith('正在整理上下文');
-}
-
-/** The runner's heartbeat while the model reasons without visible thinking. */
-const DEEP_THINKING_STATUS = '正在深入分析…';
 
 /** Statuses the run status line already shows as its phase. */
 function isPhaseSystemStatus(status: string): boolean {
@@ -136,33 +52,6 @@ function isPhaseSystemStatus(status: string): boolean {
   );
 }
 
-/** Collapsible block for a single Task Agent — visually consistent with the Thinking block. */
-/** Present-tense phase for the run status next to the agent name. */
-function describeRunPhase(
-  streaming: StreamingState | null | undefined,
-  stopping: boolean,
-) {
-  if (stopping) return '正在停止…';
-  if (!streaming || streaming.settling) return '正在准备回复';
-  const tools = streaming.activeTools;
-  const tool =
-    [...tools].reverse().find((t) => !t.isNested) ?? tools[tools.length - 1];
-  if (tool) return describeToolActivity(tool.toolName);
-  if (isCompactingStatus(streaming.systemStatus)) return '正在整理上下文';
-  // A tool just returned: the model is working out its next step.
-  if (streaming.isThinking || streaming.awaitingModel) return '正在思考';
-  if (streaming.systemStatus === DEEP_THINKING_STATUS) return '正在深入分析';
-  if (streaming.partialText) return '正在回复';
-  return '正在处理';
-}
-
-/** Thinking shorter than a second reads as noise ("已思考 0.2 秒"). */
-function thinkingLabel(durationMs: number | undefined): string {
-  return durationMs != null && durationMs >= 1000
-    ? formatThinkingDuration(durationMs)
-    : '思考过程';
-}
-
 /** Initial reasoning-block state: open only while thinking is live. */
 function initialThinkingExpanded(
   streaming: StreamingState | null | undefined,
@@ -170,21 +59,33 @@ function initialThinkingExpanded(
   return !streaming?.thinkingText || streaming.isThinking;
 }
 
-/**
- * Milliseconds between Markdown renders of the open (last) block. An open
- * table or long block re-parses in full on every render (85ms for a 60-row
- * table at 4x CPU), so large open blocks render less often.
- */
-function streamingMarkdownInterval(text: string): number {
-  const openTail = text.length - text.lastIndexOf('\n\n');
-  if (openTail > 4000) return 300;
-  if (openTail > 1500) return 200;
-  return STREAMING_MARKDOWN_INTERVAL_MS;
+/** Finished tools the classic layout keeps listed under the running ones. */
+const CLASSIC_FINISHED_TOOLS = 4;
+
+/** Tool rows of the classic layout: the running ones and the latest finished. */
+function classicToolSteps(
+  steps: StreamingStep[] | undefined,
+): StreamingStep[] | null {
+  if (!steps) return null;
+  const tools = steps.filter(
+    (step) => step.kind === 'tool' && step.toolName !== 'AskUserQuestion',
+  );
+  const finished = tools.filter((step) => step.status !== 'running');
+  const hidden = new Set(
+    finished.slice(0, Math.max(0, finished.length - CLASSIC_FINISHED_TOOLS)),
+  );
+  return tools.filter((step) => !hidden.has(step));
 }
 
-function formatRunElapsed(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`;
-  return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s`;
+/** How long this run has gone on, ticking by itself so its parent need not. */
+function RunElapsed({ runtimeJid }: { runtimeJid: string }) {
+  const elapsed = useRunElapsed(runtimeJid);
+  if (elapsed == null) return null;
+  return (
+    <span className="text-caption text-faint-foreground tabular-nums">
+      {formatRunElapsed(elapsed)}
+    </span>
+  );
 }
 
 /** Codex-style run status: current phase plus time since the run started. */
@@ -198,30 +99,20 @@ const RunStatus = memo(function RunStatus({
   /** This view's composer stops the run on Esc. */
   stopHint?: boolean;
 }) {
-  const startedAt = useChatStore((s) => s.activeRuns[runtimeJid]?.startedAt);
   // A requested stop freezes the timer at the click: the run is ending.
-  const stoppedAt = useChatStore((s) => s.stopRequests[runtimeJid]);
+  const stopped = useChatStore((s) => !!s.stopRequests[runtimeJid]);
+  const elapsed = useRunElapsed(runtimeJid);
   // Offline, the run may have moved on; don't pretend the phase is live. A
   // dropped WebSocket alone isn't enough: HTTP polling keeps state fresh.
   const offline = useConnectionStatus() === 'offline';
   const shownPhase = offline ? '网络已断开，恢复后同步' : phase;
   const announced = useThrottledValue(shownPhase, 3000);
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!startedAt || stoppedAt) return;
-    const interval = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(interval);
-  }, [startedAt, stoppedAt]);
-  const start = startedAt ? Date.parse(startedAt) : Number.NaN;
-  const elapsed = Number.isFinite(start)
-    ? Math.max(0, Math.floor(((stoppedAt ?? now) - start) / 1000))
-    : null;
   return (
     <span className="flex min-w-0 items-center gap-1.5 text-caption text-muted-foreground">
       <span
         className={cn(
           'truncate',
-          offline ? 'text-warning' : !stoppedAt && 'shimmer',
+          offline ? 'text-warning' : !stopped && 'shimmer',
         )}
       >
         {shownPhase}
@@ -234,7 +125,7 @@ const RunStatus = memo(function RunStatus({
           {formatRunElapsed(elapsed)}
         </span>
       )}
-      {stopHint && !stoppedAt && !offline && (
+      {stopHint && !stopped && !offline && (
         <span
           aria-hidden="true"
           className="shrink-0 text-faint-foreground max-sm:hidden pointer-coarse:hidden"
@@ -246,274 +137,38 @@ const RunStatus = memo(function RunStatus({
   );
 });
 
-function TaskAgentBlock({
-  agent,
-  groupJid,
-}: {
-  agent: AgentInfo;
-  groupJid: string;
-}) {
-  const streaming = useChatStore((s) => s.agentStreaming[agent.id]);
-  const isRunning = agent.status === 'running';
-  const partialMarkdown = useThrottledValue(
-    markdownTail(streaming?.partialText ?? '', PROGRESS_TAIL_CHARS),
-    STREAMING_MARKDOWN_INTERVAL_MS,
-  );
-  const [expanded, setExpanded] = useState(isRunning);
-  const [localElapsed, setLocalElapsed] = useState<Record<string, number>>({});
-
-  // Auto-expand when agent starts running
-  useEffect(() => {
-    if (isRunning) setExpanded(true);
-  }, [isRunning]);
-
-  // Local elapsed timer for tools. Depend on the joined tool-id signature
-  // (membership) rather than the array reference — every tool_progress event
-  // produces a fresh array but the same members, and re-creating the interval
-  // each time would prevent it from ever ticking.
-  const activeToolIdSignature =
-    streaming?.activeTools.map((t) => t.toolUseId).join('|') ?? '';
-  useEffect(() => {
-    if (!activeToolIdSignature) {
-      setLocalElapsed({});
-      return;
-    }
-    const interval = setInterval(() => {
-      const now = Date.now();
-      const tools =
-        useChatStore.getState().agentStreaming[agent.id]?.activeTools ?? [];
-      const next: Record<string, number> = {};
-      for (const tool of tools) {
-        next[tool.toolUseId] = (now - tool.startTime) / 1000;
-      }
-      setLocalElapsed(next);
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [activeToolIdSignature, agent.id]);
-
-  // Neutral card; only the status dot carries color.
-  const borderColor = 'border-surface-border';
-  const bgColor = 'bg-surface-raised';
-  const hoverBg = 'hover:bg-surface-hover';
-  const dotColor = isRunning
-    ? 'bg-primary animate-pulse'
-    : agent.status === 'error'
-      ? 'bg-error'
-      : 'bg-success';
-  const textColor = 'text-foreground';
-  const chevronColor = 'text-faint-foreground';
-  const contentBorderColor = 'border-surface-border';
-
-  return (
-    <div
-      className={`mb-3 overflow-hidden rounded-lg border font-sans ${borderColor} ${bgColor}`}
-    >
-      <button
-        type="button"
-        onClick={() => setExpanded(!expanded)}
-        aria-expanded={expanded}
-        className={`flex h-9 w-full cursor-pointer items-center gap-2 px-3 text-left transition-colors ${hoverBg}`}
-      >
-        <span className={`size-2 shrink-0 rounded-full ${dotColor}`} />
-        <span className={`truncate text-label font-medium ${textColor}`}>
-          子 Agent: {agent.name}
-        </span>
-        <span className="shrink-0 text-caption text-muted-foreground">
-          {TASK_STATUS_LABELS[agent.status] || agent.status}
-        </span>
-        <span className="flex-1" />
-        {expanded ? (
-          <ChevronUp className={`w-3.5 h-3.5 ${chevronColor}`} />
-        ) : (
-          <ChevronDown className={`w-3.5 h-3.5 ${chevronColor}`} />
-        )}
-      </button>
-      {expanded && (
-        <div className={`px-3 pb-3 border-t ${contentBorderColor} space-y-2`}>
-          {/* Agent prompt */}
-          <p className="mt-2 line-clamp-2 text-caption text-muted-foreground">
-            {agent.prompt}
-          </p>
-
-          {/* Live streaming state (running) */}
-          {isRunning && streaming && (
-            <>
-              {streaming.isThinking && (
-                <p className="flex items-center gap-1 text-label text-muted-foreground">
-                  思考中
-                  <span className="flex gap-0.5 ml-0.5">
-                    <span className="size-1 animate-bounce rounded-full bg-faint-foreground [animation-delay:-0.3s]" />
-                    <span className="size-1 animate-bounce rounded-full bg-faint-foreground [animation-delay:-0.15s]" />
-                    <span className="size-1 animate-bounce rounded-full bg-faint-foreground" />
-                  </span>
-                </p>
-              )}
-              {streaming.activeTools.length > 0 && (
-                <div className="space-y-1.5">
-                  {streaming.activeTools
-                    .filter((t) => t.toolName !== 'AskUserQuestion')
-                    .map((tool) => (
-                      <ToolActivityCard
-                        key={tool.toolUseId}
-                        tool={tool}
-                        localElapsed={localElapsed[tool.toolUseId]}
-                      />
-                    ))}
-                </div>
-              )}
-              {streaming.partialText && (
-                <div className="max-w-none overflow-hidden [&>div>*:first-child]:!mt-0">
-                  <MarkdownRenderer
-                    content={partialMarkdown}
-                    groupJid={groupJid}
-                    variant="docs"
-                    streaming
-                  />
-                </div>
-              )}
-            </>
-          )}
-
-          {/* Result summary (completed/error) */}
-          {!isRunning && agent.result_summary && (
-            <p className="text-label text-foreground/80">
-              {agent.result_summary}
-            </p>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-const SdkTaskRuntimeBlock = memo(function SdkTaskRuntimeBlock({
-  task,
-  groupJid,
-}: {
-  task: import('../../stores/chat').StreamingTaskRuntimeState;
-  groupJid: string;
-}) {
-  const [expanded, setExpanded] = useState(task.status === 'running');
-  const isRunning = task.status === 'running' || task.status === 'backgrounded';
-  const textTailMarkdown = useThrottledValue(
-    markdownTail(task.textTail, PROGRESS_TAIL_CHARS),
-    STREAMING_MARKDOWN_INTERVAL_MS,
-  );
-  const statusLabel =
-    task.status === 'completed'
-      ? '已完成'
-      : task.status === 'error'
-        ? '出错'
-        : task.status === 'backgrounded'
-          ? '后台执行'
-          : '执行中';
-
-  return (
-    <div className="overflow-hidden rounded-lg bg-surface-raised font-sans ring-1 ring-surface-border">
-      <button
-        type="button"
-        onClick={() => setExpanded(!expanded)}
-        aria-expanded={expanded}
-        className="flex h-9 w-full cursor-pointer items-center gap-2 px-3 text-left transition-colors hover:bg-surface-hover"
-      >
-        <span
-          className={`size-2 rounded-full ${isRunning ? 'animate-pulse bg-primary' : task.status === 'error' ? 'bg-error' : 'bg-success'}`}
-        />
-        <span className="truncate text-label font-medium text-foreground">
-          {task.title}
-        </span>
-        {task.subagentType && (
-          <span className="shrink-0 text-caption text-faint-foreground">
-            {task.subagentType}
-          </span>
-        )}
-        <span className="shrink-0 text-caption text-muted-foreground">
-          {statusLabel}
-        </span>
-        <span className="flex-1" />
-        {expanded ? (
-          <ChevronUp className="w-3.5 h-3.5 text-muted-foreground" />
-        ) : (
-          <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" />
-        )}
-      </button>
-      {expanded && (
-        <div className="space-y-2 border-t border-surface-border px-3 py-2">
-          {task.latestSummary && (
-            <div className="text-label break-words whitespace-pre-wrap text-foreground/80">
-              {task.lastToolName && (
-                <span className="text-muted-foreground">
-                  [{task.lastToolName}]{' '}
-                </span>
-              )}
-              {task.latestSummary}
-            </div>
-          )}
-          {task.activeTools.length > 0 && (
-            <div className="space-y-1.5">
-              {task.activeTools.map((tool) => (
-                <ToolActivityCard
-                  key={tool.toolUseId}
-                  tool={tool}
-                  localElapsed={undefined}
-                />
-              ))}
-            </div>
-          )}
-          {task.recentTools.length > 0 && (
-            <div className="space-y-0.5 text-caption text-muted-foreground">
-              {task.recentTools.slice(-5).map((item) => (
-                <div key={item.id}>{item.text}</div>
-              ))}
-            </div>
-          )}
-          {task.thinkingTail && (
-            <div className="max-h-28 overflow-y-auto rounded-md border-l-2 border-surface-border bg-muted/40 px-2 py-1.5 text-label break-words whitespace-pre-wrap text-muted-foreground">
-              {task.thinkingTail}
-            </div>
-          )}
-          {task.textTail && (
-            <div className="max-w-none overflow-hidden [&>div>*:first-child]:!mt-0">
-              <MarkdownRenderer
-                content={textTailMarkdown}
-                groupJid={groupJid}
-                variant="docs"
-                streaming
-              />
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-});
-
 /** Shared streaming content — used by both compact and chat modes to eliminate duplication. */
 function StreamingContent({
   streaming,
-  localElapsed,
   groupJid,
   thinkingExpanded,
   setThinkingExpanded,
-  thinkingRef,
-  handleThinkingScroll,
   showPartialText,
   live,
+  layout,
 }: {
   streaming: import('../../stores/chat').StreamingState;
-  localElapsed: Record<string, number>;
   groupJid: string;
   thinkingExpanded: boolean;
   setThinkingExpanded: (v: boolean) => void;
-  thinkingRef: React.RefObject<HTMLDivElement | null>;
-  handleThinkingScroll: () => void;
   showPartialText: boolean;
   /** The run is producing this card right now (not stopped or settled). */
   live: boolean;
+  layout: StreamLayout;
 }) {
+  // The step timeline's answer is the text after the last tool, which is what
+  // the host delivers as the final message; the classic layout shows all text.
+  const timeline = layout === 'timeline';
+  const answerFrom = timeline
+    ? answerStart(streaming.steps, streaming.partialBase ?? 0)
+    : undefined;
+  const answerText =
+    answerFrom === undefined
+      ? streaming.partialText
+      : streaming.partialText.slice(answerFrom);
   const partialMarkdown = useThrottledValue(
-    streaming.partialText,
-    streamingMarkdownInterval(streaming.partialText),
+    answerText,
+    streamingMarkdownInterval(answerText),
   );
   // Text is arriving: a quiet trailing dot marks where it continues.
   const writing =
@@ -521,17 +176,25 @@ function StreamingContent({
     !streaming.isThinking &&
     !streaming.awaitingModel &&
     streaming.activeTools.length === 0 &&
-    !!streaming.partialText;
-  // Classify active tools
-  const cardTools = streaming.activeTools.filter(
-    (t) => t.toolName !== 'AskUserQuestion',
+    !!answerText;
+  // The model's request is out and nothing is running meanwhile.
+  const waitingForModel =
+    live &&
+    !!streaming.awaitingModel &&
+    !streaming.isThinking &&
+    !streaming.activeTools.some((tool) => !tool.isNested);
+  const hasContent = !!(
+    streaming.steps?.length ||
+    streaming.partialText ||
+    streaming.thinkingText
   );
   const askUserTools = streaming.activeTools.filter(
     (t) => t.toolName === 'AskUserQuestion' && t.toolInput,
   );
-  const hasWorkflowTasks = Object.values(streaming.taskStates).some(
-    (task) => task.workflowRun || task.taskType === 'local_workflow',
+  const tasks = Object.values(streaming.taskStates).sort(
+    (a, b) => a.updatedAt - b.updatedAt,
   );
+  const hasWorkflowTasks = tasks.some(isWorkflowTask);
   const showSystemStatus =
     streaming.systemStatus &&
     !isPhaseSystemStatus(streaming.systemStatus) &&
@@ -541,143 +204,193 @@ function StreamingContent({
     )
       ? streaming.systemStatus
       : null;
+  const hasThinkingRow =
+    !!streaming.thinkingText ||
+    streaming.isThinking ||
+    (streaming.thinkingDurationMs ?? 0) >= 1000;
+  const toolSteps = classicToolSteps(streaming.steps);
+  const now = useTick(
+    live && !timeline && !!toolSteps?.some((step) => step.status === 'running'),
+  );
+
+  const systemStatus = showSystemStatus && (
+    <div className="mb-2 flex h-7 items-center gap-2 font-sans text-label text-muted-foreground">
+      <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+      <span>{showSystemStatus}</span>
+    </div>
+  );
+  const hook = streaming.activeHook && (
+    <div className="mb-2 flex h-7 items-center gap-2 font-sans text-label text-muted-foreground">
+      <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+      <span>Hook: {streaming.activeHook.hookName}</span>
+    </div>
+  );
+  const todos = streaming.todos && streaming.todos.length > 0 && (
+    <TodoProgressPanel todos={streaming.todos} />
+  );
+  const answer = showPartialText && streaming.partialText && answerText && (
+    <div className="max-w-none overflow-hidden">
+      <StreamingMarkdown
+        content={partialMarkdown}
+        groupJid={groupJid}
+        variant="chat"
+        caret={writing}
+      />
+    </div>
+  );
+  const reasoning = hasThinkingRow && (
+    <ThinkingBlock
+      text={streaming.thinkingText}
+      title={streaming.thinkingTitle}
+      durationMs={streaming.thinkingDurationMs}
+      running={streaming.isThinking}
+      live={live && streaming.isThinking}
+      groupJid={groupJid}
+      expanded={thinkingExpanded}
+      onExpandedChange={setThinkingExpanded}
+    />
+  );
+
+  // A timeline card that is not live (settled for its final, or stopped) is
+  // shaped like the finished message: the reasoning and the execution details
+  // each folded to a row, the answer below, so the swap between them keeps
+  // its height. Every layout and state fills the same slots in the same order
+  // (an unused one is `false`), so the answer keeps its element, and its
+  // rendered Markdown, when the card settles.
+  const folded = timeline && !live;
+  const toolRows =
+    !timeline &&
+    (toolSteps ? toolSteps.length > 0 : streaming.activeTools.length > 0) ? (
+      <div className="mb-2 space-y-1.5">
+        {toolSteps
+          ? toolSteps.map((step) => {
+              const running = step.status === 'running';
+              return (
+                <ToolRow
+                  key={step.id}
+                  toolName={step.toolName ?? 'unknown'}
+                  skillName={step.skillName}
+                  summary={step.summary}
+                  status={step.status}
+                  elapsedSeconds={
+                    running ? Math.max(0, (now - step.at) / 1000) : undefined
+                  }
+                  durationMs={
+                    running
+                      ? undefined
+                      : Math.max(0, (step.endedAt ?? step.at) - step.at)
+                  }
+                  resultPreview={step.resultPreview}
+                />
+              );
+            })
+          : streaming.activeTools
+              .filter((t) => t.toolName !== 'AskUserQuestion')
+              .map((tool) => (
+                <ToolActivityCard key={tool.toolUseId} tool={tool} />
+              ))}
+        {askUserTools.map((tool) => (
+          <AskUserQuestionCard
+            key={tool.toolUseId}
+            toolInput={tool.toolInput ?? {}}
+          />
+        ))}
+      </div>
+    ) : null;
+  const tasksCards = !timeline && tasks.length > 0 && (
+    <div className="mb-2 space-y-1.5">
+      {tasks.map((task) =>
+        isWorkflowTask(task) ? (
+          <WorkflowRunCard key={task.id} run={workflowRunOf(task)} />
+        ) : (
+          <SubAgentCard key={task.id} task={task} groupJid={groupJid} />
+        ),
+      )}
+    </div>
+  );
+  // A finished message keeps its Workflow cards, below its execution details.
+  const workflowCards = folded && tasks.some(isWorkflowTask) && (
+    <div className="mb-2 space-y-1.5">
+      {tasks.filter(isWorkflowTask).map((task) => (
+        <WorkflowRunCard key={task.id} run={workflowRunOf(task)} />
+      ))}
+    </div>
+  );
 
   return (
     <>
       {/* System status */}
-      {showSystemStatus && (
-        <div className="mb-2 flex h-7 items-center gap-2 font-sans text-label text-muted-foreground">
-          <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-          <span>{showSystemStatus}</span>
-        </div>
-      )}
+      {!folded && systemStatus}
 
-      {/* Reasoning block */}
-      {streaming.thinkingText && (
-        <div className="mb-2 font-sans">
-          <button
-            type="button"
-            onClick={() => setThinkingExpanded(!thinkingExpanded)}
-            aria-expanded={thinkingExpanded}
-            className="-ml-1.5 inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-md px-1.5 text-caption text-muted-foreground transition-colors hover:bg-surface-hover hover:text-foreground"
-          >
-            <Sparkles className="size-3.5" />
-            <span className={streaming.isThinking ? 'shimmer' : undefined}>
-              {streaming.isThinking
-                ? '思考中…'
-                : thinkingLabel(streaming.thinkingDurationMs)}
-            </span>
-            <ChevronRight
-              className={`size-3.5 transition-transform duration-150 ${thinkingExpanded ? 'rotate-90' : ''}`}
+      {/* Reasoning block: live in the classic layout, folded once over */}
+      {folded
+        ? hasThinkingRow && (
+            <ThinkingBlock
+              text={streaming.thinkingText}
+              title={streaming.thinkingTitle}
+              durationMs={streaming.thinkingDurationMs}
+              groupJid={groupJid}
             />
-          </button>
-          {thinkingExpanded && (
-            <div
-              ref={thinkingRef}
-              onScroll={handleThinkingScroll}
-              className="mt-1 mb-3 max-h-64 overflow-y-auto border-l-2 border-surface-border pl-3 text-label leading-6 break-words whitespace-pre-wrap text-muted-foreground"
-            >
-              {streaming.thinkingText}
-            </div>
-          )}
-        </div>
-      )}
+          )
+        : timeline
+          ? false
+          : reasoning}
 
-      {/* Active tools */}
-      {streaming.activeTools.length > 0 && (
-        <div className="mb-2 space-y-1.5">
-          {cardTools.length > 0 && (
-            <div className="space-y-1.5">
-              {cardTools.map((tool) => (
-                <ToolActivityCard
-                  key={tool.toolUseId}
-                  tool={tool}
-                  localElapsed={localElapsed[tool.toolUseId]}
-                />
-              ))}
-            </div>
-          )}
-          {askUserTools.map((tool) => (
-            <AskUserQuestionCard
-              key={tool.toolUseId}
-              toolInput={tool.toolInput ?? {}}
-            />
-          ))}
-        </div>
+      {/* The steps in order (timeline), or the tools: running and latest done */}
+      {timeline && !folded ? (
+        <>
+          <PermissionAlert traceEvents={streaming.traceEvents} />
+          <StepTimeline
+            steps={streaming.steps}
+            stepsDropped={streaming.stepsDropped}
+            taskStates={streaming.taskStates}
+            activeTools={streaming.activeTools}
+            waiting={waitingForModel}
+            waitingSince={streaming.phaseStartedAt}
+            hasContent={hasContent}
+            groupJid={groupJid}
+            live={live}
+          />
+        </>
+      ) : (
+        toolRows
       )}
 
       {/* Todo progress */}
-      {streaming.todos && streaming.todos.length > 0 && (
-        <TodoProgressPanel todos={streaming.todos} />
-      )}
+      {!folded && todos}
 
-      {/* SDK Task / sub-agent runtime state */}
-      {Object.keys(streaming.taskStates).length > 0 && (
-        <div className="mb-2 space-y-1.5">
-          {Object.values(streaming.taskStates)
-            .sort((a, b) => a.updatedAt - b.updatedAt)
-            .map((task) =>
-              task.workflowRun || task.taskType === 'local_workflow' ? (
-                <WorkflowRunCard
-                  key={task.id}
-                  run={
-                    task.workflowRun ?? {
-                      taskId: task.id,
-                      workflowName: task.workflowName,
-                      summary: task.title,
-                      status:
-                        task.status === 'completed'
-                          ? 'completed'
-                          : task.status === 'error'
-                            ? 'failed'
-                            : 'running',
-                      durationMs: task.usage?.durationMs,
-                      totalTokens: task.usage?.totalTokens,
-                      totalToolCalls: task.usage?.toolUses,
-                      phases: [],
-                      agents: [],
-                    }
-                  }
-                />
-              ) : (
-                <SdkTaskRuntimeBlock
-                  key={task.id}
-                  task={task}
-                  groupJid={groupJid}
-                />
-              ),
-            )}
-        </div>
-      )}
+      {/* Sub-agent / workflow runtime state, one card each */}
+      {tasksCards}
 
       {/* Permission denials — surfaced prominently in red, not buried in trace */}
-      <PermissionAlert traceEvents={streaming.traceEvents} />
+      {(folded || !timeline) && (
+        <PermissionAlert traceEvents={streaming.traceEvents} />
+      )}
 
       {/* Full trace */}
-      <TracePanel
-        traceEvents={streaming.traceEvents}
-        taskCount={Object.keys(streaming.taskStates).length}
-      />
+      {(folded || !timeline) && (
+        <TracePanel
+          traceEvents={streaming.traceEvents}
+          taskCount={tasks.length}
+        />
+      )}
+
+      {workflowCards}
 
       {/* Hook */}
-      {streaming.activeHook && (
-        <div className="mb-2 flex h-7 items-center gap-2 font-sans text-label text-muted-foreground">
-          <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
-          <span>Hook: {streaming.activeHook.hookName}</span>
-        </div>
+      {!folded && hook}
+
+      {/* The model is at work and nothing has come back yet */}
+      {!timeline && (
+        <ModelWaitRow
+          active={waitingForModel}
+          since={streaming.phaseStartedAt}
+          delayMs={hasContent ? 800 : 0}
+        />
       )}
 
       {/* Partial text */}
-      {showPartialText && streaming.partialText && (
-        <div className="max-w-none overflow-hidden">
-          <StreamingMarkdown
-            content={partialMarkdown}
-            groupJid={groupJid}
-            variant="chat"
-            caret={writing}
-          />
-        </div>
-      )}
+      {answer}
     </>
   );
 }
@@ -699,8 +412,6 @@ interface StreamingDisplayProps {
    */
   settled?: boolean;
 }
-
-const EMPTY_AGENTS: AgentInfo[] = [];
 
 export function StreamingDisplay({
   groupJid,
@@ -741,15 +452,6 @@ export function StreamingDisplay({
   const stopping = useChatStore(
     (s) => !settled && !!s.stopRequests[runtimeJid],
   );
-  // Task agents — only shown in main conversation (not inside agent tabs)
-  const allAgents = useChatStore((s) =>
-    !agentId && !settled ? (s.agents[groupJid] ?? EMPTY_AGENTS) : EMPTY_AGENTS,
-  );
-  const taskAgents = useMemo(
-    () => allAgents.filter((a) => a.kind === 'task' && a.status === 'running'),
-    [allAgents],
-  );
-  const hasTaskAgents = taskAgents.length > 0;
   // Fire-and-forget spawn Agents retain Assistant streaming semantics even in
   // a proactive Workspace. The Workspace contract applies to main and
   // conversation Agent loops.
@@ -758,6 +460,15 @@ export function StreamingDisplay({
   const showPartialText = shouldShowStreamingPartialText(
     effectiveInteractionMode,
   );
+  // How much of a proactive turn's process its owner chose to show, and
+  // whether this reader may change that.
+  const processVisibility = useChatStore((s) =>
+    normalizeProcessVisibility(s.groups[groupJid]?.process_visibility),
+  );
+  const canChangeVisibility = useChatStore(
+    (s) => !!s.groups[groupJid]?.can_modify,
+  );
+  const { layout } = useStreamLayout();
   const appearance = useAuthStore((state) => state.appearance);
   const agentIdentity = resolveAgentDisplayIdentity({
     agentName: senderNameProp,
@@ -782,10 +493,7 @@ export function StreamingDisplay({
   const [thinkingExpanded, setThinkingExpanded] = useState(() =>
     initialThinkingExpanded(streaming),
   );
-  const thinkingRef = useRef<HTMLDivElement>(null);
-  const userScrolledRef = useRef(false);
   const userToggledThinkingRef = useRef(false);
-  const [localElapsed, setLocalElapsed] = useState<Record<string, number>>({});
 
   // Exact run_started/run_finished events own the public waiting lifecycle.
   // This timer only recovers orphaned UI state after the authoritative run has
@@ -841,14 +549,6 @@ export function StreamingDisplay({
     return () => window.clearInterval(interval);
   }, [agentId, groupJid, isWaiting, runtimeJid]);
 
-  // Auto-scroll thinking content (unless user scrolled up)
-  useEffect(() => {
-    if (!thinkingExpanded || !thinkingRef.current || userScrolledRef.current)
-      return;
-    const el = thinkingRef.current;
-    el.scrollTop = el.scrollHeight;
-  }, [streaming?.thinkingText, thinkingExpanded]);
-
   // Reset on group change (not on mount: the initial state already did).
   const resetGroupRef = useRef(groupJid);
   useEffect(() => {
@@ -858,67 +558,29 @@ export function StreamingDisplay({
       ? useChatStore.getState().agentStreaming[agentId]
       : useChatStore.getState().streaming[groupJid];
     setThinkingExpanded(initialThinkingExpanded(current));
-    userScrolledRef.current = false;
     userToggledThinkingRef.current = false;
   }, [agentId, groupJid]);
 
   useEffect(() => {
     if (!streaming) {
       setThinkingExpanded(true);
-      userScrolledRef.current = false;
       userToggledThinkingRef.current = false;
     }
   }, [streaming]);
 
-  // Collapse the reasoning block once thinking is over so the streaming card
-  // height matches the post-streaming MessageBubble's collapsed
-  // ReasoningBlock — eliminates the layout jump described in #493. Not only
-  // on an observed true → false transition: a burst that starts and ends
-  // within one frame (or before a remount) was never seen thinking. We
-  // respect an explicit user toggle during this turn.
+  // The reasoning block follows the reasoning: open while the model thinks,
+  // folded once it is over, so the streaming card's height matches the
+  // finished message's collapsed block (the layout jump of #493). Each new
+  // burst opens it again. Not only on an observed true → false transition: a
+  // burst that starts and ends within one frame (or before a remount) was
+  // never seen thinking. An explicit user toggle in this turn wins.
+  const isThinking = streaming?.isThinking ?? false;
+  const hasThinking = !!streaming?.thinkingText;
   useEffect(() => {
-    const isThinking = streaming?.isThinking ?? false;
-    const hasThinking = !!streaming?.thinkingText;
-    if (!isThinking && hasThinking && !userToggledThinkingRef.current) {
-      setThinkingExpanded(false);
-    }
-  }, [streaming?.isThinking, streaming?.thinkingText]);
-
-  // Local elapsed time for tools. Depend on the joined tool-id signature
-  // (membership) rather than the array reference; tool_progress events bump
-  // the array reference every ~200ms and would otherwise reset the timer
-  // before it ever ticks.
-  const mainActiveToolIdSignature =
-    streaming?.activeTools.map((t) => t.toolUseId).join('|') ?? '';
-  useEffect(() => {
-    if (!mainActiveToolIdSignature) {
-      setLocalElapsed({});
-      return;
-    }
-
-    const interval = setInterval(() => {
-      const now = Date.now();
-      const state = useChatStore.getState();
-      const tools =
-        (agentId
-          ? state.agentStreaming[agentId]?.activeTools
-          : state.streaming[groupJid]?.activeTools) ?? [];
-      const next: Record<string, number> = {};
-      for (const tool of tools) {
-        next[tool.toolUseId] = (now - tool.startTime) / 1000;
-      }
-      setLocalElapsed(next);
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [mainActiveToolIdSignature, agentId, groupJid]);
-
-  const handleThinkingScroll = () => {
-    if (!thinkingRef.current) return;
-    const el = thinkingRef.current;
-    const isAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
-    userScrolledRef.current = !isAtBottom;
-  };
+    if (userToggledThinkingRef.current) return;
+    if (isThinking) setThinkingExpanded(true);
+    else if (hasThinking) setThinkingExpanded(false);
+  }, [isThinking, hasThinking]);
 
   const runStatus =
     isWaiting && !streaming?.interrupted ? (
@@ -960,44 +622,79 @@ export function StreamingDisplay({
   // it is not an unfinished Assistant reply and must not look like another card.
   if (effectiveInteractionMode === 'proactive') {
     if (!isWaiting) return null;
+    const showProcess =
+      processVisibility !== 'hidden' && !!streaming && !streaming.interrupted;
     return (
       <div
-        role="status"
-        aria-live="polite"
-        aria-atomic="true"
-        aria-label={`${senderName}正在处理`}
         className={
-          isCompact
-            ? 'mb-2 flex min-h-10 items-center gap-2 border-b border-surface-border pb-2 text-body text-muted-foreground'
-            : 'flex min-h-10 w-full items-center gap-2 py-2 text-body text-muted-foreground'
+          isCompact ? 'mb-2 border-b border-surface-border pb-2' : 'w-full'
         }
       >
-        <Loader2
-          aria-hidden="true"
-          className="h-4 w-4 shrink-0 animate-spin text-muted-foreground motion-reduce:animate-none"
-        />
-        <span>正在处理…</span>
+        <div
+          className={
+            isCompact
+              ? 'flex min-h-10 items-center gap-2 text-body text-muted-foreground'
+              : 'flex min-h-10 w-full items-center gap-2 py-2 text-body text-muted-foreground'
+          }
+        >
+          <div
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+            aria-label={`${senderName}正在处理`}
+            className="flex items-center gap-2"
+          >
+            <Loader2
+              aria-hidden="true"
+              className="h-4 w-4 shrink-0 animate-spin text-muted-foreground motion-reduce:animate-none"
+            />
+            <span>正在处理…</span>
+          </div>
+          {processVisibility === 'hidden' && (
+            <>
+              <RunElapsed runtimeJid={runtimeJid} />
+              {canChangeVisibility && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    useShellStore.getState().requestWorkspaceSettings(groupJid)
+                  }
+                  className="ml-auto inline-flex h-7 shrink-0 cursor-pointer items-center rounded-md px-2 text-caption text-faint-foreground transition-colors hover:bg-surface-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none pointer-coarse:h-10"
+                >
+                  显示过程
+                </button>
+              )}
+            </>
+          )}
+        </div>
+        {showProcess && streaming && (
+          <ProcessPanel
+            streaming={streaming}
+            groupJid={groupJid}
+            runtimeJid={runtimeJid}
+            visibility={processVisibility}
+          />
+        )}
       </div>
     );
   }
 
   // 计算是否有流式数据（含中断后冻结的 partialText）
   const hasStreamData =
-    (streaming &&
-      ((showPartialText && streaming.partialText) ||
-        streaming.thinkingText ||
-        streaming.activeTools.length > 0 ||
-        streaming.activeHook ||
-        streaming.systemStatus ||
-        streaming.traceEvents.length > 0 ||
-        Object.keys(streaming.taskStates).length > 0 ||
-        (streaming.todos && streaming.todos.length > 0))) ||
-    hasTaskAgents;
-  const hasWorkflowCards = Boolean(
     streaming &&
-    Object.values(streaming.taskStates).some(
-      (task) => task.workflowRun || task.taskType === 'local_workflow',
-    ),
+    ((showPartialText && streaming.partialText) ||
+      streaming.thinkingText ||
+      streaming.isThinking ||
+      (streaming.thinkingDurationMs ?? 0) >= 1000 ||
+      streaming.awaitingModel ||
+      streaming.activeTools.length > 0 ||
+      streaming.activeHook ||
+      streaming.systemStatus ||
+      streaming.traceEvents.length > 0 ||
+      Object.keys(streaming.taskStates).length > 0 ||
+      (streaming.todos && streaming.todos.length > 0));
+  const hasWorkflowCards = Boolean(
+    streaming && Object.values(streaming.taskStates).some(isWorkflowTask),
   );
 
   // 仅在既不等待也无冻结数据时才隐藏
@@ -1032,7 +729,22 @@ export function StreamingDisplay({
     );
   }
 
-  if (!streaming && !hasTaskAgents) return null;
+  if (!streaming) return null;
+
+  const content = (
+    <StreamingContent
+      streaming={streaming}
+      groupJid={groupJid}
+      thinkingExpanded={thinkingExpanded}
+      setThinkingExpanded={(v) => {
+        setThinkingExpanded(v);
+        userToggledThinkingRef.current = true;
+      }}
+      showPartialText={showPartialText}
+      live={live}
+      layout={layout}
+    />
+  );
 
   // ── Compact mode streaming ──
   if (isCompact) {
@@ -1047,31 +759,7 @@ export function StreamingDisplay({
         </div>
 
         {/* Content — flat, no card wrapper */}
-        <div className="min-w-0 overflow-hidden">
-          {/* Shared streaming content */}
-          {streaming && (
-            <StreamingContent
-              streaming={streaming}
-              localElapsed={localElapsed}
-              groupJid={groupJid}
-              thinkingExpanded={thinkingExpanded}
-              setThinkingExpanded={(v) => {
-                setThinkingExpanded(v);
-                userToggledThinkingRef.current = true;
-                if (v) userScrolledRef.current = false;
-              }}
-              thinkingRef={thinkingRef}
-              handleThinkingScroll={handleThinkingScroll}
-              showPartialText={showPartialText}
-              live={live}
-            />
-          )}
-
-          {/* Task agent blocks */}
-          {taskAgents.map((agent) => (
-            <TaskAgentBlock key={agent.id} agent={agent} groupJid={groupJid} />
-          ))}
-        </div>
+        <div className="min-w-0 overflow-hidden">{content}</div>
       </div>
     );
   }
@@ -1093,32 +781,7 @@ export function StreamingDisplay({
                 : 'overflow-hidden font-serif'
             }
           >
-            {streaming && (
-              <StreamingContent
-                streaming={streaming}
-                localElapsed={localElapsed}
-                groupJid={groupJid}
-                thinkingExpanded={thinkingExpanded}
-                setThinkingExpanded={(v) => {
-                  setThinkingExpanded(v);
-                  userToggledThinkingRef.current = true;
-                  if (v) userScrolledRef.current = false;
-                }}
-                thinkingRef={thinkingRef}
-                handleThinkingScroll={handleThinkingScroll}
-                showPartialText={showPartialText}
-                live={live}
-              />
-            )}
-
-            {/* Task agent blocks */}
-            {taskAgents.map((agent) => (
-              <TaskAgentBlock
-                key={agent.id}
-                agent={agent}
-                groupJid={groupJid}
-              />
-            ))}
+            {content}
           </div>
         </div>
       </div>

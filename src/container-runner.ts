@@ -84,8 +84,15 @@ import {
   isDatabaseInitialized,
   getSessionModelSelection,
   getSessionProviderId,
+  setSessionModel,
   setSessionProviderId,
 } from './db.js';
+import {
+  chatGptDefaultModel,
+  chatGptLaunchModel,
+  resolveSessionLaunchOverrides,
+  sessionModelHasChanged,
+} from './session-model-overrides.js';
 import { isApiError } from './agent-output-parser.js';
 import {
   CODEX_REAUTH_REQUIRED_USER_NOTICE,
@@ -1432,7 +1439,12 @@ export function willClearSessionOnProviderSwitch(
   });
   const boundId = getSessionProviderId(groupFolder, agentId);
   if (selectedModelConfigId) {
-    return !!boundId && boundId !== selectedModelConfigId;
+    if (boundId && boundId !== selectedModelConfigId) return true;
+    return boundSessionModelWillChange(
+      groupFolder,
+      agentId,
+      selectedModelConfigId,
+    );
   }
 
   // Env-level provider override means the pool is bypassed entirely — no
@@ -1478,10 +1490,42 @@ export function willClearSessionOnProviderSwitch(
   // Same second dimension the sticky path checks: a walled model tier moves
   // the session off a still-healthy account, and that switch must inject
   // history like any other.
-  return !stickyBindingCanServeTier(
-    boundId,
-    enabledProviders,
-    resolvePoolTierModel(enabledProviders),
+  if (
+    !stickyBindingCanServeTier(
+      boundId,
+      enabledProviders,
+      resolvePoolTierModel(enabledProviders),
+    )
+  ) {
+    return true;
+  }
+  // The binding stays, but a conversation that just left its pinned model
+  // returns to the configuration's own, and that is a model change.
+  return boundSessionModelWillChange(groupFolder, agentId, boundId);
+}
+
+/**
+ * Whether launching on `providerId` would change the model of a ChatGPT
+ * session that is still resumable. Mirrors withSessionModel, read-only.
+ */
+function boundSessionModelWillChange(
+  groupFolder: string,
+  agentId: string | null | undefined,
+  providerId: string,
+): boolean {
+  const provider = getProviders().find((item) => item.id === providerId);
+  if (!provider?.codexOAuthCredentials) return false;
+  const overrides = resolveSessionLaunchOverrides(
+    groupFolder,
+    agentId,
+    provider,
+    { warn: false },
+  );
+  return sessionModelHasChanged(
+    groupFolder,
+    agentId,
+    chatGptLaunchModel(overrides.model, provider),
+    chatGptDefaultModel(provider),
   );
 }
 
@@ -1611,7 +1655,17 @@ export function trySelectPoolProvider(
   agentId?: string | null,
   modelConfigId?: string | null,
   transientRetryProfileId?: string | null,
-): {
+): PoolProviderSelection | null {
+  const selection = selectPoolProvider(
+    groupFolder,
+    agentId,
+    modelConfigId,
+    transientRetryProfileId,
+  );
+  return selection ? withSessionModel(selection, groupFolder, agentId) : null;
+}
+
+export interface PoolProviderSelection {
   profileId: string;
   resolved: ResolvedProvider;
   previousProviderId?: string;
@@ -1621,7 +1675,67 @@ export function trySelectPoolProvider(
    * configured model walled, so this turn must run on the fallback model.
    */
   modelOverride?: string;
-} | null {
+  /**
+   * ChatGPT launches: the upstream model the Session's SDK session runs on,
+   * recorded so that a later launch can tell the model changed.
+   */
+  sessionModel?: string;
+  /**
+   * ChatGPT launches: the reasoning effort this conversation picked. It is
+   * minted into the gateway grant, never into the runner's environment.
+   */
+  sessionEffort?: string;
+}
+
+/**
+ * A ChatGPT session's encrypted reasoning only verifies for the model that
+ * issued it, so a conversation that changes model has to start a new SDK
+ * session, the same way one that changes provider does. Record the model this
+ * launch runs on and flag the reset when it differs from the recorded one.
+ */
+function withSessionModel(
+  selection: PoolProviderSelection,
+  groupFolder: string,
+  agentId: string | null | undefined,
+): PoolProviderSelection {
+  const { config } = selection.resolved;
+  if (!isCodexGatewayBaseUrl(config.anthropicBaseUrl)) return selection;
+  const provider = getProviders().find(
+    (item) => item.id === selection.profileId,
+  );
+  if (!provider) return selection;
+  const sessionModel = chatGptLaunchModel(
+    selection.modelOverride || config.anthropicModel,
+    provider,
+  );
+  const modelChanged =
+    !selection.resetSession &&
+    sessionModelHasChanged(
+      groupFolder,
+      agentId,
+      sessionModel,
+      chatGptDefaultModel(provider),
+    );
+  if (modelChanged) {
+    logger.info(
+      { groupFolder, agentId: agentId || null, providerId: provider.id },
+      'Conversation model changed; starting a new session',
+    );
+  }
+  setSessionModel(groupFolder, agentId, sessionModel);
+  return {
+    ...selection,
+    sessionModel,
+    ...(modelChanged ? { resetSession: true } : {}),
+  };
+}
+
+function selectPoolProvider(
+  groupFolder: string,
+  agentId?: string | null,
+  modelConfigId?: string | null,
+  transientRetryProfileId?: string | null,
+): PoolProviderSelection | null {
   const selectedModelConfigId = resolvePinnedModelConfigId(modelConfigId, {
     groupFolder,
     agentId,
@@ -1645,11 +1759,26 @@ export function trySelectPoolProvider(
     const resolved = resolveProviderById(selected.id);
     providerPool.acquireSession(selected.id);
     setSessionProviderId(groupFolder, agentId, selected.id);
+    // A ChatGPT conversation may run another of the account's models and at
+    // another effort. Only the main model is replaced: the OPUS / SONNET /
+    // SUBAGENT tiers follow it when the environment is built, and the haiku
+    // tier (background work) deliberately stays on the configuration's model.
+    const overrides = resolveSessionLaunchOverrides(
+      groupFolder,
+      agentId,
+      selected,
+    );
     return {
       profileId: selected.id,
-      resolved: { config: resolved.config, customEnv: resolved.customEnv },
+      resolved: {
+        config: overrides.model
+          ? { ...resolved.config, anthropicModel: overrides.model }
+          : resolved.config,
+        customEnv: resolved.customEnv,
+      },
       previousProviderId: existingBoundId,
       resetSession: !!existingBoundId && existingBoundId !== selected.id,
+      ...(overrides.effort ? { sessionEffort: overrides.effort } : {}),
     };
   }
 
@@ -3069,8 +3198,10 @@ export async function runContainerAgent(
     kind: 'container',
     groupFolder: group.folder,
     agentId: input.agentId ?? null,
+    sessionAgentId: sessionAgentId ?? null,
     taskRunId: input.taskRunId ?? null,
     agentEffort: resolveAgentSdkEffort(input.agentProfile?.runtimePolicy),
+    sessionEffort: poolResult?.sessionEffort,
   });
   try {
     const isAdminHome = !!input.isAdminHome;
@@ -4209,8 +4340,10 @@ export async function runHostAgent(
     kind: 'host',
     groupFolder: group.folder,
     agentId: input.agentId ?? null,
+    sessionAgentId: sessionAgentId ?? null,
     taskRunId: input.taskRunId ?? null,
     agentEffort: resolveAgentSdkEffort(input.agentProfile?.runtimePolicy),
+    sessionEffort: hostPoolResult?.sessionEffort,
   });
   try {
     // Minted inside try so the finally below always revokes the token.

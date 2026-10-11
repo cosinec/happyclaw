@@ -13,6 +13,7 @@ import {
   clampCodexEffortWithCatalog,
   getCodexModelTraits,
   lowestCodexEffortWithCatalog,
+  normalizeCodexSessionEffort,
   resolveCodexDefaultEffort,
   type CodexModelCatalogEntry,
   type CodexVerbosity,
@@ -1164,6 +1165,11 @@ export interface GatewayEffortPolicy {
   providerEffort?: string;
   /** Explicit Agent effort of the calling runner; undefined = inherit. */
   agentEffort?: string;
+  /**
+   * Effort the user picked for this conversation; undefined = none picked.
+   * May name any level of the catalog, `ultra` included.
+   */
+  sessionEffort?: string;
 }
 
 /**
@@ -1186,9 +1192,13 @@ export function isCodexBackgroundRequest(
  * 1. thinking disabled → the lowest level the model supports (never `none`,
  *    which the current catalog rejects);
  * 2. background/haiku-tier requests → low;
- * 3. an explicit Agent effort → the SDK's requested effort for this call,
+ * 3. the effort the user picked for this conversation in the composer, used as
+ *    is: Claude Code's own output_config.effort is ignored (it mirrors the
+ *    third-party CLAUDE_CODE_EFFORT_LEVEL default, and its SDK option cannot
+ *    even express `ultra`), so the pick reaches here out of band;
+ * 4. an explicit Agent effort → the SDK's requested effort for this call,
  *    else the Agent's own level (sub-agents may ask for a different level);
- * 4. otherwise the provider default: CODEX_REASONING_EFFORT, else the model's
+ * 5. otherwise the provider default: CODEX_REASONING_EFFORT, else the model's
  *    catalog default. Claude Code's own output_config.effort is ignored here:
  *    for inheriting Agents it only mirrors the third-party CLAUDE_CODE_EFFORT_LEVEL
  *    default, not a user choice, and the settings page shows the provider default.
@@ -1209,6 +1219,10 @@ export function resolveGatewayReasoningEffort(
     return !entry || entry.efforts.includes('low')
       ? 'low'
       : lowestCodexEffortWithCatalog(catalog, model);
+  }
+  const sessionEffort = normalizeCodexSessionEffort(policy.sessionEffort);
+  if (sessionEffort) {
+    return clampCodexEffortWithCatalog(catalog, model, sessionEffort)!;
   }
   if (policy.agentEffort) {
     const requested = request.output_config?.effort;

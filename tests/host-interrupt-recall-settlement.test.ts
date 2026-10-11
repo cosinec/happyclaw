@@ -27,7 +27,12 @@ import {
   buildSteeredReply,
   buildStoppedReply,
 } from '../src/reply-finalization.js';
-import { publishesFrameworkAnswer } from '../src/workspace-interaction-runtime.js';
+import {
+  projectSdkStreamEventForWeb,
+  publishesFrameworkAnswer,
+  shouldBroadcastTaskAgentStatus,
+} from '../src/workspace-interaction-runtime.js';
+import { TurnTraceTracker } from '../src/turn-trace.js';
 import { createRuntimeSourceHarness } from './helpers/runtime-source.js';
 
 const paths = vi.hoisted(() => ({ root: '' }));
@@ -143,7 +148,17 @@ function agentRun(name: string) {
     updateLatestMessageTokenUsage: vi.fn(),
     broadcastNewMessage: vi.fn(),
     broadcastStreamEvent: vi.fn(),
-    shouldBroadcastSdkStreamEvent: () => false,
+    // The Web projection of the stream is covered by
+    // workspace-interaction-runtime.test.ts; these runs only settle Turns.
+    projectSdkStreamEventForWeb: () => null,
+    resolveProcessVisibility: () => 'full',
+    shouldBroadcastTaskAgentStatus: () => false,
+    turnTraces: {
+      observe: vi.fn(),
+      persist: vi.fn(() => false),
+      discard: vi.fn(),
+    },
+    persistProactiveTurnTrace: vi.fn(),
     getChannelType,
     isStreamingSessionSettled,
     getMessageChannelTurnContext: () => ({
@@ -936,7 +951,17 @@ function mainRun(name: string, options: { steered?: boolean } = {}) {
     bindTurnOutputCoordinator: () => ({
       reduceStreamEvent: () => ({ visibleAnswerChanged: false }),
     }),
-    shouldBroadcastSdkStreamEvent: () => false,
+    // The Web projection of the stream is covered by
+    // workspace-interaction-runtime.test.ts; these runs only settle Turns.
+    projectSdkStreamEventForWeb: () => null,
+    resolveProcessVisibility: () => 'full',
+    shouldBroadcastTaskAgentStatus: () => false,
+    turnTraces: {
+      observe: vi.fn(),
+      persist: vi.fn(() => false),
+      discard: vi.fn(),
+    },
+    persistProactiveTurnTrace: vi.fn(),
     broadcastStreamEvent: vi.fn(),
     isStreamingSessionSettled,
     feedStreamEventToCard: vi.fn(),
@@ -1105,5 +1130,313 @@ describe('settleInterruptedChannelTurn', () => {
       expect(store.getChannelTurnRun(runtime.runId)?.status).toBe('running');
       runtime.dispose();
     }
+  });
+});
+
+/**
+ * Process visibility at the host: the real output handlers decide, per event,
+ * what the Web is told and what an IM card is fed.
+ */
+describe('process visibility in the real output handlers (behavioural)', () => {
+  type Level = 'hidden' | 'activity' | 'full';
+
+  async function streamThrough(
+    handler: (output: unknown) => Promise<unknown>,
+    inputId: string,
+    events: Array<Record<string, unknown>>,
+  ): Promise<void> {
+    for (const streamEvent of events) {
+      await handler({
+        status: 'stream',
+        result: null,
+        inputTurnId: inputId,
+        streamEvent,
+      });
+    }
+  }
+
+  const PROCESS = [
+    { eventType: 'status', statusText: 'requesting' },
+    { eventType: 'thinking_start' },
+    { eventType: 'thinking_delta', text: '先看目录' },
+    { eventType: 'thinking_end', thinkingDurationMs: 800 },
+    { eventType: 'text_delta', text: '这是模型的话' },
+    {
+      eventType: 'tool_use_start',
+      toolName: 'Bash',
+      toolUseId: 'tool-1',
+      toolInputSummary: 'command: ls',
+    },
+    {
+      eventType: 'tool_result',
+      toolUseId: 'tool-1',
+      toolResult: 'a.txt',
+      detail: 'a.txt',
+    },
+    { eventType: 'tool_use_end', toolUseId: 'tool-1' },
+    { eventType: 'memory_recall', summary: '回忆' },
+    { eventType: 'context_audit', title: 'Agent Context' },
+  ];
+
+  function mainWith(
+    name: string,
+    mode: 'assistant' | 'proactive',
+    level: Level,
+  ) {
+    const run = mainRun(name);
+    const traceStore = vi.fn();
+    Object.assign(run.globals, {
+      interactionMode: mode,
+      projectSdkStreamEventForWeb,
+      shouldBroadcastTaskAgentStatus,
+      resolveProcessVisibility: () => (mode === 'proactive' ? level : 'full'),
+      turnTraces: new TurnTraceTracker({
+        mode,
+        getVisibility: () => level,
+        store: traceStore,
+      }),
+    });
+    const broadcasts = () =>
+      (run.globals.broadcastStreamEvent as ReturnType<typeof vi.fn>).mock.calls
+        .map(([, event]) => event)
+        .filter((event) => event.eventType !== 'usage');
+    return { run, traceStore, broadcasts };
+  }
+
+  test('a hidden proactive workspace shows the spinner and nothing of the process', async () => {
+    const { run, broadcasts } = mainWith('vis-hidden', 'proactive', 'hidden');
+    await streamThrough(run.output, run.inputId, PROCESS);
+    expect(broadcasts().map((e) => e.eventType)).toEqual([
+      'status',
+      'context_audit',
+    ]);
+    expect(run.globals.feedStreamEventToCard).not.toHaveBeenCalled();
+  });
+
+  test("activity adds the structure of the work, never the model's words", async () => {
+    const { run, broadcasts } = mainWith(
+      'vis-activity',
+      'proactive',
+      'activity',
+    );
+    await streamThrough(run.output, run.inputId, PROCESS);
+    const sent = broadcasts();
+    expect(sent.map((e) => e.eventType)).toEqual([
+      'status',
+      'thinking_start',
+      'thinking_end',
+      'tool_use_start',
+      'tool_result',
+      'tool_use_end',
+      'context_audit',
+    ]);
+    const result = sent.find((e) => e.eventType === 'tool_result');
+    expect(result.toolResult).toBeUndefined();
+    expect(result.detail).toBeUndefined();
+    // a proactive turn's process never reaches an IM card, even if one exists
+    expect(run.globals.feedStreamEventToCard).not.toHaveBeenCalled();
+  });
+
+  test('full also streams the reasoning summary, still not the answer text', async () => {
+    const { run, broadcasts } = mainWith('vis-full', 'proactive', 'full');
+    await streamThrough(run.output, run.inputId, PROCESS);
+    const types = broadcasts().map((e) => e.eventType);
+    expect(types).toContain('thinking_delta');
+    expect(types).not.toContain('text_delta');
+    expect(types).not.toContain('memory_recall');
+    expect(run.globals.feedStreamEventToCard).not.toHaveBeenCalled();
+  });
+
+  test('an Assistant workspace is unchanged: all of it goes to the Web and the card', async () => {
+    const { run, broadcasts } = mainWith(
+      'vis-assistant',
+      'assistant',
+      'hidden',
+    );
+    await streamThrough(run.output, run.inputId, PROCESS);
+    expect(broadcasts().map((e) => e.eventType)).toEqual(
+      PROCESS.map((e) => e.eventType),
+    );
+    expect(run.globals.feedStreamEventToCard).toHaveBeenCalled();
+  });
+
+  test("every turn's process is collected for turn_traces, in the mode's own measure", async () => {
+    for (const [mode, level, expectThinking, expectTrace] of [
+      ['assistant', 'hidden', true, true],
+      ['proactive', 'hidden', false, false],
+      ['proactive', 'activity', false, true],
+      ['proactive', 'full', true, true],
+    ] as const) {
+      const { run, traceStore } = mainWith(
+        `trace-${mode}-${level}`,
+        mode,
+        level,
+      );
+      await streamThrough(run.output, run.inputId, PROCESS);
+      const stored = run.globals.turnTraces.persist({
+        chatJid: run.globals.chatJid,
+        inputId: run.inputId,
+      });
+      expect(stored, `${mode}/${level}`).toBe(expectTrace);
+      if (expectTrace) {
+        expect(traceStore.mock.calls[0][0].thinking !== '').toBe(
+          expectThinking,
+        );
+      } else {
+        expect(traceStore).not.toHaveBeenCalled();
+      }
+    }
+  });
+
+  test('Task tabs follow the task events: sent unless a proactive workspace is hidden', async () => {
+    for (const [mode, level, expected] of [
+      ['assistant', 'hidden', true],
+      ['proactive', 'hidden', false],
+      ['proactive', 'activity', true],
+      ['proactive', 'full', true],
+    ] as const) {
+      const { run } = mainWith(`task-${mode}-${level}`, mode, level);
+      Object.assign(run.globals, {
+        queryTaskIds: new Set<string>(),
+        getAgent: () => undefined,
+        createAgent: vi.fn(),
+        updateAgentInfo: vi.fn(),
+        upsertSubagentCheckpoint: vi.fn(),
+        taskInputMessageId: () => run.inputId,
+        broadcastAgentStatus: vi.fn(),
+      });
+      await streamThrough(run.output, run.inputId, [
+        {
+          eventType: 'task_start',
+          toolUseId: 'task-1',
+          taskId: 'task-1',
+          taskDescription: '审查',
+        },
+      ]);
+      // the task row is written whatever the Web is shown
+      expect(run.globals.createAgent, `${mode}/${level}`).toHaveBeenCalled();
+      expect(
+        (run.globals.broadcastAgentStatus as ReturnType<typeof vi.fn>).mock
+          .calls.length > 0,
+        `${mode}/${level}`,
+      ).toBe(expected);
+    }
+  });
+
+  test('the visibility is read per event, so a change reaches a running turn', async () => {
+    const { run, broadcasts } = mainWith('vis-live', 'proactive', 'hidden');
+    let level: Level = 'hidden';
+    run.globals.resolveProcessVisibility = () => level;
+    await streamThrough(run.output, run.inputId, [
+      { eventType: 'tool_use_start', toolName: 'A', toolUseId: 'a' },
+    ]);
+    level = 'activity';
+    await streamThrough(run.output, run.inputId, [
+      { eventType: 'tool_use_start', toolName: 'B', toolUseId: 'b' },
+    ]);
+    expect(broadcasts().map((e) => e.toolName)).toEqual(['B']);
+  });
+
+  test('a Runtime Session follows the same projection, addressed to its own session', async () => {
+    for (const [mode, level, expected] of [
+      ['proactive', 'hidden', ['status', 'context_audit']],
+      [
+        'proactive',
+        'activity',
+        [
+          'status',
+          'thinking_start',
+          'thinking_end',
+          'tool_use_start',
+          'tool_result',
+          'tool_use_end',
+          'context_audit',
+        ],
+      ],
+      ['assistant', 'hidden', PROCESS.map((e) => e.eventType)],
+    ] as const) {
+      const run = agentRun(`vis-${mode}-${level}`);
+      const card = fakeCard(['om_card_vis']);
+      Object.assign(run.globals, {
+        interactionMode: mode,
+        agentStreamingSession: card,
+        projectSdkStreamEventForWeb,
+        resolveProcessVisibility: () => (mode === 'proactive' ? level : 'full'),
+        turnTraces: new TurnTraceTracker({
+          mode,
+          getVisibility: () => level,
+          store: vi.fn(),
+        }),
+        broadcastStreamEvent: vi.fn(),
+      });
+      await streamThrough(run.output, run.inputId, PROCESS);
+      const calls = (
+        run.globals.broadcastStreamEvent as ReturnType<typeof vi.fn>
+      ).mock.calls;
+      expect(
+        calls.map(([, event]) => event.eventType),
+        `${mode}/${level}`,
+      ).toEqual(expected);
+      // every one is addressed to the session, not the workspace conversation
+      for (const call of calls) expect(call[2]).toBe(run.globals.agentId);
+      // a provider card only ever exists for an Assistant conversation
+      expect(
+        (run.globals.feedStreamEventToCard as ReturnType<typeof vi.fn>).mock
+          .calls.length > 0,
+        `${mode}/${level}`,
+      ).toBe(mode === 'assistant');
+    }
+  });
+
+  test("a proactive turn's trace is hung on the chats its utterances live in", () => {
+    const globals: Record<string, any> = {
+      chatJid: 'web:proactive-trace-home',
+      resolveIpcOutputWorkspaceJid: (jid: string) =>
+        jid === 'web:proactive-trace-home' ? null : 'web:proactive-trace-home',
+      getLastAgentMessageIdForTurn: db.getLastAgentMessageIdForTurn,
+      turnTraces: new TurnTraceTracker({
+        mode: 'proactive',
+        getVisibility: () => 'activity',
+      }),
+    };
+    createRuntimeSourceHarness(globals).install(
+      'persistProactiveTurnTrace',
+      'processGroupMessages',
+    );
+    const persist = globals.persistProactiveTurnTrace as (id: string) => void;
+    const collect = (turnId: string) =>
+      globals.turnTraces.observe(turnId, {
+        eventType: 'tool_use_start',
+        toolName: 'Bash',
+        toolUseId: `tool-${turnId}`,
+      });
+
+    db.ensureChatExists('web:proactive-trace-home');
+    db.storeMessageDirect(
+      'utterance-1',
+      'web:proactive-trace-home',
+      'happyclaw-agent',
+      'Agent',
+      '一句话',
+      '2026-10-12T02:00:00.000Z',
+      true,
+      { meta: { turnId: 'turn-spoke', sourceKind: 'sdk_send_message' } },
+    );
+    collect('turn-spoke');
+    persist('turn-spoke');
+    expect(
+      db.getTurnTrace('web:proactive-trace-home', 'turn-spoke'),
+    ).toBeDefined();
+
+    // a silent turn left no message to hang a trace on
+    collect('turn-silent');
+    persist('turn-silent');
+    expect(
+      db.getTurnTrace('web:proactive-trace-home', 'turn-silent'),
+    ).toBeUndefined();
+    globals.turnTraces.observe('turn-silent', {
+      eventType: 'status',
+      statusText: 'requesting',
+    });
   });
 });

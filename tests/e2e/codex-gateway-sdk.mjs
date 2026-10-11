@@ -2,6 +2,10 @@
 // npm run build && node tests/e2e/codex-gateway-sdk.mjs
 // Real installed Agent SDK/CLI -> real Hono HTTP gateway -> local Responses SSE.
 // No accounts are needed. All config, credentials and Bash output are temporary.
+// A second scenario covers a conversation that picked another model and an
+// effort in the composer: the model arrives as the runner's ANTHROPIC_MODEL and
+// the effort (`ultra`, which the SDK cannot express) through the runner's
+// gateway grant, which can also be changed while the runner is warm.
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
@@ -23,6 +27,9 @@ const claudeConfig = path.join(scratch, 'claude-config');
 // The provider's stored identifier; runners authenticate with a minted token.
 const gatewayIdentifier = 'e2e-gateway-identifier-not-a-real-secret';
 let gatewayKey = '';
+let overrideKey = '';
+let observedCliEffort;
+let scenario = 'tools';
 const upstreamKey = 'e2e-upstream-not-a-real-secret';
 const accountId = 'e2e-account';
 const model = 'gpt-6-sol';
@@ -45,6 +52,9 @@ const servers = [];
 const requests = [];
 const upstreamRequests = [];
 const gatewayStreams = [];
+const overrideRequests = [];
+const overrideUpstream = [];
+const overrideStreams = [];
 const sdkMessages = [];
 const checks = {};
 let blockedFetches = 0;
@@ -269,6 +279,52 @@ function fixtureEvents(turn, shortenedMcp) {
   ];
 }
 
+const overrideText = 'CODEX_GATEWAY_CONVERSATION_OVERRIDE_OK';
+
+/** One plain text turn, served by whatever model the request named. */
+function overrideEvents(servedModel) {
+  const id = 'resp_gateway_override';
+  const output = {
+    id: 'msg_gateway_override',
+    type: 'message',
+    role: 'assistant',
+    content: [{ type: 'output_text', text: overrideText, annotations: [] }],
+  };
+  return [
+    {
+      type: 'response.created',
+      response: { id, model: servedModel, status: 'in_progress' },
+    },
+    {
+      type: 'response.output_item.added',
+      output_index: 0,
+      item: { ...output, content: [] },
+    },
+    {
+      type: 'response.output_text.delta',
+      item_id: output.id,
+      output_index: 0,
+      content_index: 0,
+      delta: overrideText,
+    },
+    { type: 'response.output_item.done', output_index: 0, item: output },
+    {
+      type: 'response.completed',
+      response: {
+        id,
+        model: servedModel,
+        status: 'completed',
+        output: [output],
+        usage: {
+          input_tokens: 30,
+          input_tokens_details: { cached_tokens: 0 },
+          output_tokens: 5,
+        },
+      },
+    },
+  ];
+}
+
 function parseAnthropicStream(text) {
   return text
     .split('\n')
@@ -339,12 +395,14 @@ try {
   const { codexGatewayApp } = await import(
     pathToFileURL(path.join(repository, 'dist/codex-gateway/gateway.js')).href
   );
-  const { CodexGatewayRunnerLease, resolveCodexGatewayLaunchConfig } =
-    await import(
-      pathToFileURL(
-        path.join(repository, 'dist/codex-gateway/runner-tokens.js'),
-      ).href
-    );
+  const {
+    CodexGatewayRunnerLease,
+    resolveCodexGatewayLaunchConfig,
+    updateLiveSessionEffort,
+  } = await import(
+    pathToFileURL(path.join(repository, 'dist/codex-gateway/runner-tokens.js'))
+      .href
+  );
   const { CodexMessagesRequestSchema } = await import(
     pathToFileURL(
       path.join(repository, 'dist/codex-gateway/request-validation.js'),
@@ -383,6 +441,22 @@ try {
       assert.equal(request.headers.authorization, `Bearer ${upstreamKey}`);
       assert.equal(request.headers['chatgpt-account-id'], accountId);
       const body = await jsonBody(request);
+      if (scenario === 'override') {
+        overrideUpstream.push(body);
+        response.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+        });
+        response.end(
+          overrideEvents(body.model)
+            .map(
+              (event) =>
+                `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
+            )
+            .join(''),
+        );
+        return;
+      }
       check(
         'realSdkStableSessionCache',
         typeof body.prompt_cache_key === 'string' &&
@@ -492,9 +566,12 @@ try {
   app.use(`${CODEX_GATEWAY_ROUTE}/v1/messages`, async (context, next) => {
     const body = await context.req.raw.clone().json();
     const validation = CodexMessagesRequestSchema.safeParse(body);
-    requests.push({
+    const overriding = scenario === 'override';
+    (overriding ? overrideRequests : requests).push({
       body,
-      apiKeyCorrect: context.req.header('x-api-key') === gatewayKey,
+      apiKeyCorrect:
+        context.req.header('x-api-key') ===
+        (overriding ? overrideKey : gatewayKey),
       validationIssues: validation.success
         ? []
         : validation.error.issues.map((issue) => ({
@@ -504,7 +581,7 @@ try {
     });
     await next();
     const record = { status: context.res.status, events: [] };
-    gatewayStreams.push(record);
+    (overriding ? overrideStreams : gatewayStreams).push(record);
     if (context.res.ok)
       record.events = parseAnthropicStream(await context.res.clone().text());
     else record.errorType = (await context.res.clone().json())?.error?.type;
@@ -763,6 +840,134 @@ try {
       blockedProxyRequests === 0 &&
       unexpectedHttpRequests === 0,
   );
+
+  // ── A conversation that picked another model and an effort ─────────────
+  phase = 'conversationOverride';
+  scenario = 'override';
+  abortController = new AbortController();
+  timer = setTimeout(() => abortController.abort(), 60000);
+  const pickedModel = 'gpt-6-astra';
+  const conversation = {
+    groupFolder: 'e2e-conversation',
+    sessionAgentId: null,
+  };
+  // What a launch does for a pinned conversation: the picked effort is minted
+  // into the runner's grant, the picked model becomes the runner's model.
+  const pickLease = new CodexGatewayRunnerLease({
+    kind: 'host',
+    ...conversation,
+    sessionEffort: 'ultra',
+  });
+  overrideKey = resolveCodexGatewayLaunchConfig(
+    {
+      anthropicBaseUrl: CODEX_GATEWAY_BASE_URL_PLACEHOLDER,
+      anthropicAuthToken: gatewayIdentifier,
+    },
+    'host',
+    pickLease,
+  ).anthropicAuthToken;
+  const pickEnv = {
+    ...env,
+    ANTHROPIC_API_KEY: overrideKey,
+    ANTHROPIC_MODEL: pickedModel,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: pickedModel,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: pickedModel,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-5-5',
+    CLAUDE_CODE_SUBAGENT_MODEL: pickedModel,
+    // The third-party default the host sets: the CLI sends max on its own.
+    CLAUDE_CODE_EFFORT_LEVEL: 'max',
+  };
+  const askOnce = async () => {
+    const messages = [];
+    querySession = query({
+      prompt: 'Reply with the confirmation.',
+      options: {
+        cwd: workspace,
+        env: pickEnv,
+        pathToClaudeCodeExecutable: cli,
+        model: pickedModel,
+        systemPrompt: 'You are a controlled conversation-override test.',
+        tools: [],
+        allowedTools: [],
+        permissionMode: 'dontAsk',
+        settingSources: [],
+        skills: [],
+        plugins: [],
+        persistSession: false,
+        maxTurns: 2,
+        thinking: { type: 'adaptive', display: 'summarized' },
+        abortController,
+        stderr: (text) => {
+          sdkStderrBytes += Buffer.byteLength(text);
+        },
+      },
+    });
+    for await (const message of querySession) messages.push(message);
+    querySession.close();
+    return messages.find((message) => message.type === 'result');
+  };
+
+  const pickedResult = await askOnce();
+  check(
+    'conversationTurnCompleted',
+    pickedResult?.subtype === 'success' &&
+      pickedResult.result === overrideText &&
+      !pickedResult.is_error,
+  );
+  check(
+    'conversationRequestsAreAuthenticated',
+    overrideRequests.length === 1 &&
+      overrideRequests[0].apiKeyCorrect &&
+      overrideRequests[0].validationIssues.length === 0 &&
+      overrideStreams.every(({ status }) => status === 200),
+  );
+  check(
+    'conversationModelReachesUpstream',
+    overrideRequests[0].body.model === pickedModel &&
+      overrideUpstream.length === 1 &&
+      overrideUpstream[0].model === pickedModel,
+  );
+  // The CLI keeps sending its own effort; the pick must not ride on it.
+  observedCliEffort = overrideRequests[0].body.output_config?.effort;
+  check('cliKeepsItsOwnEffort', observedCliEffort !== 'ultra');
+  check(
+    'conversationUltraReachesUpstreamUntouched',
+    overrideUpstream[0].reasoning?.effort === 'ultra',
+  );
+
+  // The effort button while the runner is warm: no new grant, no restart.
+  check(
+    'liveEffortChangeReachesTheGrant',
+    updateLiveSessionEffort(conversation, 'high') === 1,
+  );
+  const changedResult = await askOnce();
+  check(
+    'liveEffortChangeTurnCompleted',
+    changedResult?.subtype === 'success' && !changedResult.is_error,
+  );
+  check(
+    'liveEffortChangeAppliesToTheNextRequest',
+    overrideUpstream.length === 2 &&
+      overrideUpstream[1].model === pickedModel &&
+      overrideUpstream[1].reasoning?.effort === 'high',
+  );
+  // Back to the default: the catalog's own level for the model applies.
+  updateLiveSessionEffort(conversation, undefined);
+  await askOnce();
+  check(
+    'clearedEffortFallsBackToTheModelDefault',
+    overrideUpstream.length === 3 &&
+      overrideUpstream[2].reasoning?.effort === 'low',
+  );
+  clearTimeout(timer);
+  pickLease.revoke();
+  scenario = 'tools';
+  check(
+    'noUnexpectedNetworkAfterConversationOverride',
+    blockedFetches === 0 &&
+      blockedProxyRequests === 0 &&
+      unexpectedHttpRequests === 0,
+  );
   phase = 'complete';
 } catch {
   // No SDK stderr, request bodies, provider credentials or user data are logged.
@@ -802,6 +1007,8 @@ console.log(
       responsesRequests: upstreamRequests.length,
       sdkMessages: sdkMessages.length,
       sdkStderrBytes,
+      conversationSdkRequests: overrideRequests.length,
+      conversationResponsesRequests: overrideUpstream.length,
       sdkFreshInputTokens,
       sdkCachedInputTokens,
       sdkOutputTokens,
@@ -810,6 +1017,7 @@ console.log(
       blockedProxyRequests,
       unexpectedHttpRequests,
     },
+    conversationCliEffort: observedCliEffort ?? null,
     statuses: gatewayStreams.map(({ status, errorType }) => ({
       status,
       errorType,

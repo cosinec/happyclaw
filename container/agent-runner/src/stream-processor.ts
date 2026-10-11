@@ -56,6 +56,33 @@ type PendingSubAgentMessage = {
   timer: ReturnType<typeof setTimeout>;
 };
 
+/**
+ * One top-level (main Agent) reasoning block, from content_block_start to the
+ * assistant frame that carries it. Sub-Agent blocks are never tracked.
+ */
+type MainThinkingBlock = {
+  messageId: string;
+  index: number;
+  /** redacted_thinking carries no text, only the signature. */
+  redacted: boolean;
+  startedAt: number;
+  /** Some of this block's text already left through thinking_delta. */
+  streamed: boolean;
+  /** The assistant frame holding this block has been processed. */
+  consumed: boolean;
+  /** content_block_stop arrived (or the block was closed at a boundary). */
+  stopped: boolean;
+  durationMs: number;
+  endEmitted: boolean;
+};
+
+/** SDK `tool_progress` heartbeats are forwarded at most once per interval. */
+type ToolProgressThrottle = {
+  lastEmitAt: number;
+  pending?: StreamEvent;
+  timer?: ReturnType<typeof setTimeout>;
+};
+
 export class StreamEventProcessor {
   private readonly emit: EmitFn;
   private readonly log: LogFn;
@@ -229,13 +256,42 @@ export class StreamEventProcessor {
   >();
   private readonly PENDING_SUBAGENT_TIMEOUT_MS = 30_000;
 
-  // 主 Agent thinking 是否已通过 content_block_delta 路径流出过。
-  // 某些模型仍按 delta 下发 thinking；若 delta 路径已消费，processAssistantMessage
-  // 必须跳过完整 block 的补发，避免同一段思考被 emit 两次。
-  private mainThinkingStreamed = false;
+  // 主 Agent 的 thinking 块按块登记（content_block_start 起、assistant 帧消费止）。
+  // 某些模型按 delta 下发 thinking，另一些只在完整 assistant 帧里给出整块：
+  // 帧到达时按块判断该块是否已流出，已流出的不再补发，避免同一段思考被 emit
+  // 两次；单个布尔在一条消息含多个 thinking 块（GPT 的多个 reasoning item）且
+  // assistant 帧被批量延后时会误判第二块。记录按 message id 分组，只保留最近几条。
+  private currentMainMessageId: string | null = null;
+  private implicitMessageCounter = 0;
+  private readonly openThinkingBlocks = new Map<number, MainThinkingBlock>();
+  private readonly thinkingBlocksByMessage = new Map<
+    string,
+    MainThinkingBlock[]
+  >();
+  private readonly MAX_TRACKED_THINKING_MESSAGES = 8;
+
+  // SDK tool_progress 心跳按 tool_use_id 节流：首帧立即发，其后每个 id 至少间隔
+  // 1s，被节流的帧只留最新一帧并在间隔结束时补发。
+  private readonly toolProgressThrottles = new Map<
+    string,
+    ToolProgressThrottle
+  >();
+  private readonly TOOL_PROGRESS_MIN_INTERVAL_MS = 1_000;
 
   constructor(emit: EmitFn, log: LogFn) {
-    this.emit = emit;
+    // Every outgoing frame passes through here, so a finished tool drops its
+    // throttled heartbeat whichever of the many code paths ended it.
+    this.emit = (output) => {
+      const streamEvent = output.streamEvent;
+      if (
+        streamEvent?.toolUseId &&
+        (streamEvent.eventType === 'tool_use_end' ||
+          streamEvent.eventType === 'tool_result')
+      ) {
+        this.dropToolProgressThrottle(streamEvent.toolUseId);
+      }
+      emit(output);
+    };
     this.log = log;
   }
 
@@ -425,6 +481,198 @@ export class StreamEventProcessor {
     }
   }
 
+  /**
+   * Flush buffered text/thinking right now. Called at every message and block
+   * boundary so what the previous block buffered always precedes the events of
+   * the next one (thinking_start, tool_use_start, task_start, ...).
+   */
+  private flushNow(): void {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    this.flushBuffers();
+  }
+
+  /** Start tracking a top-level reasoning block and announce it. */
+  private openMainThinkingBlock(
+    index: number,
+    redacted: boolean,
+  ): MainThinkingBlock {
+    if (this.currentMainMessageId === null) {
+      this.currentMainMessageId = `implicit-${++this.implicitMessageCounter}`;
+    }
+    const messageId = this.currentMainMessageId;
+    const block: MainThinkingBlock = {
+      messageId,
+      index,
+      redacted,
+      startedAt: Date.now(),
+      streamed: false,
+      consumed: false,
+      stopped: false,
+      durationMs: 0,
+      endEmitted: false,
+    };
+    this.openThinkingBlocks.set(index, block);
+    let blocks = this.thinkingBlocksByMessage.get(messageId);
+    if (!blocks) {
+      blocks = [];
+      this.thinkingBlocksByMessage.set(messageId, blocks);
+      while (
+        this.thinkingBlocksByMessage.size > this.MAX_TRACKED_THINKING_MESSAGES
+      ) {
+        const oldest = this.thinkingBlocksByMessage.keys().next().value;
+        if (oldest === undefined) break;
+        this.thinkingBlocksByMessage.delete(oldest);
+      }
+    }
+    blocks.push(block);
+    this.emit({
+      status: 'stream',
+      result: null,
+      streamEvent: { eventType: 'thinking_start', agentScope: 'main' },
+    });
+    return block;
+  }
+
+  /** The delta path carried (part of) this block's text. */
+  private markMainThinkingStreamed(index: number): void {
+    const block =
+      this.openThinkingBlocks.get(index) ??
+      this.openMainThinkingBlock(index, false);
+    block.streamed = true;
+  }
+
+  private emitThinkingEnd(block: MainThinkingBlock): void {
+    if (block.endEmitted) return;
+    block.endEmitted = true;
+    this.emit({
+      status: 'stream',
+      result: null,
+      streamEvent: {
+        eventType: 'thinking_end',
+        agentScope: 'main',
+        thinkingDurationMs: block.durationMs,
+      },
+    });
+  }
+
+  /**
+   * content_block_stop of a top-level reasoning block. A block whose text has
+   * not left yet may still get it from its assistant frame (models that return
+   * the whole block at once), so its end waits for that frame to keep
+   * thinking_start → thinking_delta → thinking_end in order.
+   */
+  private stopMainThinkingBlock(index: number): void {
+    const block = this.openThinkingBlocks.get(index);
+    if (!block) return;
+    this.openThinkingBlocks.delete(index);
+    block.stopped = true;
+    block.durationMs = Math.max(0, Date.now() - block.startedAt);
+    if (block.redacted || block.streamed || block.consumed) {
+      this.emitThinkingEnd(block);
+    }
+  }
+
+  /** Announce the end of every block that is still waiting for one. */
+  private flushPendingThinkingEnds(): void {
+    for (const blocks of this.thinkingBlocksByMessage.values()) {
+      for (const block of blocks) {
+        if (block.stopped && !block.endEmitted) this.emitThinkingEnd(block);
+      }
+    }
+  }
+
+  /** A message boundary or the end of the query closes whatever is open. */
+  private closeMainThinkingBlocks(): void {
+    const now = Date.now();
+    for (const block of this.openThinkingBlocks.values()) {
+      block.stopped = true;
+      block.durationMs = Math.max(0, now - block.startedAt);
+    }
+    this.openThinkingBlocks.clear();
+    this.flushPendingThinkingEnds();
+  }
+
+  private forgetMainThinkingBlocks(): void {
+    this.openThinkingBlocks.clear();
+    this.thinkingBlocksByMessage.clear();
+    this.currentMainMessageId = null;
+  }
+
+  /**
+   * The tracked block an assistant frame's next reasoning block corresponds
+   * to. Blocks are consumed in order within their message; a frame without an
+   * id falls back to the oldest unconsumed block.
+   */
+  private nextThinkingBlockForFrame(
+    frameMessageId: string | undefined,
+  ): MainThinkingBlock | undefined {
+    if (frameMessageId) {
+      return this.thinkingBlocksByMessage
+        .get(frameMessageId)
+        ?.find((block) => !block.consumed);
+    }
+    for (const blocks of this.thinkingBlocksByMessage.values()) {
+      const block = blocks.find((candidate) => !candidate.consumed);
+      if (block) return block;
+    }
+    return undefined;
+  }
+
+  /**
+   * Forward an SDK tool_progress heartbeat, at most once per interval for each
+   * tool. A throttled frame is kept (only the latest) and sent when the
+   * interval ends.
+   */
+  private emitToolProgress(event: StreamEvent): void {
+    const toolUseId = event.toolUseId;
+    if (!toolUseId) {
+      this.emitStreamEvent(event);
+      return;
+    }
+    const now = Date.now();
+    const throttle = this.toolProgressThrottles.get(toolUseId);
+    if (
+      !throttle ||
+      now - throttle.lastEmitAt >= this.TOOL_PROGRESS_MIN_INTERVAL_MS
+    ) {
+      if (throttle?.timer) clearTimeout(throttle.timer);
+      this.toolProgressThrottles.set(toolUseId, { lastEmitAt: now });
+      this.emitStreamEvent(event);
+      return;
+    }
+    throttle.pending = event;
+    if (!throttle.timer) {
+      throttle.timer = setTimeout(
+        () => {
+          throttle.timer = undefined;
+          const pending = throttle.pending;
+          throttle.pending = undefined;
+          if (!pending) return;
+          throttle.lastEmitAt = Date.now();
+          this.emitStreamEvent(pending);
+        },
+        this.TOOL_PROGRESS_MIN_INTERVAL_MS - (now - throttle.lastEmitAt),
+      );
+    }
+  }
+
+  private dropToolProgressThrottle(toolUseId: string): void {
+    const throttle = this.toolProgressThrottles.get(toolUseId);
+    if (!throttle) return;
+    if (throttle.timer) clearTimeout(throttle.timer);
+    this.toolProgressThrottles.delete(toolUseId);
+  }
+
+  private dropAllToolProgressThrottles(): void {
+    for (const throttle of this.toolProgressThrottles.values()) {
+      if (throttle.timer) clearTimeout(throttle.timer);
+    }
+    this.toolProgressThrottles.clear();
+  }
+
   /** Clean up tools associated with a Task. */
   private cleanupTaskTools(taskId: string): void {
     const nested = this.activeNestedToolByParent.get(taskId);
@@ -480,11 +728,30 @@ export class StreamEventProcessor {
     // would close the message and the timer would later misclassify its text as
     // a new implicit AssistantMessage.
     if (event.type === 'message_stop') {
-      if (this.flushTimer) {
-        clearTimeout(this.flushTimer);
-        this.flushTimer = null;
+      this.flushNow();
+      if (!isNested) this.closeMainThinkingBlocks();
+    }
+    // Block boundaries flush too: the previous block's short tail must reach
+    // the host before this block's own events (thinking_start, tool_use_start,
+    // task_start, ...), not up to FLUSH_MS after them.
+    if (
+      event.type === 'content_block_start' ||
+      event.type === 'content_block_stop'
+    ) {
+      this.flushNow();
+      if (event.type === 'content_block_start' && !isNested) {
+        this.flushPendingThinkingEnds();
       }
-      this.flushBuffers();
+    }
+    if (event.type === 'message_start' && !isNested) {
+      this.flushNow();
+      // A message the previous one never closed is over once a new one starts.
+      this.closeMainThinkingBlocks();
+      const id = event.message?.id;
+      this.currentMainMessageId =
+        typeof id === 'string' && id
+          ? id
+          : `implicit-${++this.implicitMessageCounter}`;
     }
     if (event.type === 'message_start' || event.type === 'message_stop') {
       this.emitStreamEvent({
@@ -524,9 +791,21 @@ export class StreamEventProcessor {
         this.handleToolUseStart(block, parentToolUseId, isNested, event.index);
       } else if (block?.type === 'text') {
         this.handleTextBlockStart(parentToolUseId, isNested);
+      } else if (
+        !isNested &&
+        (block?.type === 'thinking' || block?.type === 'redacted_thinking')
+      ) {
+        this.openMainThinkingBlock(
+          typeof event.index === 'number' ? event.index : -1,
+          block.type === 'redacted_thinking',
+        );
       }
     } else if (event.type === 'content_block_delta') {
       this.handleContentBlockDelta(event, parentToolUseId);
+    } else if (event.type === 'content_block_stop' && !isNested) {
+      this.stopMainThinkingBlock(
+        typeof event.index === 'number' ? event.index : -1,
+      );
     }
 
     return true;
@@ -743,7 +1022,9 @@ export class StreamEventProcessor {
     } else if (delta?.type === 'thinking_delta' && delta.thinking) {
       const bufKey = parentToolUseId || this.BUF_MAIN;
       if (!parentToolUseId) {
-        this.mainThinkingStreamed = true;
+        this.markMainThinkingStreamed(
+          typeof event.index === 'number' ? event.index : -1,
+        );
         this.seenTextualResult = false;
       }
       this.getBuf(bufKey).think += delta.thinking;
@@ -920,24 +1201,23 @@ export class StreamEventProcessor {
   }
 
   /**
-   * Process a tool_progress message.
+   * Process a tool_progress message: the SDK's elapsed-time heartbeat of a
+   * running tool. It arrives several times a second, so it is throttled per
+   * tool (see emitToolProgress); the one-shot tool_progress events built from
+   * streamed tool input are not.
    */
   processToolProgress(message: any): void {
     const parentToolUseId =
       message.parent_tool_use_id === undefined
         ? null
         : message.parent_tool_use_id;
-    this.emit({
-      status: 'stream',
-      result: null,
-      streamEvent: {
-        eventType: 'tool_progress',
-        toolName: message.tool_name,
-        toolUseId: message.tool_use_id,
-        parentToolUseId,
-        isNested: parentToolUseId !== null,
-        elapsedSeconds: message.elapsed_time_seconds,
-      },
+    this.emitToolProgress({
+      eventType: 'tool_progress',
+      toolName: message.tool_name,
+      toolUseId: message.tool_use_id,
+      parentToolUseId,
+      isNested: parentToolUseId !== null,
+      elapsedSeconds: message.elapsed_time_seconds,
     });
   }
 
@@ -1770,21 +2050,32 @@ export class StreamEventProcessor {
     // 主 Agent thinking 补发:
     // - 子 Agent 消息 (parent_tool_use_id 非空) 的 thinking 已由 processSubAgentMessage
     //   emit (带 parentToolUseId), 这里若再 emit 会挂到主 Agent 气泡导致重复展示。
-    // - 主 Agent 若 delta 路径已消费过 thinking (mainThinkingStreamed=true),
-    //   再从完整 block emit 会导致同一段思考被显示两次。
+    // - 主 Agent 的每个 thinking 块按顺序对应 stream 阶段登记的一条记录；该块的
+    //   文本若已经通过 delta 路径流出，再从完整 block emit 会让同一段思考显示两次，
+    //   所以只补发没流出过的块（模型不走 stream 事件、或只给整块时）。
+    // - 补发的文本先于该块的 thinking_end，保持 start → delta → end 的顺序。
     const isSubAgent = (message.parent_tool_use_id ?? null) !== null;
-    if (!isSubAgent && !this.mainThinkingStreamed) {
+    if (!isSubAgent) {
+      const frameMessageId =
+        typeof message.message?.id === 'string'
+          ? message.message.id
+          : undefined;
       for (const block of content) {
-        if (block.type === 'thinking' && block.thinking) {
+        if (block?.type !== 'thinking' && block?.type !== 'redacted_thinking') {
+          continue;
+        }
+        const tracked = this.nextThinkingBlockForFrame(frameMessageId);
+        if (tracked) tracked.consumed = true;
+        if (block.type === 'thinking' && block.thinking && !tracked?.streamed) {
           this.emit({
             status: 'stream',
             result: null,
             streamEvent: { eventType: 'thinking_delta', text: block.thinking },
           });
         }
+        if (tracked?.stopped) this.emitThinkingEnd(tracked);
       }
     }
-    if (!isSubAgent) this.mainThinkingStreamed = false;
 
     // Fallback: extract skill name from complete assistant message
     for (const block of content) {
@@ -2189,6 +2480,10 @@ export class StreamEventProcessor {
     this.streamBufs.clear();
     this.fullTextAccumulator = '';
     this.lastThinkingTokenStatusAt = null;
+    // The spent stream stays hidden: no thinking_end for its open blocks and no
+    // late heartbeat of its tools.
+    this.forgetMainThinkingBlocks();
+    this.dropAllToolProgressThrottles();
     // Make cleanup clear rather than flush any late buffer from the spent SDK stream.
     this.seenTextualResult = true;
   }
@@ -2209,6 +2504,13 @@ export class StreamEventProcessor {
     } else {
       this.flushBuffers();
     }
+
+    // Reasoning blocks the stream never closed (interrupt, error, cut stream):
+    // announce their end so downstream state machines settle. Pending
+    // heartbeats of tools that are about to be ended below are dropped.
+    this.closeMainThinkingBlocks();
+    this.forgetMainThinkingBlocks();
+    this.dropAllToolProgressThrottles();
 
     // Emit tool_use_end for active top-level tool (except Task tools)
     if (this.activeTopLevelToolUseId) {

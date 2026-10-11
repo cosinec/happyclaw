@@ -20,6 +20,7 @@ import type {
   AvailableImGroup,
   CreateWorkspaceOptions,
   InteractionMode,
+  ProcessVisibility,
   WorkspaceDeleteImpact,
 } from '../types';
 import {
@@ -34,6 +35,15 @@ import {
   normalizeGroupInteractionMode,
   normalizeInteractionMode,
 } from '../lib/interaction-mode';
+import {
+  SPEECH_TOOL_NAME,
+  filterProactiveStreamEvent,
+  isSpeechToolEvent,
+  normalizeProcessVisibility,
+  scrubTaskStates,
+  speechToolCallsIn,
+  withoutSpeechTool,
+} from '../lib/process-visibility';
 import { useGroupsStore } from './groups';
 import {
   applyRunFinished,
@@ -47,6 +57,33 @@ import {
 } from './run-lifecycle';
 import { extractErrorMessage } from '../utils/error';
 import { markdownTail } from '../lib/markdown-blocks';
+import {
+  MAX_THINKING_TEXT,
+  capThinkingText,
+  extractThinkingTitle,
+  thinkingSeparator,
+} from '../lib/thinking-text';
+import {
+  appendThinkingText,
+  closeOpenSteps,
+  closeThinkingStep,
+  endToolStep,
+  ensureTaskStep,
+  failToolStep,
+  finishSteps,
+  hasTaskStep,
+  isUnderTask,
+  openTextStep,
+  openThinkingStep,
+  progressToolStep,
+  rebuildSteps,
+  setTaskStepStatus,
+  startToolStep,
+  stepList,
+  type StepList,
+  type StepStatus,
+  type StreamingStep,
+} from '../lib/stream-steps';
 
 export type { GroupInfo, AgentInfo };
 
@@ -65,6 +102,8 @@ export interface Message {
   token_usage?: string;
   workflow_runs?: import('../stream-event.types').WorkflowRunSnapshot[];
   turn_id?: string | null;
+  /** The turn kept its reasoning and execution trace on the server. */
+  has_trace?: boolean;
   session_id?: string | null;
   sdk_message_uuid?: string | null;
   source_kind?:
@@ -183,12 +222,21 @@ export interface StreamingTaskRuntimeState {
 export interface StreamSnapshotData {
   partialText: string;
   thinkingText?: string;
+  /** Reasoning time of the finished bursts, and the open one's start. */
+  thinkingDurationMs?: number;
+  thinkingStartedAt?: number;
+  phaseStartedAt?: number;
+  awaitingModel?: boolean;
   activeTools: Array<{
     toolName: string;
     toolUseId: string;
     startTime: number;
+    elapsedSeconds?: number;
     toolInputSummary?: string;
     parentToolUseId?: string | null;
+    isNested?: boolean;
+    skillName?: string;
+    toolInput?: Record<string, unknown>;
   }>;
   recentEvents: Array<{
     id: string;
@@ -204,6 +252,15 @@ export interface StreamSnapshotData {
   isThinking?: boolean;
   activeHook?: { hookName: string; hookEvent: string } | null;
   turnId?: string;
+}
+
+/** What the server kept of one turn's reasoning and execution (GET turn-traces). */
+interface TurnTraceResponse {
+  turn_id: string;
+  thinking?: string | null;
+  thinking_duration_ms?: number | null;
+  trace?: StreamingTraceEvent[] | null;
+  created_at?: string;
 }
 
 export interface ActiveRunSnapshotData {
@@ -241,8 +298,28 @@ export interface StreamingState {
   thinkingDurationMs?: number;
   /** When the model's current request began; the next burst starts there. */
   phaseStartedAt?: number;
-  /** A tool returned and the model has not produced anything since. */
+  /**
+   * The model's request is in flight and nothing has come back from it yet:
+   * a model request began (`requesting`), or a tool returned.
+   */
   awaitingModel?: boolean;
+  /** Summary title of the latest reasoning, for the collapsed label. */
+  thinkingTitle?: string;
+  /** A new burst of reasoning began: its first text starts a paragraph. */
+  thinkingGap?: boolean;
+  /**
+   * The reply's steps in the order they happened (reasoning, tools,
+   * sub-agents, commentary), for the step timeline. Written next to the
+   * fields above, which the classic layout still reads.
+   */
+  steps?: StreamingStep[];
+  /** Steps dropped from the front of `steps` at its cap. */
+  stepsDropped?: number;
+  /**
+   * Characters cut from the head of `partialText` at its cap, so the offsets
+   * text steps hold into the whole text stay valid.
+   */
+  partialBase?: number;
   /**
    * The run ended (run_finished) and this frozen projection waits, in
    * `settledStreaming`, for the turn's final message, which replaces it in
@@ -307,6 +384,7 @@ export function mergeMessagesChronologically(
       JSON.stringify(old.workflow_runs ?? []) !==
         JSON.stringify(next.workflow_runs ?? []) ||
       old.turn_id !== next.turn_id ||
+      old.has_trace !== next.has_trace ||
       old.session_id !== next.session_id ||
       old.sdk_message_uuid !== next.sdk_message_uuid ||
       old.source_kind !== next.source_kind ||
@@ -503,14 +581,168 @@ function markThinkingStarted(
   next.awaitingModel = false;
 }
 
-/** Add the finished burst to the reply's thinking time (isThinking:true → false). */
-function markThinkingEnded(prev: StreamingState, next: StreamingState): void {
+/** Whether the event is a sub-agent's: its text and reasoning are its card's. */
+function isSubagentEvent(event: StreamEvent): boolean {
+  return !!event.parentToolUseId || event.agentScope === 'subagent';
+}
+
+/** The reply's step list, to be edited and written back with `setSteps`. */
+function stepsOf(state: StreamingState): StepList {
+  return stepList(state.steps, state.stepsDropped);
+}
+
+function setSteps(next: StreamingState, list: StepList): void {
+  next.steps = list.steps;
+  next.stepsDropped = list.dropped;
+}
+
+/**
+ * A burst of reasoning ends (isThinking:true → false): add it to the reply's
+ * thinking time and close its step. `reportedMs` is the model's own timing
+ * from `thinking_end`; without it the clock decides.
+ */
+function endThinkingBurst(
+  prev: StreamingState,
+  next: StreamingState,
+  at: number,
+  reportedMs?: number,
+): void {
+  const reported =
+    reportedMs != null && Number.isFinite(reportedMs) && reportedMs >= 0
+      ? reportedMs
+      : undefined;
   if (prev.isThinking && prev.thinkingStartedAt != null) {
     next.thinkingDurationMs =
       (prev.thinkingDurationMs ?? 0) +
-      Math.max(0, Date.now() - prev.thinkingStartedAt);
+      (reported ?? Math.max(0, at - prev.thinkingStartedAt));
     next.thinkingStartedAt = undefined;
+  } else if (prev.isThinking && reported != null) {
+    next.thinkingDurationMs = (prev.thinkingDurationMs ?? 0) + reported;
   }
+  next.isThinking = false;
+  setSteps(next, closeThinkingStep(stepsOf(next), at, reported));
+}
+
+/**
+ * Reasoning began: a `thinking_start`, or the first delta of a burst when the
+ * runner sends none. A new burst after earlier reasoning opens a new step and
+ * its text a new paragraph; the first delta after a `thinking_start` is part
+ * of the burst that start opened.
+ */
+function beginThinkingBurst(
+  prev: StreamingState,
+  next: StreamingState,
+  runStartedAt: number | undefined,
+  at: number,
+): void {
+  markThinkingStarted(prev, next, runStartedAt);
+  if (!prev.isThinking) {
+    next.thinkingGap = prev.thinkingText.length > 0;
+    setSteps(next, openThinkingStep(stepsOf(prev), at));
+  }
+  next.isThinking = true;
+}
+
+/** Add reasoning text: bursts are separated, the whole is bounded and titled. */
+function appendThinking(
+  prev: StreamingState,
+  next: StreamingState,
+  text: string,
+  at: number,
+): void {
+  const gap = next.thinkingGap ? thinkingSeparator(prev.thinkingText) : '';
+  next.thinkingText = capThinkingText(
+    prev.thinkingText + gap + text,
+    MAX_THINKING_TEXT,
+  );
+  next.thinkingGap = false;
+  next.thinkingTitle =
+    extractThinkingTitle(next.thinkingText) ?? prev.thinkingTitle;
+  setSteps(next, appendThinkingText(stepsOf(next), text, at));
+}
+
+/** Add reply text; the text after the last tool is what the host delivers. */
+function appendReplyText(
+  prev: StreamingState,
+  next: StreamingState,
+  text: string,
+  at: number,
+  maxText: number,
+): void {
+  const base = prev.partialBase ?? 0;
+  const combined = prev.partialText + text;
+  next.partialText = capStreamingText(combined, maxText);
+  next.partialBase =
+    base + Math.max(0, combined.length - next.partialText.length);
+  setSteps(
+    next,
+    openTextStep(stepsOf(next), at, base + prev.partialText.length),
+  );
+}
+
+/**
+ * Whether a runtime delivers its messages itself (a proactive workspace's
+ * main and conversation sessions), so no final reply ever replaces its
+ * card. Fire-and-forget spawn Agents keep the Assistant contract.
+ */
+function isProactiveRuntime(
+  s: Pick<ChatState, 'groups' | 'agents'>,
+  runtimeJid: string,
+): boolean {
+  const marker = '#agent:';
+  const markerIndex = runtimeJid.indexOf(marker);
+  const chatJid =
+    markerIndex >= 0 ? runtimeJid.slice(0, markerIndex) : runtimeJid;
+  if (
+    normalizeInteractionMode(s.groups[chatJid]?.interaction_mode) !==
+    'proactive'
+  ) {
+    return false;
+  }
+  if (markerIndex < 0) return true;
+  const agentId = runtimeJid.slice(markerIndex + marker.length);
+  return (
+    s.agents[chatJid]?.find((agent) => agent.id === agentId)?.kind !== 'spawn'
+  );
+}
+
+/**
+ * A proactive turn's state cut down to what `visibility` shows: nothing but
+ * the spinner at `hidden`, no reasoning text at `activity`. The owner can
+ * lower the level while a turn runs; what the new level hides is dropped.
+ */
+function scrubForVisibility(
+  state: StreamingState,
+  visibility: ProcessVisibility,
+): StreamingState {
+  if (visibility === 'hidden') {
+    return {
+      ...DEFAULT_STREAMING_STATE,
+      turnId: state.turnId,
+      sessionId: state.sessionId,
+      systemStatus: state.systemStatus,
+    };
+  }
+  // The reply is never shown, whatever the level; so is what a tool was given.
+  const shown: StreamingState = {
+    ...state,
+    partialText: '',
+    partialBase: 0,
+    taskStates: scrubTaskStates(state.taskStates, visibility),
+    activeTools: state.activeTools.map(
+      ({ toolInput: _input, ...tool }) => tool,
+    ),
+  };
+  if (visibility === 'full') return shown;
+  return {
+    ...shown,
+    thinkingText: '',
+    thinkingTitle: undefined,
+    thinkingGap: false,
+    steps: state.steps?.map((step) =>
+      step.kind === 'thinking' ? { ...step, text: '', title: undefined } : step,
+    ),
+  };
 }
 
 /** Thinking time so far, including a burst still in progress. */
@@ -552,6 +784,7 @@ function applyDeltaChunks(
 ): StreamingState {
   let state = prev;
   let index = 0;
+  const at = Date.now();
   while (index < chunks.length) {
     const thinking = chunks[index].thinking;
     let text = '';
@@ -562,23 +795,14 @@ function applyDeltaChunks(
     if (!text) continue;
     const next = { ...state };
     if (thinking) {
-      const combined = state.thinkingText + text;
-      next.thinkingText =
-        combined.length > MAX_THINKING_TEXT
-          ? combined.slice(-MAX_THINKING_TEXT)
-          : combined;
-      next.isThinking = true;
-      markThinkingStarted(state, next, runStartedAt);
+      beginThinkingBurst(state, next, runStartedAt, at);
+      appendThinking(state, next, text, at);
     } else {
-      next.partialText = capStreamingText(
-        state.partialText + text,
-        MAX_STREAMING_TEXT,
-      );
-      next.isThinking = false;
+      endThinkingBurst(state, next, at);
+      appendReplyText(state, next, text, at, MAX_STREAMING_TEXT);
       next.awaitingModel = false;
       next.phaseStartedAt = undefined;
       if (isPhaseStatus(state.systemStatus)) next.systemStatus = null;
-      markThinkingEnded(state, next);
     }
     state = next;
   }
@@ -688,6 +912,12 @@ interface ChatState {
    * final message id, so the reply keeps its collapsed "执行详情".
    */
   traceCache: Record<string, StreamingTraceEvent[]>;
+  /**
+   * A message whose reasoning and trace the server kept but this tab has not
+   * loaded: `loading` while asked, `failed` to try again on the next ask,
+   * `empty` when the server had nothing (or no longer shows it).
+   */
+  turnTraceStatus: Record<string, 'loading' | 'failed' | 'empty'>;
   /** Stop requested for a runtime JID (ms); the run shows "正在停止…". */
   stopRequests: Record<string, number>;
   /**
@@ -764,12 +994,24 @@ interface ChatState {
     jid: string,
     interactionMode: InteractionMode,
   ) => Promise<boolean>;
+  /** Change how much of a proactive turn's process the Web shows (no restart). */
+  updateProcessVisibility: (
+    jid: string,
+    visibility: ProcessVisibility,
+  ) => Promise<boolean>;
   togglePin: (jid: string) => Promise<void>;
   inspectDeleteFlow: (jid: string) => Promise<WorkspaceDeleteImpact>;
   deleteFlow: (
     jid: string,
     options?: { unbindChannels?: boolean },
   ) => Promise<void>;
+  /**
+   * Load the reasoning and execution trace the server kept of a finished
+   * turn into the caches the message renders from. Quiet on failure.
+   */
+  loadTurnTrace: (
+    message: Pick<Message, 'id' | 'chat_jid' | 'turn_id'>,
+  ) => Promise<boolean>;
   handleStreamEvent: (
     chatJid: string,
     event: StreamEvent,
@@ -976,6 +1218,7 @@ function freezeStreamingState(
   // as soon as it arrives.
   const hasData = state.partialText || state.thinkingText;
   if (!hasData) return null;
+  const steps = finishSteps(stepsOf(state), Date.now(), true);
   return {
     ...state,
     isThinking: false,
@@ -987,6 +1230,8 @@ function freezeStreamingState(
     // Keep an in-flight burst so the interrupted card still shows "已思考 Xs".
     thinkingDurationMs: totalThinkingMs(state),
     thinkingStartedAt: undefined,
+    steps: steps.steps,
+    stepsDropped: steps.dropped,
   };
 }
 
@@ -1001,7 +1246,15 @@ function settleStreamingState(
   runId: string | undefined,
 ): StreamingState | null {
   if (!state) return null;
-  if (!state.partialText && !state.thinkingText) return null;
+  // Reasoning without a summary still leaves "已思考 Xs" to carry over.
+  if (
+    !state.partialText &&
+    !state.thinkingText &&
+    !((totalThinkingMs(state) ?? 0) > 0)
+  ) {
+    return null;
+  }
+  const steps = finishSteps(stepsOf(state), Date.now(), false);
   return {
     ...state,
     isThinking: false,
@@ -1011,6 +1264,8 @@ function settleStreamingState(
     awaitingModel: false,
     thinkingDurationMs: totalThinkingMs(state),
     thinkingStartedAt: undefined,
+    steps: steps.steps,
+    stepsDropped: steps.dropped,
     settling: true,
     runId,
   };
@@ -1062,7 +1317,7 @@ function finalizedReplyCaches(
           }),
         }
       : {}),
-    ...(thinkingText && duration != null
+    ...(duration != null && (thinkingText || duration >= 1000)
       ? {
           thinkingDurationCache: capThinkingCache({
             ...s.thinkingDurationCache,
@@ -1106,7 +1361,6 @@ function resolveStreamingPrev(
 // The whole streamed reply is rendered (finished blocks are memoized), so
 // this is only a memory guard; past it the tail is kept from a block boundary.
 const MAX_STREAMING_TEXT = 200_000;
-const MAX_THINKING_TEXT = 8000;
 
 /**
  * Past the cap, keep a block-bounded tail with headroom: cutting to exactly
@@ -1204,6 +1458,51 @@ interface PendingDelta {
   turnId?: string;
 }
 const pendingDeltas = new Map<string, PendingDelta>();
+
+/**
+ * The calls of a proactive turn's speech tool, per runtime: its start names
+ * the tool, its later events carry only the id of the call. Kept for the
+ * run that made them, so a new run starts empty.
+ */
+const speechToolCalls = new Map<
+  string,
+  { runId: string; calls: Set<string> }
+>();
+const MAX_SPEECH_CALLS = 64;
+
+function speechCallsOf(runtimeJid: string, runId?: string): Set<string> {
+  const entry = speechToolCalls.get(runtimeJid);
+  return entry && entry.runId === (runId ?? '') ? entry.calls : new Set();
+}
+
+/** The speech tool's calls in a reconnect snapshot: its rows and running calls. */
+function speechCallsOfSnapshot(snapshot: StreamSnapshotData): Set<string> {
+  const calls = speechToolCallsIn(snapshot.traceEvents ?? []);
+  for (const tool of snapshot.activeTools ?? []) {
+    if (tool.toolName === SPEECH_TOOL_NAME) calls.add(tool.toolUseId);
+  }
+  return calls;
+}
+
+function rememberSpeechCalls(
+  runtimeJid: string,
+  runId: string | undefined,
+  ids: Iterable<string>,
+): void {
+  const key = runId ?? '';
+  let entry = speechToolCalls.get(runtimeJid);
+  if (!entry || entry.runId !== key) {
+    entry = { runId: key, calls: new Set() };
+    speechToolCalls.set(runtimeJid, entry);
+  }
+  for (const id of ids) {
+    if (entry.calls.size >= MAX_SPEECH_CALLS) {
+      const oldest = entry.calls.values().next().value;
+      if (oldest !== undefined) entry.calls.delete(oldest);
+    }
+    entry.calls.add(id);
+  }
+}
 
 // Match the runner's retry banner (including unknown SDK counters), not user
 // progress text that happens to mention a retry or a file named retry.ts.
@@ -1639,6 +1938,83 @@ function traceTitle(event: StreamEvent): string {
   }
 }
 
+/** What a trace row says about its event: the first of these it has. */
+function traceSummary(event: StreamEvent): string | undefined {
+  return (
+    event.summary ||
+    event.taskSummary ||
+    event.statusText ||
+    event.toolInputSummary
+  );
+}
+
+/** The row a tool's start wrote to the trace, if it is still there. */
+function toolTraceIndex(
+  events: StreamingTraceEvent[],
+  toolUseId: string,
+): number {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const row = events[index];
+    if (
+      row.toolUseId === toolUseId &&
+      (row.kind === 'tool' || row.kind === 'skill') &&
+      /^(?:工具|技能) /.test(row.title)
+    ) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+/**
+ * A running tool reports progress many times: say it on the row it already
+ * has (its input becomes known, its skill name resolves) instead of writing
+ * a row per report, which pushed the rest of the trace out of its bound.
+ */
+function pushToolProgress(
+  events: StreamingTraceEvent[],
+  event: StreamEvent,
+): StreamingTraceEvent[] {
+  if (!event.toolUseId) return events;
+  const index = toolTraceIndex(events, event.toolUseId);
+  if (index < 0) {
+    // A bare elapsed-time heartbeat says nothing the trace could keep; the
+    // host does not keep it either.
+    if (!traceSummary(event) && !event.skillName) return events;
+    const row = traceRow({ ...event, eventType: 'tool_use_start' });
+    return [...events, row].slice(-MAX_TRACE_EVENTS);
+  }
+  const row = events[index];
+  const summary = traceSummary(event) || row.summary;
+  const skillResolved = !!event.skillName && row.kind !== 'skill';
+  if (summary === row.summary && !skillResolved) return events;
+  const next = events.slice();
+  next[index] = {
+    ...row,
+    summary,
+    ...(skillResolved
+      ? { kind: 'skill' as const, title: `技能 ${event.skillName}` }
+      : {}),
+  };
+  return next;
+}
+
+function traceRow(event: StreamEvent): StreamingTraceEvent {
+  return {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    timestamp: Date.now(),
+    kind: traceKind(event),
+    scope: event.agentScope,
+    title: traceTitle(event),
+    summary: traceSummary(event),
+    detail: event.detail,
+    taskId: event.taskId,
+    toolUseId: event.toolUseId,
+    parentToolUseId: event.parentToolUseId,
+    displayLevel: event.displayLevel,
+  };
+}
+
 function pushTrace(
   events: StreamingTraceEvent[],
   event: StreamEvent,
@@ -1646,32 +2022,22 @@ function pushTrace(
   if (
     event.eventType === 'text_delta' ||
     event.eventType === 'thinking_delta' ||
+    event.eventType === 'thinking_start' ||
+    event.eventType === 'thinking_end' ||
     event.eventType === 'usage' ||
     event.eventType === 'init' ||
     event.eventType === 'context_audit' ||
+    // Debug rows are never shown; they only used up the trace's bound.
+    event.displayLevel === 'debug' ||
     (event.eventType === 'status' &&
       isInternalLifecycleStatus(event.statusText))
   ) {
     return events;
   }
-  const item: StreamingTraceEvent = {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    timestamp: Date.now(),
-    kind: traceKind(event),
-    scope: event.agentScope,
-    title: traceTitle(event),
-    summary:
-      event.summary ||
-      event.taskSummary ||
-      event.statusText ||
-      event.toolInputSummary,
-    detail: event.detail,
-    taskId: event.taskId,
-    toolUseId: event.toolUseId,
-    parentToolUseId: event.parentToolUseId,
-    displayLevel: event.displayLevel,
-  };
-  return [...events, item].slice(-MAX_TRACE_EVENTS);
+  if (event.eventType === 'tool_progress') {
+    return pushToolProgress(events, event);
+  }
+  return [...events, traceRow(event)].slice(-MAX_TRACE_EVENTS);
 }
 
 function taskIdFromEvent(event: StreamEvent): string | null {
@@ -1847,6 +2213,55 @@ function updateTaskRuntime(
 /** Tools whose end comes from their own lifecycle, not their tool_result. */
 const TOOLS_ENDED_BY_LIFECYCLE = new Set(['Task', 'Agent', 'Skill']);
 
+function stepStatusOfTask(
+  status: StreamingTaskRuntimeState['status'],
+): StepStatus {
+  if (status === 'completed') return 'done';
+  return status === 'error' ? 'error' : 'running';
+}
+
+/**
+ * Mirror a task event into the step list: the task's card keeps its details
+ * in `taskStates`; the step holds its place in the order and its summary.
+ * Runs after `updateTaskRuntime`, so the status is the task's own.
+ */
+function applyTaskToSteps(
+  event: StreamEvent,
+  prev: StreamingState,
+  next: StreamingState,
+  at: number,
+): void {
+  // A task event with a parent belongs to a task nested in another.
+  if (event.parentToolUseId) return;
+  const taskId = taskIdFromEvent(event);
+  if (!taskId) return;
+  let list = stepsOf(next);
+  if (!hasTaskStep(list, taskId)) {
+    list = closeOpenSteps(list, at, prev.partialText, prev.partialBase ?? 0);
+  }
+  const task = next.taskStates[taskId];
+  list = ensureTaskStep(
+    list,
+    {
+      taskId,
+      toolUseId: event.toolUseId,
+      title: event.taskDescription || event.toolInputSummary || task?.title,
+      summary: task?.latestSummary,
+    },
+    at,
+  );
+  if (task) {
+    list = setTaskStepStatus(
+      list,
+      taskId,
+      stepStatusOfTask(task.status),
+      at,
+      task.latestSummary,
+    );
+  }
+  setSteps(next, list);
+}
+
 /**
  * Apply a single StreamEvent to a StreamingState object.
  * Shared by main conversation and SDK subagent streaming.
@@ -1856,23 +2271,23 @@ function applyStreamEvent(
   prev: StreamingState,
   next: StreamingState,
   maxText: number,
+  runStartedAt?: number,
 ): void {
   if (event.turnId) next.turnId = event.turnId;
   if (event.sessionId) next.sessionId = event.sessionId;
   next.traceEvents = pushTrace(prev.traceEvents || [], event);
+  const at = Date.now();
   switch (event.eventType) {
     case 'text_delta': {
       if (event.parentToolUseId) {
         updateTaskRuntime(prev, next, event);
         break;
       }
-      const combined = prev.partialText + (event.text || '');
-      next.partialText = capStreamingText(combined, maxText);
-      next.isThinking = false;
+      endThinkingBurst(prev, next, at);
+      if (event.text) appendReplyText(prev, next, event.text, at, maxText);
       next.awaitingModel = false;
       next.phaseStartedAt = undefined;
       if (isPhaseStatus(prev.systemStatus)) next.systemStatus = null;
-      markThinkingEnded(prev, next);
       break;
     }
     case 'thinking_delta': {
@@ -1880,24 +2295,51 @@ function applyStreamEvent(
         updateTaskRuntime(prev, next, event);
         break;
       }
-      const combined = prev.thinkingText + (event.text || '');
-      next.thinkingText =
-        combined.length > MAX_THINKING_TEXT
-          ? combined.slice(-MAX_THINKING_TEXT)
-          : combined;
-      next.isThinking = true;
-      markThinkingStarted(prev, next);
+      beginThinkingBurst(prev, next, runStartedAt, at);
+      appendThinking(prev, next, event.text || '', at);
+      break;
+    }
+    case 'thinking_start': {
+      // Sub-agents do not send these; their reasoning is their task's tail.
+      if (isSubagentEvent(event)) break;
+      beginThinkingBurst(prev, next, runStartedAt, at);
+      break;
+    }
+    case 'thinking_end': {
+      if (isSubagentEvent(event)) break;
+      endThinkingBurst(prev, next, at, event.thinkingDurationMs);
       break;
     }
     case 'tool_use_start': {
-      next.isThinking = false;
-      markThinkingEnded(prev, next);
+      // A sub-agent's tool is not the main agent's: its own reasoning goes on.
+      if (!isSubagentEvent(event)) endThinkingBurst(prev, next, at);
       if (!event.parentToolUseId) {
         next.awaitingModel = false;
         next.phaseStartedAt = undefined;
         if (isPhaseStatus(prev.systemStatus)) next.systemStatus = null;
       }
       const toolUseId = event.toolUseId || '';
+      if (toolUseId && !isUnderTask(stepsOf(next), event.parentToolUseId)) {
+        // Text before a tool was commentary; the tool is the next step.
+        setSteps(
+          next,
+          startToolStep(
+            closeOpenSteps(
+              stepsOf(next),
+              at,
+              prev.partialText,
+              prev.partialBase ?? 0,
+            ),
+            {
+              toolUseId,
+              toolName: event.toolName || 'unknown',
+              skillName: event.skillName,
+              summary: event.toolInputSummary,
+            },
+            at,
+          ),
+        );
+      }
       const existing = prev.activeTools.find(
         (t) => t.toolUseId === toolUseId && toolUseId,
       );
@@ -1939,6 +2381,9 @@ function applyStreamEvent(
         next.activeTools = prev.activeTools.filter(
           (t) => t.toolUseId !== event.toolUseId,
         );
+        if (!isUnderTask(stepsOf(next), event.parentToolUseId)) {
+          setSteps(next, endToolStep(stepsOf(next), event.toolUseId, at));
+        }
         if (ended) {
           const rawSec = (Date.now() - ended.startTime) / 1000;
           const elapsedSec =
@@ -1973,6 +2418,10 @@ function applyStreamEvent(
       // "正在运行命令" while the model is already on its next step. Task and
       // Skill keep their own lifecycle (sub-agent events, nested tools).
       if (!event.toolUseId || event.parentToolUseId) break;
+      setSteps(
+        next,
+        endToolStep(stepsOf(next), event.toolUseId, at, event.toolResult),
+      );
       const ended = prev.activeTools.find(
         (t) => t.toolUseId === event.toolUseId,
       );
@@ -2036,6 +2485,24 @@ function applyStreamEvent(
           },
         ];
       }
+      if (
+        event.toolUseId &&
+        !isUnderTask(stepsOf(next), event.parentToolUseId)
+      ) {
+        setSteps(
+          next,
+          progressToolStep(
+            stepsOf(next),
+            {
+              toolUseId: event.toolUseId,
+              toolName: event.toolName,
+              skillName: event.skillName,
+              summary: event.toolInputSummary,
+            },
+            at,
+          ),
+        );
+      }
       if (event.parentToolUseId) {
         updateTaskRuntime(prev, next, event);
       }
@@ -2043,6 +2510,7 @@ function applyStreamEvent(
     }
     case 'task_start': {
       updateTaskRuntime(prev, next, event);
+      applyTaskToSteps(event, prev, next, at);
       const desc =
         event.taskDescription ||
         event.toolInputSummary ||
@@ -2057,6 +2525,7 @@ function applyStreamEvent(
     }
     case 'task_progress': {
       updateTaskRuntime(prev, next, event);
+      applyTaskToSteps(event, prev, next, at);
       const label = event.lastToolName
         ? `Task 进度 [${event.lastToolName}]`
         : 'Task 进度';
@@ -2069,6 +2538,7 @@ function applyStreamEvent(
     }
     case 'task_updated': {
       updateTaskRuntime(prev, next, event);
+      applyTaskToSteps(event, prev, next, at);
       next.recentEvents = pushEvent(
         prev.recentEvents,
         'task',
@@ -2078,6 +2548,7 @@ function applyStreamEvent(
     }
     case 'task_notification': {
       updateTaskRuntime(prev, next, event);
+      applyTaskToSteps(event, prev, next, at);
       next.recentEvents = pushEvent(
         prev.recentEvents,
         'task',
@@ -2117,9 +2588,13 @@ function applyStreamEvent(
       break;
     case 'status': {
       next.systemStatus = event.statusText || null;
-      // A new model request: thinking that follows started here.
+      // A new model request: thinking that follows started here, and until
+      // something comes back the model is the one at work.
       if (event.statusText === 'requesting' && !event.parentToolUseId) {
-        next.phaseStartedAt = Date.now();
+        // The previous request is over: reasoning that follows is a new block.
+        endThinkingBurst(prev, next, at);
+        next.phaseStartedAt = at;
+        next.awaitingModel = true;
       }
       if (event.statusText && !isInternalLifecycleStatus(event.statusText)) {
         next.recentEvents = pushEvent(
@@ -2144,6 +2619,9 @@ function applyStreamEvent(
         'permission',
         `🚫 ${tool ? `${tool}: ` : ''}${why}`.trim(),
       );
+      if (pd?.toolUseId) {
+        setSteps(next, failToolStep(stepsOf(next), pd.toolUseId, at, why));
+      }
       break;
     }
     case 'memory_recall':
@@ -2200,6 +2678,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   thinkingCache: {},
   thinkingDurationCache: {},
   traceCache: {},
+  turnTraceStatus: {},
   stopRequests: {},
   settledStreaming: {},
   pendingThinking: {},
@@ -2851,6 +3330,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             { ...nextAgentMessages, ...nextMessages },
             s.traceCache,
           ),
+          turnTraceStatus: retainThinkingCacheForMessages(
+            { ...nextAgentMessages, ...nextMessages },
+            s.turnTraceStatus,
+          ),
           agents: nextAgents,
           pendingMessageUsage: clearPendingMessageUsage(
             s.pendingMessageUsage,
@@ -3056,6 +3539,65 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
+  updateProcessVisibility: async (jid, requested) => {
+    try {
+      const saved = await api.patch<{
+        success: boolean;
+        process_visibility?: string;
+      }>(`/api/groups/${encodeURIComponent(jid)}`, {
+        process_visibility: requested,
+      });
+      // The server echoes the level now in force; an older one says nothing.
+      const processVisibility = normalizeProcessVisibility(
+        saved?.process_visibility ?? requested,
+      );
+      const patchGroups = (groups: Record<string, GroupInfo>) => {
+        const group = groups[jid];
+        if (!group) return groups;
+        return {
+          ...groups,
+          [jid]: { ...group, process_visibility: processVisibility },
+        };
+      };
+      set((state) => {
+        // A level lowered mid-run must not leave what it hides in memory.
+        const scrub = isProactiveRuntime(state, jid);
+        const nextStreaming = { ...state.streaming };
+        if (scrub && nextStreaming[jid]) {
+          nextStreaming[jid] = scrubForVisibility(
+            nextStreaming[jid],
+            processVisibility,
+          );
+        }
+        const nextAgentStreaming = { ...state.agentStreaming };
+        for (const agent of state.agents[jid] ?? []) {
+          if (
+            isProactiveRuntime(state, `${jid}#agent:${agent.id}`) &&
+            nextAgentStreaming[agent.id]
+          ) {
+            nextAgentStreaming[agent.id] = scrubForVisibility(
+              nextAgentStreaming[agent.id],
+              processVisibility,
+            );
+          }
+        }
+        return {
+          groups: patchGroups(state.groups),
+          streaming: nextStreaming,
+          agentStreaming: nextAgentStreaming,
+          error: null,
+        };
+      });
+      useGroupsStore.setState((state) => ({
+        groups: patchGroups(state.groups),
+      }));
+      return true;
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+      return false;
+    }
+  },
+
   togglePin: async (jid: string) => {
     const group = get().groups[jid];
     if (!group) return;
@@ -3147,6 +3689,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             { ...s.agentMessages, ...nextMessages },
             s.traceCache,
           ),
+          turnTraceStatus: retainThinkingCacheForMessages(
+            { ...s.agentMessages, ...nextMessages },
+            s.turnTraceStatus,
+          ),
           currentGroup: nextCurrent,
           error: null,
         };
@@ -3186,6 +3732,90 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   // 处理流式事件
+  loadTurnTrace: async (message) => {
+    const { id, chat_jid: jid, turn_id: turnId } = message;
+    if (!turnId) return false;
+    const current = get();
+    if (current.turnTraceStatus[id] === 'loading') return false;
+    if (
+      current.thinkingCache[id] !== undefined ||
+      current.thinkingDurationCache[id] !== undefined ||
+      current.traceCache[id] !== undefined
+    ) {
+      return true;
+    }
+    set((s) => ({
+      turnTraceStatus: { ...s.turnTraceStatus, [id]: 'loading' },
+    }));
+    try {
+      const data = await api.get<TurnTraceResponse>(
+        `/api/groups/${encodeURIComponent(jid)}/turn-traces/${encodeURIComponent(turnId)}`,
+      );
+      const thinking = capThinkingText(data.thinking || '');
+      const duration = data.thinking_duration_ms ?? undefined;
+      const rows = (Array.isArray(data.trace) ? data.trace : []).filter(
+        isUserVisibleTraceEvent,
+      );
+      // The host keeps the speech tool's rows of a proactive turn; the live
+      // view leaves them out, so the reloaded one does too.
+      const trace = (
+        isProactiveRuntime(get(), jid) ? withoutSpeechTool(rows) : rows
+      ).slice(-MAX_CACHED_TRACE_EVENTS);
+      const keepsDuration =
+        duration !== undefined &&
+        Number.isFinite(duration) &&
+        duration > 0 &&
+        (!!thinking || duration >= 1000);
+      set((s) => {
+        const status = { ...s.turnTraceStatus };
+        if (!thinking && !keepsDuration && trace.length === 0) {
+          status[id] = 'empty';
+        } else {
+          delete status[id];
+        }
+        return {
+          turnTraceStatus: capThinkingCache(status),
+          ...(thinking
+            ? {
+                thinkingCache: capThinkingCache({
+                  ...s.thinkingCache,
+                  [id]: thinking,
+                }),
+              }
+            : {}),
+          ...(keepsDuration
+            ? {
+                thinkingDurationCache: capThinkingCache({
+                  ...s.thinkingDurationCache,
+                  [id]: duration,
+                }),
+              }
+            : {}),
+          ...(trace.length > 0
+            ? {
+                traceCache: capThinkingCache({
+                  ...s.traceCache,
+                  [id]: trace,
+                }),
+              }
+            : {}),
+        };
+      });
+      return true;
+    } catch (err) {
+      // A turn the server no longer shows (its owner hid the process) is
+      // nothing to load; anything else may work on the next ask.
+      const gone = (err as { status?: number } | null)?.status === 404;
+      set((s) => ({
+        turnTraceStatus: {
+          ...s.turnTraceStatus,
+          [id]: gone ? 'empty' : 'failed',
+        },
+      }));
+      return false;
+    }
+  },
+
   handleStreamEvent: (chatJid, event, agentId, runId) => {
     // Skip while clearHistory is in-flight
     if (get().clearing[chatJid]) return;
@@ -3277,6 +3907,42 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
 
+    // A proactive workspace shows the process at the level its owner chose and
+    // never its model text: whatever else reaches the Web is dropped here,
+    // even if the host sent it.
+    if (isProactiveRuntime(get(), runtimeJid)) {
+      const allowed = filterProactiveStreamEvent(
+        normalizeProcessVisibility(get().groups[chatJid]?.process_visibility),
+        event,
+      );
+      if (!allowed) return;
+      event = allowed;
+      // Calling the speech tool is the reply itself, not work to watch: it is
+      // neither a step nor the latest tool, and does not count among the tools
+      // used. Its start still ends the reasoning before it.
+      if (isSpeechToolEvent(event, speechCallsOf(runtimeJid, runId))) {
+        if (event.eventType === 'tool_use_start' && event.toolUseId) {
+          rememberSpeechCalls(runtimeJid, runId, [event.toolUseId]);
+          // Keep arrival order: reasoning still waiting for its frame came first.
+          flushPendingDeltaForRuntime(runtimeJid, set);
+          set((s) => {
+            const prev = agentId
+              ? s.agentStreaming[agentId]
+              : s.streaming[chatJid];
+            if (!prev || prev.interrupted) return s;
+            const next = { ...prev };
+            endThinkingBurst(prev, next, Date.now());
+            next.awaitingModel = false;
+            next.phaseStartedAt = undefined;
+            return agentId
+              ? { agentStreaming: { ...s.agentStreaming, [agentId]: next } }
+              : { streaming: { ...s.streaming, [chatJid]: next } };
+          });
+        }
+        return;
+      }
+    }
+
     // Clear in receive order: an older rAF batch must not erase a newer retry.
     // Child activity does not mean the parent request has recovered.
     if (
@@ -3303,11 +3969,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
     }
 
-    // ⓪ text_delta / thinking_delta — rAF batch for both agent and main conversation
+    // ⓪ text_delta / thinking_delta — rAF batch for both agent and main
+    // conversation. A sub-agent's own text and reasoning (it has a parent tool)
+    // is its task's tail, not the reply's, in a session as in the main stream.
     if (
       (event.eventType === 'text_delta' ||
         event.eventType === 'thinking_delta') &&
-      (agentId || !event.parentToolUseId)
+      !event.parentToolUseId
     ) {
       const key = agentId ? `agent:${agentId}` : `main:${chatJid}`;
       let entry = pendingDeltas.get(key);
@@ -3402,7 +4070,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (current?.interrupted) return s;
         const prev = resolveStreamingPrev(current, event);
         const next = { ...prev };
-        applyStreamEvent(event, prev, next, MAX_STREAMING_TEXT);
+        applyStreamEvent(
+          event,
+          prev,
+          next,
+          MAX_STREAMING_TEXT,
+          runStartedAtMs(s.activeRuns, runtimeJid),
+        );
         return { agentStreaming: { ...s.agentStreaming, [agentId]: next } };
       });
       return;
@@ -3579,7 +4253,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (!current || current.interrupted) return s;
         const prev = resolveStreamingPrev(current, event);
         const next = { ...prev };
-        applyStreamEvent(event, prev, next, MAX_STREAMING_TEXT);
+        applyStreamEvent(
+          event,
+          prev,
+          next,
+          MAX_STREAMING_TEXT,
+          runStartedAtMs(s.activeRuns, runtimeJid),
+        );
         return {
           streaming: { ...s.streaming, [chatJid]: next },
         };
@@ -3705,7 +4385,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       const prev = resolveStreamingPrev(current, event);
       const next = { ...prev };
-      applyStreamEvent(event, prev, next, MAX_STREAMING_TEXT);
+      applyStreamEvent(
+        event,
+        prev,
+        next,
+        MAX_STREAMING_TEXT,
+        runStartedAtMs(s.activeRuns, runtimeJid),
+      );
       return {
         waiting: { ...s.waiting, [chatJid]: true },
         streaming: { ...s.streaming, [chatJid]: next },
@@ -3745,6 +4431,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       workflow_runs:
         completedWorkflowRuns.length > 0 ? completedWorkflowRuns : undefined,
       turn_id: wsMsg.turn_id ?? null,
+      ...(wsMsg.has_trace ? { has_trace: true } : {}),
       session_id: wsMsg.session_id ?? null,
       sdk_message_uuid: wsMsg.sdk_message_uuid ?? null,
       source_kind: wsMsg.source_kind ?? null,
@@ -4937,24 +5624,54 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // WS 重连时接收后端推送的流式快照，恢复 StreamingDisplay
   handleStreamSnapshot: (chatJid, snapshot, agentId, runId) => {
     const runtimeJid = agentId ? `${chatJid}#agent:${agentId}` : chatJid;
-    const restore = (local: StreamingState | undefined): StreamingState => {
+    // The speech tool of a proactive turn is not work to watch: the calls the
+    // snapshot shows are remembered so their later events are left out too.
+    const speech = isProactiveRuntime(get(), runtimeJid)
+      ? speechCallsOfSnapshot(snapshot)
+      : null;
+    if (speech) rememberSpeechCalls(runtimeJid, runId, speech);
+    // A proactive workspace's snapshot is cut to the level its owner chose,
+    // whatever the host put in it.
+    const levelOf = (s: ChatState): ProcessVisibility | null =>
+      isProactiveRuntime(s, runtimeJid)
+        ? normalizeProcessVisibility(s.groups[chatJid]?.process_visibility)
+        : null;
+    const restore = (
+      local: StreamingState | undefined,
+      level: ProcessVisibility | null,
+    ): StreamingState => {
       const restored: StreamingState = {
         ...DEFAULT_STREAMING_STATE,
         partialText: snapshot.partialText || '',
-        thinkingText: snapshot.thinkingText || '',
-        activeTools: (snapshot.activeTools || []).map((t) => ({
-          toolName: t.toolName,
-          toolUseId: t.toolUseId,
-          startTime: t.startTime,
-          toolInputSummary: t.toolInputSummary,
-          parentToolUseId: t.parentToolUseId,
-        })),
+        thinkingText: capThinkingText(snapshot.thinkingText || ''),
+        thinkingDurationMs: snapshot.thinkingDurationMs,
+        thinkingStartedAt: snapshot.thinkingStartedAt,
+        phaseStartedAt: snapshot.phaseStartedAt,
+        awaitingModel: snapshot.awaitingModel,
+        activeTools: (snapshot.activeTools || [])
+          .filter((t) => !level || !speech?.has(t.toolUseId))
+          .map((t) => ({
+            toolName: t.toolName,
+            toolUseId: t.toolUseId,
+            startTime: t.startTime,
+            ...(t.elapsedSeconds != null
+              ? { elapsedSeconds: t.elapsedSeconds }
+              : {}),
+            toolInputSummary: t.toolInputSummary,
+            parentToolUseId: t.parentToolUseId,
+            ...(t.isNested != null ? { isNested: t.isNested } : {}),
+            ...(t.skillName ? { skillName: t.skillName } : {}),
+            ...(t.toolInput ? { toolInput: t.toolInput } : {}),
+          })),
         recentEvents: (
           (snapshot.recentEvents || []) as StreamingTimelineEvent[]
         ).filter(isUserVisibleTimelineEvent),
-        traceEvents: (snapshot.traceEvents || []).filter(
-          isUserVisibleTraceEvent,
-        ),
+        traceEvents: (() => {
+          const rows = (snapshot.traceEvents || []).filter(
+            isUserVisibleTraceEvent,
+          );
+          return level && speech ? withoutSpeechTool(rows) : rows;
+        })(),
         taskStates: snapshot.taskStates || {},
         todos: snapshot.todos,
         systemStatus: snapshot.systemStatus || null,
@@ -4979,10 +5696,56 @@ export const useChatStore = create<ChatState>((set, get) => ({
         restored.thinkingStartedAt = local.thinkingStartedAt;
         restored.thinkingDurationMs = local.thinkingDurationMs;
         restored.phaseStartedAt = local.phaseStartedAt;
+        restored.awaitingModel = local.awaitingModel;
         restored.sessionId = local.sessionId;
         restored.interrupted = local.interrupted;
       }
-      return restored;
+      restored.thinkingTitle = extractThinkingTitle(restored.thinkingText, {
+        final: !restored.isThinking,
+      });
+      // The snapshot has the pieces but not their order. This tab's own steps
+      // of the same turn know it; otherwise rebuild a plausible order.
+      if (local && sameTurn && local.steps && local.steps.length > 0) {
+        restored.steps = local.steps;
+        restored.stepsDropped = local.stepsDropped;
+        restored.partialBase = local.partialBase;
+        restored.thinkingGap = local.thinkingGap;
+        if (local.thinkingTitle) restored.thinkingTitle = local.thinkingTitle;
+      } else {
+        const rebuilt = rebuildSteps({
+          thinkingText: restored.thinkingText,
+          thinkingDurationMs: restored.thinkingDurationMs,
+          isThinking: restored.isThinking,
+          partialText: restored.partialText,
+          activeTools: restored.activeTools,
+          tasks: Object.values(restored.taskStates).map((task) => ({
+            id: task.id,
+            status: task.status,
+            title: task.title,
+          })),
+          tracedTools: restored.traceEvents.flatMap((row) =>
+            (row.kind === 'tool' || row.kind === 'skill') &&
+            !row.parentToolUseId &&
+            row.toolUseId &&
+            /^(?:工具|技能) /.test(row.title)
+              ? [
+                  {
+                    toolUseId: row.toolUseId,
+                    timestamp: row.timestamp,
+                    summary: row.summary,
+                    ...(row.kind === 'skill'
+                      ? { skillName: row.title.slice(3), toolName: 'Skill' }
+                      : { toolName: row.title.slice(3) }),
+                  },
+                ]
+              : [],
+          ),
+          now: Date.now(),
+        });
+        restored.steps = rebuilt.steps;
+        restored.stepsDropped = rebuilt.dropped;
+      }
+      return level ? scrubForVisibility(restored, level) : restored;
     };
 
     if (agentId) {
@@ -4995,7 +5758,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           agentWaiting: { ...s.agentWaiting, [agentId]: true },
           agentStreaming: {
             ...s.agentStreaming,
-            [agentId]: restore(s.agentStreaming[agentId]),
+            [agentId]: restore(s.agentStreaming[agentId], levelOf(s)),
           },
         };
       });
@@ -5009,7 +5772,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           waiting: { ...s.waiting, [chatJid]: true },
           streaming: {
             ...s.streaming,
-            [chatJid]: restore(s.streaming[chatJid]),
+            [chatJid]: restore(s.streaming[chatJid], levelOf(s)),
           },
         };
       });
@@ -5063,7 +5826,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const previous = agentId
         ? s.agentStreaming[agentId]
         : s.streaming[chatJid];
-      if (replacingAttempt) {
+      if (replacingAttempt && !isProactiveRuntime(s, chatJid)) {
         settled.state = settleStreamingState(
           previous,
           s.activeRuns[chatJid]?.runId,
@@ -5116,10 +5879,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // message. Freeze the card (settled) so the final replaces it in one
       // update instead of leaving a blank frame in between; the next queued
       // run streams into a separate live projection meanwhile.
-      settled.state = settleStreamingState(
-        agentId ? s.agentStreaming[agentId] : s.streaming[chatJid],
-        runId,
-      );
+      // A proactive workspace's messages are not replies to a card.
+      settled.state = isProactiveRuntime(s, chatJid)
+        ? null
+        : settleStreamingState(
+            agentId ? s.agentStreaming[agentId] : s.streaming[chatJid],
+            runId,
+          );
       const settledStreaming = settled.state
         ? { ...s.settledStreaming, [chatJid]: settled.state }
         : s.settledStreaming;

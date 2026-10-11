@@ -20,6 +20,7 @@
 | `/api/groups`                      | `src/routes/groups.ts`           | 工作区兼容模型、消息和环境    |
 | `/api/groups`                      | `src/routes/files.ts`            | 工作区文件                    |
 | `/api/groups`                      | `src/routes/agents.ts`           | Runtime Session 与渠道绑定    |
+| `/api/groups`                      | `src/routes/turn-traces.ts`      | 回合的思考摘要与执行轨迹      |
 | `/api/groups`                      | `src/routes/workspace-config.ts` | 项目 Skills/MCP               |
 | `/api/workspaces`                  | `src/routes/workspaces.ts`       | Agent-first 工作区投影        |
 | `/api/agent-profiles`              | `src/routes/agent-profiles.ts`   | 产品级 Agent                  |
@@ -84,13 +85,14 @@ Public：
 - `POST /api/groups/:jid/stop`
 - `POST /api/groups/:jid/interrupt`
 - `POST /api/groups/:jid/reset-session`
-- `GET|PUT /api/groups/:jid/model-selection`，聊天输入框的会话级模型选择
+- `GET|PUT /api/groups/:jid/model-selection`，聊天输入框的会话级模型与推理档位选择
 - `POST /api/groups/:jid/clear-history`，重建工作区内容：永久清除聊天、
   Runtime Session、子对话、工作目录及 Workspace Memory（含版本历史和
   Home Owner Profile），关联定时任务停止并移入回收站；保留工作区外壳、
   `data/extra/` 和任务运行历史
 - `POST /api/groups/:jid/reset-owner`，admin break-glass
 - `GET /api/groups/:jid/messages`
+- `GET /api/groups/:jid/turn-traces/:turnId`，已结算回合的思考摘要与执行轨迹
 - `DELETE /api/groups/:jid/messages/:messageId`
 - `GET /api/groups/:jid/messages/:messageId/attachments/:index/original`
 - `GET|PUT /api/groups/:jid/env`
@@ -104,6 +106,31 @@ Public：
 PUT 的 `modelConfigId` 为 `null` 时恢复默认。会话选择优先于智能体绑定的模型配置，
 可以选择未启用的配置；切换后该会话的暖 Runner 在当前轮次结束后退出，下一条消息
 使用新配置。
+
+ChatGPT 订阅配置（`kind: "codex"`）还可以在配置内选择具体模型与推理档位。GET 为
+这类选项增加 `codex`：`defaultModel`（配置自己的模型）、`defaultEffort`（不选档位时
+实际使用的档位，Agent 显式档位优先，其次是配置档位，按模型目录钳制）、`source`
+（`live` 为该账号自己的目录，其余为兜底目录）、`needsReauth`，以及
+`models[]`（`value`、`label`、`efforts`、`defaultEffort`）。`models` 来自该账号的
+实时目录并按套餐过滤，同步读取、后台刷新，不等待网络；`efforts` 按 low 到 ultra
+排序，只含当前用户可以选择的档位。响应顶层另有 `selectedModel`、`selectedEffort`：
+已存的选择若不再被目录或当前用户权限支持，按未选择返回，与 Runner 启动时的处理
+一致。其他类型的选项形状不变，旧客户端不受影响。
+
+PUT 可以携带 `model`、`effort`，请求整体替换该会话的选择：只写 `modelConfigId`
+会清掉之前的模型和档位，换配置也不会继承旧配置的模型。`model` 必须在该账号当前
+目录内，`effort` 必须在（所选或配置自己的）模型的 `efforts` 内，且 `model` 与
+`effort` 只能用于 ChatGPT 订阅配置，并要同时给出 `modelConfigId`；否则返回 400 与
+`code`：`MODEL_UNAVAILABLE`、`EFFORT_UNSUPPORTED`、`EFFORT_RESTRICTED`、
+`MODEL_SELECTION_UNSUPPORTED`、`MODEL_CONFIG_REQUIRED`。高于 `max` 的档位（目前是
+`ultra`）只允许具备 `manage_system_config` 的用户选择，GET 不列出，PUT 返回
+`EFFORT_RESTRICTED`，Runner 启动时若选择者已失去该权限则回到默认档；放宽只需改
+`CODEX_SESSION_EFFORT_CEILING`。响应附带 `drained`（被退出的暖 Runner 数）与
+`liveUpdated`（被就地改档的存活网关授权数）。
+
+换配置或换模型会让下一条消息在新的底层会话上开始，并带上最近的对话记录（加密推理只对
+签发它的模型有效）；只改档位不会，存活 Runner 的下一个上游请求就使用新档位。
+选择的 (配置, 模型, 档位) 都没变时不退出任何 Runner。
 
 `POST /api/messages` 可以携带 Web 附件和 Runtime Session 标识。`/clear` 与
 `/fresh` 会进入与 `reset-session` 相同的 owner 级破坏性检查。`/fresh` 会开启
@@ -122,6 +149,52 @@ Workspace↔AgentProfile 绑定行上，因此：仅 `web:` 前缀工作区可�
 工作区没有 AgentProfile 绑定时返回 409 `WORKSPACE_AGENT_PROFILE_MISSING`。
 它与 `execution_mode` 共享同一道 quiesce 边界，暖 Runner 只能观察到旧契约或新
 契约；停机失败返回 503 并带 `persisted` 标记。
+
+`process_visibility`（`hidden`、`activity` 或 `full`）决定主动模式工作区的 Web
+能看到一个回合的多少过程，存放在同一条绑定行上。`GET /api/groups` 的每个 `web:`
+工作区都带解析后的有效值（没有绑定行时为 `hidden`）；`POST /api/groups` 可在创建时
+指定，缺省 `activity`，此前已存在的工作区保持 `hidden`；`PATCH /api/groups/:jid`
+同样接受它，响应回显当前值。权限与 `interaction_mode` 相同（仅 `web:` 前缀工作区、
+仅 owner，没有绑定行时 409 `WORKSPACE_AGENT_PROFILE_MISSING`），但它只改变展示：
+不经过 quiesce、不重启运行时，正在运行的回合从下一个事件起按新值投影。Assistant
+模式的工作区始终展示完整过程，该字段可以设置但没有效果。三个级别对 Web 的投影：
+
+| 级别       | 广播给 Web 的 Runner 事件                                                                                                                       |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hidden`   | 仅运行生命周期 `status`（`requesting`、`idle`、`interrupted`），即转圈                                                                          |
+| `activity` | 再加工具、子 Agent 任务、todo、hook、权限拒绝、上下文压缩和其余阶段状态，以及不含文本的 `thinking_start`/`thinking_end`；不含任何模型产出的文字 |
+| `full`     | `activity` 加上主 Agent 与子 Agent 的 `thinking_delta`（推理摘要）                                                                              |
+
+任何级别都不会发送 `text_delta`（含子 Agent 文本）、`usage`、`memory_recall`、
+`prompt_suggestion`、`raw_sdk_event`、`notification` 和未知事件类型；`tool_result`
+只保留 `toolUseId`，工具的 `toolInput`、子 Agent 的提示词与 Workflow 的预览文本也
+会被剥离。过程事件永远不会进入 IM 渠道的流式卡片。`context_audit` 从不发给 Web，但
+在所有模式下都会记录到宿主的运行上下文快照。`activity` 及以上还会广播子 Agent 任务的
+`agent_status`，使 Task 标签与任务事件一致。
+
+回合结算时，宿主把该回合的思考摘要、思考耗时和执行轨迹写入 `turn_traces`
+（Assistant 模式总是写；主动模式仅当 `process_visibility` 不是 `hidden` 时写，且
+`activity` 级不保存思考文本；思考文本最多 64KB，保留尾部并以 `…` 开头标记被截断，
+轨迹最多 200 条）。`GET /api/groups/:jid/messages` 返回的消息带 `has_trace: true`
+表示它是所属回合最后一条 agent 消息且该回合有轨迹，WebSocket `new_message` 在写入
+轨迹的同时也带这个标记。`GET /api/groups/:jid/turn-traces/:turnId` 返回：
+
+```json
+{
+  "turn_id": "…",
+  "thinking": "…",
+  "thinking_duration_ms": 12400,
+  "trace": [
+    { "id": "…", "timestamp": 0, "kind": "tool", "title": "工具 Bash" }
+  ],
+  "created_at": "2026-01-01T00:00:00.000Z"
+}
+```
+
+`trace` 的行与 Web 实时累积的一致（标题格式相同）。访问检查与消息列表相同
+（Runtime Session 的 `:jid` 为 `{workspaceJid}#agent:{sessionId}`）；主动模式工作区
+按**当前**可见性过滤：`hidden` 返回 404 且消息不带 `has_trace`，`activity` 返回空的
+`thinking`。消息、聊天或工作区被删除时对应的轨迹一并清除，服务启动时清理孤儿轨迹。
 
 Home Workspace 固定归属当前用户的内置 HappyClaw。尝试通过
 `PATCH /api/groups/:jid/agent-profile` 将 Home 迁移到自定义 Agent 时返回：
@@ -693,6 +766,8 @@ Agent 镜像只由 `main` 分支的 GitHub Actions 构建并发布。该接口�
 - `typing`
 - `status_update`
 - `stream_event`
+- `stream_snapshot`，连接建立时推送进行中回合的快照（含推理文本尾部、推理计时、
+  活动工具、子 Agent 状态和轨迹）
 - `agent_status`
 - `terminal_output`
 - `terminal_started`

@@ -88,7 +88,8 @@ token（Runner/查询退出即吊销），并拒绝带 `Forwarded`、`X-Forwarde
 需要 Access 的典型操作：
 
 - 列表中的工作区投影
-- 读取消息与文件
+- 读取消息与文件，以及回合的思考摘要与执行轨迹
+  （`GET /api/groups/:jid/turn-traces/:turnId`，主动模式工作区另按下述过程可见性过滤）
 - 查看会话当前使用的模型配置
 - 发送普通消息
 - 查看 Runtime Session、绑定和项目能力
@@ -105,8 +106,11 @@ Host Workspace 在 Access 之外还要求 admin。
 `canModifyGroup()` 是 owner-only。需要 Modify 的典型操作：
 
 - 重命名、切换 Agent、修改执行方式
+- 修改回复模式与过程可见性（`PATCH /api/groups/:jid` 的 `interaction_mode`、
+  `process_visibility`，仅 `web:` 工作区；后者不重启运行时）
 - stop、interrupt、reset-session、clear-history
-- 切换会话模型（`PUT /api/groups/:jid/model-selection`）
+- 切换会话模型与推理档位（`PUT /api/groups/:jid/model-selection`）；其中高于 `max` 的
+  推理档位（目前是 `ultra`）另需 `manage_system_config`
 - 创建、修改、删除 Runtime Session
 - 写入工作区 Skills/MCP
 - 修改群聊绑定、激活方式、响应对象和 owner
@@ -126,6 +130,22 @@ Home Workspace 永远不可删除。其他工作区必须通过 Modify，删除�
 自定义 AgentProfile 创建后默认不拥有 Workspace，因此也没有可访问的 Session 或
 Workspace Memory。只有 owner 显式新建/迁移非 Home Workspace 才建立归属；迁移时
 Memory 随 Workspace 保留，不跨 Workspace 复制。
+
+### 4.3.1 过程可见性与回合轨迹
+
+主动模式工作区的 `process_visibility` 同时约束实时广播和已存轨迹：
+
+| 级别       | 实时 WebSocket 过程事件 | `turn-traces` 与 `has_trace` |
+| ---------- | ----------------------- | ---------------------------- |
+| `hidden`   | 仅运行生命周期          | 404，消息不带 `has_trace`    |
+| `activity` | 工具、任务、todo 等结构 | 可读，`thinking` 为空        |
+| `full`     | 再加推理摘要            | 完整                         |
+
+模型自己产出的文字（`text_delta`、工具结果文本、子 Agent 的提示词与回答）在任何级别
+都不会广播，也不会写入轨迹。过滤读取**当前**级别，而不是回合运行时的级别。Assistant
+模式工作区与 fire-and-forget 的 Spawn Agent 不受该设置影响。轨迹的读取权限与消息
+列表相同：只有能读取该聊天历史的用户可读；admin 没有跨 owner bypass，无权限与不存在
+都返回 404。
 
 ### 4.4 环境变量
 

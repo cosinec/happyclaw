@@ -29,6 +29,10 @@ import {
   setDefaultFollowUpMode,
   type FollowUpPreference,
 } from '../../lib/follow-up-preferences';
+import {
+  useStreamLayout,
+  type StreamLayout,
+} from '../../hooks/useStreamLayout';
 import { SettingsGroup, SettingsRow, SettingsSection } from './SettingsLayout';
 import { SettingsSwitchRow } from './SettingsFormControls';
 
@@ -52,6 +56,24 @@ const SCHEME_OPTIONS: {
 const FONT_OPTIONS: { value: FontStyle; label: string }[] = [
   { value: 'default', label: 'HappyClaw' },
   { value: 'anthropic', label: 'Anthropic' },
+];
+
+const STREAM_LAYOUT_OPTIONS: {
+  value: StreamLayout;
+  label: string;
+  description: string;
+}[] = [
+  {
+    value: 'timeline',
+    label: '步骤时间线',
+    description:
+      '按发生的先后列出思考、工具调用和子 Agent，最近几步展开，完成后折成一行。',
+  },
+  {
+    value: 'classic',
+    label: '经典布局',
+    description: '按类型分组：思考、正在运行的工具、计划、子 Agent，再接回复。',
+  },
 ];
 
 const FOLLOW_UP_OPTIONS: {
@@ -271,6 +293,11 @@ export function PreferencesSection() {
     fontStyle,
     setFontStyle,
   } = useTheme();
+  const { layout: streamLayout, setLayout: setStreamLayout } =
+    useStreamLayout();
+  const currentStreamLayout =
+    STREAM_LAYOUT_OPTIONS.find((option) => option.value === streamLayout) ??
+    STREAM_LAYOUT_OPTIONS[0];
 
   return (
     <div className="space-y-8">
@@ -303,6 +330,18 @@ export function PreferencesSection() {
                 value={fontStyle}
                 options={FONT_OPTIONS}
                 onChange={setFontStyle}
+              />
+            }
+          />
+          <SettingsRow
+            label="流式过程布局"
+            description={currentStreamLayout.description}
+            control={
+              <SegmentedControl
+                label="流式过程布局"
+                value={streamLayout}
+                options={STREAM_LAYOUT_OPTIONS}
+                onChange={setStreamLayout}
               />
             }
           />

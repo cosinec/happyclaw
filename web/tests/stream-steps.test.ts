@@ -1,0 +1,371 @@
+import { describe, expect, it } from 'vitest';
+import {
+  MAX_STEPS,
+  answerStart,
+  appendThinkingText,
+  buildTimelineView,
+  closeOpenSteps,
+  closeTextStep,
+  closeThinkingStep,
+  endToolStep,
+  ensureTaskStep,
+  failToolStep,
+  finishSteps,
+  openTextStep,
+  openThinkingStep,
+  patchToolStep,
+  railSteps,
+  rebuildSteps,
+  setTaskStepStatus,
+  startToolStep,
+  stepList,
+  summarizeSteps,
+  type StepList,
+} from '../src/lib/stream-steps';
+
+const empty = (): StepList => stepList(undefined, undefined);
+
+describe('thinking steps', () => {
+  it('keeps one running thinking step and grows its text', () => {
+    let list = openThinkingStep(empty(), 100);
+    list = openThinkingStep(list, 150);
+    expect(list.steps).toHaveLength(1);
+    list = appendThinkingText(list, '**读取文件**\n\n先看一下', 200);
+    list = appendThinkingText(list, '入口。', 210);
+    expect(list.steps[0].text).toBe('**读取文件**\n\n先看一下入口。');
+    expect(list.steps[0].title).toBe('读取文件');
+    expect(list.steps[0].status).toBe('running');
+  });
+
+  it('closes with the model timing when it gave one, else by the clock', () => {
+    const open = appendThinkingText(empty(), '想。', 1000);
+    expect(closeThinkingStep(open, 4000).steps[0].durationMs).toBe(3000);
+    expect(closeThinkingStep(open, 4000, 2500).steps[0].durationMs).toBe(2500);
+    expect(closeThinkingStep(open, 4000).steps[0].status).toBe('done');
+  });
+
+  it('opens a new step for the next burst', () => {
+    let list = closeThinkingStep(appendThinkingText(empty(), '一。', 0), 10);
+    list = startToolStep(list, { toolUseId: 't1', toolName: 'Read' }, 20);
+    list = appendThinkingText(list, '二。', 30);
+    expect(list.steps.map((step) => step.kind)).toEqual([
+      'thinking',
+      'tool',
+      'thinking',
+    ]);
+  });
+
+  it('bounds the text of one step and says so', () => {
+    const list = appendThinkingText(empty(), '段落。\n\n'.repeat(5000), 0);
+    expect(list.steps[0].text!.length).toBeLessThanOrEqual(6000);
+    expect(list.steps[0].text!.startsWith('*（已省略较早的思考）*')).toBe(true);
+  });
+
+  it('has an empty thinking step for a silent burst', () => {
+    const list = closeThinkingStep(openThinkingStep(empty(), 0), 5000, 4800);
+    expect(list.steps[0]).toMatchObject({
+      kind: 'thinking',
+      text: '',
+      durationMs: 4800,
+      status: 'done',
+    });
+  });
+});
+
+describe('tool steps', () => {
+  it('runs, then finishes with what it returned', () => {
+    let list = startToolStep(
+      empty(),
+      { toolUseId: 't1', toolName: 'Bash', summary: 'ls' },
+      100,
+    );
+    list = patchToolStep(list, 't1', { summary: 'ls -la' });
+    list = endToolStep(list, 't1', 400, 'total 8\ndrwx');
+    expect(list.steps[0]).toMatchObject({
+      kind: 'tool',
+      status: 'done',
+      endedAt: 400,
+      summary: 'ls -la',
+      resultPreview: 'total 8 drwx',
+    });
+  });
+
+  it('marks a failed result as an error without its warning prefix', () => {
+    let list = startToolStep(empty(), { toolUseId: 't1', toolName: 'Bash' }, 0);
+    list = endToolStep(list, 't1', 50, '⚠️ command not found');
+    expect(list.steps[0].status).toBe('error');
+    expect(list.steps[0].resultPreview).toBe('command not found');
+  });
+
+  it('keeps an error through a later plain end', () => {
+    let list = startToolStep(empty(), { toolUseId: 't1', toolName: 'Bash' }, 0);
+    list = endToolStep(list, 't1', 50, '⚠️ boom');
+    list = endToolStep(list, 't1', 60);
+    expect(list.steps[0].status).toBe('error');
+  });
+
+  it('does not duplicate a tool that starts twice', () => {
+    let list = startToolStep(empty(), { toolUseId: 't1', toolName: 'Read' }, 0);
+    list = startToolStep(
+      list,
+      { toolUseId: 't1', toolName: 'Read', summary: 'a.ts' },
+      5,
+    );
+    expect(list.steps).toHaveLength(1);
+    expect(list.steps[0].summary).toBe('a.ts');
+  });
+
+  it('marks the denied call', () => {
+    let list = startToolStep(empty(), { toolUseId: 't1', toolName: 'Bash' }, 0);
+    list = failToolStep(list, 't1', 9, '被权限策略拒绝');
+    expect(list.steps[0]).toMatchObject({
+      status: 'error',
+      resultPreview: '被权限策略拒绝',
+    });
+  });
+
+  it('ignores an unknown tool id', () => {
+    const list = startToolStep(
+      empty(),
+      { toolUseId: 't1', toolName: 'Read' },
+      0,
+    );
+    expect(endToolStep(list, 'other', 5)).toBe(list);
+    expect(patchToolStep(list, 'other', { summary: 'x' })).toBe(list);
+  });
+});
+
+describe('sub-agent steps', () => {
+  it('turns a Task tool into a task step that ends on its own lifecycle', () => {
+    let list = startToolStep(
+      empty(),
+      { toolUseId: 'task-1', toolName: 'Task', summary: '检查滚动' },
+      0,
+    );
+    expect(list.steps[0]).toMatchObject({ kind: 'task', taskId: 'task-1' });
+    list = endToolStep(list, 'task-1', 100);
+    expect(list.steps[0].status).toBe('running');
+    list = setTaskStepStatus(list, 'task-1', 'done', 200, '已完成检查');
+    expect(list.steps[0]).toMatchObject({
+      status: 'done',
+      endedAt: 200,
+      summary: '已完成检查',
+    });
+  });
+
+  it('shares one step between the tool, task_start and progress', () => {
+    let list = startToolStep(
+      empty(),
+      { toolUseId: 'task-1', toolName: 'Agent' },
+      0,
+    );
+    list = ensureTaskStep(
+      list,
+      { taskId: 'task-1', title: '检查', summary: '读到第 3 个文件' },
+      5,
+    );
+    expect(list.steps).toHaveLength(1);
+    expect(list.steps[0]).toMatchObject({
+      title: '检查',
+      summary: '读到第 3 个文件',
+    });
+  });
+
+  it('adds a workflow that has no tool call of its own', () => {
+    const list = ensureTaskStep(empty(), { taskId: 'wf-1', title: '审查' }, 0);
+    expect(list.steps[0]).toMatchObject({ kind: 'task', taskId: 'wf-1' });
+  });
+
+  it('marks a failed Task tool result as an error', () => {
+    let list = startToolStep(
+      empty(),
+      { toolUseId: 'task-1', toolName: 'Task' },
+      0,
+    );
+    list = endToolStep(list, 'task-1', 9, '⚠️ aborted');
+    expect(list.steps[0].status).toBe('error');
+  });
+});
+
+describe('text steps', () => {
+  it('is the answer when nothing runs after it', () => {
+    let list = openTextStep(empty(), 0, 0);
+    list = openTextStep(list, 5, 10);
+    expect(list.steps).toHaveLength(1);
+    expect(answerStart(list.steps, 0)).toBe(0);
+    expect(railSteps(list.steps)).toEqual([]);
+  });
+
+  it('becomes commentary once a tool starts after it', () => {
+    const text = '我先看一下文件。';
+    let list = openTextStep(empty(), 0, 0);
+    list = closeOpenSteps(list, 10, text, 0);
+    list = startToolStep(list, { toolUseId: 't1', toolName: 'Read' }, 11);
+    expect(list.steps[0]).toMatchObject({ kind: 'text', text, status: 'done' });
+    expect(answerStart(list.steps, 0)).toBe(Number.POSITIVE_INFINITY);
+    expect(railSteps(list.steps).map((step) => step.kind)).toEqual([
+      'text',
+      'tool',
+    ]);
+  });
+
+  it('puts the answer after the last tool', () => {
+    const first = '我先看一下。';
+    const second = '结论如下。';
+    let list = openTextStep(empty(), 0, 0);
+    list = closeOpenSteps(list, 10, first, 0);
+    list = startToolStep(list, { toolUseId: 't1', toolName: 'Read' }, 11);
+    list = endToolStep(list, 't1', 20);
+    list = openTextStep(list, 30, first.length);
+    expect(answerStart(list.steps, 0)).toBe(first.length);
+    expect((first + second).slice(first.length)).toBe(second);
+  });
+
+  it('keeps offsets right after the head of the text was cut', () => {
+    let list = openTextStep(empty(), 0, 500);
+    expect(answerStart(list.steps, 400)).toBe(100);
+    expect(answerStart(list.steps, 900)).toBe(0);
+    list = closeTextStep(list, 1, 'x'.repeat(50), 480);
+    expect(list.steps[0].text).toBe('x'.repeat(30));
+  });
+
+  it('has no answer start without steps', () => {
+    expect(answerStart(undefined, 0)).toBeUndefined();
+    expect(answerStart([], 0)).toBeUndefined();
+  });
+});
+
+describe('the end of a reply', () => {
+  it('finishes whatever was running', () => {
+    let list = startToolStep(empty(), { toolUseId: 't1', toolName: 'Read' }, 0);
+    list = appendThinkingText(list, '想。', 1);
+    const done = finishSteps(list, 50, false);
+    expect(done.steps.every((step) => step.status === 'done')).toBe(true);
+  });
+
+  it('marks a tool that never returned after a stop', () => {
+    const list = finishSteps(
+      startToolStep(empty(), { toolUseId: 't1', toolName: 'Bash' }, 0),
+      9,
+      true,
+    );
+    expect(list.steps[0]).toMatchObject({
+      status: 'error',
+      resultPreview: '已停止',
+    });
+  });
+
+  it('returns the same list when nothing runs', () => {
+    const list = closeThinkingStep(openThinkingStep(empty(), 0), 5);
+    expect(finishSteps(list, 9, false)).toBe(list);
+  });
+});
+
+describe('the cap', () => {
+  it('drops the oldest finished steps first', () => {
+    let list = startToolStep(
+      empty(),
+      { toolUseId: 'keep', toolName: 'Bash' },
+      0,
+    );
+    for (let i = 0; i < MAX_STEPS + 20; i += 1) {
+      list = startToolStep(
+        list,
+        { toolUseId: `t${i}`, toolName: 'Read' },
+        i + 1,
+      );
+      list = endToolStep(list, `t${i}`, i + 2);
+    }
+    expect(list.steps).toHaveLength(MAX_STEPS);
+    expect(list.dropped).toBe(21);
+    // The long-running first tool is not dropped for being the oldest.
+    expect(list.steps[0].toolUseId).toBe('keep');
+  });
+});
+
+describe('the timeline view', () => {
+  const tools = (count: number): StepList => {
+    let list = empty();
+    for (let i = 0; i < count; i += 1) {
+      list = startToolStep(list, { toolUseId: `t${i}`, toolName: 'Read' }, i);
+      list = endToolStep(list, `t${i}`, i + 1);
+    }
+    return list;
+  };
+
+  it('shows few steps whole', () => {
+    const view = buildTimelineView(tools(4).steps);
+    expect(view.folded).toEqual([]);
+    expect(view.rows).toHaveLength(4);
+    expect([...view.expanded]).toHaveLength(3);
+  });
+
+  it('folds the older steps into one line and opens the latest three', () => {
+    const steps = tools(10).steps;
+    const view = buildTimelineView(steps);
+    expect(view.folded.map((step) => step.toolUseId)).toEqual([
+      't0',
+      't1',
+      't2',
+      't3',
+    ]);
+    expect(view.rows).toHaveLength(6);
+    expect([...view.expanded]).toEqual(steps.slice(-3).map((step) => step.id));
+  });
+
+  it('summarizes what was folded', () => {
+    let list = tools(2);
+    list = appendThinkingText(list, '想。', 5);
+    list = ensureTaskStep(list, { taskId: 'k' }, 6);
+    list = endToolStep(
+      startToolStep(list, { toolUseId: 'bad', toolName: 'Bash' }, 7),
+      'bad',
+      8,
+      '⚠️ no',
+    );
+    expect(summarizeSteps(list.steps)).toEqual({
+      tools: 3,
+      tasks: 1,
+      thinking: 1,
+      commentary: 0,
+      failed: 1,
+    });
+  });
+});
+
+describe('rebuilding after a reconnect', () => {
+  it('orders reasoning, tools, sub-agents, then the text', () => {
+    const list = rebuildSteps({
+      thinkingText: '**计划**\n\n先读。',
+      thinkingDurationMs: 4000,
+      isThinking: false,
+      partialText: '正在回答',
+      activeTools: [
+        {
+          toolName: 'Bash',
+          toolUseId: 't2',
+          startTime: 300,
+          toolInputSummary: 'ls',
+        },
+      ],
+      tasks: [{ id: 'task-1', status: 'running', title: '检查' }],
+      tracedTools: [
+        { toolUseId: 't1', timestamp: 100, toolName: 'Read', summary: 'a.ts' },
+        { toolUseId: 't2', timestamp: 300, toolName: 'Bash', summary: 'ls' },
+        { toolUseId: 'task-1', timestamp: 200, toolName: 'Task' },
+      ],
+      now: 1000,
+    });
+    expect(list.steps.map((step) => step.kind)).toEqual([
+      'thinking',
+      'tool',
+      'tool',
+      'task',
+      'text',
+    ]);
+    expect(list.steps[1].status).toBe('done');
+    expect(list.steps[2].status).toBe('running');
+    expect(list.steps[0].title).toBe('计划');
+    expect(answerStart(list.steps, 0)).toBe(0);
+  });
+});

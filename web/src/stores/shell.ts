@@ -56,6 +56,12 @@ export interface BindingRequest {
   nonce: number;
 }
 
+/** A request from the transcript for ChatView to open the workspace settings. */
+export interface WorkspaceSettingsRequest {
+  groupJid: string;
+  nonce: number;
+}
+
 interface ShellState {
   sidebarWidth: number;
   sidebarCollapsed: boolean;
@@ -69,6 +75,7 @@ interface ShellState {
   /** Agent preselected in the create-workspace dialog (null = default). */
   createWorkspaceAgentId: string | null;
   bindingRequest: BindingRequest | null;
+  workspaceSettingsRequest: WorkspaceSettingsRequest | null;
   /** Incremented to ask the active composer to take focus. */
   composerFocusNonce: number;
   /** Text the active composer should insert (starter prompts), not send. */
@@ -87,6 +94,8 @@ interface ShellState {
   ) => void;
   requestBinding: (groupJid: string, target: string) => void;
   clearBindingRequest: () => void;
+  requestWorkspaceSettings: (groupJid: string) => void;
+  clearWorkspaceSettingsRequest: () => void;
   requestComposerFocus: () => void;
   requestComposerDraft: (text: string) => void;
 }
@@ -101,6 +110,7 @@ export const useShellStore = create<ShellState>((set, get) => ({
   createWorkspaceOpen: false,
   createWorkspaceAgentId: null,
   bindingRequest: null,
+  workspaceSettingsRequest: null,
   composerFocusNonce: 0,
   composerDraftRequest: null,
 
@@ -136,6 +146,9 @@ export const useShellStore = create<ShellState>((set, get) => ({
   requestBinding: (groupJid, target) =>
     set({ bindingRequest: { groupJid, target, nonce: Date.now() } }),
   clearBindingRequest: () => set({ bindingRequest: null }),
+  requestWorkspaceSettings: (groupJid) =>
+    set({ workspaceSettingsRequest: { groupJid, nonce: Date.now() } }),
+  clearWorkspaceSettingsRequest: () => set({ workspaceSettingsRequest: null }),
   requestComposerFocus: () =>
     set((state) => ({ composerFocusNonce: state.composerFocusNonce + 1 })),
   requestComposerDraft: (text) =>

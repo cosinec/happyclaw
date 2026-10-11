@@ -18,6 +18,7 @@ import {
   getCodexCatalogForProvider,
   getResolvedCodexCatalog,
   initCodexCatalogSync,
+  listCodexModelsForProvider,
   maybeRefreshCodexCatalog,
   maybeRefreshCodexProviderCatalog,
   noteCodexModelsEtag,
@@ -636,5 +637,79 @@ describe('per-provider live Codex model catalog', () => {
     const first = await ensureCodexProviderCatalog('p1', { fetchImpl });
     expect(first.source).toBe('live');
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('models a ChatGPT login may run', () => {
+  const login = (
+    planType: string | null,
+    accountId: string | null = 'acct-1',
+  ) => ({
+    id: 'p1',
+    codexOAuthCredentials: { accountId, planType },
+  });
+
+  afterEach(() => {
+    resetCodexCatalogSyncForTests();
+    setCodexCatalogDiskCachePathForTests(null);
+    resolveCodexAccess.mockReset();
+    vi.unstubAllGlobals();
+  });
+
+  test('is the global catalog narrowed to the plan until the account list is fetched', () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    const { models, source } = listCodexModelsForProvider(login('promax'));
+    expect(source).toBe('builtin');
+    const values = models.map((entry) => entry.value);
+    expect(values).toContain('gpt-6.1-sol');
+    // promax is not on gpt-6-sol's plan list.
+    expect(values).not.toContain('gpt-6-sol');
+    // Reading never reaches for the network, and never waits on it.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(resolveCodexAccess).not.toHaveBeenCalled();
+  });
+
+  test('prefers the account catalog once it was fetched, still narrowed to the plan', async () => {
+    resolveCodexAccess.mockResolvedValue({
+      providerId: 'p1',
+      accessToken: 'token',
+      accountId: 'acct-1',
+    });
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            models: [
+              {
+                slug: 'gpt-live-a',
+                visibility: 'list',
+                available_in_plans: ['plus', 'pro'],
+                supported_reasoning_levels: [{ effort: 'low' }],
+              },
+              {
+                slug: 'gpt-live-b',
+                visibility: 'list',
+                available_in_plans: ['pro'],
+                supported_reasoning_levels: [{ effort: 'low' }],
+              },
+            ],
+          }),
+          { status: 200 },
+        ),
+    );
+    await refreshCodexProviderCatalog('p1', { fetchImpl });
+    const plus = listCodexModelsForProvider(login('plus'));
+    expect(plus.source).toBe('live');
+    expect(plus.models.map((entry) => entry.value)).toEqual(['gpt-live-a']);
+    expect(
+      listCodexModelsForProvider(login('pro')).models.map(
+        (entry) => entry.value,
+      ),
+    ).toEqual(['gpt-live-a', 'gpt-live-b']);
+    // The same configuration re-logged into another account sees none of it.
+    expect(listCodexModelsForProvider(login('pro', 'acct-2')).source).toBe(
+      'builtin',
+    );
   });
 });

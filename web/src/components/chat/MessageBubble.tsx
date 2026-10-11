@@ -1,12 +1,10 @@
-import { useState, memo, lazy, Suspense } from 'react';
+import { useState, useMemo, memo, lazy, Suspense } from 'react';
 import {
   Copy,
   Check,
-  ChevronRight,
   Ellipsis,
   ImageDown,
   OctagonAlert,
-  Sparkles,
   TriangleAlert,
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
@@ -19,15 +17,23 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { IconButton } from '../common/IconButton';
 import { cn } from '@/lib/utils';
-import type { Message, StreamingTraceEvent } from '../../stores/chat';
+import {
+  useChatStore,
+  type Message,
+  type StreamingTraceEvent,
+} from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { EmojiAvatar } from '../common/EmojiAvatar';
 import { FinalMarkdown } from './StreamingMarkdown';
 import { PermissionAlert, TracePanel } from './ExecutionTrace';
+import { ThinkingBlock } from './ThinkingBlock';
+import { LazyTurnTrace } from './LazyTurnTrace';
 import { MessageContextMenu } from './MessageContextMenu';
 import { ImageLightbox } from './ImageLightbox';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
-import { formatThinkingDuration } from '../../utils/thinking-duration';
+import { extractThinkingTitle } from '../../lib/thinking-text';
+import { normalizeInteractionMode } from '../../lib/interaction-mode';
+import { normalizeProcessVisibility } from '../../lib/process-visibility';
 import { resolveAgentDisplayIdentity } from '../../utils/agent-identity';
 import {
   getPresentedMessageContent,
@@ -105,47 +111,6 @@ function formatShortTime(value: string): string {
   return date.getFullYear() === now.getFullYear()
     ? `${md} ${hm}`
     : `${date.getFullYear()}-${md} ${hm}`;
-}
-
-/** Collapsible reasoning block for AI messages */
-function ReasoningBlock({
-  content,
-  durationMs,
-}: {
-  content: string;
-  durationMs?: number;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  // Under a second reads as noise ("已思考 0.2 秒").
-  const label =
-    durationMs != null && durationMs >= 1000
-      ? formatThinkingDuration(durationMs)
-      : '思考过程';
-
-  return (
-    <div className="mb-2">
-      <button
-        type="button"
-        onClick={() => setExpanded(!expanded)}
-        aria-expanded={expanded}
-        className="-ml-1.5 inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-md px-1.5 font-sans text-caption text-muted-foreground transition-colors hover:bg-surface-hover hover:text-foreground"
-      >
-        <Sparkles className="size-3.5" />
-        <span>{label}</span>
-        <ChevronRight
-          className={cn(
-            'size-3.5 transition-transform duration-150',
-            expanded && 'rotate-90',
-          )}
-        />
-      </button>
-      {expanded && (
-        <div className="mt-1 mb-3 max-h-72 overflow-y-auto border-l-2 border-surface-border pl-3 font-sans text-label leading-6 break-words whitespace-pre-wrap text-muted-foreground">
-          {content}
-        </div>
-      )}
-    </div>
-  );
 }
 
 /** Parse and display token usage for AI messages */
@@ -279,6 +244,35 @@ export const MessageBubble = memo(
           : undefined,
     });
     const { mode: displayMode } = useDisplayMode();
+    const thinkingTitle = useMemo(
+      () =>
+        thinkingContent
+          ? extractThinkingTitle(thinkingContent, { final: true })
+          : undefined,
+      [thinkingContent],
+    );
+    // Reasoning without a summary still says how long the model thought.
+    const hasReasoning = !!thinkingContent || (thinkingDurationMs ?? 0) >= 1000;
+    // What the server kept of a turn this tab did not stream, shown as the
+    // same rows and loaded when one is opened. A proactive workspace shows
+    // only what its owner chose: nothing when hidden, no reasoning text at
+    // the activity level.
+    const [openOnLoad, setOpenOnLoad] = useState<'thinking' | 'trace' | null>(
+      null,
+    );
+    const process = useChatStore((s) => {
+      const group = s.groups[message.chat_jid.replace(/#agent:.*$/, '')];
+      return normalizeInteractionMode(group?.interaction_mode) === 'proactive'
+        ? normalizeProcessVisibility(group?.process_visibility)
+        : 'full';
+    });
+    const traceOnServer =
+      message.is_from_me &&
+      !!message.has_trace &&
+      !!message.turn_id &&
+      process !== 'hidden' &&
+      !hasReasoning &&
+      !(traceEvents && traceEvents.length > 0);
     const isUser = !message.is_from_me;
     const presentedContent = getPresentedMessageContent(message);
     const completedWorkflowRuns = message.workflow_runs?.filter(
@@ -327,7 +321,11 @@ export const MessageBubble = memo(
     const executionTrace = traceEvents && traceEvents.length > 0 && (
       <>
         <PermissionAlert traceEvents={traceEvents} />
-        <TracePanel traceEvents={traceEvents} taskCount={0} />
+        <TracePanel
+          traceEvents={traceEvents}
+          taskCount={0}
+          defaultExpanded={openOnLoad === 'trace'}
+        />
       </>
     );
 
@@ -568,10 +566,20 @@ export const MessageBubble = memo(
           </div>
 
           {/* Reasoning */}
-          {thinkingContent && (
-            <ReasoningBlock
-              content={thinkingContent}
+          {hasReasoning && (
+            <ThinkingBlock
+              text={thinkingContent ?? ''}
+              title={thinkingTitle}
               durationMs={thinkingDurationMs}
+              groupJid={markdownJid}
+              defaultExpanded={openOnLoad === 'thinking'}
+            />
+          )}
+          {traceOnServer && (
+            <LazyTurnTrace
+              message={message}
+              reasoning={process === 'full'}
+              onRequest={setOpenOnLoad}
             />
           )}
 
@@ -682,10 +690,20 @@ export const MessageBubble = memo(
 
         {/* Claude-style: no card container, direct content */}
         <div className="overflow-hidden font-serif">
-          {thinkingContent && (
-            <ReasoningBlock
-              content={thinkingContent}
+          {hasReasoning && (
+            <ThinkingBlock
+              text={thinkingContent ?? ''}
+              title={thinkingTitle}
               durationMs={thinkingDurationMs}
+              groupJid={markdownJid}
+              defaultExpanded={openOnLoad === 'thinking'}
+            />
+          )}
+          {traceOnServer && (
+            <LazyTurnTrace
+              message={message}
+              reasoning={process === 'full'}
+              onRequest={setOpenOnLoad}
             />
           )}
 
@@ -756,6 +774,8 @@ export const MessageBubble = memo(
     prev.message.attachments === next.message.attachments &&
     prev.message.workflow_runs === next.message.workflow_runs &&
     prev.message.source_kind === next.message.source_kind &&
+    prev.message.has_trace === next.message.has_trace &&
+    prev.message.turn_id === next.message.turn_id &&
     prev.message.finalization_reason === next.message.finalization_reason &&
     prev.message.timestamp === next.message.timestamp &&
     prev.message.delivery_updated_at === next.message.delivery_updated_at &&

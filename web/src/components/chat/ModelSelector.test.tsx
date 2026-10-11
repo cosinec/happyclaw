@@ -5,7 +5,10 @@ import { createRoot, type Root } from 'react-dom/client';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
-import type { SessionModelSelection } from './ModelSelector';
+import type {
+  SessionModelOption,
+  SessionModelSelection,
+} from './ModelSelector';
 
 const mocks = vi.hoisted(() => ({
   get: vi.fn(),
@@ -91,6 +94,86 @@ function trigger(): HTMLButtonElement {
   const button = container.querySelector('button');
   if (!button) throw new Error('model selector trigger not rendered');
   return button;
+}
+
+/** The reasoning effort button: always the one after the model button. */
+function effortTrigger(): HTMLButtonElement | null {
+  return container.querySelectorAll('button')[1] ?? null;
+}
+
+async function open(button: HTMLButtonElement) {
+  await act(async () => {
+    button.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+    );
+  });
+}
+
+const menuItems = () => [
+  ...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+];
+
+const itemByText = (text: string) =>
+  menuItems().find((item) => item.textContent?.includes(text));
+
+const FULL = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+/** A selection with one ChatGPT login next to a Claude one. */
+function chatGptSelection(
+  overrides: Partial<SessionModelSelection> = {},
+  codex: Partial<NonNullable<SessionModelOption['codex']>> = {},
+  option: Partial<SessionModelOption> = {},
+): SessionModelSelection {
+  return {
+    selectedModelConfigId: null,
+    default: { source: 'pool', modelConfigId: null, enabledCount: 2 },
+    options: [
+      {
+        id: 'official',
+        name: 'Claude 官方',
+        kind: 'official',
+        enabled: true,
+        model: 'opus',
+      },
+      {
+        id: 'chatgpt',
+        name: 'ChatGPT 订阅',
+        kind: 'codex',
+        enabled: true,
+        model: 'gpt-6.1-sol',
+        usable: true,
+        codex: {
+          defaultModel: 'gpt-6.1-sol',
+          defaultEffort: 'low',
+          source: 'live',
+          needsReauth: false,
+          models: [
+            {
+              value: 'gpt-6.1-sol',
+              label: 'gpt-6.1-sol（主力编码）',
+              efforts: FULL,
+              defaultEffort: 'low',
+            },
+            {
+              value: 'gpt-6-astra',
+              label: 'gpt-6-astra（旗舰·最强推理）',
+              efforts: FULL,
+              defaultEffort: 'medium',
+            },
+            {
+              value: 'gpt-5.5',
+              label: 'gpt-5.5（遗留）',
+              efforts: ['low', 'medium', 'high'],
+              defaultEffort: 'medium',
+            },
+          ],
+          ...codex,
+        },
+        ...option,
+      },
+    ],
+    ...overrides,
+  };
 }
 
 describe('describeDefaultModel', () => {
@@ -192,5 +275,499 @@ describe('ModelSelector', () => {
       '已切换到「GLM」，从下一条消息开始生效',
     );
     expect(trigger().textContent).toContain('GLM');
+  });
+});
+
+describe('ChatGPT models', () => {
+  test('a login lists its models under its own heading and marks the default one', async () => {
+    mocks.get.mockResolvedValue(chatGptSelection());
+    await render(null);
+    await open(trigger());
+    expect(menuItems().map((item) => item.textContent)).toEqual([
+      expect.stringContaining('默认'),
+      expect.stringContaining('Claude 官方'),
+      expect.stringContaining('gpt-6.1-sol'),
+      expect.stringContaining('gpt-6-astra'),
+      expect.stringContaining('gpt-5.5'),
+    ]);
+    expect(itemByText('gpt-6.1-sol')?.textContent).toContain('主力编码');
+    expect(itemByText('gpt-6.1-sol')?.textContent).toContain('配置默认');
+    expect(itemByText('gpt-6-astra')?.textContent).not.toContain('配置默认');
+    const headings = [
+      ...document.querySelectorAll('[data-slot="dropdown-menu-label"]'),
+    ].map((node) => node.textContent);
+    expect(headings.some((text) => text?.includes('ChatGPT 订阅'))).toBe(true);
+    // The picked-model note replaces the configuration-only one.
+    expect(document.body.textContent).toContain('只调整推理档位不会');
+  });
+
+  test('the model button names the model a pinned login runs', async () => {
+    mocks.get.mockResolvedValue(
+      chatGptSelection({
+        selectedModelConfigId: 'chatgpt',
+        selectedModel: 'gpt-6-astra',
+      }),
+    );
+    await render(null);
+    expect(trigger().textContent).toContain('gpt-6-astra');
+    await open(trigger());
+    const checked = menuItems().filter(
+      (item) => item.getAttribute('aria-checked') === 'true',
+    );
+    expect(checked.map((item) => item.textContent)).toEqual([
+      expect.stringContaining('gpt-6-astra'),
+    ]);
+
+    // Following the configuration shows its own model, on the default row.
+    mocks.get.mockResolvedValue(
+      chatGptSelection({ selectedModelConfigId: 'chatgpt' }),
+    );
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render(null);
+    expect(trigger().textContent).toContain('gpt-6.1-sol');
+  });
+
+  test('a stored model the account list lacks stays visible and checked', async () => {
+    mocks.get.mockResolvedValue(
+      chatGptSelection({
+        selectedModelConfigId: 'chatgpt',
+        selectedModel: 'gpt-unlisted',
+      }),
+    );
+    await render(null);
+    await open(trigger());
+    const checked = menuItems().filter(
+      (item) => item.getAttribute('aria-checked') === 'true',
+    );
+    expect(checked.map((item) => item.textContent)).toEqual([
+      expect.stringContaining('gpt-unlisted'),
+    ]);
+    expect(checked[0].textContent).toContain('不在账号的模型列表里');
+    // Choosing it again changes nothing.
+    await act(async () => checked[0].click());
+    expect(mocks.put).not.toHaveBeenCalled();
+  });
+
+  test('picking a model saves it with the effort it still supports', async () => {
+    mocks.get.mockResolvedValue(
+      chatGptSelection({
+        selectedModelConfigId: 'chatgpt',
+        selectedModel: 'gpt-6.1-sol',
+        selectedEffort: 'high',
+      }),
+    );
+    mocks.put.mockResolvedValue(
+      chatGptSelection({
+        selectedModelConfigId: 'chatgpt',
+        selectedModel: 'gpt-6-astra',
+        selectedEffort: 'high',
+      }),
+    );
+    await render('session-1');
+    await open(trigger());
+    await act(async () => itemByText('gpt-6-astra')!.click());
+    expect(mocks.put).toHaveBeenCalledWith(
+      '/api/groups/web%3Aws/model-selection',
+      {
+        agentId: 'session-1',
+        modelConfigId: 'chatgpt',
+        model: 'gpt-6-astra',
+        effort: 'high',
+      },
+    );
+    expect(mocks.toastSuccess).toHaveBeenCalledWith(
+      '已切换到「ChatGPT 订阅 · gpt-6-astra」，从下一条消息开始生效',
+    );
+  });
+
+  test('a model without the picked effort returns to its default and says so', async () => {
+    mocks.get.mockResolvedValue(
+      chatGptSelection({
+        selectedModelConfigId: 'chatgpt',
+        selectedModel: 'gpt-6.1-sol',
+        selectedEffort: 'max',
+      }),
+    );
+    mocks.put.mockResolvedValue(
+      chatGptSelection({
+        selectedModelConfigId: 'chatgpt',
+        selectedModel: 'gpt-5.5',
+      }),
+    );
+    await render(null);
+    await open(trigger());
+    await act(async () => itemByText('gpt-5.5')!.click());
+    expect(mocks.put).toHaveBeenCalledWith(
+      '/api/groups/web%3Aws/model-selection',
+      {
+        agentId: null,
+        modelConfigId: 'chatgpt',
+        model: 'gpt-5.5',
+        effort: null,
+      },
+    );
+    expect(mocks.toastSuccess).toHaveBeenCalledWith(
+      expect.stringContaining('该模型不支持 max，档位已恢复为默认（medium）'),
+    );
+  });
+
+  test('the default row drops the model and the effort with it', async () => {
+    mocks.get.mockResolvedValue(
+      chatGptSelection({
+        selectedModelConfigId: 'chatgpt',
+        selectedModel: 'gpt-6-astra',
+        selectedEffort: 'high',
+      }),
+    );
+    mocks.put.mockResolvedValue(chatGptSelection());
+    await render(null);
+    await open(trigger());
+    await act(async () => itemByText('默认')!.click());
+    expect(mocks.put).toHaveBeenCalledWith(
+      '/api/groups/web%3Aws/model-selection',
+      { agentId: null, modelConfigId: null },
+    );
+    // The configuration's own model is a pick of the configuration alone.
+    mocks.put.mockResolvedValue(
+      chatGptSelection({ selectedModelConfigId: 'chatgpt' }),
+    );
+    await open(trigger());
+    await act(async () => itemByText('gpt-6.1-sol')!.click());
+    expect(mocks.put).toHaveBeenLastCalledWith(
+      '/api/groups/web%3Aws/model-selection',
+      { agentId: null, modelConfigId: 'chatgpt', model: null, effort: null },
+    );
+  });
+
+  test('a login that has to be redone, or has no credential, cannot be picked', async () => {
+    mocks.get.mockResolvedValue(
+      chatGptSelection({}, { needsReauth: true }, {}),
+    );
+    await render(null);
+    await open(trigger());
+    expect(itemByText('gpt-6-astra')?.getAttribute('aria-disabled')).toBe(
+      'true',
+    );
+    expect(document.body.textContent).toContain('需重新登录');
+    expect(itemByText('Claude 官方')?.getAttribute('aria-disabled')).not.toBe(
+      'true',
+    );
+  });
+
+  test('looks again when the menu opens while the list is only a fallback', async () => {
+    mocks.get.mockResolvedValue(chatGptSelection({}, { source: 'builtin' }));
+    await render(null);
+    expect(mocks.get).toHaveBeenCalledTimes(1);
+    const live = chatGptSelection(
+      {},
+      {
+        source: 'live',
+        models: [
+          {
+            value: 'gpt-7-new',
+            label: 'gpt-7-new',
+            efforts: FULL,
+            defaultEffort: 'medium',
+          },
+        ],
+        defaultModel: 'gpt-7-new',
+      },
+    );
+    mocks.get.mockResolvedValue(live);
+    // Within a few seconds of the first load nothing is asked again.
+    await open(trigger());
+    expect(mocks.get).toHaveBeenCalledTimes(1);
+
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(Date.now() + 10_000);
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      mocks.get.mockClear();
+      mocks.get.mockResolvedValueOnce(
+        chatGptSelection({}, { source: 'builtin' }),
+      );
+      await render(null);
+      vi.setSystemTime(Date.now() + 10_000);
+      mocks.get.mockResolvedValue(live);
+      await open(trigger());
+      expect(mocks.get).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('looking the list up again', () => {
+  test('never puts an older selection back over one that was just saved', async () => {
+    vi.useFakeTimers();
+    try {
+      mocks.get.mockResolvedValueOnce(
+        chatGptSelection({}, { source: 'builtin' }),
+      );
+      await render(null);
+      vi.setSystemTime(Date.now() + 10_000);
+      // The look-up the menu starts is slow; the save overtakes it.
+      let answerLookUp!: (value: SessionModelSelection) => void;
+      mocks.get.mockReturnValueOnce(
+        new Promise<SessionModelSelection>((resolve) => {
+          answerLookUp = resolve;
+        }),
+      );
+      mocks.put.mockResolvedValue(
+        chatGptSelection({
+          selectedModelConfigId: 'chatgpt',
+          selectedModel: 'gpt-6-astra',
+        }),
+      );
+      await open(trigger());
+      await act(async () => itemByText('gpt-6-astra')!.click());
+      expect(trigger().textContent).toContain('gpt-6-astra');
+      await act(async () => {
+        answerLookUp(chatGptSelection({}, { source: 'live' }));
+      });
+      expect(trigger().textContent).toContain('gpt-6-astra');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('reasoning effort button', () => {
+  test('is absent without a ChatGPT login and follows the model button otherwise', async () => {
+    mocks.get.mockResolvedValue(selection());
+    await render(null);
+    expect(container.querySelectorAll('button')).toHaveLength(1);
+
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    mocks.get.mockResolvedValue(chatGptSelection());
+    await render(null);
+    const buttons = container.querySelectorAll('button');
+    expect(buttons).toHaveLength(2);
+    // The model button stays the first button of the selector.
+    expect(buttons[0].getAttribute('aria-label')).toContain('模型');
+    expect(buttons[1].getAttribute('aria-label')).toContain('推理档位');
+  });
+
+  test('is greyed out while the pool picks the configuration', async () => {
+    mocks.get.mockResolvedValue(chatGptSelection());
+    await render(null);
+    expect(effortTrigger()!.disabled).toBe(true);
+    expect(effortTrigger()!.title).toContain('请先选择');
+  });
+
+  test('shows the default effort of the model in use until one is picked', async () => {
+    mocks.get.mockResolvedValue(
+      chatGptSelection({
+        selectedModelConfigId: 'chatgpt',
+        selectedModel: 'gpt-6-astra',
+      }),
+    );
+    await render(null);
+    expect(effortTrigger()!.disabled).toBe(false);
+    expect(effortTrigger()!.textContent).toContain('默认 · medium');
+    expect(effortTrigger()!.getAttribute('aria-label')).toBe(
+      '推理档位：medium（默认）',
+    );
+    expect(effortTrigger()!.title).toBe('推理档位：medium（默认）');
+  });
+
+  test('lists the efforts of the model in use, low to high, and saves a pick', async () => {
+    mocks.get.mockResolvedValue(
+      chatGptSelection({
+        selectedModelConfigId: 'chatgpt',
+        selectedModel: 'gpt-5.5',
+      }),
+    );
+    mocks.put.mockResolvedValue(
+      chatGptSelection({
+        selectedModelConfigId: 'chatgpt',
+        selectedModel: 'gpt-5.5',
+        selectedEffort: 'high',
+      }),
+    );
+    await render('session-1');
+    await open(effortTrigger()!);
+    expect(menuItems().map((item) => item.textContent)).toEqual([
+      expect.stringContaining('默认 · medium'),
+      'low',
+      'medium',
+      'high',
+    ]);
+    await act(async () => itemByText('high')!.click());
+    expect(mocks.put).toHaveBeenCalledWith(
+      '/api/groups/web%3Aws/model-selection',
+      {
+        agentId: 'session-1',
+        modelConfigId: 'chatgpt',
+        model: 'gpt-5.5',
+        effort: 'high',
+      },
+    );
+    expect(mocks.toastSuccess).toHaveBeenCalledWith(
+      '推理档位已设为 high，从下一个请求开始生效',
+    );
+    expect(effortTrigger()!.textContent).toContain('high');
+    expect(effortTrigger()!.title).toBe('推理档位：high');
+  });
+
+  test('only offers the levels the server lists for this user', async () => {
+    const withUltra = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+    mocks.get.mockResolvedValue(
+      chatGptSelection(
+        { selectedModelConfigId: 'chatgpt', selectedModel: 'gpt-6-astra' },
+        {
+          models: [
+            {
+              value: 'gpt-6-astra',
+              label: 'gpt-6-astra',
+              efforts: withUltra,
+              defaultEffort: 'medium',
+            },
+          ],
+        },
+      ),
+    );
+    await render(null);
+    await open(effortTrigger()!);
+    expect(menuItems().map((item) => item.textContent)).toContain('ultra');
+
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    mocks.get.mockResolvedValue(
+      chatGptSelection(
+        { selectedModelConfigId: 'chatgpt', selectedModel: 'gpt-6-astra' },
+        {
+          models: [
+            {
+              value: 'gpt-6-astra',
+              label: 'gpt-6-astra',
+              efforts: FULL,
+              defaultEffort: 'medium',
+            },
+          ],
+        },
+      ),
+    );
+    await render(null);
+    await open(effortTrigger()!);
+    expect(menuItems().map((item) => item.textContent)).not.toContain('ultra');
+  });
+
+  test('the default row clears a picked effort', async () => {
+    mocks.get.mockResolvedValue(
+      chatGptSelection({
+        selectedModelConfigId: 'chatgpt',
+        selectedEffort: 'max',
+      }),
+    );
+    mocks.put.mockResolvedValue(
+      chatGptSelection({ selectedModelConfigId: 'chatgpt' }),
+    );
+    await render(null);
+    await open(effortTrigger()!);
+    await act(async () => itemByText('默认')!.click());
+    expect(mocks.put).toHaveBeenCalledWith(
+      '/api/groups/web%3Aws/model-selection',
+      {
+        agentId: null,
+        modelConfigId: 'chatgpt',
+        model: null,
+        effort: null,
+      },
+    );
+    expect(mocks.toastSuccess).toHaveBeenCalledWith(
+      '已恢复默认推理档位，从下一个请求开始生效',
+    );
+  });
+
+  test('acts on the login the default resolves to, pinning it', async () => {
+    mocks.get.mockResolvedValue(
+      chatGptSelection({
+        default: {
+          source: 'single',
+          modelConfigId: 'chatgpt',
+          enabledCount: 1,
+        },
+      }),
+    );
+    mocks.put.mockResolvedValue(
+      chatGptSelection({
+        default: {
+          source: 'single',
+          modelConfigId: 'chatgpt',
+          enabledCount: 1,
+        },
+        selectedModelConfigId: 'chatgpt',
+        selectedEffort: 'xhigh',
+      }),
+    );
+    await render(null);
+    expect(effortTrigger()!.disabled).toBe(false);
+    await open(effortTrigger()!);
+    await act(async () => itemByText('xhigh')!.click());
+    expect(mocks.put).toHaveBeenCalledWith(
+      '/api/groups/web%3Aws/model-selection',
+      {
+        agentId: null,
+        modelConfigId: 'chatgpt',
+        model: null,
+        effort: 'xhigh',
+      },
+    );
+  });
+
+  test('is read-only without Modify and unusable when the login must be redone', async () => {
+    mocks.get.mockResolvedValue(
+      chatGptSelection({ selectedModelConfigId: 'chatgpt' }),
+    );
+    await render(null, false);
+    expect(effortTrigger()!.disabled).toBe(true);
+    // The current level is still readable.
+    expect(effortTrigger()!.textContent).toContain('low');
+
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    mocks.get.mockResolvedValue(
+      chatGptSelection(
+        { selectedModelConfigId: 'chatgpt' },
+        { needsReauth: true },
+      ),
+    );
+    await render(null);
+    expect(effortTrigger()!.disabled).toBe(true);
+  });
+
+  test('stays unavailable when the model in use is not in the account list', async () => {
+    mocks.get.mockResolvedValue(
+      chatGptSelection({
+        selectedModelConfigId: 'chatgpt',
+        selectedModel: 'gpt-unlisted',
+      }),
+    );
+    await render(null);
+    expect(trigger().textContent).toContain('gpt-unlisted');
+    expect(effortTrigger()!.disabled).toBe(true);
+    expect(effortTrigger()!.title).toContain('不在账号的模型列表里');
+  });
+
+  test('a refused pick reloads what the server holds', async () => {
+    mocks.get.mockResolvedValue(
+      chatGptSelection({ selectedModelConfigId: 'chatgpt' }),
+    );
+    mocks.put.mockRejectedValue(
+      new Error('推理档位 ultra 仅限具备系统配置权限的用户选择'),
+    );
+    await render(null);
+    await open(effortTrigger()!);
+    await act(async () => itemByText('max')!.click());
+    expect(mocks.toastError).toHaveBeenCalledWith(
+      '推理档位 ultra 仅限具备系统配置权限的用户选择',
+    );
+    // Picked again from the server's state.
+    expect(mocks.get).toHaveBeenCalledTimes(2);
+    expect(effortTrigger()!.textContent).toContain('low');
   });
 });

@@ -70,6 +70,14 @@ function makeOutputRuntime(lane: 'main' | 'session') {
     ...replyDelivery,
     ...interactionRuntime,
     ...replySource,
+    // The Web projection and the turn traces are covered by their own tests.
+    resolveProcessVisibility: () => 'full',
+    turnTraces: {
+      observe: vi.fn(),
+      persist: vi.fn(() => false),
+      discard: vi.fn(),
+    },
+    persistProactiveTurnTrace: vi.fn(),
     crypto,
     getChannelType,
     channelTurnScope,

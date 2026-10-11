@@ -37,6 +37,14 @@ export interface ContainerConfig {
 export type ExecutionMode = 'container' | 'host';
 /** User-visible interaction contract owned by one Workspace↔Agent binding. */
 export type InteractionMode = 'assistant' | 'proactive';
+/**
+ * How much of a proactive turn's process the Web shows beside the spinner:
+ * `hidden` keeps today's behavior (spinner only); `activity` adds the phase,
+ * tools, sub-agents and todos but never any model text; `full` also shows the
+ * model's reasoning summary. Assistant workspaces always show their whole
+ * process, so the setting only matters for `proactive`.
+ */
+export type ProcessVisibility = 'hidden' | 'activity' | 'full';
 export type ConversationSource = 'manual' | 'native_thread' | 'feishu_thread';
 export type ConversationNavMode = 'horizontal' | 'vertical_threads';
 export type ImBindingMode = 'single_context' | 'thread_map';
@@ -365,6 +373,8 @@ export interface WorkspaceAgentProfileBinding {
   group_folder: string;
   agent_profile_id: string;
   interaction_mode: InteractionMode;
+  /** Presentation only: no runtime restart when it changes. */
+  process_visibility: ProcessVisibility;
   created_at: string;
   updated_at: string;
 }
@@ -439,6 +449,12 @@ export interface NewMessage {
   channel_context?: ChannelTurnContext;
   /** Session-derived Claude Code Workflow snapshots for historical replay. */
   workflow_runs?: WorkflowRunSnapshot[];
+  /**
+   * Set on the last agent message of a turn whose thinking summary and
+   * execution trace were stored (GET /api/groups/:jid/turn-traces/:turnId).
+   * Derived when a message is listed or announced; never persisted.
+   */
+  has_trace?: boolean;
   turn_id?: string | null;
   session_id?: string | null;
   sdk_message_uuid?: string | null;
@@ -1052,7 +1068,11 @@ export type WsMessageOut =
           toolName: string;
           toolUseId: string;
           startTime: number;
+          elapsedSeconds?: number;
           toolInputSummary?: string;
+          toolInput?: Record<string, unknown>;
+          skillName?: string;
+          isNested?: boolean;
           parentToolUseId?: string | null;
         }>;
         recentEvents: Array<{
@@ -1097,6 +1117,14 @@ export type WsMessageOut =
         todos?: Array<{ id: string; content: string; status: string }>;
         systemStatus: string | null;
         isThinking?: boolean;
+        /** Epoch ms the open reasoning burst began (backdated to the model request). */
+        thinkingStartedAt?: number;
+        /** Reasoning time of the bursts already finished, summed. */
+        thinkingDurationMs?: number;
+        /** Epoch ms the model's current request began; the next burst starts there. */
+        phaseStartedAt?: number;
+        /** A tool returned and the model has produced nothing since. */
+        awaitingModel?: boolean;
         activeHook?: { hookName: string; hookEvent: string } | null;
         turnId?: string;
       };

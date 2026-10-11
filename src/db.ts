@@ -37,6 +37,7 @@ import {
   InviteCode,
   InviteCodeWithCreator,
   InteractionMode,
+  ProcessVisibility,
   MessageFinalizationReason,
   FollowUpMode,
   FollowUpStatus,
@@ -1144,6 +1145,35 @@ export function initDatabase(
     );
     CREATE INDEX IF NOT EXISTS idx_session_model_selections_model
       ON session_model_selections(model_config_id);
+  `);
+
+  // v78 -> v79: a configuration may expose many models (a ChatGPT subscription
+  // exposes its whole catalog) and a reasoning effort, so the conversation can
+  // pin both. NULL keeps following the configuration's own default.
+  ensureColumn('session_model_selections', 'model', 'TEXT');
+  ensureColumn('session_model_selections', 'reasoning_effort', 'TEXT');
+  // The upstream model the SDK session of a Session ran on. Encrypted
+  // reasoning only verifies for the model that issued it, so a session that
+  // changes model has to start over; this is what the next launch compares.
+  // NULL: not recorded (a session from before models were tracked).
+  ensureColumn('sessions', 'model', 'TEXT');
+
+  // v80 -> v81: per-turn thinking summary and execution trace. The Web shows
+  // them next to the reply, but they used to live only in browser memory and
+  // vanished on refresh; a proactive turn has no single SDK reply to hang them
+  // on, so they are keyed by the turn instead of by a message.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS turn_traces (
+      chat_jid TEXT NOT NULL,
+      turn_id TEXT NOT NULL,
+      thinking TEXT NOT NULL DEFAULT '',
+      thinking_duration_ms INTEGER,
+      trace_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (chat_jid, turn_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_turn_traces_created
+      ON turn_traces(created_at);
   `);
 
   // Top-level Agent Profiles: runtime identities/personas that own workspaces.
@@ -2568,6 +2598,19 @@ export function initDatabase(
      SET interaction_mode = 'assistant'
      WHERE interaction_mode IS NULL
         OR interaction_mode NOT IN ('assistant', 'proactive')`).run();
+
+  // v79 -> v80: how much of a proactive turn's process the Web may show next
+  // to the spinner. It is a presentation setting of the same binding row but,
+  // unlike interaction_mode, changes nothing the Agent does, so it needs no
+  // runtime restart. Existing rows keep today's behavior ('hidden'); rows
+  // created from now on default to 'activity' (assignWorkspaceAgentProfile).
+  // After the v62 table rebuild above and before the binding backfill below,
+  // which reads the full row projection.
+  ensureColumn(
+    'workspace_agent_profiles',
+    'process_visibility',
+    "TEXT NOT NULL DEFAULT 'hidden' CHECK (process_visibility IN ('hidden', 'activity', 'full'))",
+  );
 
   db.exec('DROP TABLE IF EXISTS group_members');
   backfillAgentProfileDefaultsAndWorkspaceMappings();
@@ -8656,6 +8699,39 @@ export function setSessionProviderId(
 }
 
 /**
+ * The upstream model the SDK session of a logical Session last ran on, or null
+ * when none was recorded. Only ChatGPT-gateway runs record it: it is what
+ * tells a launch that the model changed under a session it could resume.
+ */
+export function getSessionModel(
+  groupFolder: string,
+  agentId?: string | null,
+): string | null {
+  if (!isDatabaseInitialized()) return null;
+  const row = prepareCached(
+    'SELECT model FROM sessions WHERE group_folder = ? AND agent_id = ?',
+  ).get(groupFolder, agentId || '') as { model: string | null } | undefined;
+  return row?.model || null;
+}
+
+/**
+ * Record the model a Session's SDK session runs on. Like the provider binding
+ * it belongs to the row that `deleteSession` removes, so a launch that resets
+ * the session records it again afterwards. A Session without a row (nothing
+ * is bound or resumable yet) records nothing.
+ */
+export function setSessionModel(
+  groupFolder: string,
+  agentId: string | null | undefined,
+  model: string | null,
+): void {
+  if (!isDatabaseInitialized()) return;
+  prepareCached(
+    'UPDATE sessions SET model = ? WHERE group_folder = ? AND agent_id = ?',
+  ).run(model || null, groupFolder, agentId || '');
+}
+
+/**
  * The model configuration the user picked for one logical Session in the chat
  * composer, or null to follow the Agent/system default. Callers must still
  * check that the configuration exists: deleting a provider clears its rows,
@@ -8675,12 +8751,64 @@ export function getSessionModelSelection(
   return row?.model_config_id || null;
 }
 
-/** Pin one logical Session to a model configuration, or clear it with null. */
+/** Everything a conversation pinned in the chat composer. */
+export interface SessionModelSelectionDetail {
+  modelConfigId: string;
+  /** Upstream model chosen inside the configuration; null follows its default. */
+  model: string | null;
+  /** Reasoning effort chosen for the conversation; null follows the model default. */
+  effort: string | null;
+  /**
+   * Who made the choice. What they may choose depends on their permissions, so
+   * a launch re-checks the choice against the chooser as they are now.
+   */
+  updatedBy: string | null;
+}
+
+/**
+ * The full persisted choice of one logical Session, or null for none. Like
+ * getSessionModelSelection, the caller must still validate it: the
+ * configuration, the model and the effort can all have gone stale.
+ */
+export function getSessionModelSelectionDetail(
+  groupFolder: string,
+  agentId?: string | null,
+): SessionModelSelectionDetail | null {
+  if (!isDatabaseInitialized()) return null;
+  const row = prepareCached(`SELECT model_config_id, model, reasoning_effort,
+         updated_by
+       FROM session_model_selections
+       WHERE group_folder = ? AND agent_id = ?`).get(
+    groupFolder,
+    agentId || '',
+  ) as
+    | {
+        model_config_id: string;
+        model: string | null;
+        reasoning_effort: string | null;
+        updated_by: string | null;
+      }
+    | undefined;
+  if (!row?.model_config_id) return null;
+  return {
+    modelConfigId: row.model_config_id,
+    model: row.model || null,
+    effort: row.reasoning_effort || null,
+    updatedBy: row.updated_by || null,
+  };
+}
+
+/**
+ * Pin one logical Session to a model configuration, or clear it with null.
+ * The row is replaced as a whole: omitting `overrides` drops a previous model
+ * and effort, so picking a configuration never inherits the old one's choices.
+ */
 export function setSessionModelSelection(
   groupFolder: string,
   agentId: string | null | undefined,
   modelConfigId: string | null,
   updatedBy?: string | null,
+  overrides?: { model?: string | null; effort?: string | null },
 ): void {
   const effectiveAgentId = agentId || '';
   if (!modelConfigId) {
@@ -8692,15 +8820,20 @@ export function setSessionModelSelection(
     return;
   }
   prepareCached(`INSERT INTO session_model_selections
-       (group_folder, agent_id, model_config_id, updated_by, updated_at)
-     VALUES (?, ?, ?, ?, ?)
+       (group_folder, agent_id, model_config_id, model, reasoning_effort,
+        updated_by, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(group_folder, agent_id) DO UPDATE SET
        model_config_id = excluded.model_config_id,
+       model = excluded.model,
+       reasoning_effort = excluded.reasoning_effort,
        updated_by = excluded.updated_by,
        updated_at = excluded.updated_at`).run(
     groupFolder,
     effectiveAgentId,
     modelConfigId,
+    overrides?.model || null,
+    overrides?.effort || null,
     updatedBy ?? null,
     new Date().toISOString(),
   );
@@ -8725,6 +8858,153 @@ export function clearSessionModelSelectionsForModelConfig(
   return prepareCached(
     'DELETE FROM session_model_selections WHERE model_config_id = ?',
   ).run(modelConfigId).changes;
+}
+
+/** Persisted thinking summary and execution trace of one turn. */
+export interface TurnTraceRecord {
+  chat_jid: string;
+  turn_id: string;
+  thinking: string;
+  thinking_duration_ms: number | null;
+  /** JSON array of the trace events the Web renders under the reply. */
+  trace_json: string;
+  created_at: string;
+}
+
+/** Store (or replace) the trace of one turn. */
+export function upsertTurnTrace(input: {
+  chatJid: string;
+  turnId: string;
+  thinking: string;
+  thinkingDurationMs?: number | null;
+  traceJson: string;
+  createdAt?: string;
+}): void {
+  prepareCached(`INSERT INTO turn_traces
+       (chat_jid, turn_id, thinking, thinking_duration_ms, trace_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(chat_jid, turn_id) DO UPDATE SET
+       thinking = excluded.thinking,
+       thinking_duration_ms = excluded.thinking_duration_ms,
+       trace_json = excluded.trace_json`).run(
+    input.chatJid,
+    input.turnId,
+    input.thinking,
+    input.thinkingDurationMs ?? null,
+    input.traceJson,
+    input.createdAt ?? new Date().toISOString(),
+  );
+}
+
+export function getTurnTrace(
+  chatJid: string,
+  turnId: string,
+): TurnTraceRecord | undefined {
+  if (!isDatabaseInitialized()) return undefined;
+  return prepareCached(`SELECT chat_jid, turn_id, thinking,
+         thinking_duration_ms, trace_json, created_at
+       FROM turn_traces
+       WHERE chat_jid = ? AND turn_id = ?`).get(chatJid, turnId) as
+    | TurnTraceRecord
+    | undefined;
+}
+
+/** Which of these turns have a stored trace (cheap flag for message lists). */
+export function listTurnIdsWithTrace(
+  chatJid: string,
+  turnIds: readonly string[],
+): Set<string> {
+  const found = new Set<string>();
+  if (!isDatabaseInitialized() || turnIds.length === 0) return found;
+  // Stay far below SQLite's bound-parameter limit however long the page is.
+  const CHUNK = 400;
+  for (let offset = 0; offset < turnIds.length; offset += CHUNK) {
+    const chunk = turnIds.slice(offset, offset + CHUNK);
+    const rows = db
+      .prepare(
+        `SELECT turn_id FROM turn_traces
+         WHERE chat_jid = ? AND turn_id IN (${chunk.map(() => '?').join(',')})`,
+      )
+      .all(chatJid, ...chunk) as Array<{ turn_id: string }>;
+    for (const row of rows) found.add(row.turn_id);
+  }
+  return found;
+}
+
+export function deleteTurnTracesForChat(chatJid: string): number {
+  if (!isDatabaseInitialized()) return 0;
+  return prepareCached('DELETE FROM turn_traces WHERE chat_jid = ?').run(
+    chatJid,
+  ).changes;
+}
+
+/**
+ * Drop traces whose turn no longer has any message (history cleared, messages
+ * deleted, workspace removed). Safe to run at any time.
+ */
+export function pruneOrphanTurnTraces(): number {
+  if (!isDatabaseInitialized()) return 0;
+  return prepareCached(`DELETE FROM turn_traces
+     WHERE NOT EXISTS (
+       SELECT 1 FROM messages m
+       WHERE m.chat_jid = turn_traces.chat_jid
+         AND m.turn_id = turn_traces.turn_id
+     )`).run().changes;
+}
+
+/**
+ * Drop the trace of one turn when that turn no longer has any message in the
+ * chat (the last message of the turn was deleted). Cheap enough to run after
+ * every single-message delete.
+ */
+export function deleteTurnTraceIfOrphan(
+  chatJid: string,
+  turnId: string,
+): boolean {
+  if (!isDatabaseInitialized() || !turnId) return false;
+  return (
+    prepareCached(`DELETE FROM turn_traces
+       WHERE chat_jid = ? AND turn_id = ?
+         AND NOT EXISTS (
+           SELECT 1 FROM messages m
+           WHERE m.chat_jid = ? AND m.turn_id = ?
+         )`).run(chatJid, turnId, chatJid, turnId).changes > 0
+  );
+}
+
+/** The chat and every Runtime Session chat (`{chat}#agent:{id}`) under it. */
+export function deleteTurnTracesForChatTree(chatJid: string): number {
+  if (!isDatabaseInitialized()) return 0;
+  const sessionPrefix = `${chatJid}#agent:`;
+  return (
+    prepareCached('DELETE FROM turn_traces WHERE chat_jid = ?').run(chatJid)
+      .changes +
+    // substr, not LIKE: a JID may contain the wildcard characters % and _.
+    prepareCached(
+      'DELETE FROM turn_traces WHERE substr(chat_jid, 1, ?) = ?',
+    ).run([...sessionPrefix].length, sessionPrefix).changes
+  );
+}
+
+/**
+ * The newest agent-authored message of one turn (system and billing notices
+ * excluded). The Web hangs a turn's trace on this message.
+ */
+export function getLastAgentMessageIdForTurn(
+  chatJid: string,
+  turnId: string,
+): string | undefined {
+  if (!isDatabaseInitialized() || !turnId) return undefined;
+  const row = prepareCached(`SELECT m.id
+       FROM messages m
+       LEFT JOIN message_ingest_sequences seq
+         ON seq.chat_jid = m.chat_jid AND seq.message_id = m.id
+       WHERE m.chat_jid = ? AND m.turn_id = ?
+         AND m.is_from_me = 1
+         AND m.sender NOT LIKE '\\_\\_%' ESCAPE '\\'
+       ORDER BY m.timestamp DESC, COALESCE(seq.sequence, 0) DESC
+       LIMIT 1`).get(chatJid, turnId) as { id: string } | undefined;
+  return row?.id;
 }
 
 /** Persisted session namespaces currently bound to one Provider account. */
@@ -9859,10 +10139,16 @@ export function archiveAgentProfile(
   return 'ok';
 }
 
+/**
+ * Bind a Workspace to an AgentProfile. A new binding starts with the
+ * `activity` process visibility; rebinding keeps the existing one unless
+ * `processVisibility` is given.
+ */
 export function assignWorkspaceAgentProfile(
   groupFolder: string,
   profileId: string,
   interactionMode?: InteractionMode,
+  processVisibility?: ProcessVisibility,
 ): void {
   const now = new Date().toISOString();
   db.transaction(() => {
@@ -9882,21 +10168,28 @@ export function assignWorkspaceAgentProfile(
       }
     }
     prepareCached(`INSERT INTO workspace_agent_profiles (
-        group_folder, agent_profile_id, interaction_mode, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?)
+        group_folder, agent_profile_id, interaction_mode, process_visibility,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(group_folder) DO UPDATE SET
         agent_profile_id = excluded.agent_profile_id,
         interaction_mode = CASE
           WHEN ? IS NULL THEN workspace_agent_profiles.interaction_mode
           ELSE excluded.interaction_mode
         END,
+        process_visibility = CASE
+          WHEN ? IS NULL THEN workspace_agent_profiles.process_visibility
+          ELSE excluded.process_visibility
+        END,
         updated_at = excluded.updated_at`).run(
       groupFolder,
       profileId,
       interactionMode ?? 'assistant',
+      processVisibility ?? 'activity',
       now,
       now,
       interactionMode ?? null,
+      processVisibility ?? null,
     );
     syncAgentChannelMountsForWorkspaceFolder(groupFolder);
   })();
@@ -9916,17 +10209,23 @@ function parseInteractionMode(
   return 'assistant';
 }
 
+/** Unknown values keep the private behavior every workspace had before. */
+function parseProcessVisibility(value: unknown): ProcessVisibility {
+  return value === 'activity' || value === 'full' ? value : 'hidden';
+}
+
 export function getWorkspaceAgentProfileBinding(
   groupFolder: string,
 ): WorkspaceAgentProfileBinding | undefined {
   const row =
-    prepareCached(`SELECT group_folder, agent_profile_id, interaction_mode, created_at, updated_at
+    prepareCached(`SELECT group_folder, agent_profile_id, interaction_mode, process_visibility, created_at, updated_at
        FROM workspace_agent_profiles
        WHERE group_folder = ?`).get(groupFolder) as
       | {
           group_folder: string;
           agent_profile_id: string;
           interaction_mode: unknown;
+          process_visibility: unknown;
           created_at: string;
           updated_at: string;
         }
@@ -9939,6 +10238,7 @@ export function getWorkspaceAgentProfileBinding(
       row.interaction_mode,
       row.group_folder,
     ),
+    process_visibility: parseProcessVisibility(row.process_visibility),
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -9967,6 +10267,33 @@ export function setWorkspaceInteractionMode(
        SET interaction_mode = ?, updated_at = ?
        WHERE group_folder = ?`).run(
     interactionMode,
+    new Date().toISOString(),
+    groupFolder,
+  );
+  return result.changes > 0;
+}
+
+/** How much of a proactive turn's process the Web shows for this Workspace. */
+export function getWorkspaceProcessVisibility(
+  groupFolder: string,
+): ProcessVisibility {
+  return (
+    getWorkspaceAgentProfileBinding(groupFolder)?.process_visibility ?? 'hidden'
+  );
+}
+
+/**
+ * Presentation only: it changes what the Web is sent, not what the Agent does,
+ * so unlike setWorkspaceInteractionMode it needs no runtime restart.
+ */
+export function setWorkspaceProcessVisibility(
+  groupFolder: string,
+  processVisibility: ProcessVisibility,
+): boolean {
+  const result = prepareCached(`UPDATE workspace_agent_profiles
+       SET process_visibility = ?, updated_at = ?
+       WHERE group_folder = ?`).run(
+    processVisibility,
     new Date().toISOString(),
     groupFolder,
   );
@@ -12284,6 +12611,7 @@ export function ensureUserHomeGroup(
 export function deleteChatHistory(chatJid: string): void {
   const tx = db.transaction((jid: string) => {
     prepareCached('DELETE FROM messages WHERE chat_jid = ?').run(jid);
+    prepareCached('DELETE FROM turn_traces WHERE chat_jid = ?').run(jid);
     prepareCached('DELETE FROM chats WHERE jid = ?').run(jid);
   });
   tx(chatJid);
@@ -12457,11 +12785,17 @@ export function rebuildWorkspacePersistentState(input: {
         prepareCached('DELETE FROM messages WHERE chat_jid = ?').run(
           siblingJid,
         );
+        prepareCached('DELETE FROM turn_traces WHERE chat_jid = ?').run(
+          siblingJid,
+        );
         prepareCached('DELETE FROM chats WHERE jid = ?').run(siblingJid);
       }
       for (const agent of agents) {
         const virtualJid = `${agent.chat_jid}#agent:${agent.id}`;
         prepareCached('DELETE FROM messages WHERE chat_jid = ?').run(
+          virtualJid,
+        );
+        prepareCached('DELETE FROM turn_traces WHERE chat_jid = ?').run(
           virtualJid,
         );
         prepareCached('DELETE FROM chats WHERE jid = ?').run(virtualJid);
@@ -12536,6 +12870,7 @@ export function deleteImGroupRecord(jid: string): void {
     );
     prepareCached('DELETE FROM registered_groups WHERE jid = ?').run(jid);
     prepareCached('DELETE FROM messages WHERE chat_jid = ?').run(jid);
+    prepareCached('DELETE FROM turn_traces WHERE chat_jid = ?').run(jid);
     prepareCached('DELETE FROM chats WHERE jid = ?').run(jid);
     prepareCached('DELETE FROM user_pinned_groups WHERE jid = ?').run(jid);
     prepareCached('DELETE FROM im_context_bindings WHERE source_jid = ?').run(
@@ -12661,6 +12996,7 @@ export function deleteGroupData(
     prepareCached('DELETE FROM messages WHERE chat_jid LIKE ?').run(
       `${jid}#agent:%`,
     );
+    deleteTurnTracesForChatTree(jid);
     prepareCached('DELETE FROM chats WHERE jid = ?').run(jid);
     prepareCached('DELETE FROM chats WHERE jid LIKE ?').run(`${jid}#agent:%`);
     // 7. 删除 pin 记录
@@ -14358,6 +14694,7 @@ function mapAgentRow(row: Record<string, unknown>): SubAgent {
 
 export function deleteMessagesForChatJid(chatJid: string): void {
   prepareCached('DELETE FROM messages WHERE chat_jid = ?').run(chatJid);
+  prepareCached('DELETE FROM turn_traces WHERE chat_jid = ?').run(chatJid);
   prepareCached('DELETE FROM chats WHERE jid = ?').run(chatJid);
 }
 
@@ -14488,9 +14825,16 @@ export function getAgentBuilderInputMessage(
 }
 
 export function deleteMessage(chatJid: string, messageId: string): boolean {
+  const turnId = (
+    prepareCached(
+      'SELECT turn_id FROM messages WHERE id = ? AND chat_jid = ?',
+    ).get(messageId, chatJid) as { turn_id: string | null } | undefined
+  )?.turn_id;
   const result = prepareCached(
     'DELETE FROM messages WHERE id = ? AND chat_jid = ?',
   ).run(messageId, chatJid);
+  // The turn's trace outlives a single message, not the turn itself.
+  if (result.changes > 0 && turnId) deleteTurnTraceIfOrphan(chatJid, turnId);
   return result.changes > 0;
 }
 

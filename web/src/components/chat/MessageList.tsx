@@ -244,6 +244,12 @@ export const MessageList = memo(function MessageList({
   // Where the virtualizer last moved scrollTop to absorb a row measuring
   // itself: a scroll event landing there is layout, not the reader leaving.
   const layoutScrollTopRef = useRef<number | null>(null);
+  // Where the resize pass last put a pinned reader. When the content shrinks
+  // the browser clamps scrollTop and queues a scroll event; it is dispatched a
+  // frame later, by when a row added meanwhile may have grown the content
+  // again, so it reads as an upward scroll away from the bottom. The pass that
+  // already pinned the reader again knows that event is layout.
+  const resizePinRef = useRef<{ top: number; at: number } | null>(null);
   const lastScrollTopRef = useRef(0);
   const isEmptyRef = useRef(timelineMessages.length === 0);
 
@@ -499,6 +505,8 @@ export const MessageList = memo(function MessageList({
     until: number;
   } | null>(null);
   const SWAP_ANCHOR_HOLD_MS = 400;
+  /** How long after a resize pin a scroll event landing there is still layout. */
+  const RESIZE_PIN_WINDOW_MS = 300;
   const applyAnchorHold = useCallback(() => {
     const hold = anchorHoldRef.current;
     const parent = parentRef.current;
@@ -656,9 +664,14 @@ export const MessageList = memo(function MessageList({
       lastScrollTopRef.current = scrollTop;
       const layoutTop = layoutScrollTopRef.current;
       layoutScrollTopRef.current = null;
-      const layoutScroll =
-        layoutTop !== null && Math.abs(scrollTop - layoutTop) < 2;
       const now = Date.now();
+      const resizePin = resizePinRef.current;
+      resizePinRef.current = null;
+      const layoutScroll =
+        (layoutTop !== null && Math.abs(scrollTop - layoutTop) < 2) ||
+        (resizePin !== null &&
+          now - resizePin.at < RESIZE_PIN_WINDOW_MS &&
+          Math.abs(scrollTop - resizePin.top) < 2);
 
       if (scrollHeight - scrollTop - clientHeight < 10) {
         // Landed: whatever was carrying the reader down is done.
@@ -967,6 +980,10 @@ export const MessageList = memo(function MessageList({
         scheduleSmoothCatchUp();
         return;
       }
+      resizePinRef.current = {
+        top: Math.max(0, parent.scrollHeight - parent.clientHeight),
+        at: Date.now(),
+      };
       parent.scrollTop = parent.scrollHeight;
     });
     observer.observe(content);
