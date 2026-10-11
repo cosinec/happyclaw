@@ -7,9 +7,10 @@
  * cannot do on its own: restoring a run after a reconnect (stream_snapshot)
  * and keeping a finished turn's trace (turn_traces). Titles must match the
  * Web's character for character: the collapsed "已使用 N 个工具" summary counts
- * rows whose title starts with "工具 " / "技能 ". If the Web's formatting
- * changes, change it here as well (tests/stream-trace.test.ts pins the
- * formats).
+ * rows whose title starts with "工具 " / "技能 ". A tool_progress does not add
+ * a row of its own: like the Web, it updates its tool's row in place. If the
+ * Web's formatting changes, change it here as well (tests/stream-trace.test.ts
+ * pins the formats).
  */
 
 import type { StreamEvent } from './stream-event.types.js';
@@ -110,24 +111,58 @@ export function traceTitleFor(event: StreamEvent): string {
   }
 }
 
-/**
- * The SDK's tool_progress heartbeat carries only an elapsed counter, so its
- * row would read "工具进度 Bash" again and again and push real rows out of the
- * bounded trace.
- */
-function isHeartbeatToolProgress(event: StreamEvent): boolean {
+/** What a row says beside its title. */
+function traceSummaryFor(event: StreamEvent): string | undefined {
   return (
-    event.eventType === 'tool_progress' &&
-    !event.toolInputSummary &&
-    !event.toolInput &&
-    !event.skillName
+    event.summary ||
+    event.taskSummary ||
+    event.statusText ||
+    event.toolInputSummary
   );
+}
+
+/** The title a tool's own row carries, whether it came from the start or later. */
+function toolRowTitle(event: StreamEvent): string {
+  return event.skillName
+    ? `技能 ${event.skillName}`
+    : `工具 ${event.toolName || 'unknown'}`;
+}
+
+/** The rows the collapsed "已使用 N 个工具" summary counts. */
+const TOOL_ROW_TITLE = /^(?:工具|技能) /;
+
+/**
+ * The row for a tool_progress whose tool has no row of its own (the start row
+ * was pushed out of the bounded trace, or the run was joined mid-tool). Most
+ * tool_progress events add nothing: the SDK's heartbeat carries only an
+ * elapsed counter, and the Runner's one-shot ones (the input summary, the
+ * skill a Skill call turned out to be) belong on the start row, see
+ * foldToolProgress.
+ */
+function toolProgressRow(
+  event: StreamEvent,
+  now: number,
+): TraceEventRecord | null {
+  const summary = traceSummaryFor(event);
+  if (!summary && !event.skillName) return null;
+  return {
+    id: `${now}-${Math.random().toString(36).slice(2, 7)}`,
+    timestamp: now,
+    kind: event.skillName ? 'skill' : 'tool',
+    scope: event.agentScope,
+    title: toolRowTitle(event),
+    summary,
+    taskId: event.taskId,
+    toolUseId: event.toolUseId,
+    parentToolUseId: event.parentToolUseId,
+    displayLevel: event.displayLevel,
+  };
 }
 
 /**
  * One trace row for an event, or null when the event is not part of the trace.
  * Same rows as the Web's pushTrace, minus the ones the Web itself never shows
- * (debug-level events) and tool_progress heartbeats.
+ * (debug-level events).
  */
 export function traceEventFor(
   event: StreamEvent,
@@ -141,18 +176,14 @@ export function traceEventFor(
     return null;
   }
   if (event.displayLevel === 'debug') return null;
-  if (isHeartbeatToolProgress(event)) return null;
+  if (event.eventType === 'tool_progress') return toolProgressRow(event, now);
   return {
     id: `${now}-${Math.random().toString(36).slice(2, 7)}`,
     timestamp: now,
     kind: traceKindFor(event),
     scope: event.agentScope,
     title: traceTitleFor(event),
-    summary:
-      event.summary ||
-      event.taskSummary ||
-      event.statusText ||
-      event.toolInputSummary,
+    summary: traceSummaryFor(event),
     detail: event.detail,
     taskId: event.taskId,
     toolUseId: event.toolUseId,
@@ -161,13 +192,57 @@ export function traceEventFor(
   };
 }
 
-/** Append a row, keeping the newest `max`. */
+/** The start row of a tool (newest first), or -1 when it is not in `events`. */
+function findToolRow(events: TraceEventRecord[], toolUseId: string): number {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const row = events[i];
+    if (
+      row.toolUseId === toolUseId &&
+      (row.kind === 'tool' || row.kind === 'skill') &&
+      TOOL_ROW_TITLE.test(row.title)
+    ) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Update a tool's start row from a tool_progress instead of adding a row per
+ * frame, the way the Web does: the input summary fills the row's summary, and
+ * a Skill call that turned out to be a skill becomes a "技能 X" row (a row that
+ * already is one keeps its name).
+ */
+function foldToolProgress(row: TraceEventRecord, event: StreamEvent): void {
+  const summary = traceSummaryFor(event);
+  if (summary) row.summary = summary;
+  if (event.skillName && row.kind !== 'skill') {
+    row.kind = 'skill';
+    row.title = `技能 ${event.skillName}`;
+  }
+}
+
+/**
+ * Append a row, keeping the newest `max`. A tool_progress is folded into the
+ * tool's start row when there is one.
+ */
 export function appendTraceEvent(
   events: TraceEventRecord[],
   event: StreamEvent,
   max: number,
   now?: number,
 ): TraceEventRecord[] {
+  if (
+    event.eventType === 'tool_progress' &&
+    event.toolUseId &&
+    event.displayLevel !== 'debug'
+  ) {
+    const index = findToolRow(events, event.toolUseId);
+    if (index >= 0) {
+      foldToolProgress(events[index], event);
+      return events;
+    }
+  }
   const row = traceEventFor(event, now);
   if (!row) return events;
   events.push(row);
@@ -231,37 +306,64 @@ export function capTailByBytes(text: string, maxBytes: number): string {
 // ── Thinking text ────────────────────────────────────────────────────────
 
 /**
- * The main Agent's reasoning text of one run or turn. The model reasons once
- * per request, so a turn with tool calls has several blocks: they are
- * separated by a blank line, however the Runner announces them (old Runners
- * send no thinking_start). Sub-Agent reasoning is not part of it.
+ * Events of a sub-Agent, or of a tool running under one, as opposed to the
+ * main Agent's own loop. The reasoning text and timing shown under a reply are
+ * the main Agent's.
+ */
+export function isSubagentEvent(event: StreamEvent): boolean {
+  return !!event.parentToolUseId || event.agentScope === 'subagent';
+}
+
+/**
+ * The main Agent's reasoning text of one run or turn, accumulated the way the
+ * Web does (web/src/stores/chat.ts), so that what is restored or stored reads
+ * like what was on screen.
+ *
+ * The model reasons once per request, so a turn with tool calls has several
+ * blocks. A block starts at thinking_start, or at the first thinking_delta
+ * when none is open (old Runners send no thinking_start), and ends at
+ * thinking_end, the main Agent's text or tool call, or the next model request.
+ * A new block is set off from the text before it by a blank line, without
+ * stacking on newlines the text already ends with. Sub-Agent events take no
+ * part: a sub-Agent's tool call does not end the main Agent's block.
  */
 export class ThinkingTextBuffer {
   text = '';
-  /** Something other than reasoning happened since the last thinking text. */
-  private blockClosed = false;
+  /** A reasoning block is open: its next text continues it. */
+  private blockOpen = false;
 
   /** `cap` bounds the text after an append; return `text` itself if it fits. */
   constructor(private readonly cap: (text: string) => string) {}
 
+  /** A blank line after existing text; none for no text, one more after "\n". */
+  private separate(): void {
+    if (!this.text || this.text.endsWith('\n\n')) return;
+    this.text += this.text.endsWith('\n') ? '\n' : '\n\n';
+  }
+
+  private startBlock(): void {
+    this.separate();
+    this.blockOpen = true;
+  }
+
   observe(event: StreamEvent): void {
-    if (event.parentToolUseId) return;
+    if (isSubagentEvent(event)) return;
     switch (event.eventType) {
+      case 'thinking_start':
+        this.startBlock();
+        break;
       case 'thinking_delta':
         if (!event.text) return;
-        if (this.text && this.blockClosed && !this.text.endsWith('\n'))
-          this.text += '\n\n';
-        this.blockClosed = false;
+        if (!this.blockOpen) this.startBlock();
         this.text = this.cap(this.text + event.text);
         break;
-      case 'thinking_start':
       case 'thinking_end':
       case 'text_delta':
       case 'tool_use_start':
-        this.blockClosed = true;
+        this.blockOpen = false;
         break;
       case 'status':
-        if (event.statusText === 'requesting') this.blockClosed = true;
+        if (event.statusText === 'requesting') this.blockOpen = false;
         break;
       default:
         break;
@@ -271,9 +373,9 @@ export class ThinkingTextBuffer {
   /** Append what another buffer collected after this one. */
   absorb(other: ThinkingTextBuffer): void {
     if (!other.text) return;
-    if (this.text && !this.text.endsWith('\n')) this.text += '\n\n';
+    this.separate();
     this.text = this.cap(this.text + other.text);
-    this.blockClosed = other.blockClosed;
+    this.blockOpen = other.blockOpen;
   }
 }
 
@@ -334,7 +436,7 @@ export class ThinkingClock {
   }
 
   observe(event: StreamEvent, now: number = Date.now()): void {
-    if (event.parentToolUseId) return;
+    if (isSubagentEvent(event)) return;
     switch (event.eventType) {
       case 'status':
         if (event.statusText === 'requesting') this.phaseStartedAt = now;

@@ -135,29 +135,246 @@ describe('trace rows mirror the Web', () => {
     ).not.toBeNull();
   });
 
-  test('the SDK heartbeat of a running tool is not a row, real progress is', () => {
-    const beat = ev('tool_progress', {
-      toolName: 'Bash',
-      toolUseId: 't1',
-      elapsedSeconds: 7,
-    });
-    expect(traceEventFor(beat)).toBeNull();
+  test('what a tool_progress adds, when its tool has no row to update', () => {
+    // the SDK heartbeat is only an elapsed counter
     expect(
       traceEventFor(
         ev('tool_progress', {
+          toolName: 'Bash',
           toolUseId: 't1',
-          toolInputSummary: 'command: ls',
+          elapsedSeconds: 7,
         }),
       ),
-    ).not.toBeNull();
-    expect(
-      traceEventFor(ev('tool_progress', { toolUseId: 't1', skillName: 'pdf' })),
-    ).not.toBeNull();
+    ).toBeNull();
+    // streamed tool input the Runner could not summarize says nothing either
     expect(
       traceEventFor(
         ev('tool_progress', { toolUseId: 't1', toolInput: { q: 1 } }),
       ),
-    ).not.toBeNull();
+    ).toBeNull();
+    // an input summary or a skill name does: the row the tool would have had
+    expect(
+      traceEventFor(
+        ev('tool_progress', {
+          toolName: 'Bash',
+          toolUseId: 't1',
+          parentToolUseId: 'k1',
+          toolInputSummary: 'command: ls',
+        }),
+        99,
+      ),
+    ).toMatchObject({
+      timestamp: 99,
+      kind: 'tool',
+      title: '工具 Bash',
+      summary: 'command: ls',
+      toolUseId: 't1',
+      parentToolUseId: 'k1',
+    });
+    expect(
+      traceEventFor(
+        ev('tool_progress', {
+          toolName: 'Skill',
+          toolUseId: 't2',
+          skillName: 'pdf',
+        }),
+      ),
+    ).toMatchObject({ kind: 'skill', title: '技能 pdf' });
+  });
+
+  test('a tool_progress updates the tool row in place, as the Web does', () => {
+    let rows: ReturnType<typeof appendTraceEvent> = [];
+    const add = (event: StreamEvent) => {
+      rows = appendTraceEvent(rows, event, 200, 1);
+    };
+    add(ev('tool_use_start', { toolName: 'Bash', toolUseId: 't1' }));
+    add(ev('tool_use_start', { toolName: 'Skill', toolUseId: 's1' }));
+    add(ev('tool_use_start', { toolName: 'Read', toolUseId: 't2' }));
+    expect(rows.map((row) => [row.kind, row.title])).toEqual([
+      ['tool', '工具 Bash'],
+      ['tool', '工具 Skill'],
+      ['tool', '工具 Read'],
+    ]);
+
+    // the heartbeat, many times: still three rows, nothing changed
+    for (let i = 0; i < 20; i += 1) {
+      add(
+        ev('tool_progress', {
+          toolName: 'Bash',
+          toolUseId: 't1',
+          elapsedSeconds: i,
+        }),
+      );
+    }
+    expect(rows).toHaveLength(3);
+    expect(rows[0].summary).toBeUndefined();
+
+    // the input summary arrives once the streamed input is complete
+    add(
+      ev('tool_progress', {
+        toolName: 'Bash',
+        toolUseId: 't1',
+        toolInputSummary: 'command: ls',
+      }),
+    );
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toMatchObject({
+      title: '工具 Bash',
+      summary: 'command: ls',
+    });
+
+    // so does the skill a Skill call turned out to be
+    add(
+      ev('tool_progress', {
+        toolName: 'Skill',
+        toolUseId: 's1',
+        skillName: 'pdf',
+      }),
+    );
+    expect(rows).toHaveLength(3);
+    expect(rows[1]).toMatchObject({ kind: 'skill', title: '技能 pdf' });
+
+    // streamed AskUserQuestion input has nothing to show in the trace
+    add(
+      ev('tool_progress', {
+        toolName: 'AskUserQuestion',
+        toolUseId: 'q1',
+        toolInput: { questions: [] },
+      }),
+    );
+    expect(rows).toHaveLength(3);
+  });
+
+  test('a tool_progress is matched to its tool by id, and adds a row only when it says something', () => {
+    let rows: ReturnType<typeof appendTraceEvent> = [];
+    const add = (event: StreamEvent) => {
+      rows = appendTraceEvent(rows, event, 200, 1);
+    };
+    // a tool whose start is not in the trace (joined mid-run, or pushed out)
+    add(ev('tool_progress', { toolUseId: 'gone', elapsedSeconds: 5 }));
+    expect(rows).toHaveLength(0);
+    add(
+      ev('tool_progress', {
+        toolName: 'Bash',
+        toolUseId: 'gone',
+        toolInputSummary: 'command: pwd',
+      }),
+    );
+    expect(rows.map((row) => row.title)).toEqual(['工具 Bash']);
+    // the next one finds the row it just got
+    add(
+      ev('tool_progress', {
+        toolName: 'Bash',
+        toolUseId: 'gone',
+        toolInputSummary: 'command: pwd -P',
+      }),
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].summary).toBe('command: pwd -P');
+
+    // another tool's row, or a row that is not a tool's own, is never touched
+    add(ev('tool_use_start', { toolName: 'Read', toolUseId: 'other' }));
+    add(ev('tool_result', { toolUseId: 'other' }));
+    add(
+      ev('tool_progress', {
+        toolUseId: 'other',
+        toolInputSummary: 'file: a.ts',
+      }),
+    );
+    expect(rows.map((row) => [row.title, row.summary])).toEqual([
+      ['工具 Bash', 'command: pwd -P'],
+      ['工具 Read', 'file: a.ts'],
+      ['工具结果', undefined],
+    ]);
+  });
+
+  test('details of the update: the newest start row, a skill keeps its name, debug is ignored', () => {
+    let rows: ReturnType<typeof appendTraceEvent> = [];
+    const add = (event: StreamEvent) => {
+      rows = appendTraceEvent(rows, event, 200, 1);
+    };
+    // the same id started twice: the newest row is the one updated
+    add(ev('tool_use_start', { toolName: 'Bash', toolUseId: 'dup' }));
+    add(ev('tool_use_start', { toolName: 'Bash', toolUseId: 'dup' }));
+    add(
+      ev('tool_progress', {
+        toolUseId: 'dup',
+        toolInputSummary: 'command: ls',
+      }),
+    );
+    expect(rows.map((row) => row.summary)).toEqual([undefined, 'command: ls']);
+
+    // a row that already is a skill is not renamed, though its summary follows
+    add(
+      ev('tool_use_start', {
+        toolName: 'Skill',
+        toolUseId: 'sk',
+        skillName: 'pdf',
+      }),
+    );
+    add(
+      ev('tool_progress', {
+        toolUseId: 'sk',
+        skillName: 'other',
+        toolInputSummary: 'skill: pdf',
+      }),
+    );
+    expect(rows[2]).toMatchObject({
+      kind: 'skill',
+      title: '技能 pdf',
+      summary: 'skill: pdf',
+    });
+
+    // a debug-level frame neither updates a row nor makes one
+    add(
+      ev('tool_progress', {
+        toolUseId: 'dup',
+        toolInputSummary: 'command: rm -rf',
+        displayLevel: 'debug',
+      }),
+    );
+    add(
+      ev('tool_progress', {
+        toolName: 'Bash',
+        toolUseId: 'none',
+        toolInputSummary: 'command: pwd',
+        displayLevel: 'debug',
+      }),
+    );
+    expect(rows).toHaveLength(3);
+    expect(rows[1].summary).toBe('command: ls');
+
+    // a row that merely shares the id, and is not a tool's own, is skipped
+    const foreign = [
+      {
+        id: 'x',
+        timestamp: 1,
+        kind: 'status',
+        title: '工具 看起来像工具行',
+        toolUseId: 'shared',
+      },
+    ] as ReturnType<typeof appendTraceEvent>;
+    const after = appendTraceEvent(
+      foreign,
+      ev('tool_progress', {
+        toolName: 'Bash',
+        toolUseId: 'shared',
+        taskId: 'task-1',
+        toolInputSummary: 'command: ls',
+      }),
+      200,
+      5,
+    );
+    expect(after).toHaveLength(2);
+    expect(foreign[0].summary).toBeUndefined();
+    // and the row that had to be added carries what the tool's own row would
+    expect(after[1]).toMatchObject({
+      kind: 'tool',
+      title: '工具 Bash',
+      summary: 'command: ls',
+      taskId: 'task-1',
+      toolUseId: 'shared',
+    });
   });
 
   test('appendTraceEvent keeps the newest rows', () => {
@@ -257,19 +474,99 @@ describe('ThinkingTextBuffer', () => {
     expect(viaRequest.text).toBe('甲\n\n乙');
   });
 
-  test('no second break after text that already ends with one', () => {
+  test('a blank line never stacks on newlines the text already ends with', () => {
+    const endsBlank = buffer();
+    endsBlank.observe(delta('第一部分\n\n'));
+    endsBlank.observe(ev('thinking_end'));
+    endsBlank.observe(delta('第二部分'));
+    expect(endsBlank.text).toBe('第一部分\n\n第二部分');
+
+    // one newline short of a blank line: one more completes it
+    const endsLine = buffer();
+    endsLine.observe(delta('第一部分\n'));
+    endsLine.observe(ev('thinking_end'));
+    endsLine.observe(delta('第二部分'));
+    expect(endsLine.text).toBe('第一部分\n\n第二部分');
+
+    // nothing before the first block
+    const first = buffer();
+    first.observe(ev('thinking_start'));
+    first.observe(delta('甲'));
+    expect(first.text).toBe('甲');
+  });
+
+  test('the first text after thinking_start belongs to that block', () => {
     const b = buffer();
-    b.observe(delta('第一部分\n\n'));
+    b.observe(delta('甲'));
     b.observe(ev('thinking_end'));
-    b.observe(delta('第二部分'));
-    expect(b.text).toBe('第一部分\n\n第二部分');
+    b.observe(ev('thinking_start'));
+    // the break went in when the block started, not again with its first text
+    expect(b.text).toBe('甲\n\n');
+    b.observe(delta('乙'));
+    b.observe(delta('丙'));
+    expect(b.text).toBe('甲\n\n乙丙');
+    // a block with no text leaves no more than the one break
+    b.observe(ev('thinking_end'));
+    b.observe(ev('thinking_start'));
+    b.observe(ev('thinking_end'));
+    b.observe(ev('thinking_start'));
+    expect(b.text).toBe('甲\n\n乙丙\n\n');
+    b.observe(delta('丁'));
+    expect(b.text).toBe('甲\n\n乙丙\n\n丁');
+  });
+
+  test('text after thinking_end is a new block even without a new thinking_start', () => {
+    const b = buffer();
+    b.observe(ev('thinking_start'));
+    b.observe(delta('甲'));
+    b.observe(ev('thinking_end'));
+    b.observe(delta('乙'));
+    expect(b.text).toBe('甲\n\n乙');
+  });
+
+  test('only the main Agent ends a block; a sub-Agent and bookkeeping events do not', () => {
+    const b = buffer();
+    b.observe(delta('甲'));
+    for (const other of [
+      // a tool of a sub-Agent, or one running under a Skill, and its text
+      ev('tool_use_start', { toolName: 'Grep', parentToolUseId: 'k1' }),
+      ev('tool_use_start', { toolName: 'Grep', agentScope: 'subagent' }),
+      ev('text_delta', { text: '子答', parentToolUseId: 'k1' }),
+      ev('text_delta', { text: '子答', agentScope: 'subagent' }),
+      ev('thinking_end', { parentToolUseId: 'k1' }),
+      ev('status', { statusText: 'requesting', agentScope: 'subagent' }),
+      // bookkeeping that is neither the model's text nor a tool call
+      ev('hook_started', { hookName: 'h' }),
+      ev('task_progress'),
+      ev('todo_update'),
+      ev('status', { statusText: '正在深入分析…' }),
+      ev('usage'),
+      ev('tool_use_end', { toolUseId: 't1' }),
+      ev('tool_result', { toolUseId: 't1' }),
+    ]) {
+      b.observe(other);
+    }
+    b.observe(delta('乙'));
+    expect(b.text).toBe('甲乙');
   });
 
   test('sub-agent reasoning and empty deltas are not part of it', () => {
     const b = buffer();
     b.observe(delta('子', { parentToolUseId: 'k1' }));
+    b.observe(delta('子', { agentScope: 'subagent' }));
     b.observe(delta(''));
     expect(b.text).toBe('');
+  });
+
+  test('a buffer absorbs the one that came after it, set off by a blank line', () => {
+    const a = buffer();
+    a.observe(delta('甲\n'));
+    const b = buffer();
+    b.observe(delta('乙'));
+    a.absorb(b);
+    expect(a.text).toBe('甲\n\n乙');
+    a.absorb(buffer());
+    expect(a.text).toBe('甲\n\n乙');
   });
 
   test('the cap is applied after every append', () => {
@@ -331,6 +628,10 @@ describe('ThinkingClock', () => {
     );
     clock.observe(ev('thinking_delta', { text: '' }), 2);
     clock.observe(ev('text_delta', { text: '子答', parentToolUseId: 'k1' }), 3);
+    clock.observe(
+      ev('thinking_delta', { text: '子', agentScope: 'subagent' }),
+      4,
+    );
     expect(clock.isThinking).toBe(false);
     expect(clock.sawThinking).toBe(false);
     clock.observe(ev('thinking_start'), 10);

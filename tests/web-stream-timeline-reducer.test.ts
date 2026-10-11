@@ -1032,6 +1032,14 @@ describe('a reconnect snapshot', () => {
   describe('of a proactive workspace', () => {
     const leaky = () =>
       snapshot({
+        recentEvents: [
+          {
+            id: 'e1',
+            timestamp: 1,
+            kind: 'tool',
+            text: '工具: mcp__happyclaw__send_message {"text":"没发出去的回复"}',
+          },
+        ],
         partialText: '没发出去的回复',
         thinkingText: '**检查**\n\n主 Agent 的思考。',
         activeTools: [
@@ -1065,6 +1073,12 @@ describe('a reconnect snapshot', () => {
         .handleStreamSnapshot(JID, leaky(), undefined, RUN);
       return live();
     };
+
+    it('keeps no log of recent events at any level', () => {
+      for (const level of ['hidden', 'activity', 'full'] as const) {
+        expect(restore(level).recentEvents, level).toEqual([]);
+      }
+    });
 
     it('shows nothing but the spinner when the process is hidden', () => {
       const state = restore('hidden');
@@ -1161,6 +1175,7 @@ describe('a reconnect snapshot', () => {
         .getState()
         .handleStreamSnapshot(JID, leaky(), undefined, RUN);
       expect(live().partialText).toBe('没发出去的回复');
+      expect(live().recentEvents).toHaveLength(1);
       expect(live().taskStates['task-1'].textTail).toBe('子 Agent 的话');
     });
   });

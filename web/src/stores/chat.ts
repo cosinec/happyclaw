@@ -724,10 +724,13 @@ function scrubForVisibility(
     };
   }
   // The reply is never shown, whatever the level; so is what a tool was given.
+  // The log of recent events is no part of the process panel, and the host's
+  // lines for the speech tool carry the start of what was said.
   const shown: StreamingState = {
     ...state,
     partialText: '',
     partialBase: 0,
+    recentEvents: [],
     taskStates: scrubTaskStates(state.taskStates, visibility),
     activeTools: state.activeTools.map(
       ({ toolInput: _input, ...tool }) => tool,
