@@ -49,6 +49,37 @@ for it or fails because of it. A converted provider gets the catalog default
 model unless it already uses a Codex catalog model. No additional Docker
 gateway service or device-code-login switch is needed for this flow.
 
+**Model and effort per conversation.** The provider's model and effort are
+only defaults. In the chat composer a conversation can pin any model of the
+account's catalog (the account's own `/models` list narrowed to its plan, the
+global catalog until that is fetched) and a reasoning effort on it; the pick is
+stored per conversation (`session_model_selections`) and applies to that
+conversation's main agent and sub-agents, while the haiku-tier background
+requests stay on the provider's model at low effort.
+
+- The model reaches the runner as `ANTHROPIC_MODEL` (the OPUS, SONNET and
+  SUBAGENT tiers follow it) when the runner starts. Changing it starts a new
+  SDK session with the latest messages replayed from HappyClaw's history,
+  like switching provider does, because encrypted reasoning only verifies for
+  the model that issued it. The gateway's `invalid_encrypted_content` recovery
+  works within one request only; without the new session every request after
+  the change would pay one rejected attempt first. `sessions.model` records
+  the model each session runs on, so a launch can tell. A session from before
+  models were tracked counts as running on the provider's model.
+- The effort does not travel through the SDK, which cannot express every
+  level of the catalog (`ultra` is rounded down by the CLI) and which the CLI
+  always overrides with its own `output_config.effort`. It is minted into the
+  runner's gateway grant, and a change of the effort button updates the live
+  grants of that conversation, so the next upstream request uses it and no
+  runner restarts or loses its session.
+- Levels above `max` (today `ultra`) can only be picked by users with
+  `manage_system_config`. The server applies the rule when listing (the
+  picker never sees them), when saving (`400`, `EFFORT_RESTRICTED`) and when a
+  runner starts: a stored pick is re-checked against the model's levels, the
+  catalog and the permissions of whoever chose it, and a stale part falls back
+  to the provider default with a log line instead of failing the turn. The
+  ceiling is `CODEX_SESSION_EFFORT_CEILING` in `model-catalog.ts`.
+
 ### Runtime and account isolation
 
 ```text
@@ -136,10 +167,13 @@ and `User-Agent`.
   `message_delta` reports the exact cache-exclusive counts. Because Claude
   Code keeps the `message_start` input whenever the delta reports 0, a fully
   cached prompt reports one cached token as input so the total stays exact.
-- Reasoning effort: disabled thinking uses the model's lowest supported level;
-  haiku-tier background requests use low; an Agent with an explicit effort
-  keeps it; otherwise `CODEX_REASONING_EFFORT` applies, falling back to the
-  model's catalog default. The settings page shows that same default.
+- Reasoning effort, in this order: disabled thinking uses the model's lowest
+  supported level; haiku-tier background requests use low; the effort picked
+  for the conversation in the composer is used as is (Claude Code's own
+  `output_config.effort` is ignored); an Agent with an explicit effort keeps
+  it; otherwise `CODEX_REASONING_EFFORT` applies, falling back to the model's
+  catalog default. Every result is clamped to the levels of the model the
+  request runs on. The settings page shows the provider default.
 - The official Codex CLI sets no response-header deadline on `/responses`
   and a 300-second stream idle deadline. The gateway waits up to 300 seconds
   for upstream headers (a queued request is not cut off early; the deadline
