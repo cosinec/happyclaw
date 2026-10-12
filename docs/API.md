@@ -178,8 +178,8 @@ Workspace↔AgentProfile 绑定行上，因此：仅 `web:` 前缀工作区可�
 
 任何级别都不会发送 `text_delta`（含子 Agent 文本）、`usage`、`memory_recall`、
 `prompt_suggestion`、`raw_sdk_event`、`notification` 和未知事件类型；`tool_result`
-只保留 `toolUseId`，工具的 `toolInput`、子 Agent 的提示词与 Workflow 的预览文本也
-会被剥离。过程事件永远不会进入 IM 渠道的流式卡片。`context_audit` 从不发给 Web，但
+只保留 `toolUseId` 与布尔值 `toolIsError`（调用是否失败），工具的 `toolInput`、
+`toolResultFacts`（见下）、子 Agent 的提示词与 Workflow 的预览文本都会被剥离。过程事件永远不会进入 IM 渠道的流式卡片。`context_audit` 从不发给 Web，但
 在所有模式下都会记录到宿主的运行上下文快照。`activity` 及以上还会广播子 Agent 任务的
 `agent_status`，使 Task 标签与任务事件一致。
 
@@ -243,6 +243,17 @@ Web store 和宿主记录器并逐项比对。只记录主 Agent 的顶层步骤
 步骤开始截（保留标题与时间），步骤超过 100 条时丢弃最早的，被丢弃的条数写在
 `steps_dropped`。该字段加入之前结算的回合读作 `steps: []`、`steps_dropped: 0`（不回填），
 `steps_json` 损坏同样读作空，不会让请求失败。
+
+主 Agent 顶层工具的 `tool_result` 事件除结果文本外还带两个可选字段：`toolIsError`
+是 SDK 的 `is_error`（失败但没有任何输出的调用也会发出该事件），`toolResultFacts`
+是从 SDK 结构化的 `tool_use_result` 读出的数字与布尔（Read 的行数与总行数，Edit 与
+Write 增删的行数及是否新建，Glob 与 Grep 的文件数与匹配数，失败 Bash 的退出码，
+WebFetch 的状态码与字节数，WebSearch 的搜索次数，子 Agent 的工具、token 与耗时合计），
+从不含路径、文件内容、命令输出等任何字符串；旧版 Runner 不发这两个字段，字段缺失时
+按原有的结果文本判断失败。`toolResultFacts` 记在 `steps` 里对应工具步骤的
+`resultFacts` 上，`toolIsError` 决定该步骤的 `status` 是否为 `error`。主动模式工作区
+不放行工具结果文本，因此 `toolResultFacts` 在任何级别都被剥离、`resultFacts` 不会出现，
+`toolIsError` 照常保留。
 
 访问检查与消息列表相同（Runtime Session 的 `:jid` 为
 `{workspaceJid}#agent:{sessionId}`）；主动模式工作区按**当前**可见性过滤：`hidden`
