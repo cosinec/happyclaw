@@ -20,6 +20,7 @@ import type { StreamingStep } from '../../lib/stream-steps';
 import {
   hasListedSteps,
   summarizeSettled,
+  summarizedSteps,
   visibleSteps,
 } from '../../lib/process-steps';
 import {
@@ -306,6 +307,8 @@ export const ProcessCard = memo(function ProcessCard({
     [steps, commentary],
   );
   const listed = hasProcess(shown);
+  // Rows to list: a question put to the reader has its own place, not a row.
+  const hasRows = useMemo(() => summarizedSteps(shown).length > 0, [shown]);
   // A wait between tools shows only once it has lasted a moment.
   const waitVisible = useAfterDelay(
     live && waiting,
@@ -333,7 +336,7 @@ export const ProcessCard = memo(function ProcessCard({
       bodyClassName={live ? 'max-h-36 pointer-coarse:max-h-24' : undefined}
       after={
         waitVisible ? (
-          <WaitNote since={waitingSince} hasRows={listed} />
+          <WaitNote since={waitingSince} hasRows={hasRows} />
         ) : undefined
       }
     />
@@ -358,6 +361,7 @@ export const ProcessCard = memo(function ProcessCard({
         onToggle={toggle}
       />
       {open &&
+        (hasRows || waitVisible) &&
         (live ? (
           <PreviewWindow id={bodyId}>{timeline}</PreviewWindow>
         ) : (

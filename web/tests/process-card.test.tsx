@@ -322,6 +322,17 @@ describe('ProcessCard, live', () => {
     expect(windowEl()).toBeNull();
     expect(text()).toContain('用哪个方案？');
     expect(text()).toContain('窄 selector');
+
+    // A card of nothing but the question has no window to hold no rows.
+    await render(null);
+    await render(
+      <ProcessCard
+        {...props({ mode: 'live', steps: [question], activeTools })}
+      />,
+    );
+    expect(header()?.textContent).toContain('等待你的回答');
+    expect(windowEl()).toBeNull();
+    expect(text()).toContain('用哪个方案？');
   });
 });
 
