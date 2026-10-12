@@ -563,6 +563,178 @@ describe('the steps a finished reply keeps', () => {
   });
 });
 
+describe('the steps of a tab that joined the run part-way', () => {
+  const snapshot = (turnId = 'turn-1') => ({
+    partialText: '最终答案。',
+    thinkingText: '先想一想。',
+    activeTools: [],
+    recentEvents: [],
+    traceEvents: [
+      {
+        id: 'r1',
+        timestamp: Date.now() - 5000,
+        kind: 'tool' as const,
+        title: '工具 Bash',
+        summary: 'ls',
+        toolUseId: 'tool-1',
+      },
+    ],
+    systemStatus: null,
+    turnId,
+  });
+  const finish = () => {
+    useChatStore.getState().handleRunFinished(JID, 'run-a');
+    useChatStore
+      .getState()
+      .handleWsNewMessage(JID, finalMessage('final-1', '最终答案。'));
+  };
+
+  beforeEach(() => {
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+  });
+
+  it('are provisional on the final message: rebuilt, not exact', () => {
+    useChatStore
+      .getState()
+      .handleStreamSnapshot(JID, snapshot(), undefined, 'run-a');
+    // Events that follow the snapshot are exact, but the list is still partly a
+    // rebuilt one.
+    emit(
+      {
+        eventType: 'tool_use_start',
+        toolName: 'Read',
+        toolUseId: 'tool-2',
+        toolInputSummary: 'a.ts',
+        turnId: 'turn-1',
+      },
+      'run-a',
+    );
+    emit(
+      { eventType: 'tool_use_end', toolUseId: 'tool-2', turnId: 'turn-1' },
+      'run-a',
+    );
+    finish();
+    const cached = useChatStore.getState().stepsCache['final-1'];
+    expect(cached?.steps.some((step) => step.toolName === 'Bash')).toBe(true);
+    expect(cached?.steps.some((step) => step.toolName === 'Read')).toBe(true);
+    expect(cached?.provisional).toBe(true);
+  });
+
+  it('are exact when this tab saw the whole run, whatever a snapshot says', () => {
+    emit(
+      {
+        eventType: 'tool_use_start',
+        toolName: 'Bash',
+        toolUseId: 'tool-1',
+        toolInputSummary: 'ls',
+        turnId: 'turn-1',
+      },
+      'run-a',
+    );
+    emit(
+      { eventType: 'tool_use_end', toolUseId: 'tool-1', turnId: 'turn-1' },
+      'run-a',
+    );
+    useChatStore
+      .getState()
+      .handleStreamSnapshot(JID, snapshot(), undefined, 'run-a');
+    finish();
+    const cached = useChatStore.getState().stepsCache['final-1'];
+    expect(cached?.steps.some((step) => step.toolName === 'Bash')).toBe(true);
+    expect(cached?.provisional).toBeUndefined();
+  });
+
+  it('are exact on a reply that streamed here from its first event', () => {
+    emit(
+      { eventType: 'thinking_delta', text: '先想一想。', turnId: 'turn-1' },
+      'run-a',
+    );
+    flushRaf();
+    emit(
+      {
+        eventType: 'tool_use_start',
+        toolName: 'Bash',
+        toolUseId: 'tool-1',
+        toolInputSummary: 'ls',
+        turnId: 'turn-1',
+      },
+      'run-a',
+    );
+    emit(
+      { eventType: 'tool_use_end', toolUseId: 'tool-1', turnId: 'turn-1' },
+      'run-a',
+    );
+    finish();
+    const cached = useChatStore.getState().stepsCache['final-1'];
+    expect(cached?.steps.length).toBeGreaterThan(0);
+    expect(cached?.provisional).toBeUndefined();
+  });
+});
+
+describe('the trace a finished reply keeps', () => {
+  function streamDenialThenTools(tools: number) {
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    emit(
+      {
+        eventType: 'permission_denied',
+        toolName: 'Write',
+        summary: 'a.ts 被拒绝',
+        turnId: 'turn-1',
+      },
+      'run-a',
+    );
+    for (let i = 0; i < tools; i += 1) {
+      emit(
+        {
+          eventType: 'tool_use_start',
+          toolName: 'Read',
+          toolUseId: `tool-${i}`,
+          toolInputSummary: `f${i}.ts`,
+          turnId: 'turn-1',
+        },
+        'run-a',
+      );
+      emit(
+        { eventType: 'tool_use_end', toolUseId: `tool-${i}`, turnId: 'turn-1' },
+        'run-a',
+      );
+    }
+    emit(
+      { eventType: 'text_delta', text: '最终答案。', turnId: 'turn-1' },
+      'run-a',
+    );
+  }
+
+  it('keeps a denied permission from early in a long run', () => {
+    streamDenialThenTools(40);
+    const live = useChatStore.getState().streaming[JID]!.traceEvents;
+    expect(live.length).toBeGreaterThan(60);
+    expect(live[0].kind).toBe('permission');
+
+    useChatStore.getState().handleRunFinished(JID, 'run-a');
+    useChatStore
+      .getState()
+      .handleWsNewMessage(JID, finalMessage('final-1', '最终答案。'));
+    const rows = useChatStore.getState().traceCache['final-1'];
+    // The banner the card showed is still there; the rest is the newest rows.
+    expect(rows.filter((row) => row.kind === 'permission')).toHaveLength(1);
+    expect(rows).toHaveLength(60);
+    expect(rows[0].kind).toBe('permission');
+    expect(rows.at(-1)).toEqual(live.at(-1));
+  });
+
+  it('leaves a trace within the cap as it is', () => {
+    streamDenialThenTools(3);
+    useChatStore.getState().handleRunFinished(JID, 'run-a');
+    useChatStore
+      .getState()
+      .handleWsNewMessage(JID, finalMessage('final-1', '最终答案。'));
+    const rows = useChatStore.getState().traceCache['final-1'];
+    expect(rows[0].kind).toBe('permission');
+    expect(rows.length).toBeLessThan(60);
+  });
+});
+
 describe('reconnect snapshot', () => {
   const snapshot = (partialText: string, turnId = 'turn-1') => ({
     partialText,
