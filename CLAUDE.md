@@ -366,8 +366,8 @@ data/
 - 渠道：`channel_accounts`、`channel_mounts`、`agent_channel_mounts`、
   `im_context_bindings`
 - 消息与调度：`chats`、`messages`、`scheduled_tasks`、`task_runs`、
-  `task_run_logs`、`subagent_checkpoints`、`turn_traces`（回合的思考摘要与执行
-  轨迹，按 `(chat_jid, turn_id)` 存放，随消息一起清理）
+  `task_run_logs`、`subagent_checkpoints`、`turn_traces`（回合的思考摘要、执行
+  轨迹与有序步骤，按 `(chat_jid, turn_id)` 存放，随消息一起清理）
 - 用量与计费：`usage_records`、`usage_events`、`usage_daily_summary` 及
   `billing_*`、订阅、余额和兑换码相关表
 
