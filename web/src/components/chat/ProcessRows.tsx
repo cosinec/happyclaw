@@ -3,7 +3,9 @@ import {
   memo,
   useCallback,
   useId,
+  useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
@@ -28,13 +30,14 @@ import type {
   StreamingTaskRuntimeState,
 } from '../../stores/chat';
 import {
+  buildProcessView,
   cleanToolSummary,
   describeGroup,
   describeStepCall,
   firstOutputLine,
-  groupProcessSteps,
   hasListedSteps,
   isQuestionStep,
+  itemSteps,
   processSpanMs,
   stepDurationMs,
   summarizeGroup,
@@ -46,7 +49,7 @@ import {
   type ToolCategory,
 } from '../../lib/process-steps';
 import {
-  buildTimelineView,
+  TIMELINE_ROWS,
   summarizeSteps,
   type StreamingStep,
 } from '../../lib/stream-steps';
@@ -127,6 +130,8 @@ interface RowFrameProps {
   onToggle?: () => void;
   /** The row's own icon is the chevron: it takes no second one at the end. */
   endChevron?: boolean;
+  /** Names the row's button, so focus can be found again after a remount. */
+  rowId?: string;
   panelId?: string;
   /** What opens under the row. */
   children?: ReactNode;
@@ -153,6 +158,7 @@ function RowFrame({
   open = false,
   onToggle,
   endChevron = true,
+  rowId,
   panelId,
   children,
 }: RowFrameProps) {
@@ -225,6 +231,7 @@ function RowFrame({
           onClick={onToggle}
           aria-expanded={open}
           aria-controls={open ? panelId : undefined}
+          data-hc-row={rowId}
           title={title}
           className={cn(ROW_CLASS, ROW_BUTTON_CLASS)}
         >
@@ -249,6 +256,14 @@ function RowFrame({
 function elapsedLabel(now: number, at: number): string | undefined {
   const seconds = Math.max(0, Math.round((now - at) / 1000));
   return seconds >= 1 ? formatRunElapsed(seconds) : undefined;
+}
+
+/**
+ * The step was still going when its card stopped being the live one (a stop
+ * came before the run said it was over): it is not done, and not said to be.
+ */
+function unfinished(step: StreamingStep, live: boolean): boolean {
+  return step.status === 'running' && !live;
 }
 
 function durationLabel(step: StreamingStep): string | undefined {
@@ -277,12 +292,19 @@ const ThinkingRow = memo(function ThinkingRow({
   live,
   groupJid,
   thinkingText,
+  titleInHeader,
   bodyClassName,
-}: RowProps & { thinkingText: boolean; bodyClassName?: string }) {
+}: RowProps & {
+  thinkingText: boolean;
+  /** The card's headline says what this row's title would: the row does not. */
+  titleInHeader: boolean;
+  bodyClassName?: string;
+}) {
   const panelId = useId();
   const running = step.status === 'running' && live;
   const text = thinkingText ? (step.text ?? '') : '';
-  const title = thinkingText ? step.title : undefined;
+  const title =
+    thinkingText && !(running && titleInHeader) ? step.title : undefined;
   const canOpen = text.trim().length > 0;
   const durationMs =
     step.status === 'running' ? undefined : stepDurationMs(step);
@@ -318,9 +340,12 @@ const ThinkingRow = memo(function ThinkingRow({
             : undefined
       }
       running={running}
-      status={running ? '，进行中' : undefined}
+      status={
+        running ? '，进行中' : unfinished(step, live) ? '，未完成' : undefined
+      }
       open={open && canOpen}
       onToggle={canOpen ? () => onToggle(step.id, !open) : undefined}
+      rowId={step.id}
       panelId={panelId}
     >
       <ThinkingBody
@@ -425,10 +450,19 @@ const ToolStepRow = memo(function ToolStepRow({
       }
       tone={failed ? 'error' : running ? 'active' : 'quiet'}
       running={running}
-      status={running ? '，运行中' : failed ? '，失败' : '，已完成'}
+      status={
+        running
+          ? '，运行中'
+          : unfinished(step, live)
+            ? '，未完成'
+            : failed
+              ? '，失败'
+              : '，已完成'
+      }
       title={summary ?? hint}
       open={open && expandable}
       onToggle={expandable ? () => onToggle(step.id, !open) : undefined}
+      rowId={step.id}
       panelId={panelId}
     >
       <div className="space-y-1 text-caption break-words">
@@ -498,9 +532,18 @@ const ReadGroupRow = memo(
         }
         tone={failed ? 'error' : running ? 'active' : 'quiet'}
         running={running}
-        status={running ? '，运行中' : failed ? '，有失败' : '，已完成'}
+        status={
+          running
+            ? '，运行中'
+            : !live && summary.running > 0
+              ? '，未完成'
+              : failed
+                ? '，有失败'
+                : '，已完成'
+        }
         open={open}
         onToggle={() => onToggle(group.id, !open)}
+        rowId={group.id}
         panelId={panelId}
       >
         <div role="list" aria-label="已合并的读取步骤">
@@ -548,6 +591,7 @@ const TextRow = memo(function TextRow({
       grow
       open={open}
       onToggle={() => onToggle(step.id, !open)}
+      rowId={step.id}
       panelId={panelId}
     >
       <div className="max-h-48 overflow-y-auto overscroll-contain text-muted-foreground [&_[data-markdown-root]]:text-label [&_[data-markdown-root]]:text-muted-foreground">
@@ -576,6 +620,9 @@ const TaskRow = memo(function TaskRow({
   const running = live && (status === 'running' || status === 'backgrounded');
   const failed = status === 'error';
   const canOpen = !!task && subAgentHasBody(task);
+  // Not over, yet its card is no longer the live one.
+  const notDone =
+    !live && (task ? task.status === 'running' : step.status === 'running');
   const tone: Tone = failed ? 'error' : running ? 'active' : 'quiet';
   const detail = task
     ? [task.subagentType, task.lastToolName, task.latestSummary]
@@ -603,9 +650,18 @@ const TaskRow = memo(function TaskRow({
       }
       tone={tone}
       running={running}
-      status={`，子 Agent，${task ? STATUS_LABELS[task.status] : failed ? '失败' : '已完成'}`}
+      status={`，子 Agent，${
+        notDone
+          ? '未完成'
+          : task
+            ? STATUS_LABELS[task.status]
+            : failed
+              ? '失败'
+              : '已完成'
+      }`}
       open={open && canOpen}
       onToggle={canOpen ? () => onToggle(step.id, !open) : undefined}
+      rowId={step.id}
       panelId={panelId}
     >
       {task && (
@@ -653,6 +709,7 @@ function FoldedRow({
       open={open}
       onToggle={onToggle}
       endChevron={false}
+      rowId="folded"
       title="较早的步骤"
     />
   );
@@ -670,8 +727,17 @@ export interface ProcessTimelineProps {
   thinkingText?: boolean;
   /** The run is producing these steps now: what runs here animates and counts. */
   live: boolean;
+  /** How many rows are listed before the older ones fold into one line. */
+  maxRows?: number;
+  /**
+   * A headline above says what the reasoning being written is titled: its row
+   * does not say it again.
+   */
+  titleInHeader?: boolean;
   /** Extra classes for the open reasoning text of a row. */
   bodyClassName?: string;
+  /** The reader opened or closed a row. */
+  onInteract?: () => void;
   /** Under the list, on the same line down the left. */
   after?: ReactNode;
 }
@@ -690,32 +756,49 @@ export const ProcessTimeline = memo(function ProcessTimeline({
   taskStates = EMPTY_TASKS,
   thinkingText = true,
   live,
+  maxRows = TIMELINE_ROWS,
+  titleInHeader = false,
   bodyClassName,
+  onInteract,
   after,
 }: ProcessTimelineProps) {
-  const view = useMemo(() => buildTimelineView(steps), [steps]);
+  const view = useMemo(
+    () => buildProcessView(steps, maxRows),
+    [steps, maxRows],
+  );
   // Rows the reader opened or closed themselves; the rest follow the default.
   const [override, setOverride] = useState<Record<string, boolean>>({});
   const [foldedOpen, setFoldedOpen] = useState(false);
-  const counting = live && view.rows.some((step) => step.status === 'running');
+  // One list, folded rows and the rest, so a row that slides from one to the
+  // other is the same row and keeps what the reader opened.
+  const items = useMemo(
+    () => (foldedOpen ? [...view.folded, ...view.rows] : view.rows),
+    [foldedOpen, view],
+  );
+  const foldedSteps = useMemo(() => itemSteps(view.folded), [view.folded]);
+  const counting =
+    live && itemSteps(items).some((step) => step.status === 'running');
   const now = useTick(counting);
-  const onToggle = useCallback((id: string, next: boolean) => {
-    setOverride((current) => ({ ...current, [id]: next }));
-  }, []);
-  // A question put to the reader is a card of its own, not a row.
-  const rows = useMemo(
-    () => view.rows.filter((step) => !isQuestionStep(step)),
-    [view.rows],
+  const onToggle = useCallback(
+    (id: string, next: boolean) => {
+      setOverride((current) => ({ ...current, [id]: next }));
+      onInteract?.();
+    },
+    [onInteract],
   );
-  const folded = useMemo(
-    () => view.folded.filter((step) => !isQuestionStep(step)),
-    [view.folded],
-  );
-  const items = useMemo(() => groupProcessSteps(rows), [rows]);
-  const foldedItems = useMemo(
-    () => (foldedOpen ? groupProcessSteps(folded) : []),
-    [foldedOpen, folded],
-  );
+
+  // A row that is rebuilt (a call that joins the one above it as a group)
+  // would take the reader's focus with it: put it back where the row went.
+  const root = useRef<HTMLDivElement>(null);
+  const focused = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    const id = focused.current;
+    const active = document.activeElement;
+    if (!id || (active && active !== document.body)) return;
+    [...(root.current?.querySelectorAll<HTMLElement>('[data-hc-row]') ?? [])]
+      .find((row) => row.getAttribute('data-hc-row') === id)
+      ?.focus({ preventScroll: true });
+  });
 
   const defaultOpen = (step: StreamingStep): boolean => {
     if (step.kind === 'tool') return toolOpensByDefault(step);
@@ -725,7 +808,11 @@ export const ProcessTimeline = memo(function ProcessTimeline({
 
   const renderItem = (item: ProcessItem) => {
     if (item.type === 'group') {
-      const open = override[item.id] ?? false;
+      // A group that holds a row the reader opened is open: that row was theirs
+      // before it was a member.
+      const open =
+        override[item.id] ??
+        item.steps.some((step) => override[step.id] === true);
       return (
         <div role="listitem" key={item.id}>
           <ReadGroupRow
@@ -757,6 +844,7 @@ export const ProcessTimeline = memo(function ProcessTimeline({
           <ThinkingRow
             {...common}
             thinkingText={thinkingText}
+            titleInHeader={titleInHeader}
             bodyClassName={bodyClassName}
           />
         );
@@ -778,10 +866,27 @@ export const ProcessTimeline = memo(function ProcessTimeline({
     );
   };
 
-  const hasRows = rows.length > 0 || folded.length > 0;
+  const hasRows = view.rows.length > 0 || view.folded.length > 0;
   if (!hasRows && !after) return null;
   return (
-    <div className="border-l-2 border-surface-border pl-3 font-sans">
+    <div
+      ref={root}
+      onFocus={(event) => {
+        focused.current =
+          (event.target as HTMLElement)
+            .closest('[data-hc-row]')
+            ?.getAttribute('data-hc-row') ?? null;
+      }}
+      onBlur={(event) => {
+        const target = event.target as HTMLElement;
+        // A row taken out of the page under focus does not count as the
+        // reader moving on.
+        queueMicrotask(() => {
+          if (target.isConnected) focused.current = null;
+        });
+      }}
+      className="border-l-2 border-surface-border pl-3 font-sans"
+    >
       {hasRows && (
         <div
           role="list"
@@ -789,17 +894,16 @@ export const ProcessTimeline = memo(function ProcessTimeline({
           data-hc-step-timeline=""
           className="space-y-0.5"
         >
-          {(folded.length > 0 || stepsDropped > 0) && (
+          {(view.folded.length > 0 || stepsDropped > 0) && (
             <div role="listitem">
               <FoldedRow
-                folded={folded}
+                folded={foldedSteps}
                 dropped={stepsDropped}
                 open={foldedOpen}
                 onToggle={() => setFoldedOpen(!foldedOpen)}
               />
             </div>
           )}
-          {foldedItems.map(renderItem)}
           {items.map(renderItem)}
         </div>
       )}
@@ -883,10 +987,11 @@ export const ProcessSteps = memo(function ProcessSteps({
     [steps, commentary],
   );
   const hasRows = hasListedSteps(shown);
-  if (!hasRows && !waiting) return null;
+  const hasQuestion = shown.some(isQuestionStep);
+  if (!hasRows && !hasQuestion && !waiting) return null;
   return (
     <>
-      {hasRows && (
+      {(hasRows || hasQuestion) && (
         <div className="mb-2">
           <ProcessTimeline
             steps={shown}

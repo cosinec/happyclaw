@@ -7,6 +7,7 @@
 import { describeToolCall } from '../components/chat/ToolActivityCard';
 import { SPEECH_TOOL_NAME } from './process-visibility';
 import {
+  TIMELINE_ROWS,
   railSteps,
   summarizeSteps,
   type StepSummary,
@@ -81,8 +82,29 @@ export function toolOutput(step: StreamingStep): string | undefined {
   if (step.toolName === SPEECH_TOOL_NAME || isQuestionStep(step)) {
     return undefined;
   }
-  const output = step.resultPreview?.trimEnd();
+  const output = withoutExitCodeLine(step, step.resultPreview?.trimEnd());
   return output?.trim() ? output : undefined;
+}
+
+const EXIT_CODE_LINE = /^\s*exit code:?\s*(\d+)\s*$/i;
+
+/**
+ * The Bash tool starts the output of a failed command with "Exit code 3". When
+ * the facts already carry that code the row says it ("退出码 3"), and the same
+ * line in the output would only repeat it. Only a line that says the same code.
+ */
+function withoutExitCodeLine(
+  step: StreamingStep,
+  output: string | undefined,
+): string | undefined {
+  const code = step.resultFacts?.exitCode;
+  if (!output || typeof code !== 'number') return output;
+  const lines = output.split('\n');
+  const first = lines.findIndex((line) => line.trim() !== '');
+  if (first < 0) return output;
+  const match = EXIT_CODE_LINE.exec(lines[first]);
+  if (!match || Number(match[1]) !== Math.round(code)) return output;
+  return lines.slice(first + 1).join('\n');
 }
 
 /** A failed call shows why it failed without being asked to; a good one does not. */
@@ -132,6 +154,37 @@ export function groupProcessSteps(
   }
   flush();
   return items;
+}
+
+/** Rows a settled card lists before the older ones fold into one line. */
+export const SETTLED_TIMELINE_ROWS = 30;
+
+export interface ProcessView {
+  /** Items folded out of sight, oldest first. */
+  folded: ProcessItem[];
+  /** The latest items, oldest first. */
+  rows: ProcessItem[];
+}
+
+/**
+ * The rows of the timeline: the steps are grouped as a whole and only then cut
+ * to the latest `maxRows`, so a group keeps its identity (its first call's) and
+ * its place however many calls join it, and what has been opened stays open.
+ */
+export function buildProcessView(
+  steps: readonly StreamingStep[],
+  maxRows: number = TIMELINE_ROWS,
+): ProcessView {
+  const items = groupProcessSteps(summarizedSteps(steps));
+  const cut = Math.max(0, items.length - maxRows);
+  return { folded: items.slice(0, cut), rows: items.slice(cut) };
+}
+
+/** The steps of some items, in order. */
+export function itemSteps(items: readonly ProcessItem[]): StreamingStep[] {
+  return items.flatMap((item) =>
+    item.type === 'group' ? item.steps : [item.step],
+  );
 }
 
 export interface GroupSummary {
@@ -229,16 +282,19 @@ export function visibleSteps(
   return commentary ? [...steps] : steps.filter((step) => step.kind !== 'text');
 }
 
-/** There is something to show of these steps (the timeline's own measure). */
-export function hasListedSteps(steps: readonly StreamingStep[]): boolean {
-  return railSteps(steps).length > 0;
-}
-
-/** The steps a finished run is summed up from. */
+/** The steps the timeline lists, and a finished run is summed up from. */
 export function summarizedSteps(
   steps: readonly StreamingStep[],
 ): StreamingStep[] {
   return railSteps(steps).filter((step) => !isQuestionStep(step));
+}
+
+/**
+ * There is something to list of these steps. A question put to the reader is
+ * a card of its own, not a row: steps of nothing else have no timeline.
+ */
+export function hasListedSteps(steps: readonly StreamingStep[]): boolean {
+  return summarizedSteps(steps).length > 0;
 }
 
 // ── the summary of a finished run ───────────────────────────────────────
@@ -247,7 +303,11 @@ export function summarizedSteps(
  * "已处理 14 秒 · 4 个工具 · 4 段思考"; with reasoning only "已思考 14 秒", with
  * tools only "已使用 4 个工具", and the failures counted at the end.
  */
-export function describeSettled(counts: StepSummary, spanMs?: number): string {
+export function describeSettled(
+  counts: StepSummary,
+  spanMs?: number,
+  dropped = 0,
+): string {
   const tools = counts.tools + counts.tasks;
   const span = formatSpanZh(spanMs);
   let text: string;
@@ -262,18 +322,22 @@ export function describeSettled(counts: StepSummary, spanMs?: number): string {
   } else {
     text = '已处理';
   }
-  return counts.failed > 0 ? `${text} · ${counts.failed} 个失败` : text;
+  const failed = counts.failed > 0 ? `${text} · ${counts.failed} 个失败` : text;
+  // The steps dropped at the cap are not counted above, and not said to be.
+  return dropped > 0 ? `${failed} · 另有较早 ${dropped} 步` : failed;
 }
 
 /** The one-line summary of the steps of a finished run. */
 export function summarizeSettled(
   steps: readonly StreamingStep[],
   durationMs?: number,
+  dropped = 0,
 ): string {
   const listed = summarizedSteps(steps);
   return describeSettled(
     summarizeSteps(listed),
     processSpanMs(listed, durationMs),
+    dropped,
   );
 }
 

@@ -2,7 +2,6 @@ import { memo, useId, useState } from 'react';
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import type { StreamingTaskRuntimeState } from '../../stores/chat';
 import { markdownTail } from '../../lib/markdown-blocks';
-import { formatTaskUsage } from '../../lib/process-facts';
 import { useThrottledValue } from '../../hooks/useThrottledValue';
 import { STREAMING_MARKDOWN_INTERVAL_MS } from '../../lib/streaming-interval';
 import { MarkdownRenderer } from './MarkdownRenderer';
@@ -117,7 +116,6 @@ export const SubAgentCard = memo(function SubAgentCard({
   // A card with nothing under its title (no tool yet, none of its text shown)
   // has nothing to open: its title row is a plain row, not a button.
   const hasBody = subAgentHasBody(task);
-  const usage = formatTaskUsage(task.usage);
   const titleRow = (
     <>
       <span
@@ -143,14 +141,7 @@ export const SubAgentCard = memo(function SubAgentCard({
           {task.latestSummary}
         </span>
       )}
-      {usage && (
-        <span className="ml-auto shrink-0 text-caption text-faint-foreground tabular-nums">
-          {usage}
-        </span>
-      )}
-      <span
-        className={`${usage ? '' : 'ml-auto '}shrink-0 text-caption text-muted-foreground`}
-      >
+      <span className="ml-auto shrink-0 text-caption text-muted-foreground">
         {STATUS_LABELS[task.status]}
       </span>
       {hasBody &&

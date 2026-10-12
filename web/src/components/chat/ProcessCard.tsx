@@ -19,9 +19,10 @@ import type {
 } from '../../stores/chat';
 import type { StreamingStep } from '../../lib/stream-steps';
 import {
+  SETTLED_TIMELINE_ROWS,
   hasListedSteps,
+  isQuestionStep,
   summarizeSettled,
-  summarizedSteps,
   visibleSteps,
 } from '../../lib/process-steps';
 import {
@@ -31,7 +32,6 @@ import {
 } from '../../lib/process-headline';
 import { formatRunElapsed } from '../../lib/run-phase';
 import { useSteadyValue } from '../../hooks/useSteadyValue';
-import { useThrottledValue } from '../../hooks/useThrottledValue';
 import { useAfterDelay, useTick } from '../../hooks/useTick';
 import { ModelWaitBody, modelWaitSeconds } from './ModelWaitRow';
 import {
@@ -77,8 +77,6 @@ const EMPTY_TOOLS: StreamingState['activeTools'] = [];
 
 /** A line that changes is let settle this long before it is swapped. */
 const HEADLINE_SETTLE_MS = 300;
-/** The sentence read out to assistive tech changes at most this often. */
-const ANNOUNCE_INTERVAL_MS = 3000;
 /** Closer to the end than this, the window counts as following it. */
 const FOLLOW_THRESHOLD_PX = 30;
 
@@ -94,15 +92,19 @@ interface ProcessHeaderProps {
   waitingSince?: number;
   thinkingText: boolean;
   durationMs?: number;
+  stepsDropped: number;
   open: boolean;
-  bodyId: string;
+  /** The id of the window the header opens, when there is one. */
+  bodyId?: string;
   onToggle: () => void;
 }
 
 /**
  * The one row that is always there. Live, it says what the run is doing now
- * and for how long it has gone on; settled, what it did. It is the button
- * that opens the rest, the whole row wide, never dependent on a hover.
+ * and for how long that step has gone on (the run's own time is the status
+ * line's, and a second clock would disagree with it); settled, what it did. It
+ * is the button that opens the rest, the whole row wide, never dependent on a
+ * hover.
  */
 function ProcessHeader({
   mode,
@@ -111,25 +113,32 @@ function ProcessHeader({
   waitingSince,
   thinkingText,
   durationMs,
+  stepsDropped,
   open,
   bodyId,
   onToggle,
 }: ProcessHeaderProps) {
   const live = mode === 'live';
-  const latest = deriveHeadline({ steps, waiting, thinkingText }) ?? {
+  const latest = deriveHeadline({
+    steps,
+    waiting,
+    thinkingText,
+    waitingSince,
+  }) ?? {
     source: 'waiting' as const,
     label: WAITING_HEADLINE,
     running: true,
+    startedAt: waitingSince,
     text: WAITING_HEADLINE,
   };
   const headline = useSteadyValue<ProcessHeadline>(
     latest,
-    `${latest.source}|${latest.running}|${latest.text}`,
+    `${latest.source}|${latest.running}|${latest.startedAt}|${latest.text}`,
     HEADLINE_SETTLE_MS,
   );
-  const announced = useThrottledValue(headline.text, ANNOUNCE_INTERVAL_MS);
-  const startedAt = steps[0]?.at ?? waitingSince;
-  const now = useTick(live);
+  // The time of what is going on, with the line that says what it is.
+  const startedAt = live && headline.running ? headline.startedAt : undefined;
+  const now = useTick(startedAt != null);
   const seconds =
     startedAt != null
       ? Math.max(0, Math.floor((now - startedAt) / 1000))
@@ -143,80 +152,81 @@ function ProcessHeader({
 
   const running = live && headline.running;
   return (
-    <>
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={open}
-        aria-controls={open ? bodyId : undefined}
-        className="-mx-1.5 flex min-h-8 w-[calc(100%+0.75rem)] cursor-pointer items-center gap-2 rounded-md px-1.5 text-left text-label text-muted-foreground transition-colors hover:bg-surface-hover focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none pointer-coarse:min-h-10"
-      >
-        <Sparkles
-          aria-hidden="true"
-          className={cn(
-            ICON_CLASS,
-            running
-              ? 'animate-pulse text-muted-foreground motion-reduce:animate-none'
-              : 'text-faint-foreground',
-          )}
-        />
-        {live ? (
-          <span className="min-w-0 flex-1 overflow-hidden">
-            <m.span
-              key={headline.text}
-              initial={shownOnce.current ? { opacity: 0, y: 6 } : false}
-              animate={{ opacity: 1, y: 0 }}
-              className={cn('block truncate', running && 'shimmer')}
-            >
-              <span
-                className={cn('font-medium', !running && 'text-foreground')}
-              >
-                {headline.label}
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={open}
+      aria-controls={open ? bodyId : undefined}
+      className="-mx-1.5 flex min-h-8 w-[calc(100%+0.75rem)] cursor-pointer items-center gap-2 rounded-md px-1.5 text-left text-label text-muted-foreground transition-colors hover:bg-surface-hover focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none pointer-coarse:min-h-10"
+    >
+      <Sparkles
+        aria-hidden="true"
+        className={cn(
+          ICON_CLASS,
+          running
+            ? 'animate-pulse text-muted-foreground motion-reduce:animate-none'
+            : 'text-faint-foreground',
+        )}
+      />
+      {live ? (
+        <span className="min-w-0 flex-1 overflow-hidden">
+          <m.span
+            key={headline.text}
+            initial={shownOnce.current ? { opacity: 0, y: 6 } : false}
+            animate={{ opacity: 1, y: 0 }}
+            className={cn('block truncate', running && 'shimmer')}
+          >
+            <span className={cn('font-medium', !running && 'text-foreground')}>
+              {headline.label}
+            </span>
+            {headline.detail && (
+              <span className={cn(!running && 'text-muted-foreground')}>
+                {' · '}
+                {headline.detail}
               </span>
-              {headline.detail && (
-                <span className={cn(!running && 'text-muted-foreground')}>
-                  {' · '}
-                  {headline.detail}
-                </span>
-              )}
-            </m.span>
-          </span>
-        ) : (
-          <span className="min-w-0 flex-1 truncate tabular-nums">
-            {summarizeSettled(steps, durationMs)}
-          </span>
-        )}
-        {live && seconds != null && seconds >= 1 && (
-          <span className="shrink-0 text-caption text-faint-foreground tabular-nums">
-            {formatRunElapsed(seconds)}
-          </span>
-        )}
-        <ChevronRight
-          aria-hidden="true"
-          className={cn(
-            ICON_CLASS,
-            'text-faint-foreground transition-transform duration-150',
-            open && 'rotate-90',
-          )}
-        />
-      </button>
-      {live && (
-        <span role="status" aria-live="polite" className="sr-only">
-          {announced}
+            )}
+          </m.span>
+        </span>
+      ) : (
+        <span className="min-w-0 flex-1 truncate tabular-nums">
+          {summarizeSettled(steps, durationMs, stepsDropped)}
         </span>
       )}
-    </>
+      {live && seconds != null && seconds >= 1 && (
+        <span className="shrink-0 text-caption text-faint-foreground tabular-nums">
+          {formatRunElapsed(seconds)}
+        </span>
+      )}
+      <ChevronRight
+        aria-hidden="true"
+        className={cn(
+          ICON_CLASS,
+          'text-faint-foreground transition-transform duration-150',
+          open && 'rotate-90',
+        )}
+      />
+    </button>
   );
 }
 
 // ── the window ──────────────────────────────────────────────────────────
 
 /**
- * A live card's steps in a window of limited height: it follows the end as
- * steps arrive, fades its top edge once something has scrolled out of it, and
- * lets go of the end when the reader scrolls up or opens a row to read it.
+ * The steps of a card in a window. Live, its height is limited: it follows
+ * the end as steps arrive, fades its top edge once something has scrolled out
+ * of it, and lets go of the end when the reader scrolls up or opens a row to
+ * read it. Settled, it is taller and still. It is the same element either way:
+ * what a reader has opened in it survives the end of the run.
  */
-function PreviewWindow({ id, children }: { id: string; children: ReactNode }) {
+function ProcessWindow({
+  id,
+  live,
+  children,
+}: {
+  id: string;
+  live: boolean;
+  children: ReactNode;
+}) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const following = useRef(true);
@@ -224,29 +234,30 @@ function PreviewWindow({ id, children }: { id: string; children: ReactNode }) {
 
   const follow = useCallback(() => {
     const el = scrollRef.current;
-    if (el && following.current) el.scrollTop = el.scrollHeight;
-  }, []);
+    if (el && live && following.current) el.scrollTop = el.scrollHeight;
+  }, [live]);
   const measure = useCallback(() => {
     const el = scrollRef.current;
-    if (!el) return;
+    if (!el || !live) return;
     following.current =
       el.scrollHeight - el.scrollTop - el.clientHeight < FOLLOW_THRESHOLD_PX;
     setFaded(el.scrollTop > 1);
-  }, []);
+  }, [live]);
 
   // New steps, and a row growing as its text arrives, keep the end in view.
   useLayoutEffect(follow);
   useEffect(() => {
     const content = contentRef.current;
-    if (!content || typeof ResizeObserver === 'undefined') return;
+    if (!live || !content || typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver(follow);
     observer.observe(content);
     return () => observer.disconnect();
-  }, [follow]);
+  }, [live, follow]);
 
   // Opening a row is reading it: the end is not followed past it. Once the
   // row has taken its place, a window still at the end follows again.
   const handleClick = () => {
+    if (!live) return;
     following.current = false;
     requestAnimationFrame(measure);
   };
@@ -257,9 +268,12 @@ function PreviewWindow({ id, children }: { id: string; children: ReactNode }) {
       ref={scrollRef}
       onScroll={measure}
       onClickCapture={handleClick}
-      data-scroll-fade={faded ? 'top' : undefined}
+      data-scroll-fade={live && faded ? 'top' : undefined}
       data-hc-process-window=""
-      className="mt-0.5 ml-1.5 max-h-60 overflow-y-auto overscroll-contain pointer-coarse:max-h-40"
+      className={cn(
+        'mt-0.5 ml-1.5 overflow-y-auto overscroll-contain',
+        live ? 'max-h-60 pointer-coarse:max-h-40' : 'max-h-[60vh]',
+      )}
     >
       <div ref={contentRef}>{children}</div>
     </div>
@@ -390,9 +404,8 @@ export const ProcessCard = memo(function ProcessCard({
     () => visibleSteps(steps, commentary),
     [steps, commentary],
   );
-  const listed = hasProcess(shown);
   // Rows to list: a question put to the reader has its own place, not a row.
-  const hasRows = useMemo(() => summarizedSteps(shown).length > 0, [shown]);
+  const listed = hasProcess(shown);
   // A wait between tools shows only once it has lasted a moment.
   const waitVisible = useAfterDelay(
     live && waiting,
@@ -401,16 +414,29 @@ export const ProcessCard = memo(function ProcessCard({
   // What the reader chose; until then the card follows its own state.
   const [chosen, setChosen] = useState<boolean | undefined>(undefined);
   const bodyId = useId();
+  // A reader reading a row in the window has chosen to have it open: the card
+  // does not fold over them when its run ends.
+  const keepOpen = useCallback(
+    () => setChosen((current) => current ?? true),
+    [],
+  );
   const rootRef = useRef<HTMLDivElement>(null);
   useFoldAnchor(rootRef, mode);
-  if (!listed && !waitVisible) return null;
+  if (!listed && !waitVisible) {
+    // A question alone is the card the reader answers, with no process to open.
+    return live && shown.some(isQuestionStep) ? (
+      <QuestionCards steps={shown} activeTools={activeTools} />
+    ) : null;
+  }
 
   const open = chosen ?? (live ? true : (defaultOpen ?? false));
+  const showWindow = open;
   const toggle = () => {
     const next = !open;
     setChosen(next);
     onOpenChange?.(next);
   };
+
   const timeline = (
     <ProcessTimeline
       steps={shown}
@@ -419,10 +445,13 @@ export const ProcessCard = memo(function ProcessCard({
       taskStates={taskStates}
       thinkingText={thinkingText}
       live={live}
+      maxRows={live ? undefined : SETTLED_TIMELINE_ROWS}
+      titleInHeader={live}
+      onInteract={keepOpen}
       bodyClassName={live ? 'max-h-36 pointer-coarse:max-h-24' : undefined}
       after={
         waitVisible ? (
-          <WaitNote since={waitingSince} hasRows={hasRows} />
+          <WaitNote since={waitingSince} hasRows={listed} />
         ) : undefined
       }
     />
@@ -443,23 +472,16 @@ export const ProcessCard = memo(function ProcessCard({
         waitingSince={waitingSince}
         thinkingText={thinkingText}
         durationMs={durationMs}
+        stepsDropped={stepsDropped}
         open={open}
-        bodyId={bodyId}
+        bodyId={showWindow ? bodyId : undefined}
         onToggle={toggle}
       />
-      {open &&
-        (hasRows || waitVisible) &&
-        (live ? (
-          <PreviewWindow id={bodyId}>{timeline}</PreviewWindow>
-        ) : (
-          <div
-            id={bodyId}
-            data-hc-process-window=""
-            className="mt-0.5 ml-1.5 max-h-[60vh] overflow-y-auto overscroll-contain"
-          >
-            {timeline}
-          </div>
-        ))}
+      {showWindow && (
+        <ProcessWindow id={bodyId} live={live}>
+          {timeline}
+        </ProcessWindow>
+      )}
       {live && <QuestionCards steps={shown} activeTools={activeTools} />}
     </div>
   );

@@ -233,7 +233,7 @@ describe('ProcessCard, live', () => {
     expect(text()).toContain('npm test');
   });
 
-  it('says its headline to assistive tech, in a polite status', async () => {
+  it('leaves the telling of what the run does to the run status line', async () => {
     await render(
       <ProcessCard
         {...props({
@@ -244,10 +244,8 @@ describe('ProcessCard, live', () => {
         })}
       />,
     );
-    const status = container.querySelector('[role="status"]');
-    expect(status?.getAttribute('aria-live')).toBe('polite');
-    expect(status?.className).toContain('sr-only');
-    expect(status?.textContent).toBe('核对');
+    expect(container.querySelector('[role="status"]')).toBeNull();
+    expect(container.querySelector('[aria-live]')).toBeNull();
   });
 
   it('opens the reasoning being written, with its text, and folds it when it is over', async () => {
@@ -330,7 +328,7 @@ describe('ProcessCard, live', () => {
         {...props({ mode: 'live', steps: [question], activeTools })}
       />,
     );
-    expect(header()?.textContent).toContain('等待你的回答');
+    expect(header()).toBeNull();
     expect(windowEl()).toBeNull();
     expect(text()).toContain('用哪个方案？');
   });
@@ -677,9 +675,7 @@ describe('ProcessCard, the rows', () => {
     const many = Array.from({ length: 9 }, (_, i) =>
       tool(`t${i}`, 'Bash', { summary: `command: echo n${i}` }),
     );
-    await render(
-      <ProcessCard {...props({ steps: many, defaultOpen: true })} />,
-    );
+    await render(<ProcessCard {...props({ mode: 'live', steps: many })} />);
     const folded = rows()[0].querySelector('button');
     expect(folded?.textContent).toContain('较早 3 步 · 3 个工具');
     expect(text()).not.toContain('echo n2');

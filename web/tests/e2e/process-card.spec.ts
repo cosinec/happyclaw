@@ -51,6 +51,31 @@ async function runCommands(page: Page, count: number, from = 0) {
   );
 }
 
+/** `count` finished reads, with output, as the reducer takes them. */
+async function readCalls(page: Page, count: number, from = 0) {
+  await page.evaluate(
+    ([n, first]) => {
+      const { start, emit } = window.renderHarness;
+      if (first === 0) start();
+      for (let i = first; i < first + n; i += 1) {
+        emit({
+          eventType: 'tool_use_start',
+          toolName: 'Read',
+          toolUseId: `read${i}`,
+          toolInputSummary: `{"file_path":"/repo/file-${i}.ts"}`,
+        });
+        emit({
+          eventType: 'tool_result',
+          toolUseId: `read${i}`,
+          toolResult: `contents of file-${i}`,
+        });
+        emit({ eventType: 'tool_use_end', toolUseId: `read${i}` });
+      }
+    },
+    [count, from],
+  );
+}
+
 const scrollState = (page: Page) =>
   win(page).evaluate((el) => ({
     top: el.scrollTop,
@@ -289,6 +314,55 @@ test.describe('the live card', () => {
     await expectNoSidewaysOverflow(page);
   });
 
+  test('keeps a group the reader opened as more reads join it past the window', async ({
+    page,
+  }) => {
+    await open(page, 'scenario=live');
+    await readCalls(page, 6);
+    const group = win(page).getByRole('button', { name: /已浏览 6 个文件/ });
+    await group.click();
+    await expect(group).toHaveAttribute('aria-expanded', 'true');
+    await expect(win(page).getByText('file-0.ts')).toBeVisible();
+
+    // The seventh and eighth: the first would have slid out of a six-row window.
+    await readCalls(page, 2, 6);
+    const grown = win(page).getByRole('button', { name: /已浏览 8 个文件/ });
+    await expect(grown).toHaveAttribute('aria-expanded', 'true');
+    await expect(win(page).getByText('file-0.ts')).toBeVisible();
+    await expect(win(page).getByText('较早')).toHaveCount(0);
+  });
+
+  test('keeps the output a reader opened, and their focus, when the next read makes it a group', async ({
+    page,
+  }) => {
+    await open(page, 'scenario=live');
+    await readCalls(page, 1);
+    const row = win(page)
+      .getByRole('listitem')
+      .filter({ hasText: 'file-0.ts' })
+      .getByRole('button');
+    await row.click();
+    await expect(win(page).locator('pre')).toHaveText('contents of file-0');
+    await expect(row).toBeFocused();
+
+    await readCalls(page, 1, 1);
+    const group = win(page).getByRole('button', { name: /已浏览 2 个文件/ });
+    await expect(group).toHaveAttribute('aria-expanded', 'true');
+    await expect(win(page).locator('pre')).toHaveText('contents of file-0');
+    // The row was rebuilt as a member of the group: focus went with it.
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const el = document.activeElement as HTMLElement | null;
+          return (
+            !!el?.closest('[data-hc-step-timeline]') &&
+            (el.textContent ?? '').includes('file-0.ts')
+          );
+        }),
+      )
+      .toBe(true);
+  });
+
   test('stays as the reader left it while the run goes on', async ({
     page,
   }) => {
@@ -335,7 +409,7 @@ test.describe('the settled card', () => {
 
 // The calls of the `facts` scenario report what they did and what they
 // printed, as a Runner that reads the SDK's structured results sends them. The
-// card is settled and folded: open it and the rows older than the latest six.
+// card is settled and folded to its summary: open it.
 async function openFacts(page: Page, scenario = 'facts') {
   await open(page, `scenario=${scenario}`);
   const summary = page.locator(
@@ -343,9 +417,9 @@ async function openFacts(page: Page, scenario = 'facts') {
   );
   await summary.click();
   await expect(win(page)).toBeVisible();
-  await win(page)
-    .getByRole('button', { name: /较早 \d+ 步/ })
-    .click();
+  // A live card folds the older rows; a settled one lists them all.
+  const older = win(page).getByRole('button', { name: /较早 \d+ 步/ });
+  if (await older.count()) await older.click();
 }
 
 const rowOf = (page: Page, text: string | RegExp) =>

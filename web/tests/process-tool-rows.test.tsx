@@ -234,6 +234,49 @@ describe('a failed tool row', () => {
   });
 });
 
+describe('a failed command whose output starts with its exit code', () => {
+  const failed = tool('b', 'Bash', {
+    status: 'error',
+    summary: 'command: npm test',
+    resultPreview: 'Exit code 3\nnpm ERR! 3 tests failed',
+    resultFacts: { exitCode: 3 },
+  });
+
+  it('says the code once, in the row, and then what the program said', async () => {
+    await render(<ProcessCard {...props({ steps: [failed] })} />);
+    const detail = rows()[0].querySelector('button > span.truncate.text-error');
+    expect(detail?.textContent).toBe('退出码 3 · npm ERR! 3 tests failed');
+    expect(text().match(/Exit code 3/g)).toBeNull();
+    expect(output()?.textContent).toBe('npm ERR! 3 tests failed');
+  });
+
+  it('has nothing to open when the code was all the output said', async () => {
+    await render(
+      <ProcessCard
+        {...props({
+          steps: [{ ...failed, resultPreview: 'Exit code 3' }],
+        })}
+      />,
+    );
+    expect(rows()[0].textContent).toContain('退出码 3');
+    expect(text()).not.toContain('Exit code');
+    expect(rowButton(0)).toBeNull();
+  });
+
+  it('keeps the words of a command that says a code the facts do not', async () => {
+    await render(
+      <ProcessCard
+        {...props({
+          steps: [
+            { ...failed, resultFacts: undefined, resultPreview: 'Exit code 3' },
+          ],
+        })}
+      />,
+    );
+    expect(text()).toContain('Exit code 3');
+  });
+});
+
 describe('a finished tool row opens to its output', () => {
   const ok = tool('b', 'Bash', {
     summary: 'command: npm test',
@@ -546,13 +589,11 @@ describe('a sub-agent row says what it cost', () => {
     expect(rows()[0].textContent).not.toContain('token');
   });
 
-  it('shows the usage on the classic card too', async () => {
+  it('leaves the classic card as it was: its title row has no usage', async () => {
     await render(<SubAgentCard task={task} groupJid="web:test" />);
-    expect(text()).toContain('14 个工具 · 1.2 万 token · 46 秒');
-    await render(
-      <SubAgentCard task={{ ...task, usage: undefined }} groupJid="web:test" />,
-    );
+    expect(text()).toContain('执行中');
     expect(text()).not.toContain('token');
+    expect(text()).not.toContain('14 个工具');
   });
 });
 
