@@ -98,9 +98,10 @@ describe('frontend workspace interaction mode contract', () => {
     const store = read('web/src/stores/chat.ts');
 
     // The panel reads the steps, the tools and the plan; model text is never
-    // one of its inputs, and reasoning only reaches it at the `full` level.
+    // one of its inputs, and reasoning and the narration before a tool call
+    // (a step the host handed over whole) only reach it at the `full` level.
     expect(panel).not.toMatch(/partialText|textTail|thinkingText:/);
-    expect(panel).toContain('commentary={false}');
+    expect(panel).toContain("commentary={visibility === 'full'}");
     expect(panel).toContain("thinkingText={visibility === 'full'}");
 
     // The spinner row stays and the panel follows it, above `hidden` only.

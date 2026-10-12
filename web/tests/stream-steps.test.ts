@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   MAX_STEPS,
+  addCommentaryStep,
   answerStart,
   appendThinkingText,
   buildTimelineView,
@@ -37,10 +38,12 @@ describe('thinking steps', () => {
     expect(list.steps[0].status).toBe('running');
   });
 
-  it('closes with the model timing when it gave one, else by the clock', () => {
+  it('lasts as long as the clock says, or as the model reports if that is longer', () => {
     const open = appendThinkingText(empty(), '想。', 1000);
     expect(closeThinkingStep(open, 4000).steps[0].durationMs).toBe(3000);
-    expect(closeThinkingStep(open, 4000, 2500).steps[0].durationMs).toBe(2500);
+    // The step starts with the request, so a shorter own timing does not shrink it.
+    expect(closeThinkingStep(open, 4000, 2500).steps[0].durationMs).toBe(3000);
+    expect(closeThinkingStep(open, 4000, 3500).steps[0].durationMs).toBe(3500);
     expect(closeThinkingStep(open, 4000).steps[0].status).toBe('done');
   });
 
@@ -66,9 +69,16 @@ describe('thinking steps', () => {
     expect(list.steps[0]).toMatchObject({
       kind: 'thinking',
       text: '',
-      durationMs: 4800,
+      durationMs: 5000,
       status: 'done',
     });
+  });
+
+  it('counts the whole wait of a burst that arrives at once, after silent reasoning', () => {
+    // Opened at the request (t=0); the model's reasoning came back whole at
+    // t=13s with a timing of a few milliseconds.
+    const list = closeThinkingStep(openThinkingStep(empty(), 0), 13_000, 3);
+    expect(list.steps[0].durationMs).toBe(13_000);
   });
 });
 
@@ -232,6 +242,45 @@ describe('text steps', () => {
   it('has no answer start without steps', () => {
     expect(answerStart(undefined, 0)).toBeUndefined();
     expect(answerStart([], 0)).toBeUndefined();
+  });
+});
+
+describe('narration handed over whole (a proactive workspace)', () => {
+  it('is a finished commentary step that closes the reasoning before it', () => {
+    let list = openThinkingStep(empty(), 0);
+    list = addCommentaryStep(list, 5, '  先看一下记忆。\n');
+    expect(list.steps.map((step) => step.kind)).toEqual(['thinking', 'text']);
+    expect(list.steps[0].status).toBe('done');
+    expect(list.steps[1]).toMatchObject({
+      status: 'done',
+      text: '先看一下记忆。',
+      commentary: true,
+      at: 5,
+      endedAt: 5,
+    });
+  });
+
+  it('is never the answer, even with no tool after it yet', () => {
+    const list = addCommentaryStep(empty(), 0, '先看一下记忆。');
+    expect(answerStart(list.steps, 0)).toBe(Number.POSITIVE_INFINITY);
+    expect(railSteps(list.steps).map((step) => step.kind)).toEqual(['text']);
+    expect(summarizeSteps(list.steps).commentary).toBe(1);
+  });
+
+  it('leaves an answer that follows it as the answer', () => {
+    let list = addCommentaryStep(empty(), 0, '先看一下。');
+    list = openTextStep(list, 5, 0);
+    expect(answerStart(list.steps, 0)).toBe(0);
+    expect(railSteps(list.steps).map((step) => step.commentary)).toEqual([
+      true,
+    ]);
+  });
+
+  it('ignores blank text and keeps the end of a long passage', () => {
+    expect(addCommentaryStep(empty(), 0, ' \n ').steps).toEqual([]);
+    const long = addCommentaryStep(empty(), 0, `${'x'.repeat(3000)}END`);
+    expect(long.steps[0].text!.length).toBe(2000);
+    expect(long.steps[0].text!.endsWith('END')).toBe(true);
   });
 });
 

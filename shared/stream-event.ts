@@ -11,6 +11,14 @@
 
 export type StreamEventType =
   | 'text_delta'
+  /**
+   * What the model said before it called a tool, as one passage in `text`.
+   * Written by the host, never the Runner, and only for a proactive Workspace
+   * that shows its whole process: its `text_delta` stays private there, so this
+   * is the one way the narration between tool calls reaches the Web. Never the
+   * text that ends a turn.
+   */
+  | 'commentary'
   | 'thinking_delta'
   /** The model opened a reasoning block, whether or not it returns any text. */
   | 'thinking_start'

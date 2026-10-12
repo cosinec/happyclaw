@@ -53,7 +53,7 @@ describe('normalizeProcessVisibility', () => {
     expect(PROCESS_VISIBILITY_OPTIONS.map((o) => o.label)).toEqual([
       '隐藏',
       '仅活动',
-      '活动 + 思考摘要',
+      '活动 + 思考 + 过程说明',
     ]);
   });
 });
@@ -119,6 +119,13 @@ describe('filterProactiveStreamEvent', () => {
   it('adds the reasoning text at the full level', () => {
     const e = event({ eventType: 'thinking_delta', text: '想' });
     expect(filterProactiveStreamEvent('full', e)).toBe(e);
+  });
+
+  it('adds the narration before a tool call at the full level, and nowhere else', () => {
+    const e = event({ eventType: 'commentary', text: '先看一下记忆。' });
+    expect(filterProactiveStreamEvent('full', e)).toBe(e);
+    expect(filterProactiveStreamEvent('activity', e)).toBeNull();
+    expect(filterProactiveStreamEvent('hidden', e)).toBeNull();
   });
 
   it('never lets model text through, at any level', () => {

@@ -125,6 +125,20 @@ export function AppLayout() {
     };
   }, []);
 
+  // A proactive turn's trace is stored when the turn settles, after its
+  // utterances were announced: the server then says which message carries it.
+  useEffect(() => {
+    const unsub = wsManager.on('message_trace', (data: any) => {
+      if (!data.messageChatJid || !data.messageId) return;
+      useChatStore
+        .getState()
+        .handleMessageTrace(data.messageChatJid, data.messageId);
+    });
+    return () => {
+      unsub();
+    };
+  }, []);
+
   // 监听 group_created（定时任务工作区创建），刷新侧边栏和任务列表
   useEffect(() => {
     const unsub = wsManager.on('group_created', () => {

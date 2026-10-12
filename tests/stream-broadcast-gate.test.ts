@@ -32,6 +32,36 @@ describe('Runner events reach the Web only through the projection', () => {
     );
   });
 
+  test('the narration relay sits beside each projection that feeds a live turn', () => {
+    // Main session and Runtime Session each hold text back until a tool call
+    // follows it; a projection without a relay would lose the narration, a
+    // relay without a projection would send what the projection withholds.
+    expect(source.match(/new ProactiveCommentaryRelay\(\)/g)).toHaveLength(2);
+    expect(source.match(/commentaryRelay\.take\(/g)).toHaveLength(2);
+    // Its output is broadcast to the Web only, never handed to a channel.
+    for (const call of source.match(
+      /for \(const note of commentaryRelay\.take\([\s\S]*?\n\s*\}\n/g,
+    ) ?? []) {
+      expect(call).toContain('broadcastStreamEvent(chatJid, note');
+      expect(call).not.toMatch(/stream(ing)?Session|sendMessage|feishu/i);
+    }
+  });
+
+  test('a proactive turn announces the trace it stores', () => {
+    // The reply was announced mid-turn, before its trace existed. Each place
+    // that stores a proactive turn's trace says so to the clients.
+    expect(
+      source.match(/broadcastMessageTrace\(/g)?.length,
+    ).toBeGreaterThanOrEqual(2);
+    for (const name of ['persistProactiveTurnTrace']) {
+      const bodies = source.split(`const ${name} = (`).slice(1);
+      expect(bodies).toHaveLength(2);
+      for (const body of bodies) {
+        expect(body.slice(0, 900)).toContain('broadcastMessageTrace(');
+      }
+    }
+  });
+
   test('the terminal warmup run projects its events like any other turn', () => {
     const warmup = functionBody('runTerminalWarmup');
     expect(warmup).toContain('projectSdkStreamEventForWeb(');

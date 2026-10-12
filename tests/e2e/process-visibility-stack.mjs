@@ -12,8 +12,11 @@
 // What it proves that unit tests cannot: the events the Web is actually sent
 // for each interaction mode and process visibility (the privacy gate: a
 // proactive workspace never streams answer text, `hidden` shows only the run
-// lifecycle, `activity` strips tool output and reasoning), what a reconnecting
-// client is handed mid-run, what is stored for a settled turn and who may read it.
+// lifecycle, `activity` strips tool output and reasoning, `full` adds the
+// reasoning and the narration written before a tool call, never the text that
+// ends a turn), what a reconnecting client is handed mid-run, what is stored for
+// a settled turn and who may read it, and that a client that was handed the
+// proactive reply mid-turn is told when its trace is stored.
 //
 // Usage:
 //   npm run build:all
@@ -43,6 +46,7 @@ const NONCE = `N${Date.now().toString(36)}`;
 const THINK1 = '**Planning the demo**\n\nI will run one shell command first.';
 const THINK2 =
   '**Wrapping up**\n\nThe command finished, so I can report the result.';
+const NARRATION = `Let me run the demo command first (${NONCE}).`;
 const ANSWER = `DEMO_DONE_${NONCE}`;
 const PROACTIVE_TEXT = `DEMO_PROACTIVE_${NONCE}`;
 const SENTINEL = '<!--HAPPYCLAW_PROACTIVE_FINAL_DELIVERED-->';
@@ -182,6 +186,7 @@ function startStub() {
         if (round === 0) {
           blocks = [
             { type: 'thinking', text: THINK1 },
+            { type: 'text', text: NARRATION },
             {
               type: 'tool_use',
               id: `toolu_bash_${n}`,
@@ -509,6 +514,35 @@ async function runScenario(ctx, { label, interaction, visibility, expect }) {
       JSON.stringify(joined.slice(0, 80)),
     );
   }
+  const notes = streamEvents.filter((e) => e.eventType === 'commentary');
+  if (expect.narration) {
+    const joined = notes.map((e) => e.text).join('\n');
+    check(
+      label,
+      'the narration written before the Bash call reaches the Web whole',
+      joined === NARRATION,
+      JSON.stringify(joined.slice(0, 100)),
+    );
+    const noteAt = streamEvents.findIndex((e) => e.eventType === 'commentary');
+    const bashAt = streamEvents.findIndex(
+      (e) => e.eventType === 'tool_use_start' && e.toolName === 'Bash',
+    );
+    check(
+      label,
+      'and arrives ahead of the call it introduces',
+      noteAt >= 0 && bashAt > noteAt,
+      `commentary at ${noteAt}, Bash at ${bashAt}`,
+    );
+    const seen = JSON.stringify(streamEvents);
+    check(
+      label,
+      'neither the reply nor the text that ends the turn is ever narration',
+      !seen.includes(PROACTIVE_TEXT) &&
+        !seen.includes(SENTINEL) &&
+        notes.length === 1,
+      `commentary events: ${notes.length}`,
+    );
+  }
   if (expect.stripped) {
     const result = streamEvents.find((e) => e.eventType === 'tool_result');
     const start = streamEvents.find(
@@ -627,6 +661,41 @@ async function runScenario(ctx, { label, interaction, visibility, expect }) {
     `agent messages: ${JSON.stringify(agentMessages.map((m) => m.content?.slice(0, 40)))}`,
   );
   const flagged = agentMessages.filter((m) => m.has_trace === true);
+  // A proactive reply is announced mid-turn, before its trace exists: the
+  // client is told afterwards which message carries it. An assistant reply
+  // carries `has_trace` itself.
+  const traceNotices = live.filter(
+    (e) => e.type === 'message_trace' && e.chatJid === jid,
+  );
+  if (interaction === 'proactive' && expect.trace !== 'none') {
+    check(
+      label,
+      'the client that streamed the turn is told which message carries the trace',
+      traceNotices.length === 1 &&
+        traceNotices[0].messageId === finalMsg?.id &&
+        traceNotices[0].turnId === finalMsg?.turn_id &&
+        traceNotices[0].messageChatJid === finalMsg?.chat_jid,
+      `notices=${JSON.stringify(traceNotices.map((e) => ({ id: e.messageId, turn: e.turnId })))} message=${finalMsg?.id}/${finalMsg?.turn_id}`,
+    );
+    const live_ = live.find(
+      (e) =>
+        e.type === 'new_message' &&
+        e.message?.content?.includes(PROACTIVE_TEXT),
+    );
+    check(
+      label,
+      'the reply itself was announced without has_trace (it predates its trace)',
+      !!live_ && !live_.message.has_trace,
+      JSON.stringify(live_?.message?.has_trace),
+    );
+  } else {
+    check(
+      label,
+      'no trace notice is sent when there is nothing to announce',
+      traceNotices.length === 0,
+      `got ${traceNotices.length}`,
+    );
+  }
   if (expect.trace === 'none') {
     check(
       label,
@@ -715,7 +784,9 @@ async function runScenario(ctx, { label, interaction, visibility, expect }) {
       check(
         label,
         'stored trace never holds the model answer text',
-        !rowsJson.includes(ANSWER) && !rowsJson.includes(SENTINEL),
+        !rowsJson.includes(ANSWER) &&
+          !rowsJson.includes(SENTINEL) &&
+          !rowsJson.includes(NARRATION),
         '',
       );
       if (interaction === 'proactive')
@@ -808,7 +879,7 @@ async function main() {
           'thinking_start',
           'thinking_end',
         ],
-        never: [],
+        never: ['commentary'],
         answerStreamed: true,
         thinkingText: true,
         thinkingTiming: true,
@@ -834,6 +905,7 @@ async function main() {
           'tool_progress',
           'usage',
           'task_start',
+          'commentary',
         ],
         onlyLifecycleStatus: true,
         snapshot: 'none',
@@ -847,7 +919,7 @@ async function main() {
       expect: {
         toolVisible: true,
         always: ['tool_use_start', 'thinking_start', 'thinking_end'],
-        never: ['text_delta', 'thinking_delta', 'usage'],
+        never: ['text_delta', 'thinking_delta', 'usage', 'commentary'],
         stripped: true,
         thinkingTiming: true,
         snapshot: 'activity',
@@ -865,8 +937,10 @@ async function main() {
           'thinking_delta',
           'thinking_start',
           'thinking_end',
+          'commentary',
         ],
         never: ['text_delta', 'usage'],
+        narration: true,
         thinkingText: true,
         stripped: true,
         thinkingTiming: true,

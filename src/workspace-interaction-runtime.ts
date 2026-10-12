@@ -185,6 +185,11 @@ function isLifecycleStatus(statusText: string | null | undefined): boolean {
   return statusText != null && LIFECYCLE_STATUS_TEXTS.has(statusText);
 }
 
+/** Whether `toolName` is the tool a proactive Agent speaks to the user through. */
+export function isMessageDeliveryTool(toolName: string | undefined): boolean {
+  return !!toolName && MESSAGE_DELIVERY_TOOL_NAMES.has(toolName);
+}
+
 /**
  * A copy of `event` without the fields that carry the model's own words.
  * Returns `event` itself when there is nothing to remove. Hook output and the
@@ -237,8 +242,10 @@ function withoutModelText(event: StreamEvent): StreamEvent {
  *   the Web may see depends on its process visibility. `hidden` keeps the run
  *   lifecycle only (requesting/idle/interrupted: the spinner). `activity` adds
  *   the structure of the work, stripped of any text the model produced.
- *   `full` also streams the main Agent's and sub-Agents' reasoning summary.
- * - Never, at any level: text_delta (the model's own answer text, which
+ *   `full` also streams the main Agent's and sub-Agents' reasoning summary and
+ *   the narration the model wrote before a tool call (`commentary`, which the
+ *   host composes from the Runner's text_delta; see process-commentary.ts).
+ * - Never, at any level: text_delta itself (the model's own answer text, which
  *   reaches the user only through send_message), usage, memory_recall,
  *   prompt_suggestion, raw_sdk_event, notification and unknown event types.
  *
@@ -264,7 +271,11 @@ export function projectSdkStreamEventForWeb(
     return visibility === 'hidden' ? null : event;
   }
   if (visibility === 'hidden') return null;
-  if (type === 'thinking_delta') return visibility === 'full' ? event : null;
+  // The reasoning summary and the narration before a tool call (written by the
+  // host, see process-commentary.ts) are the model's words about its work.
+  if (type === 'thinking_delta' || type === 'commentary') {
+    return visibility === 'full' ? event : null;
+  }
   if (!ACTIVITY_EVENT_TYPES.has(type)) return null;
   return withoutModelText(event);
 }

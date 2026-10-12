@@ -5,7 +5,10 @@ import { ToolRow } from '../src/components/chat/ToolActivityCard';
 import { StepTimeline } from '../src/components/chat/StepTimeline';
 import { SubAgentCard } from '../src/components/chat/SubAgentCard';
 import { TracePanel } from '../src/components/chat/ExecutionTrace';
-import { ModelWaitRow } from '../src/components/chat/ModelWaitRow';
+import {
+  MODEL_WAIT_SKELETON_SECONDS,
+  ModelWaitRow,
+} from '../src/components/chat/ModelWaitRow';
 import {
   ProcessPanel,
   summarizeProcess,
@@ -72,6 +75,34 @@ describe('ThinkingBlock', () => {
     );
     expect(html).toContain('已思考 3.4 秒');
     expect(html).not.toContain('<button');
+  });
+
+  it('says the model returned no reasoning text when it thought for a while', () => {
+    const html = renderToStaticMarkup(
+      <ThinkingBlock text="" durationMs={12_700} />,
+    );
+    expect(html).toContain('已思考 13 秒');
+    expect(html).toContain('模型未返回思考内容');
+    expect(html).toContain('data-hc-no-summary');
+    expect(html).not.toContain('<button');
+  });
+
+  it('claims nothing about the model when the text is only withheld', () => {
+    const html = renderToStaticMarkup(
+      <ThinkingBlock text="" durationMs={12_700} withheld />,
+    );
+    expect(html).toContain('已思考 13 秒');
+    expect(html).not.toContain('模型未返回思考内容');
+  });
+
+  it('says nothing about a thought too short to count, or one in progress', () => {
+    for (const html of [
+      renderToStaticMarkup(<ThinkingBlock text="" durationMs={400} />),
+      renderToStaticMarkup(<ThinkingBlock text="" running durationMs={9000} />),
+      renderToStaticMarkup(<ThinkingBlock text="想" durationMs={9000} />),
+    ]) {
+      expect(html).not.toContain('模型未返回思考内容');
+    }
   });
 
   it('shimmers while the model is thinking', () => {
@@ -323,6 +354,47 @@ describe('StepTimeline', () => {
     expect(html).not.toContain('我先改渲染循环');
     expect(html).not.toContain('确认订阅范围');
     expect(html).toContain('已思考 5 秒');
+    // The text is withheld here, not missing: no word about the model.
+    expect(html).not.toContain('模型未返回思考内容');
+  });
+
+  it('shows narration the host handed over whole, as commentary', () => {
+    const html = timeline(
+      [
+        step({
+          id: 'note-0',
+          kind: 'text',
+          text: '先查一下记忆再回答。',
+          commentary: true,
+        }),
+        step({
+          id: 'tool-m',
+          kind: 'tool',
+          toolName: 'Read',
+          toolUseId: 'm',
+          summary: 'memory.md',
+        }),
+      ],
+      { commentary: true },
+    );
+    expect(html).toContain('先查一下记忆再回答。');
+    expect(html).toContain('memory.md');
+  });
+
+  it('says a reasoning step ended without any text when text is allowed', () => {
+    const html = timeline(
+      [
+        step({
+          id: 'thinking-0',
+          kind: 'thinking',
+          text: '',
+          durationMs: 22_900,
+        }),
+      ],
+      { thinkingText: true },
+    );
+    expect(html).toContain('已思考 23 秒');
+    expect(html).toContain('模型未返回思考内容');
   });
 
   it('shows a failed tool with its reason', () => {
@@ -363,6 +435,26 @@ describe('ModelWaitRow', () => {
 
   it('is not shown when the wait is over', () => {
     expect(renderToStaticMarkup(<ModelWaitRow active={false} />)).toBe('');
+  });
+
+  it('stops promising words once the wait is long, and says why', () => {
+    const quick = renderToStaticMarkup(
+      <ModelWaitRow active since={Date.now() - 2000} />,
+    );
+    expect(quick).toContain('animate-pulse');
+    expect(quick).not.toContain('data-hc-model-silent');
+
+    const long = renderToStaticMarkup(
+      <ModelWaitRow
+        active
+        since={Date.now() - (MODEL_WAIT_SKELETON_SECONDS + 1) * 1000}
+      />,
+    );
+    expect(long).toContain('data-hc-model-silent');
+    expect(long).toContain('不提供思考摘要');
+    expect(long).not.toContain('animate-pulse');
+    // The timer and the label stay.
+    expect(long).toContain('正在思考…');
   });
 });
 
@@ -495,10 +587,48 @@ describe('ProcessPanel', () => {
       />,
     );
     expect(html).toContain('处理过程');
-    expect(html).toContain('aria-expanded="false"');
     expect(html).toContain('正在运行命令 · 1 个子 Agent 运行中');
     expect(html).toContain('最近：运行 npm test');
-    expect(html).not.toContain('data-hc-step-timeline');
+  });
+
+  it('is open while the turn runs: a workspace that shows its process is meant to be watched', () => {
+    const html = renderToStaticMarkup(
+      <ProcessPanel
+        streaming={streaming}
+        groupJid="web:test"
+        runtimeJid="web:test"
+        visibility="activity"
+      />,
+    );
+    expect(html).toContain('aria-expanded="true"');
+    expect(html).toContain('data-hc-step-timeline');
+    expect(html).toContain('npm test');
+  });
+
+  it('shows the narration before a tool call only at the full level', () => {
+    const noted: StreamingState = {
+      ...streaming,
+      steps: [
+        step({
+          id: 'note-0',
+          kind: 'text',
+          text: '先跑一遍测试。',
+          commentary: true,
+        }),
+        ...(streaming.steps ?? []),
+      ],
+    };
+    const html = (visibility: 'activity' | 'full') =>
+      renderToStaticMarkup(
+        <ProcessPanel
+          streaming={noted}
+          groupJid="web:test"
+          runtimeJid="web:test"
+          visibility={visibility}
+        />,
+      );
+    expect(html('full')).toContain('先跑一遍测试。');
+    expect(html('activity')).not.toContain('先跑一遍测试。');
   });
 
   it('does not call a shell command, a monitor or an MCP call a sub-agent', () => {
@@ -588,7 +718,7 @@ describe('ProcessVisibilitySelector', () => {
         name="visibility"
       />,
     );
-    for (const label of ['隐藏', '仅活动', '活动 + 思考摘要']) {
+    for (const label of ['隐藏', '仅活动', '活动 + 思考 + 过程说明']) {
       expect(html).toContain(label);
     }
     expect(html.match(/type="radio"/g)).toHaveLength(3);

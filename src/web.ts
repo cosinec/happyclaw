@@ -2641,6 +2641,35 @@ export function broadcastMessageDeleted(
   safeBroadcast(wsMsg, isHostGroupJid(jid), allowedUserIds);
 }
 
+/**
+ * Announce that the trace of `turnId` is stored and hangs on `messageId`. The
+ * message itself was broadcast earlier without `has_trace`.
+ */
+export function broadcastMessageTrace(
+  messageChatJid: string,
+  messageId: string,
+  turnId: string,
+): void {
+  const markerIndex = messageChatJid.indexOf('#agent:');
+  const baseChatJid =
+    markerIndex >= 0 ? messageChatJid.slice(0, markerIndex) : messageChatJid;
+  const agentId =
+    markerIndex >= 0
+      ? messageChatJid.slice(markerIndex + '#agent:'.length)
+      : undefined;
+  const jid = normalizeHomeJid(baseChatJid);
+  const allowedUserIds = getGroupAllowedUserIds(baseChatJid);
+  const wsMsg: WsMessageOut = {
+    type: 'message_trace',
+    chatJid: jid,
+    messageChatJid,
+    messageId,
+    turnId,
+    ...(agentId ? { agentId } : {}),
+  };
+  safeBroadcast(wsMsg, isHostGroupJid(jid), allowedUserIds);
+}
+
 export function broadcastFollowUpUpdate(
   chatJid: string,
   transition?: FollowUpTransition,

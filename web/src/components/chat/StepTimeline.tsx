@@ -139,6 +139,7 @@ function StepRow({
           title={thinkingText ? step.title : undefined}
           durationMs={running ? undefined : stepDurationMs(step)}
           running={running}
+          withheld={!thinkingText}
           live={running && live}
           groupJid={groupJid}
           expanded={open}
