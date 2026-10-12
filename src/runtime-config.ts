@@ -1655,9 +1655,13 @@ interface StoredStateV5 {
   balancing: BalancingConfig;
 }
 
-/** Legacy subscriptions can predate the internal identifier used to mint grants. */
+/**
+ * Legacy subscriptions can predate the internal identifier used to mint grants,
+ * and the secrets route can clear it. Fills the gap in place, so callers that
+ * pass a provider list to be saved get the identifier saved with it.
+ */
 function ensureCodexGatewayIdentifiers(providers: UnifiedProvider[]): boolean {
-  let changed = false;
+  const repaired: string[] = [];
   for (const provider of providers) {
     if (
       provider.codexOAuthCredentials &&
@@ -1667,10 +1671,16 @@ function ensureCodexGatewayIdentifiers(providers: UnifiedProvider[]): boolean {
       // This stays encrypted with the provider. Only per-runner grants, never
       // this identifier, authenticate requests to the embedded gateway.
       provider.anthropicAuthToken = crypto.randomBytes(32).toString('hex');
-      changed = true;
+      repaired.push(provider.id);
     }
   }
-  return changed;
+  if (repaired.length > 0) {
+    logger.info(
+      { providerIds: repaired },
+      'Assigned missing ChatGPT gateway identifiers',
+    );
+  }
+  return repaired.length > 0;
 }
 
 /**
@@ -1755,7 +1765,18 @@ function readStoredStateV4FromDisk(): StoredStateV5 | null {
         repairedGatewayIdentifiers ||
         Object.hasOwn(v5, 'defaultProviderId')
       ) {
-        writeStoredStateV4(state.providers, state.balancing);
+        // Tidying a readable file must not make the whole configuration
+        // unreadable: if the disk refuses the write, serve what was read and
+        // retry on the next read.
+        try {
+          writeStoredStateV4(state.providers, state.balancing);
+        } catch (err) {
+          logger.warn(
+            { err, file: CLAUDE_CONFIG_FILE },
+            'Could not persist the repaired Claude model configuration; using it unsaved',
+          );
+          return state;
+        }
       }
       if (Object.hasOwn(v5, 'defaultProviderId')) {
         logger.info(
@@ -1812,7 +1833,8 @@ function writeStoredStateV4(
   providers: UnifiedProvider[],
   balancing: BalancingConfig,
 ): void {
-  // Cover V3/V4 migration and newly imported subscriptions as well as V5 reads.
+  // Fills in place: a subscription created without an identifier, or one whose
+  // identifier the secrets route cleared, is saved with a fresh one.
   ensureCodexGatewayIdentifiers(providers);
   // Every save goes through here: drop the decrypted cache first, so the next
   // read decrypts what was actually persisted.

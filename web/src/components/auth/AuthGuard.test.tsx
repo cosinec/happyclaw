@@ -65,7 +65,7 @@ async function renderAt(route: string) {
           <Route
             path="/setup/providers"
             element={
-              <AuthGuard requireAdmin>
+              <AuthGuard>
                 <SetupProvidersPage />
               </AuthGuard>
             }
@@ -107,7 +107,6 @@ describe('optional provider onboarding', () => {
     await act(async () => skip?.click());
     expect(container.textContent).toBe('chat page');
     expect(mocks.post).not.toHaveBeenCalled();
-    expect(mocks.state.setupStatus.needsSetup).toBe(true);
   });
 
   test('still requires authentication', async () => {

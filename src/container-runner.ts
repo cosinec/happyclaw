@@ -352,8 +352,11 @@ function writeContainerClaudeJsonIfChanged(
  * 同时剥离 oauthAccount：容器内不走宿主机的 OAuth 登录态，认证完全由
  * ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY 环境变量控制，避免 SDK 误检
  * OAuth 凭据后跳过标准 Bearer header（第三方 provider 返回 404）。
- * 容器认证由 HappyClaw 配置，因此始终完成交互式初始化；宿主机未登录或
- * 尚未完成引导时，也不能把该状态复制进已配置认证的容器。
+ * Runner 进程经 entrypoint 的 CLAUDE_CONFIG_DIR 读写会话目录下的 .claude.json，
+ * 不读取这份副本；它只服务于不继承该变量的容器进程，例如 Web 终端经
+ * docker exec 启动的 shell 里交互运行的 claude。副本以只读挂载，引导结果
+ * 写不回去，所以固定标记为已完成引导，免得这类进程每次都停在 Welcome 页，
+ * 无论宿主机是否登录过。
  *
  * ~/.claude.json can be megabytes, so the copy is re-derived only when the
  * host file's stats change and rewritten only when its bytes would change.

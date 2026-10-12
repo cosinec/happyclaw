@@ -14,6 +14,7 @@ vi.mock('../src/logger.js', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
+const { logger } = await import('../src/logger.js');
 const runtime = await import('../src/runtime-config.js');
 const gateway = await import('../src/codex-gateway/runner-tokens.js');
 const { CODEX_GATEWAY_BASE_URL_PLACEHOLDER } =
@@ -166,6 +167,51 @@ describe('legacy ChatGPT gateway identifiers', () => {
       }
     },
   );
+
+  test('logs which providers received an identifier, never the identifier', () => {
+    const info = vi.mocked(logger.info);
+    info.mockClear();
+    writeLegacy(5, [
+      legacyProvider('codex'),
+      legacyProvider('relay', '', false),
+    ]);
+    const [codex] = runtime.getProviders();
+    const calls = info.mock.calls.filter(
+      ([, message]) =>
+        message === 'Assigned missing ChatGPT gateway identifiers',
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toEqual({ providerIds: ['codex'] });
+    expect(JSON.stringify(info.mock.calls)).not.toContain(
+      codex.anthropicAuthToken,
+    );
+  });
+
+  test('serves the configuration when the repaired file cannot be saved', () => {
+    writeLegacy(5, [
+      legacyProvider('codex'),
+      legacyProvider('relay', '', false),
+    ]);
+    const original = fs.readFileSync(configFile, 'utf8');
+    // A directory squatting on the temp path makes every save fail.
+    fs.mkdirSync(`${configFile}.tmp`);
+    const warn = vi.mocked(logger.warn);
+    warn.mockClear();
+    try {
+      const providers = runtime.getProviders();
+      expect(providers.map((p) => p.id)).toEqual(['codex', 'relay']);
+      expect(providers[0].anthropicAuthToken).toMatch(/^[a-f0-9]{64}$/);
+      expect(providers[1].anthropicAuthToken).toBe('');
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(fs.readFileSync(configFile, 'utf8')).toBe(original);
+    } finally {
+      fs.rmSync(`${configFile}.tmp`, { recursive: true, force: true });
+    }
+    // The next read retries and persists once the disk accepts the write.
+    const [healed] = runtime.getProviders();
+    expect(JSON.parse(fs.readFileSync(configFile, 'utf8')).version).toBe(5);
+    expect(runtime.getProviders()[0]).toEqual(healed);
+  });
 
   test('persists an identifier when creating a subscription without one', () => {
     const provider = runtime.createProvider({

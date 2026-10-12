@@ -6,6 +6,7 @@ import {
   Plus,
   Server,
   ShieldCheck,
+  SkipForward,
   X,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
@@ -642,18 +643,27 @@ export function SetupProvidersPage() {
             <ShieldCheck className="mt-px size-3.5 shrink-0" />
             当前页保存的数据会作为系统全局默认配置，后续可在后台设置页继续修改。
           </div>
-          <Button
-            variant="outline"
-            disabled={saving}
-            onClick={() => navigate('/chat', { replace: true })}
-          >
-            暂不配置，进入后台
-          </Button>
-          <Button onClick={handleFinish} disabled={saving} className="shrink-0">
-            {saving && <Loader2 className="animate-spin" />}
-            保存全局默认并进入后台
-            <ArrowRight />
-          </Button>
+          <div className="flex shrink-0 flex-wrap justify-end gap-2">
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={saving}
+              onClick={() => navigate('/chat', { replace: true })}
+            >
+              <SkipForward />
+              暂不配置，进入后台
+            </Button>
+            <Button
+              type="button"
+              onClick={handleFinish}
+              disabled={saving}
+              className="shrink-0"
+            >
+              {saving && <Loader2 className="animate-spin" />}
+              保存全局默认并进入后台
+              <ArrowRight />
+            </Button>
+          </div>
         </div>
       </PageContainer>
     </div>
