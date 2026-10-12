@@ -147,7 +147,9 @@ Agent 在调用工具前写下的那段话，仅在确有工具调用跟在后�
 Web、不写入轨迹；回合结尾的文字、未发送的回复和紧接着 `send_message` 调用的文字不放行
 （宿主逐个调用判断，不向前看，详见 `docs/API.md`）。
 `turn-traces` 的 `steps`（回合的有序步骤）在主动模式工作区不含过程说明（text 步骤）和
-发言工具 `send_message` 的步骤。过滤读取**当前**级别，而不是回合运行时的级别。Assistant
+发言工具 `send_message` 的步骤。工具结果事件上的 `toolIsError`（SDK 的 `is_error`，布尔）
+在任何级别都放行；`toolResultFacts`（工具做了什么的数字，如增删行数）只在 Assistant 模式
+下发，主动模式在任何级别都剥掉，步骤里也就没有 `resultFacts`。过滤读取**当前**级别，而不是回合运行时的级别。Assistant
 模式工作区与 fire-and-forget 的 Spawn Agent 不受该设置影响。轨迹的读取权限与消息
 列表相同：只有能读取该聊天历史的用户可读；admin 没有跨 owner bypass，无权限与不存在
 都返回 404。
