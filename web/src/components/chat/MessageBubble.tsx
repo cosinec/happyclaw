@@ -20,6 +20,7 @@ import { cn } from '@/lib/utils';
 import {
   useChatStore,
   type Message,
+  type ReplySteps,
   type StreamingTraceEvent,
 } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
@@ -27,13 +28,16 @@ import { EmojiAvatar } from '../common/EmojiAvatar';
 import { FinalMarkdown } from './StreamingMarkdown';
 import { PermissionAlert, TracePanel } from './ExecutionTrace';
 import { ThinkingBlock } from './ThinkingBlock';
+import { ProcessCard, hasProcess } from './ProcessCard';
 import { LazyTurnTrace } from './LazyTurnTrace';
 import { MessageContextMenu } from './MessageContextMenu';
 import { ImageLightbox } from './ImageLightbox';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
+import { useStreamLayout } from '../../hooks/useStreamLayout';
 import { extractThinkingTitle } from '../../lib/thinking-text';
 import { normalizeInteractionMode } from '../../lib/interaction-mode';
 import { normalizeProcessVisibility } from '../../lib/process-visibility';
+import { visibleSteps } from '../../lib/process-steps';
 import { resolveAgentDisplayIdentity } from '../../utils/agent-identity';
 import {
   getPresentedMessageContent,
@@ -62,6 +66,8 @@ interface MessageBubbleProps {
   thinkingDurationMs?: number;
   /** Tools and other steps the reply streamed, kept collapsed. */
   traceEvents?: StreamingTraceEvent[];
+  /** The ordered steps the reply streamed (or the server kept). */
+  replySteps?: ReplySteps;
   agentName?: string;
   agentAvatarUrl?: string | null;
   agentAvatarEmoji?: string | null;
@@ -214,6 +220,7 @@ export const MessageBubble = memo(
     thinkingContent,
     thinkingDurationMs,
     traceEvents,
+    replySteps,
     agentName,
     agentAvatarUrl,
     agentAvatarEmoji,
@@ -226,6 +233,7 @@ export const MessageBubble = memo(
     } | null>(null);
     const [showShareDialog, setShowShareDialog] = useState(false);
     const currentUser = useAuthStore((s) => s.user);
+    const { layout } = useStreamLayout();
     const appearance = useAuthStore((s) => s.appearance);
     const agentIdentity = resolveAgentDisplayIdentity({
       agentName,
@@ -257,21 +265,38 @@ export const MessageBubble = memo(
     // same rows and loaded when one is opened. A proactive workspace shows
     // only what its owner chose: nothing when hidden, no reasoning text at
     // the activity level.
-    const [openOnLoad, setOpenOnLoad] = useState<'thinking' | 'trace' | null>(
-      null,
-    );
+    const [openOnLoad, setOpenOnLoad] = useState<
+      'thinking' | 'trace' | 'process' | null
+    >(null);
     const process = useChatStore((s) => {
       const group = s.groups[message.chat_jid.replace(/#agent:.*$/, '')];
       return normalizeInteractionMode(group?.interaction_mode) === 'proactive'
         ? normalizeProcessVisibility(group?.process_visibility)
         : 'full';
     });
+    // The timeline layout sums a reply up in the same card its streaming left
+    // off with: one row, the steps in order behind it. A reply without steps
+    // (an older turn) and the classic layout keep the reasoning and the trace
+    // as the two rows they always were.
+    const settledSteps =
+      layout === 'timeline' &&
+      replySteps &&
+      hasProcess(visibleSteps(replySteps.steps, process === 'full'))
+        ? replySteps
+        : null;
+    // One row asked for both: the reasoning opens if there is any to read.
+    const openThinking =
+      openOnLoad === 'thinking' ||
+      (openOnLoad === 'process' && !!thinkingContent);
+    const openTrace =
+      openOnLoad === 'trace' || (openOnLoad === 'process' && !thinkingContent);
     const traceOnServer =
       message.is_from_me &&
       !!message.has_trace &&
       !!message.turn_id &&
       process !== 'hidden' &&
       !hasReasoning &&
+      !settledSteps &&
       !(traceEvents && traceEvents.length > 0);
     const isUser = !message.is_from_me;
     const presentedContent = getPresentedMessageContent(message);
@@ -318,13 +343,34 @@ export const MessageBubble = memo(
     // Same base JID the stream rendered with, so its blocks' rendered trees
     // are reused (links resolve against the workspace either way).
     const markdownJid = message.chat_jid.replace(/#agent:.*$/, '');
-    const executionTrace = traceEvents && traceEvents.length > 0 && (
+    const executionTrace = !settledSteps &&
+      traceEvents &&
+      traceEvents.length > 0 && (
+        <>
+          <PermissionAlert traceEvents={traceEvents} />
+          <TracePanel
+            traceEvents={traceEvents}
+            taskCount={0}
+            defaultExpanded={openTrace}
+          />
+        </>
+      );
+    // The streaming card, once settled, is shaped like this: a denied tool
+    // call above the summary row, the answer below.
+    const settledCard = settledSteps && (
       <>
-        <PermissionAlert traceEvents={traceEvents} />
-        <TracePanel
-          traceEvents={traceEvents}
-          taskCount={0}
-          defaultExpanded={openOnLoad === 'trace'}
+        {traceEvents && traceEvents.length > 0 && (
+          <PermissionAlert traceEvents={traceEvents} />
+        )}
+        <ProcessCard
+          mode="settled"
+          steps={settledSteps.steps}
+          stepsDropped={settledSteps.dropped}
+          groupJid={markdownJid}
+          commentary={process === 'full'}
+          thinkingText={process === 'full'}
+          durationMs={thinkingDurationMs}
+          defaultOpen={openOnLoad !== null}
         />
       </>
     );
@@ -565,15 +611,16 @@ export const MessageBubble = memo(
             </div>
           </div>
 
-          {/* Reasoning */}
-          {hasReasoning && (
+          {/* Process: the settled card, or the reasoning and the trace */}
+          {settledCard}
+          {!settledSteps && hasReasoning && (
             <ThinkingBlock
               text={thinkingContent ?? ''}
               title={thinkingTitle}
               durationMs={thinkingDurationMs}
               withheld={process !== 'full'}
               groupJid={markdownJid}
-              defaultExpanded={openOnLoad === 'thinking'}
+              defaultExpanded={openThinking}
             />
           )}
           {traceOnServer && (
@@ -691,14 +738,15 @@ export const MessageBubble = memo(
 
         {/* Claude-style: no card container, direct content */}
         <div className="overflow-hidden font-serif">
-          {hasReasoning && (
+          {settledCard}
+          {!settledSteps && hasReasoning && (
             <ThinkingBlock
               text={thinkingContent ?? ''}
               title={thinkingTitle}
               durationMs={thinkingDurationMs}
               withheld={process !== 'full'}
               groupJid={markdownJid}
-              defaultExpanded={openOnLoad === 'thinking'}
+              defaultExpanded={openThinking}
             />
           )}
           {traceOnServer && (
@@ -786,6 +834,7 @@ export const MessageBubble = memo(
     prev.thinkingContent === next.thinkingContent &&
     prev.thinkingDurationMs === next.thinkingDurationMs &&
     prev.traceEvents === next.traceEvents &&
+    prev.replySteps === next.replySteps &&
     prev.agentName === next.agentName &&
     prev.agentAvatarUrl === next.agentAvatarUrl &&
     prev.agentAvatarEmoji === next.agentAvatarEmoji &&

@@ -208,14 +208,6 @@ async function startSampling(page: Page, anchor: string) {
   }, anchor);
 }
 
-/**
- * How far the answer may move when the settled card is replaced by its final
- * message. The card folds to one summary row; the final message still folds the
- * same steps to two rows (reasoning, execution details) until it shows the
- * same summary row, and then the swap keeps the page's height and this is 3.
- */
-const SWAP_SLACK_PX = 64;
-
 /** run_finished alone: the card folds, and the final has not come yet. */
 async function endRun(page: Page, runId: string) {
   await page.evaluate((id) => window.__chatScroll.runFinished(id), runId);
@@ -281,14 +273,14 @@ test('a pinned reader sees the reply swap to its final with no blank frame or ro
   }
   await expect(page.getByRole('button', { name: /^回到底部/ })).toHaveCount(0);
 
-  // The final reply keeps the thinking and execution details it streamed.
+  // The final reply keeps the process it streamed, as the settled card.
   const reply = page
     .locator('[data-index]')
     .filter({ hasText: 'Paragraph 59:' });
-  await expect(reply.getByRole('button', { name: /已思考 \d/ })).toBeVisible();
   await expect(
-    reply.getByRole('button', { name: /执行详情.*已使用 1 个工具/ }),
-  ).toBeVisible();
+    reply.locator('[data-hc-process-card][data-mode="settled"]'),
+  ).toContainText(/1 个工具.*1 段思考/);
+  await expect(reply.getByRole('button', { name: /执行详情/ })).toHaveCount(0);
 });
 
 test('a reader scrolled into the reply keeps their place through the finish', async ({
@@ -325,7 +317,7 @@ test('a reader scrolled into the reply keeps their place through the finish', as
   const offsets = frames.map((f) => f.anchorY);
   expect(offsets.every((y) => y !== null)).toBe(true);
   const ys = offsets as number[];
-  expect(Math.max(...ys) - Math.min(...ys)).toBeLessThan(SWAP_SLACK_PX);
+  expect(Math.max(...ys) - Math.min(...ys)).toBeLessThan(3);
   // A reply the reader watched stream is not counted as a new message.
   await expect(page.getByRole('button', { name: '回到底部' })).toBeVisible();
 });
@@ -454,7 +446,9 @@ test("the next queued run streams next to the previous reply until that reply's 
   const reply = page
     .locator('[data-message-id="final-run-a"]')
     .filter({ hasText: 'Paragraph 59:' });
-  await expect(reply.getByRole('button', { name: /已思考 \d/ })).toBeVisible();
+  await expect(
+    reply.locator('[data-hc-process-card][data-mode="settled"]'),
+  ).toContainText(/1 个工具.*1 段思考/);
 });
 
 test('a reconnect snapshot never cuts the reply this tab already shows', async ({
@@ -609,27 +603,41 @@ test('a timeline of steps folds into the finished message and the answer does no
   expect(frames.at(-1)?.final).toBe(true);
   expect(frames.filter((f) => !f.whole)).toEqual([]);
   expect(Math.max(...frames.map((f) => f.gap))).toBeLessThan(30);
-  // The steps fold away above the answer, which stays where the reader has
-  // it: the page may shrink by the rows' height, the answer does not move.
+  // The live card folds to its summary row when the run ends and the final
+  // message shows the same row: the answer does not move.
   const ys = frames.map((f) => f.anchorY);
   expect(ys.every((y) => y !== null)).toBe(true);
   expect(
     Math.max(...(ys as number[])) - Math.min(...(ys as number[])),
-  ).toBeLessThan(SWAP_SLACK_PX);
+  ).toBeLessThan(3);
   await expect(page.getByRole('button', { name: /^回到底部/ })).toHaveCount(0);
 
-  // The final message folds the steps into the two rows every reply has:
-  // reasoning (both blocks, 3.2s + 1.8s) and execution details (both tools).
+  // The final message folds the steps into the one summary row the settled
+  // card had: reasoning (both blocks) and tools, in order behind it.
   const reply = page
     .locator('[data-index]')
     .filter({ hasText: 'Paragraph 59:' });
-  await expect(
-    reply.getByRole('button', { name: /已思考 5 秒/ }),
-  ).toBeVisible();
-  await expect(
-    reply.getByRole('button', { name: /执行详情.*已使用 2 个工具/ }),
-  ).toBeVisible();
+  const card = reply.locator('[data-hc-process-card]');
+  await expect(card).toHaveAttribute('data-mode', 'settled');
+  await expect(card).toContainText(/已处理.*2 个工具.*2 段思考/);
+  await expect(reply.getByRole('button', { name: /执行详情/ })).toHaveCount(0);
   await expect(page.getByRole('list', { name: '处理步骤' })).toHaveCount(0);
+
+  // Opened, it lists the same steps in the same order as it did while streaming.
+  await card.getByRole('button', { name: /已处理/ }).click();
+  const settled = reply.getByRole('list', { name: '处理步骤' });
+  await expect(settled.getByRole('listitem')).toHaveCount(4);
+  await expect(
+    settled.getByRole('button', { name: /确认需求.*3\.2s/ }),
+  ).toBeVisible();
+  await expect(
+    settled.getByRole('button', { name: /整理结论.*1\.8s/ }),
+  ).toBeVisible();
+  const rows = await settled.getByRole('listitem').allInnerTexts();
+  expect(rows[0]).toContain('确认需求');
+  expect(rows[1]).toContain('README.md');
+  expect(rows[2]).toContain('npm test');
+  expect(rows[3]).toContain('整理结论');
 });
 
 test('a pinned reader stays pinned while the wait row gives way to reasoning and a tool', async ({

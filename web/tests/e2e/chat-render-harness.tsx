@@ -8,6 +8,7 @@
 //            | markdown | markdown-streaming (&cut=fence|list|table)
 //   &display=compact   &theme=dark   &scheme=default|neutral
 //   &layout=classic|timeline (the streaming layout; timeline by default)
+//   &steps=1 (history: the reply m4 also has the ordered steps it streamed)
 // window.renderHarness drives the `live` scenario through the real reducer.
 import { createRoot } from 'react-dom/client';
 import { MemoryRouter } from 'react-router-dom';
@@ -1032,6 +1033,12 @@ useChatStore.setState({
   },
   // A reply whose model gave no reasoning text still says how long it thought.
   thinkingDurationCache: { m4: 12_400, m8: 3_400 },
+  // A reply that has its steps is summed up in the settled card; one without
+  // (m8, and m4 unless asked) keeps the reasoning and trace rows.
+  stepsCache:
+    params.get('steps') === '1'
+      ? { m4: { steps: settledStreaming.steps ?? [], dropped: 0 } }
+      : {},
   traceCache: {
     m4: [
       {

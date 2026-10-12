@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { GroupInfo, Message } from '../web/src/stores/chat';
+import type { StreamingStep } from '../web/src/lib/stream-steps';
 import { countTraceTools } from '../web/src/components/chat/ExecutionTrace';
 
 const { apiGetMock } = vi.hoisted(() => ({ apiGetMock: vi.fn() }));
@@ -78,6 +79,20 @@ const row = (
   ...over,
 });
 
+const step = (
+  over: Partial<StreamingStep> & Pick<StreamingStep, 'id' | 'kind'>,
+): StreamingStep => ({
+  at: 1_000_000,
+  endedAt: 1_002_000,
+  status: 'done',
+  ...over,
+});
+
+const thinking = (id: string, over: Partial<StreamingStep> = {}) =>
+  step({ id, kind: 'thinking', text: '想一想。', title: '确认范围', ...over });
+const toolStep = (id: string, toolName: string, over = {}) =>
+  step({ id, kind: 'tool', toolName, toolUseId: id, ...over });
+
 beforeEach(() => {
   vi.clearAllMocks();
   useChatStore.setState(
@@ -88,6 +103,7 @@ beforeEach(() => {
       thinkingCache: {},
       thinkingDurationCache: {},
       traceCache: {},
+      stepsCache: {},
       turnTraceStatus: {},
     },
     true,
@@ -283,6 +299,190 @@ describe('loading the reasoning and trace the server kept', () => {
       .getState()
       .loadTurnTrace(message('m4', { source_kind: 'sdk_send_message' }));
     expect(useChatStore.getState().traceCache.m4).toHaveLength(1);
+  });
+});
+
+describe('the ordered steps the server kept', () => {
+  const SAY = 'mcp__happyclaw__send_message';
+  const proactive = (level: 'activity' | 'full' = 'full') =>
+    useChatStore.setState({
+      groups: {
+        [JID]: {
+          name: 'w',
+          folder: 'trace',
+          added_at: '2026-01-01T00:00:00.000Z',
+          interaction_mode: 'proactive',
+          process_visibility: level,
+        } as GroupInfo,
+      },
+    });
+
+  it('fills the cache the settled card renders from, with what was dropped', async () => {
+    const steps = [thinking('t0'), toolStep('a', 'Read'), thinking('t1')];
+    apiGetMock.mockResolvedValueOnce({
+      turn_id: 'turn-1',
+      thinking: '想一想。',
+      thinking_duration_ms: 4000,
+      trace: [row('a', '工具 Read', { toolUseId: 'a' })],
+      steps,
+      steps_dropped: 7,
+    });
+    expect(await useChatStore.getState().loadTurnTrace(message())).toBe(true);
+    const state = useChatStore.getState();
+    expect(state.stepsCache.m1).toEqual({ steps, dropped: 7 });
+    expect(state.turnTraceStatus.m1).toBeUndefined();
+    // The older caches are filled as ever: the classic layout reads them.
+    expect(state.thinkingCache.m1).toBe('想一想。');
+    expect(state.traceCache.m1).toHaveLength(1);
+  });
+
+  it('counts steps as content: a turn with nothing else is not empty', async () => {
+    apiGetMock.mockResolvedValueOnce({
+      turn_id: 'turn-1',
+      thinking: '',
+      thinking_duration_ms: null,
+      trace: [],
+      // The activity level: reasoning without its text.
+      steps: [thinking('t0', { text: undefined, title: undefined })],
+      steps_dropped: 0,
+    });
+    await useChatStore.getState().loadTurnTrace(message());
+    const state = useChatStore.getState();
+    expect(state.turnTraceStatus.m1).toBeUndefined();
+    expect(state.stepsCache.m1?.steps).toHaveLength(1);
+  });
+
+  it('keeps no steps for a turn recorded before steps were kept', async () => {
+    apiGetMock.mockResolvedValueOnce({
+      turn_id: 'turn-1',
+      thinking: '老回合的思考。',
+      trace: [row('a', '工具 Read')],
+      steps: [],
+      steps_dropped: 0,
+    });
+    await useChatStore.getState().loadTurnTrace(message());
+    const state = useChatStore.getState();
+    expect(state.stepsCache.m1).toBeUndefined();
+    expect(state.thinkingCache.m1).toBe('老回合的思考。');
+    expect(state.traceCache.m1).toHaveLength(1);
+  });
+
+  it('keeps no steps from a server that sends none', async () => {
+    apiGetMock.mockResolvedValueOnce({ turn_id: 'turn-1', thinking: '想。' });
+    await useChatStore.getState().loadTurnTrace(message());
+    expect(useChatStore.getState().stepsCache.m1).toBeUndefined();
+  });
+
+  it('does not count the answer, which the timeline never lists, as content', async () => {
+    apiGetMock.mockResolvedValueOnce({
+      turn_id: 'turn-1',
+      thinking: '',
+      trace: [],
+      steps: [step({ id: 'x0', kind: 'text', text: '最终答案。' })],
+      steps_dropped: 0,
+    });
+    await useChatStore.getState().loadTurnTrace(message());
+    const state = useChatStore.getState();
+    expect(state.turnTraceStatus.m1).toBe('empty');
+    expect(state.stepsCache.m1).toBeUndefined();
+  });
+
+  it('treats a bad dropped count as none', async () => {
+    apiGetMock.mockResolvedValueOnce({
+      turn_id: 'turn-1',
+      steps: [toolStep('a', 'Read')],
+      steps_dropped: null,
+    });
+    await useChatStore.getState().loadTurnTrace(message());
+    expect(useChatStore.getState().stepsCache.m1?.dropped).toBe(0);
+  });
+
+  it('does not ask for what the steps cache already holds', async () => {
+    useChatStore.setState({
+      stepsCache: { m1: { steps: [toolStep('a', 'Read')], dropped: 0 } },
+    });
+    expect(await useChatStore.getState().loadTurnTrace(message())).toBe(true);
+    expect(apiGetMock).not.toHaveBeenCalled();
+  });
+
+  it('is kept to the newest entries when the cache is full', async () => {
+    const full = Object.fromEntries(
+      Array.from({ length: 500 }, (_, i) => [
+        `old-${i}`,
+        { steps: [toolStep('a', 'Read')], dropped: 0 },
+      ]),
+    );
+    useChatStore.setState({ stepsCache: full });
+    apiGetMock.mockResolvedValueOnce({
+      turn_id: 'turn-1',
+      steps: [toolStep('b', 'Grep')],
+    });
+    await useChatStore.getState().loadTurnTrace(message('new'));
+    const keys = Object.keys(useChatStore.getState().stepsCache);
+    expect(keys).toHaveLength(500);
+    expect(keys).not.toContain('old-0');
+    expect(keys.at(-1)).toBe('new');
+  });
+
+  describe('the speech tool of a proactive turn', () => {
+    const turn = () => ({
+      turn_id: 'turn-1',
+      thinking: '',
+      trace: [],
+      steps: [
+        toolStep('t1', 'Grep'),
+        toolStep('say-1', SAY),
+        toolStep('t2', 'Read'),
+      ],
+      steps_dropped: 0,
+    });
+
+    it('is left out of the steps a proactive workspace loads', async () => {
+      proactive();
+      apiGetMock.mockResolvedValueOnce(turn());
+      await useChatStore.getState().loadTurnTrace(message('m5'));
+      expect(
+        useChatStore.getState().stepsCache.m5.steps.map((s) => s.toolName),
+      ).toEqual(['Grep', 'Read']);
+    });
+
+    it('leaves a turn that only spoke with nothing to open', async () => {
+      proactive();
+      apiGetMock.mockResolvedValueOnce({
+        ...turn(),
+        steps: [toolStep('say-1', SAY)],
+      });
+      await useChatStore.getState().loadTurnTrace(message('m6'));
+      expect(useChatStore.getState().turnTraceStatus.m6).toBe('empty');
+      expect(useChatStore.getState().stepsCache.m6).toBeUndefined();
+    });
+
+    it('is one tool like any other in an Assistant workspace', async () => {
+      apiGetMock.mockResolvedValueOnce(turn());
+      await useChatStore.getState().loadTurnTrace(message('m7'));
+      expect(useChatStore.getState().stepsCache.m7.steps).toHaveLength(3);
+    });
+  });
+
+  describe('follow the messages the store holds', () => {
+    const cached = { steps: [toolStep('a', 'Read')], dropped: 0 };
+    const seed = () =>
+      useChatStore.setState({
+        messages: { [JID]: [message('gone')], 'web:other': [message('kept')] },
+        stepsCache: { gone: cached, kept: cached, orphan: cached },
+      });
+
+    it('lets go of a cleared history, and of what has no message', async () => {
+      seed();
+      await useChatStore.getState().clearHistory(JID);
+      expect(Object.keys(useChatStore.getState().stepsCache)).toEqual(['kept']);
+    });
+
+    it('lets go of a deleted workspace, and of what has no message', async () => {
+      seed();
+      await useChatStore.getState().deleteFlow(JID);
+      expect(Object.keys(useChatStore.getState().stepsCache)).toEqual(['kept']);
+    });
   });
 });
 

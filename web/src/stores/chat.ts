@@ -57,6 +57,7 @@ import {
 } from './run-lifecycle';
 import { extractErrorMessage } from '../utils/error';
 import { markdownTail } from '../lib/markdown-blocks';
+import { hasListedSteps } from '../lib/process-steps';
 import {
   MAX_THINKING_TEXT,
   capThinkingText,
@@ -261,6 +262,9 @@ interface TurnTraceResponse {
   thinking?: string | null;
   thinking_duration_ms?: number | null;
   trace?: StreamingTraceEvent[] | null;
+  /** The ordered steps; `[]` for a turn recorded before steps were kept. */
+  steps?: StreamingStep[] | null;
+  steps_dropped?: number | null;
   created_at?: string;
 }
 
@@ -934,6 +938,13 @@ function mergePendingMessageUsage(
   };
 }
 
+/** The steps of one finished reply, as its settled process card takes them. */
+export interface ReplySteps {
+  steps: StreamingStep[];
+  /** Steps dropped from the front once the cap was reached. */
+  dropped: number;
+}
+
 interface ChatState {
   groups: Record<string, GroupInfo>;
   adminHostOnlyMode: boolean;
@@ -957,6 +968,12 @@ interface ChatState {
    * final message id, so the reply keeps its collapsed "执行详情".
    */
   traceCache: Record<string, StreamingTraceEvent[]>;
+  /**
+   * The ordered steps a finished reply streamed, by final message id: what its
+   * settled process card lists. A reply without an entry (an older turn, or the
+   * classic layout's) keeps the reasoning and trace rows.
+   */
+  stepsCache: Record<string, ReplySteps>;
   /**
    * A message whose reasoning and trace the server kept but this tab has not
    * loaded: `loading` while asked, `failed` to try again on the next ask,
@@ -1345,9 +1362,10 @@ const SETTLE_FALLBACK_MS = 1500;
 const MAX_CACHED_TRACE_EVENTS = 60;
 
 /**
- * Thinking and execution details of a finished reply, keyed by its final
- * message id. Only taken from a projection that belongs to the finished
- * reply: a settled or interrupted card, or a live one with no newer run.
+ * Thinking, execution details and ordered steps of a finished reply, keyed by
+ * its final message id. Only taken from a projection that belongs to the
+ * finished reply: a settled or interrupted card, or a live one with no newer
+ * run.
  */
 function finalizedReplyCaches(
   s: ChatState,
@@ -1359,7 +1377,17 @@ function finalizedReplyCaches(
   const thinkingText = state?.thinkingText || fallbackThinking;
   const duration = state ? totalThinkingMs(state) : fallbackDuration;
   const trace = (state?.traceEvents ?? []).filter(isUserVisibleTraceEvent);
+  // A projection that was never settled may still hold a running step.
+  const steps = state ? finishSteps(stepsOf(state), Date.now(), false) : null;
   return {
+    ...(steps && hasListedSteps(steps.steps)
+      ? {
+          stepsCache: capThinkingCache({
+            ...s.stepsCache,
+            [messageId]: { steps: steps.steps, dropped: steps.dropped },
+          }),
+        }
+      : {}),
     ...(thinkingText
       ? {
           thinkingCache: capThinkingCache({
@@ -2738,6 +2766,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   thinkingCache: {},
   thinkingDurationCache: {},
   traceCache: {},
+  stepsCache: {},
   turnTraceStatus: {},
   stopRequests: {},
   settledStreaming: {},
@@ -3390,6 +3419,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             { ...nextAgentMessages, ...nextMessages },
             s.traceCache,
           ),
+          stepsCache: retainThinkingCacheForMessages(
+            { ...nextAgentMessages, ...nextMessages },
+            s.stepsCache,
+          ),
           turnTraceStatus: retainThinkingCacheForMessages(
             { ...nextAgentMessages, ...nextMessages },
             s.turnTraceStatus,
@@ -3803,6 +3836,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             { ...s.agentMessages, ...nextMessages },
             s.traceCache,
           ),
+          stepsCache: retainThinkingCacheForMessages(
+            { ...s.agentMessages, ...nextMessages },
+            s.stepsCache,
+          ),
           turnTraceStatus: retainThinkingCacheForMessages(
             { ...s.agentMessages, ...nextMessages },
             s.turnTraceStatus,
@@ -3854,7 +3891,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (
       current.thinkingCache[id] !== undefined ||
       current.thinkingDurationCache[id] !== undefined ||
-      current.traceCache[id] !== undefined
+      current.traceCache[id] !== undefined ||
+      current.stepsCache[id] !== undefined
     ) {
       return true;
     }
@@ -3875,6 +3913,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const trace = (
         isProactiveRuntime(get(), jid) ? withoutSpeechTool(rows) : rows
       ).slice(-MAX_CACHED_TRACE_EVENTS);
+      // A proactive turn's speech tool is no step either (the server leaves it
+      // out already; a row a stale server sends is dropped here).
+      const sent = Array.isArray(data.steps) ? data.steps : [];
+      const steps = isProactiveRuntime(get(), jid)
+        ? sent.filter((step) => step.toolName !== SPEECH_TOOL_NAME)
+        : sent;
+      const keepsSteps = hasListedSteps(steps);
       const keepsDuration =
         duration !== undefined &&
         Number.isFinite(duration) &&
@@ -3882,7 +3927,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         (!!thinking || duration >= 1000);
       set((s) => {
         const status = { ...s.turnTraceStatus };
-        if (!thinking && !keepsDuration && trace.length === 0) {
+        if (!thinking && !keepsDuration && trace.length === 0 && !keepsSteps) {
           status[id] = 'empty';
         } else {
           delete status[id];
@@ -3910,6 +3955,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 traceCache: capThinkingCache({
                   ...s.traceCache,
                   [id]: trace,
+                }),
+              }
+            : {}),
+          ...(keepsSteps
+            ? {
+                stepsCache: capThinkingCache({
+                  ...s.stepsCache,
+                  [id]: {
+                    steps,
+                    dropped:
+                      typeof data.steps_dropped === 'number' &&
+                      data.steps_dropped > 0
+                        ? data.steps_dropped
+                        : 0,
+                  },
                 }),
               }
             : {}),
