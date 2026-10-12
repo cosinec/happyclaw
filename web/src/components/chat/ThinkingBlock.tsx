@@ -76,6 +76,11 @@ interface ThinkingBlockProps {
   durationMs?: number;
   /** The model is reasoning right now. */
   running?: boolean;
+  /**
+   * The reasoning text exists but this view does not show it (a proactive
+   * workspace below `full`): an empty block then says nothing about the model.
+   */
+  withheld?: boolean;
   /** The text is still arriving. */
   live?: boolean;
   groupJid?: string;
@@ -97,6 +102,7 @@ export function ThinkingBlock({
   title,
   durationMs,
   running = false,
+  withheld = false,
   live = false,
   groupJid,
   expanded,
@@ -109,6 +115,14 @@ export function ThinkingBlock({
   const open = expanded ?? kept;
   const canOpen = text.trim().length > 0;
   const label = running ? '思考中…' : thinkingLabel(durationMs);
+  // The model reasoned, for a while, and returned no summary of it. Say so
+  // instead of leaving a row that looks as if it could be opened.
+  const noSummary =
+    !running &&
+    !canOpen &&
+    !withheld &&
+    durationMs != null &&
+    durationMs >= 1000;
 
   const toggle = () => {
     const next = !open;
@@ -127,6 +141,20 @@ export function ThinkingBlock({
           </span>
           <span className="min-w-0 truncate text-faint-foreground">
             {title}
+          </span>
+        </>
+      )}
+      {noSummary && (
+        <>
+          <span aria-hidden="true" className="shrink-0 text-faint-foreground">
+            ·
+          </span>
+          <span
+            className="min-w-0 truncate text-faint-foreground"
+            title="这个模型只返回加密的推理，不提供可读的思考摘要（ChatGPT 订阅的 GPT-6 系列多数如此）。"
+            data-hc-no-summary=""
+          >
+            模型未返回思考内容
           </span>
         </>
       )}

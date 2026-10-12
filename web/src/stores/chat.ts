@@ -64,6 +64,7 @@ import {
   thinkingSeparator,
 } from '../lib/thinking-text';
 import {
+  addCommentaryStep,
   appendThinkingText,
   closeOpenSteps,
   closeThinkingStep,
@@ -432,6 +433,35 @@ function messageSequenceBoundary(
   return boundary;
 }
 
+/**
+ * Traces announced for a message this tab has not received yet, by chat and
+ * message id. The server sends `message_trace` for a message it already
+ * announced, but a message with attachments reaches the Web after its
+ * thumbnails are made and can come second.
+ */
+const pendingTraceMarks = new Set<string>();
+const MAX_PENDING_TRACE_MARKS = 100;
+
+function traceMarkKey(chatJid: string, messageId: string): string {
+  return `${chatJid}\0${messageId}`;
+}
+
+function rememberPendingTraceMark(chatJid: string, messageId: string): void {
+  const key = traceMarkKey(chatJid, messageId);
+  pendingTraceMarks.delete(key);
+  pendingTraceMarks.add(key);
+  while (pendingTraceMarks.size > MAX_PENDING_TRACE_MARKS) {
+    const oldest = pendingTraceMarks.values().next().value;
+    if (oldest === undefined) break;
+    pendingTraceMarks.delete(oldest);
+  }
+}
+
+/** Whether a mark waited for this message; it is spent either way. */
+function takePendingTraceMark(chatJid: string, messageId: string): boolean {
+  return pendingTraceMarks.delete(traceMarkKey(chatJid, messageId));
+}
+
 const MAX_THINKING_CACHE_SIZE = 500;
 
 /**
@@ -612,9 +642,12 @@ function endThinkingBurst(
       ? reportedMs
       : undefined;
   if (prev.isThinking && prev.thinkingStartedAt != null) {
+    // The longer of the model's own timing and the clock from the request:
+    // reasoning that returns no text arrives whole, after the wait, and its own
+    // timing is then a few milliseconds. The host stores the same.
     next.thinkingDurationMs =
       (prev.thinkingDurationMs ?? 0) +
-      (reported ?? Math.max(0, at - prev.thinkingStartedAt));
+      Math.max(reported ?? 0, Math.max(0, at - prev.thinkingStartedAt));
     next.thinkingStartedAt = undefined;
   } else if (prev.isThinking && reported != null) {
     next.thinkingDurationMs = (prev.thinkingDurationMs ?? 0) + reported;
@@ -638,7 +671,11 @@ function beginThinkingBurst(
   markThinkingStarted(prev, next, runStartedAt);
   if (!prev.isThinking) {
     next.thinkingGap = prev.thinkingText.length > 0;
-    setSteps(next, openThinkingStep(stepsOf(prev), at));
+    // The step starts where the burst does: when the request went out.
+    setSteps(
+      next,
+      openThinkingStep(stepsOf(prev), next.thinkingStartedAt ?? at),
+    );
   }
   next.isThinking = true;
 }
@@ -742,9 +779,14 @@ function scrubForVisibility(
     thinkingText: '',
     thinkingTitle: undefined,
     thinkingGap: false,
-    steps: state.steps?.map((step) =>
-      step.kind === 'thinking' ? { ...step, text: '', title: undefined } : step,
-    ),
+    // Reasoning text and the narration before a tool call are `full` only.
+    steps: state.steps
+      ?.filter((step) => !step.commentary)
+      .map((step) =>
+        step.kind === 'thinking'
+          ? { ...step, text: '', title: undefined }
+          : step,
+      ),
   };
 }
 
@@ -988,6 +1030,12 @@ interface ChatState {
     messageChatJid: string,
     messageId: string,
   ) => Promise<void>;
+  /**
+   * The server stored the trace of a message's turn after announcing the
+   * message (a proactive utterance is announced mid-turn): mark it, so its
+   * reasoning and execution rows appear without a reload.
+   */
+  handleMessageTrace: (messageChatJid: string, messageId: string) => void;
   createFlow: (
     name: string,
     options?: CreateWorkspaceOptions,
@@ -2024,6 +2072,7 @@ function pushTrace(
 ): StreamingTraceEvent[] {
   if (
     event.eventType === 'text_delta' ||
+    event.eventType === 'commentary' ||
     event.eventType === 'thinking_delta' ||
     event.eventType === 'thinking_start' ||
     event.eventType === 'thinking_end' ||
@@ -2291,6 +2340,14 @@ function applyStreamEvent(
       next.awaitingModel = false;
       next.phaseStartedAt = undefined;
       if (isPhaseStatus(prev.systemStatus)) next.systemStatus = null;
+      break;
+    }
+    case 'commentary': {
+      // A proactive workspace's narration before a tool call, whole. It is a
+      // step of the process, never the reply: no partial text is involved.
+      if (isSubagentEvent(event) || !event.text) break;
+      endThinkingBurst(prev, next, at);
+      setSteps(next, addCommentaryStep(stepsOf(next), at, event.text));
       break;
     }
     case 'thinking_delta': {
@@ -3433,6 +3490,60 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
+  handleMessageTrace: (messageChatJid, messageId) => {
+    const agentMarker = '#agent:';
+    const agentSep = messageChatJid.indexOf(agentMarker);
+    const workspaceJid =
+      agentSep >= 0 ? messageChatJid.slice(0, agentSep) : null;
+    const agentId =
+      agentSep >= 0
+        ? messageChatJid.slice(agentSep + agentMarker.length)
+        : null;
+    const isIt = (message: Message) =>
+      message.id === messageId && message.chat_jid === messageChatJid;
+    const marks = (message: Message) => isIt(message) && !message.has_trace;
+    const mark = (list: Message[]) =>
+      list.map((message) =>
+        marks(message) ? { ...message, has_trace: true } : message,
+      );
+
+    let snapshot: { messages: Message[]; hasMore: boolean } | null = null;
+    let known = false;
+    set((s) => {
+      known =
+        Object.values(s.messages).some((list) => list.some(isIt)) ||
+        Object.values(s.agentMessages).some((list) => list.some(isIt));
+      let messages = s.messages;
+      for (const [key, list] of Object.entries(s.messages)) {
+        if (list.some(marks)) {
+          messages = { ...messages, [key]: mark(list) };
+        }
+      }
+      let agentMessages = s.agentMessages;
+      for (const [key, list] of Object.entries(s.agentMessages)) {
+        if (!list.some(marks)) continue;
+        const updated = mark(list);
+        agentMessages = { ...agentMessages, [key]: updated };
+        if (key === agentId) {
+          snapshot = { messages: updated, hasMore: !!s.agentHasMore[key] };
+        }
+      }
+      if (messages === s.messages && agentMessages === s.agentMessages) {
+        return s;
+      }
+      return { messages, agentMessages };
+    });
+    // A message with attachments is announced after its thumbnails are made, so
+    // this can arrive first: keep the mark for the message when it does.
+    if (!known) rememberPendingTraceMark(messageChatJid, messageId);
+    // The PWA repaints a session from its stored snapshot first: keep the
+    // flag there too, or a reload before the next fetch would drop the rows.
+    if (workspaceJid && agentId && snapshot) {
+      const { messages, hasMore } = snapshot;
+      void saveAgentMessageSnapshot(workspaceJid, agentId, messages, hasMore);
+    }
+  },
+
   deleteMessage: async (jid: string, messageId: string) => {
     try {
       await api.delete(
@@ -4434,7 +4545,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       workflow_runs:
         completedWorkflowRuns.length > 0 ? completedWorkflowRuns : undefined,
       turn_id: wsMsg.turn_id ?? null,
-      ...(wsMsg.has_trace ? { has_trace: true } : {}),
+      ...(wsMsg.has_trace ||
+      takePendingTraceMark(wsMsg.chat_jid || chatJid, wsMsg.id)
+        ? { has_trace: true }
+        : {}),
       session_id: wsMsg.session_id ?? null,
       sdk_message_uuid: wsMsg.sdk_message_uuid ?? null,
       source_kind: wsMsg.source_kind ?? null,

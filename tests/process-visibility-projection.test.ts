@@ -57,6 +57,8 @@ const PASSES: Array<[StreamEvent, [boolean, boolean, boolean]]> = [
     event('thinking_delta', { text: '子', parentToolUseId: 'k1' }),
     [false, false, true],
   ],
+  // What the model said before a tool call, composed by the host.
+  [event('commentary', { text: '先看一下记忆' }), [false, false, true]],
   // Never, at any level.
   [event('text_delta', { text: '答' }), [false, false, false]],
   [

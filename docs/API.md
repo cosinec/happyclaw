@@ -163,7 +163,15 @@ Workspace↔AgentProfile 绑定行上，因此：仅 `web:` 前缀工作区可�
 | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | `hidden`   | 仅运行生命周期 `status`（`requesting`、`idle`、`interrupted`），即转圈                                                                          |
 | `activity` | 再加工具、子 Agent 任务、todo、hook、权限拒绝、上下文压缩和其余阶段状态，以及不含文本的 `thinking_start`/`thinking_end`；不含任何模型产出的文字 |
-| `full`     | `activity` 加上主 Agent 与子 Agent 的 `thinking_delta`（推理摘要）                                                                              |
+| `full`     | `activity` 加上主 Agent 与子 Agent 的 `thinking_delta`（推理摘要），以及主 Agent 调用工具前写下的过程说明 `commentary`                          |
+
+`commentary` 由宿主合成，Runner 不会发这个事件：主 Agent 的文字先被扣住，只有紧接着
+调用了工具才作为一条完整的 `commentary`（先于该次调用，带该调用的 `queryRunId`）放行；
+没有工具跟在后面的文字（回合结尾、未发送的回复）、紧接着 `send_message` 调用的文字
+（即回复本身）、子 Agent 的文字都不会放行。宿主逐个调用判断、不向前看：同一条消息里
+夹在文字与 `send_message` 之间的其它工具调用，会让这段文字在那个调用处放行。只有从
+消息开头读起的文字才会被扣住，所以中途调高级别时，正在写的那句话的后半截不放行。
+它只广播给 Web，不进入 IM 渠道，也不写入 `turn_traces`；重连快照不含它。
 
 任何级别都不会发送 `text_delta`（含子 Agent 文本）、`usage`、`memory_recall`、
 `prompt_suggestion`、`raw_sdk_event`、`notification` 和未知事件类型；`tool_result`
@@ -177,7 +185,11 @@ Workspace↔AgentProfile 绑定行上，因此：仅 `web:` 前缀工作区可�
 `activity` 级不保存思考文本；思考文本最多 64KB，保留尾部并以 `…` 开头标记被截断，
 轨迹最多 200 条）。`GET /api/groups/:jid/messages` 返回的消息带 `has_trace: true`
 表示它是所属回合最后一条 agent 消息且该回合有轨迹，WebSocket `new_message` 在写入
-轨迹的同时也带这个标记。`GET /api/groups/:jid/turn-traces/:turnId` 返回：
+轨迹的同时也带这个标记。主动模式的回复在回合中途发出（`sdk_send_message`），那时轨迹
+还没有写入，所以回合结算写入轨迹之后，宿主再广播一条
+`{ "type": "message_trace", "chatJid", "messageChatJid", "messageId", "turnId", "agentId"? }`，
+告诉客户端哪条消息现在带轨迹（即回合最后一条 agent 消息），客户端据此补上
+`has_trace`，无需刷新。`GET /api/groups/:jid/turn-traces/:turnId` 返回：
 
 ```json
 {

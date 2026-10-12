@@ -66,7 +66,13 @@ user_location? }`). `blocked_domains` and `max_uses` have no official field
   `output_config.format` as `text.format`); `service_tier: "priority"` is sent
   only when the request asks for fast/priority and the model lists that tier.
   `reasoning.summary: "auto"` is sent unless thinking is explicitly disabled
-  (product choice; official clients default to no summary).
+  (product choice; official clients default to no summary). The current
+  catalog gives every model `default_reasoning_summary: "none"`, and the
+  backend rarely returns a readable summary even when one is requested: about
+  1% of the reasoning items of `gpt-6.1-sol` in the official client's own
+  sessions, `detailed` included. A reasoning block that arrives with only its
+  cipher is therefore normal, not a lost summary; each proxied request logs
+  `reasoningBlocks` and `reasoningSummaryChars` to tell the two apart.
 - **Tool schemas**: `parse_tool_input_schema` semantics — missing root
   `properties` inserted, boolean schemas become strings, `const` becomes a
   one-value `enum`, missing types inferred, object/array children defaulted,

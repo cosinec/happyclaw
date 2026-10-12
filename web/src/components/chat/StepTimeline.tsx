@@ -56,7 +56,7 @@ function CommentaryRow({
           aria-hidden="true"
         />
         <span className={cn('min-w-0 flex-1', !open && 'truncate')}>
-          {open ? '' : stripInlineMarkdown(text)}
+          {open ? '过程说明' : stripInlineMarkdown(text)}
         </span>
       </button>
       {open && (
@@ -139,6 +139,7 @@ function StepRow({
           title={thinkingText ? step.title : undefined}
           durationMs={running ? undefined : stepDurationMs(step)}
           running={running}
+          withheld={!thinkingText}
           live={running && live}
           groupJid={groupJid}
           expanded={open}

@@ -27,8 +27,9 @@ export const PROCESS_VISIBILITY_OPTIONS: ReadonlyArray<{
   },
   {
     value: 'full',
-    label: '活动 + 思考摘要',
-    description: '在活动之外显示模型的思考摘要；仍不会显示未发送的回复文字。',
+    label: '活动 + 思考 + 过程说明',
+    description:
+      '在活动之外显示模型的思考摘要，以及它调用工具前写下的过程说明；不会显示回复文字，回复只通过发送消息送达。',
   },
 ];
 
@@ -163,8 +164,9 @@ export function scrubTaskStates(
  * The part of a proactive turn's stream the Web may show. The host already
  * sends only this; the Web checks again, so a host that sends more (an older
  * or newer one, a bug) cannot put model text or reasoning on screen. Never
- * returns `text_delta`; reasoning text only at `full`; tool results arrive
- * without their text. `null` means the event is dropped.
+ * returns `text_delta`; reasoning text and the narration before a tool call
+ * (`commentary`) only at `full`; tool results arrive without their text.
+ * `null` means the event is dropped.
  */
 export function filterProactiveStreamEvent(
   visibility: ProcessVisibility,
@@ -178,7 +180,9 @@ export function filterProactiveStreamEvent(
       ? event
       : null;
   }
-  if (type === 'thinking_delta') return visibility === 'full' ? event : null;
+  if (type === 'thinking_delta' || type === 'commentary') {
+    return visibility === 'full' ? event : null;
+  }
   if (!ACTIVITY_EVENTS.has(type)) return null;
   return scrubEvent(event);
 }

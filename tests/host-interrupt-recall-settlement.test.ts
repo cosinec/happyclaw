@@ -32,6 +32,7 @@ import {
   publishesFrameworkAnswer,
   shouldBroadcastTaskAgentStatus,
 } from '../src/workspace-interaction-runtime.js';
+import { ProactiveCommentaryRelay } from '../src/process-commentary.js';
 import { TurnTraceTracker } from '../src/turn-trace.js';
 import { createRuntimeSourceHarness } from './helpers/runtime-source.js';
 
@@ -159,6 +160,8 @@ function agentRun(name: string) {
       discard: vi.fn(),
     },
     persistProactiveTurnTrace: vi.fn(),
+    commentaryRelay: new ProactiveCommentaryRelay(),
+    broadcastMessageTrace: vi.fn(),
     getChannelType,
     isStreamingSessionSettled,
     getMessageChannelTurnContext: () => ({
@@ -962,6 +965,8 @@ function mainRun(name: string, options: { steered?: boolean } = {}) {
       discard: vi.fn(),
     },
     persistProactiveTurnTrace: vi.fn(),
+    commentaryRelay: new ProactiveCommentaryRelay(),
+    broadcastMessageTrace: vi.fn(),
     broadcastStreamEvent: vi.fn(),
     isStreamingSessionSettled,
     feedStreamEventToCard: vi.fn(),
@@ -1190,6 +1195,7 @@ describe('process visibility in the real output handlers (behavioural)', () => {
       projectSdkStreamEventForWeb,
       shouldBroadcastTaskAgentStatus,
       resolveProcessVisibility: () => (mode === 'proactive' ? level : 'full'),
+      commentaryRelay: new ProactiveCommentaryRelay(),
       turnTraces: new TurnTraceTracker({
         mode,
         getVisibility: () => level,
@@ -1245,6 +1251,43 @@ describe('process visibility in the real output handlers (behavioural)', () => {
     expect(types).not.toContain('text_delta');
     expect(types).not.toContain('memory_recall');
     expect(run.globals.feedStreamEventToCard).not.toHaveBeenCalled();
+  });
+
+  test('full adds the narration a tool call followed, ahead of that call, and no other model text', async () => {
+    const { run, broadcasts } = mainWith('vis-note', 'proactive', 'full');
+    await streamThrough(run.output, run.inputId, PROCESS);
+    const sent = broadcasts();
+    const types = sent.map((e) => e.eventType);
+    expect(sent.find((e) => e.eventType === 'commentary')).toMatchObject({
+      eventType: 'commentary',
+      text: '这是模型的话',
+      agentScope: 'main',
+    });
+    // Written ahead of the call it introduces.
+    expect(types.indexOf('commentary')).toBe(
+      types.indexOf('tool_use_start') - 1,
+    );
+    // The model's text itself never goes out, nor to a provider card.
+    expect(types).not.toContain('text_delta');
+    expect(run.globals.feedStreamEventToCard).not.toHaveBeenCalled();
+  });
+
+  test('the text that ends a turn is never narration, at any level', async () => {
+    for (const level of ['hidden', 'activity', 'full'] as const) {
+      const { run, broadcasts } = mainWith(
+        `vis-end-${level}`,
+        'proactive',
+        level,
+      );
+      await streamThrough(run.output, run.inputId, [
+        { eventType: 'status', statusText: 'requesting' },
+        { eventType: 'text_delta', text: '我决定不回复。' },
+        { eventType: 'status', statusText: 'idle' },
+      ]);
+      const types = broadcasts().map((e) => e.eventType);
+      expect(types, level).not.toContain('commentary');
+      expect(types, level).not.toContain('text_delta');
+    }
   });
 
   test('an Assistant workspace is unchanged: all of it goes to the Web and the card', async () => {
@@ -1353,6 +1396,21 @@ describe('process visibility in the real output handlers (behavioural)', () => {
           'context_audit',
         ],
       ],
+      [
+        'proactive',
+        'full',
+        [
+          'status',
+          'thinking_start',
+          'thinking_delta',
+          'thinking_end',
+          'commentary',
+          'tool_use_start',
+          'tool_result',
+          'tool_use_end',
+          'context_audit',
+        ],
+      ],
       ['assistant', 'hidden', PROCESS.map((e) => e.eventType)],
     ] as const) {
       const run = agentRun(`vis-${mode}-${level}`);
@@ -1362,6 +1420,7 @@ describe('process visibility in the real output handlers (behavioural)', () => {
         agentStreamingSession: card,
         projectSdkStreamEventForWeb,
         resolveProcessVisibility: () => (mode === 'proactive' ? level : 'full'),
+        commentaryRelay: new ProactiveCommentaryRelay(),
         turnTraces: new TurnTraceTracker({
           mode,
           getVisibility: () => level,
@@ -1394,15 +1453,16 @@ describe('process visibility in the real output handlers (behavioural)', () => {
       resolveIpcOutputWorkspaceJid: (jid: string) =>
         jid === 'web:proactive-trace-home' ? null : 'web:proactive-trace-home',
       getLastAgentMessageIdForTurn: db.getLastAgentMessageIdForTurn,
+      broadcastMessageTrace: vi.fn(),
+      logger: { warn: vi.fn() },
       turnTraces: new TurnTraceTracker({
         mode: 'proactive',
         getVisibility: () => 'activity',
       }),
     };
-    createRuntimeSourceHarness(globals).install(
-      'persistProactiveTurnTrace',
-      'processGroupMessages',
-    );
+    const harness = createRuntimeSourceHarness(globals);
+    harness.install('announceTurnTrace');
+    harness.install('persistProactiveTurnTrace', 'processGroupMessages');
     const persist = globals.persistProactiveTurnTrace as (id: string) => void;
     const collect = (turnId: string) =>
       globals.turnTraces.observe(turnId, {
@@ -1427,6 +1487,14 @@ describe('process visibility in the real output handlers (behavioural)', () => {
     expect(
       db.getTurnTrace('web:proactive-trace-home', 'turn-spoke'),
     ).toBeDefined();
+    // The utterance went out mid-turn without `has_trace`: the clients are
+    // told which message carries the trace now that it exists.
+    expect(globals.broadcastMessageTrace).toHaveBeenCalledTimes(1);
+    expect(globals.broadcastMessageTrace).toHaveBeenCalledWith(
+      'web:proactive-trace-home',
+      'utterance-1',
+      'turn-spoke',
+    );
 
     // a silent turn left no message to hang a trace on
     collect('turn-silent');
@@ -1434,9 +1502,98 @@ describe('process visibility in the real output handlers (behavioural)', () => {
     expect(
       db.getTurnTrace('web:proactive-trace-home', 'turn-silent'),
     ).toBeUndefined();
+    expect(globals.broadcastMessageTrace).toHaveBeenCalledTimes(1);
     globals.turnTraces.observe('turn-silent', {
       eventType: 'status',
       statusText: 'requesting',
     });
+  });
+
+  test("a Runtime Session's trace is announced for the session's own message", () => {
+    const session = 'web:proactive-trace-home#agent:s1';
+    const globals: Record<string, any> = {
+      virtualChatJid: session,
+      getLastAgentMessageIdForTurn: db.getLastAgentMessageIdForTurn,
+      broadcastMessageTrace: vi.fn(),
+      logger: { warn: vi.fn() },
+      turnTraces: new TurnTraceTracker({
+        mode: 'proactive',
+        getVisibility: () => 'full',
+      }),
+    };
+    const harness = createRuntimeSourceHarness(globals);
+    harness.install('announceTurnTrace');
+    harness.install('persistProactiveTurnTrace', 'processAgentConversation');
+    const persist = globals.persistProactiveTurnTrace as (id: string) => void;
+    db.ensureChatExists(session);
+    db.storeMessageDirect(
+      'utterance-s1',
+      session,
+      'happyclaw-agent',
+      'Agent',
+      '会话里的一句话',
+      '2026-10-12T02:05:00.000Z',
+      true,
+      { meta: { turnId: 'turn-s1', sourceKind: 'sdk_send_message' } },
+    );
+    globals.turnTraces.observe('turn-s1', {
+      eventType: 'tool_use_start',
+      toolName: 'Bash',
+      toolUseId: 'tool-s1',
+    });
+    persist('turn-s1');
+    expect(globals.broadcastMessageTrace).toHaveBeenCalledWith(
+      session,
+      'utterance-s1',
+      'turn-s1',
+    );
+
+    // no message, no announcement
+    globals.turnTraces.observe('turn-s2', {
+      eventType: 'tool_use_start',
+      toolName: 'Bash',
+      toolUseId: 'tool-s2',
+    });
+    persist('turn-s2');
+    expect(globals.broadcastMessageTrace).toHaveBeenCalledTimes(1);
+  });
+
+  test('a failing announcement does not keep the turn from settling', () => {
+    const session = 'web:proactive-trace-home#agent:s3';
+    const globals: Record<string, any> = {
+      virtualChatJid: session,
+      getLastAgentMessageIdForTurn: db.getLastAgentMessageIdForTurn,
+      broadcastMessageTrace: vi.fn(() => {
+        throw new Error('socket gone');
+      }),
+      logger: { warn: vi.fn() },
+      turnTraces: new TurnTraceTracker({
+        mode: 'proactive',
+        getVisibility: () => 'full',
+      }),
+    };
+    const harness = createRuntimeSourceHarness(globals);
+    harness.install('announceTurnTrace');
+    harness.install('persistProactiveTurnTrace', 'processAgentConversation');
+    db.ensureChatExists(session);
+    db.storeMessageDirect(
+      'utterance-s3',
+      session,
+      'happyclaw-agent',
+      'Agent',
+      '一句话',
+      '2026-10-12T02:10:00.000Z',
+      true,
+      { meta: { turnId: 'turn-s3', sourceKind: 'sdk_send_message' } },
+    );
+    globals.turnTraces.observe('turn-s3', {
+      eventType: 'tool_use_start',
+      toolName: 'Bash',
+      toolUseId: 'tool-s3',
+    });
+    expect(() => globals.persistProactiveTurnTrace('turn-s3')).not.toThrow();
+    // The trace is stored all the same, and the failure is only logged.
+    expect(db.getTurnTrace(session, 'turn-s3')).toBeDefined();
+    expect(globals.logger.warn).toHaveBeenCalledTimes(1);
   });
 });

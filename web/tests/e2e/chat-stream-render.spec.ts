@@ -293,18 +293,23 @@ test.describe('a proactive workspace', () => {
     await expectNoModelText(page);
   });
 
-  test('activity: one line of the process, the steps when opened, never the model text', async ({
+  test('activity: the process line and its steps, open while it runs; never the model text', async ({
     page,
   }) => {
     await open(page, 'scenario=proactive&visibility=activity');
     const panel = page.locator('[data-hc-process-panel]');
     const toggle = panel.getByRole('button', { name: /处理过程/ });
-    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    // Asked to be watched: the steps are there without opening anything.
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
     await expect(toggle).toContainText('正在运行命令');
     await expect(toggle).toContainText('1 个子 Agent 运行中');
     await expect(toggle).toContainText(/\d+s/);
     await expectNoModelText(page);
 
+    // It folds to its one line, and opens again.
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(panel.getByRole('list', { name: '处理步骤' })).toHaveCount(0);
     await toggle.click();
     await expect(toggle).toHaveAttribute('aria-expanded', 'true');
     const steps = panel.getByRole('list', { name: '处理步骤' });
@@ -328,7 +333,6 @@ test.describe('a proactive workspace', () => {
   }) => {
     await open(page, 'scenario=proactive&visibility=full');
     const panel = page.locator('[data-hc-process-panel]');
-    await panel.getByRole('button', { name: /处理过程/ }).click();
     const steps = panel.getByRole('list', { name: '处理步骤' });
     const reasoning = steps.getByRole('button', { name: /已思考 6.4 秒/ });
     await expect(reasoning).toContainText('确认订阅范围');
@@ -572,7 +576,6 @@ test.describe('on a wide screen', () => {
     const panel = page.locator('[data-hc-process-panel]');
     const toggle = panel.getByRole('button', { name: /处理过程/ });
     await expect(toggle).toContainText('最近：运行 npm test');
-    await toggle.click();
     const steps = panel.getByRole('list', { name: '处理步骤' });
     await expect(steps.getByRole('listitem')).toHaveCount(1);
 
@@ -587,6 +590,78 @@ test.describe('on a wide screen', () => {
     await expect(toggle).toContainText('最近：运行 npm test');
     await expect(page.locator('[data-hc-streaming-block]')).not.toContainText(
       /send_message|已发送的回复/,
+    );
+  });
+
+  test('full: the narration before a tool call is a step, and silent reasoning says it was silent', async ({
+    page,
+  }) => {
+    await open(page, 'scenario=live&mode=proactive&visibility=full');
+    await page.evaluate(() => {
+      const { start, emit } = window.renderHarness;
+      start();
+      emit({ eventType: 'status', statusText: 'requesting' });
+    });
+    // The model reasons silently, then the whole block arrives at once.
+    await page.waitForTimeout(1300);
+    await page.evaluate(() => {
+      const { emit } = window.renderHarness;
+      emit({ eventType: 'thinking_start' });
+      emit({ eventType: 'thinking_end', thinkingDurationMs: 2 });
+      emit({ eventType: 'commentary', text: '先查一下记忆再回答。' });
+      emit({
+        eventType: 'tool_use_start',
+        toolName: 'Read',
+        toolUseId: 'r1',
+        toolInputSummary: 'memory.md',
+      });
+    });
+    const panel = page.locator('[data-hc-process-panel]');
+    const steps = panel.getByRole('list', { name: '处理步骤' });
+    await expect(steps.getByText('先查一下记忆再回答。')).toBeVisible();
+    await expect(steps.getByText('memory.md')).toBeVisible();
+    await expect(steps.getByText(/已思考 1\.\d 秒/)).toBeVisible();
+    await expect(steps.getByText('模型未返回思考内容')).toBeVisible();
+    // Never the reply: nothing of it outside the process panel.
+    await expect(page.locator('[data-hc-streaming-block]')).not.toContainText(
+      /回复草稿/,
+    );
+    await expectNoSidewaysOverflow(page);
+  });
+
+  test('activity: the narration is not shown, and nothing claims the model was silent', async ({
+    page,
+  }) => {
+    await open(page, 'scenario=live&mode=proactive&visibility=activity');
+    await page.evaluate(() => {
+      const { start, emit } = window.renderHarness;
+      start();
+      emit({ eventType: 'status', statusText: 'requesting' });
+    });
+    await page.waitForTimeout(1300);
+    await page.evaluate(() => {
+      const { emit } = window.renderHarness;
+      emit({ eventType: 'thinking_start' });
+      emit({ eventType: 'thinking_end', thinkingDurationMs: 2 });
+      emit({ eventType: 'commentary', text: '先查一下记忆再回答。' });
+      emit({
+        eventType: 'tool_use_start',
+        toolName: 'Read',
+        toolUseId: 'r1',
+        toolInputSummary: 'memory.md',
+      });
+    });
+    const steps = page
+      .locator('[data-hc-process-panel]')
+      .getByRole('list', { name: '处理步骤' });
+    await expect(steps.getByText('memory.md')).toBeVisible();
+    await expect(steps.getByText(/已思考 1\.\d 秒/)).toBeVisible();
+    await expect(page.locator('[data-hc-streaming-block]')).not.toContainText(
+      '先查一下记忆再回答。',
+    );
+    // The reasoning text is withheld at this level, not missing.
+    await expect(page.locator('[data-hc-streaming-block]')).not.toContainText(
+      '模型未返回思考内容',
     );
   });
 

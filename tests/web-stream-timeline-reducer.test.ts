@@ -260,6 +260,25 @@ describe('reasoning text', () => {
     expect(live().thinkingDurationMs).toBe(4000);
   });
 
+  it('counts the wait before reasoning that returns no text and arrives whole', () => {
+    // A model that reasons silently (the ChatGPT subscription's): nothing for
+    // 13 s, then the reasoning block opens and closes within a frame, with a
+    // timing of a few milliseconds. The reply thought for 13 s, and says so.
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    vi.setSystemTime(new Date('2026-10-10T00:00:00.000Z'));
+    emit({ eventType: 'status', statusText: 'requesting' });
+    vi.setSystemTime(new Date('2026-10-10T00:00:13.000Z'));
+    emit({ eventType: 'thinking_start' });
+    emit({ eventType: 'thinking_end', thinkingDurationMs: 3 });
+    expect(live().thinkingDurationMs).toBe(13_000);
+    expect(live().steps?.[0]).toMatchObject({
+      kind: 'thinking',
+      status: 'done',
+      text: '',
+      durationMs: 13_000,
+    });
+  });
+
   it('keeps timing by the clock when the runner sends no thinking events', () => {
     vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
     vi.setSystemTime(new Date('2026-10-10T00:00:00.000Z'));
@@ -640,6 +659,65 @@ describe('a proactive workspace', () => {
         '',
       );
     }
+  });
+
+  it('takes the narration before a tool call as a step at the full level only', () => {
+    for (const level of ['hidden', 'activity', 'full'] as const) {
+      reset();
+      setWorkspace('proactive', level);
+      start();
+      emit({ eventType: 'thinking_start' });
+      emit({ eventType: 'thinking_end', thinkingDurationMs: 1500 });
+      emit({ eventType: 'commentary', text: '先查一下记忆。' });
+      tool('t1', 'Read', 'memory.md');
+      const steps = useChatStore.getState().streaming[JID]?.steps ?? [];
+      const notes = steps.filter((step) => step.kind === 'text');
+      if (level === 'full') {
+        expect(notes).toHaveLength(1);
+        expect(notes[0]).toMatchObject({
+          commentary: true,
+          status: 'done',
+          text: '先查一下记忆。',
+        });
+        // Written before the call it introduces, after the reasoning.
+        expect(steps.map((step) => step.kind)).toEqual([
+          'thinking',
+          'text',
+          'tool',
+        ]);
+      } else {
+        expect(notes, level).toHaveLength(0);
+      }
+      // Never the reply: no partial text, so no card for it.
+      expect(useChatStore.getState().streaming[JID]?.partialText ?? '').toBe(
+        '',
+      );
+    }
+  });
+
+  it('keeps narration out of the trace rows and ends the reasoning burst', () => {
+    setWorkspace('proactive', 'full');
+    start();
+    emit({ eventType: 'thinking_start' });
+    emit({ eventType: 'commentary', text: '先看看。' });
+    const state = live();
+    expect(state.isThinking).toBe(false);
+    expect(
+      state.traceEvents.filter((row) => row.title.includes('先看看')),
+    ).toEqual([]);
+    expect(state.traceEvents).toEqual([]);
+  });
+
+  it("never takes a sub-Agent's narration", () => {
+    setWorkspace('proactive', 'full');
+    start();
+    emit({
+      eventType: 'commentary',
+      text: '子 Agent 的话',
+      agentScope: 'subagent',
+      parentToolUseId: 'task-1',
+    });
+    expect(useChatStore.getState().streaming[JID]?.steps ?? []).toEqual([]);
   });
 
   it('shows only the spinner when the process is hidden', () => {
@@ -1200,6 +1278,23 @@ describe('changing the process visibility', () => {
   beforeEach(() => {
     reset();
     apiPatchMock.mockResolvedValue({ success: true });
+  });
+
+  it('drops the narration of a run in flight when the level is lowered', async () => {
+    setWorkspace('proactive', 'full');
+    useChatStore.getState().handleRunStarted(JID, RUN);
+    emit({ eventType: 'commentary', text: '先看看。' });
+    tool('t1', 'Read');
+    expect(live().steps!.some((step) => step.commentary)).toBe(true);
+    apiPatchMock.mockResolvedValueOnce({
+      success: true,
+      process_visibility: 'activity',
+    });
+    await useChatStore.getState().updateProcessVisibility(JID, 'activity');
+    const steps = live().steps!;
+    expect(steps.some((step) => step.commentary)).toBe(false);
+    // The tool it introduced stays: that is activity.
+    expect(steps.map((step) => step.kind)).toContain('tool');
   });
 
   it('sends the level, keeps the mode and needs no restart', async () => {

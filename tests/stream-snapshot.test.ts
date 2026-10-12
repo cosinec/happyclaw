@@ -331,6 +331,22 @@ describe('stream_snapshot of a run in progress', () => {
     expect(snapshot.traceEvents![0].title).toBe('工具 T30');
   });
 
+  test('the narration before a tool call (commentary) is nowhere in what a client or a shutdown keeps', () => {
+    const run = startRun();
+    run.emit('status', { statusText: 'requesting' });
+    run.emit('commentary', { text: '这是一段过程说明，不能进入任何快照。' });
+    run.emit('tool_use_start', { toolName: 'Read', toolUseId: 't1' });
+    const { snapshot } = web.buildStreamSnapshot(run.jid)!;
+    // It is a live-only note: no partial reply text, no event line, no trace
+    // row, no sub-agent tail, and nothing the shutdown would save as a reply.
+    expect(snapshot.partialText).toBe('');
+    expect(JSON.stringify(snapshot)).not.toContain('过程说明');
+    expect(snapshot.traceEvents!.map((row) => row.title)).toEqual([
+      '工具 Read',
+    ]);
+    expect(web.getActiveStreamingTexts().get(run.jid)).toBeUndefined();
+  });
+
   test('a new turn starts a fresh projection; idle without a run clears it', () => {
     const run = startRun();
     run.emit('thinking_delta', { text: '旧回合' });

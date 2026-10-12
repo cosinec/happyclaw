@@ -711,6 +711,9 @@ export class ResponsesToAnthropicConverter {
   private refused = false;
   private sawMeaningfulOutput = false;
   private completedOutputItems = 0;
+  /** Reasoning blocks opened, and the readable summary text they carried. */
+  private reasoningBlocks = 0;
+  private reasoningSummaryChars = 0;
   private usage: ResponseUsage = {
     input_tokens: 0,
     output_tokens: 0,
@@ -1302,6 +1305,9 @@ export class ResponsesToAnthropicConverter {
         if (block.text.length > block.emitted.length) {
           const value = block.text.slice(block.emitted.length);
           block.emitted = block.text;
+          if (block.type === 'thinking') {
+            this.reasoningSummaryChars += value.length;
+          }
           const delta =
             block.type === 'thinking'
               ? { type: 'thinking_delta', thinking: value }
@@ -1344,6 +1350,7 @@ export class ResponsesToAnthropicConverter {
       block.index = this.blockIndex++;
       this.active = block;
       if (block.type === 'tool_use') this.hasToolUse = true;
+      if (block.type === 'thinking') this.reasoningBlocks += 1;
       const content =
         block.type === 'tool_use'
           ? {
@@ -1556,6 +1563,17 @@ export class ResponsesToAnthropicConverter {
   }
   getUsage(): ResponseUsage {
     return structuredClone(this.usage);
+  }
+  /**
+   * How much readable reasoning the backend returned. The current ChatGPT
+   * models mostly return none (a reasoning item with only a cipher), which
+   * is the difference between "the gateway lost it" and "it was never sent".
+   */
+  getReasoningStats(): { blocks: number; summaryChars: number } {
+    return {
+      blocks: this.reasoningBlocks,
+      summaryChars: this.reasoningSummaryChars,
+    };
   }
 }
 

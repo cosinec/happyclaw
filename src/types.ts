@@ -948,6 +948,22 @@ export type WsMessageOut =
       agentId?: string;
     }
   | {
+      /**
+       * A turn's thinking summary and execution trace were stored after the
+       * message that carries them had been announced (a proactive utterance is
+       * announced mid-turn, its trace is written when the turn settles). The
+       * Web marks the message `has_trace`, as the message list would.
+       */
+      type: 'message_trace';
+      /** Workspace JID used to route the event in the Web client. */
+      chatJid: string;
+      /** Exact composite-key chat_jid of the message row. */
+      messageChatJid: string;
+      messageId: string;
+      turnId: string;
+      agentId?: string;
+    }
+  | {
       type: 'agent_reply';
       chatJid: string;
       text: string;

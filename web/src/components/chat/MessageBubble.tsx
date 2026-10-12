@@ -571,6 +571,7 @@ export const MessageBubble = memo(
               text={thinkingContent ?? ''}
               title={thinkingTitle}
               durationMs={thinkingDurationMs}
+              withheld={process !== 'full'}
               groupJid={markdownJid}
               defaultExpanded={openOnLoad === 'thinking'}
             />
@@ -695,6 +696,7 @@ export const MessageBubble = memo(
               text={thinkingContent ?? ''}
               title={thinkingTitle}
               durationMs={thinkingDurationMs}
+              withheld={process !== 'full'}
               groupJid={markdownJid}
               defaultExpanded={openOnLoad === 'thinking'}
             />

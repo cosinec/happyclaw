@@ -39,6 +39,11 @@ export interface StreamingStep {
   taskId?: string;
   /** text: where it starts in the reply's whole text (see `partialBase`). */
   from?: number;
+  /**
+   * text: narration the host handed over whole, because a tool call followed
+   * it (a proactive workspace). It is never the answer, whatever follows.
+   */
+  commentary?: boolean;
 }
 
 export interface StepList {
@@ -63,8 +68,15 @@ export function stepList(
   return { steps: steps ?? [], dropped: dropped ?? 0 };
 }
 
+/**
+ * An id for the next step of its kind. Steps can leave the list other than from
+ * the front (narration is filtered out when the level is lowered), so the
+ * length alone can name a step that is still there.
+ */
 function nextId(list: StepList, prefix: string): string {
-  return `${prefix}-${list.dropped + list.steps.length}`;
+  let n = list.dropped + list.steps.length;
+  while (list.steps.some((step) => step.id === `${prefix}-${n}`)) n += 1;
+  return `${prefix}-${n}`;
 }
 
 function append(list: StepList, step: StreamingStep): StepList {
@@ -141,7 +153,12 @@ export function appendThinkingText(
   });
 }
 
-/** The reasoning ended; `durationMs` is the model's own timing if it gave one. */
+/**
+ * The reasoning ended. `durationMs` is the model's own timing, when it gave
+ * one; the step lasted at least as long as the clock says, because it starts
+ * with the request, and reasoning that returns no text arrives whole after the
+ * wait with a timing of a few milliseconds.
+ */
 export function closeThinkingStep(
   list: StepList,
   at: number,
@@ -156,10 +173,12 @@ export function closeThinkingStep(
   return replaceAt(list, index, {
     status: 'done',
     endedAt: at,
-    durationMs:
+    durationMs: Math.max(
       durationMs != null && Number.isFinite(durationMs) && durationMs >= 0
         ? durationMs
-        : Math.max(0, at - step.at),
+        : 0,
+      Math.max(0, at - step.at),
+    ),
     title: extractThinkingTitle(step.text ?? '', { final: true }) ?? step.title,
   });
 }
@@ -204,6 +223,29 @@ export function closeTextStep(
     status: 'done',
     endedAt: at,
     text: tail(own, MAX_TEXT_STEP_CHARS),
+  });
+}
+
+/**
+ * The model's narration before a tool call, delivered whole (a proactive
+ * workspace never streams its text; the host sends the passage that a tool
+ * call followed). Closes the reasoning burst it came after.
+ */
+export function addCommentaryStep(
+  list: StepList,
+  at: number,
+  text: string,
+): StepList {
+  const own = text.trim();
+  if (!own) return list;
+  return append(closeThinkingStep(list, at), {
+    id: nextId(list, 'note'),
+    kind: 'text',
+    at,
+    endedAt: at,
+    status: 'done',
+    text: tail(own, MAX_TEXT_STEP_CHARS),
+    commentary: true,
   });
 }
 
@@ -496,6 +538,8 @@ export function answerStepIndex(steps: readonly StreamingStep[]): number {
   for (let index = steps.length - 1; index >= 0; index -= 1) {
     const kind = steps[index].kind;
     if (kind === 'text') {
+      // Narration handed over whole is followed by its tool call: not an answer.
+      if (steps[index].commentary) continue;
       textIndex = index;
       break;
     }

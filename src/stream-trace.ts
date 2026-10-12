@@ -54,6 +54,8 @@ export function isInternalLifecycleStatus(statusText?: string | null): boolean {
 /** Events that never become a trace row. */
 const NON_TRACE_EVENT_TYPES: ReadonlySet<string> = new Set([
   'text_delta',
+  // Narration before a tool call: shown live, never stored.
+  'commentary',
   'thinking_delta',
   'thinking_start',
   'thinking_end',

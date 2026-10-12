@@ -71,11 +71,18 @@ export function summarizeProcess(
 }
 
 /**
- * A proactive workspace's process, read-only and folded to one line: its
- * summary, then (opened) the steps in the order they happened and the plan.
- * It never shows the model's text, a sub-agent's included; reasoning only at
- * the `full` level, and the model's commentary between steps never.
+ * A proactive workspace's process, read-only: its summary line, then the steps
+ * in the order they happened and the plan. Open while the turn runs, because
+ * a workspace that shows its process is asked to be watched; the reader can
+ * fold it. It never shows the model's reply text, nor a sub-agent's words;
+ * reasoning and the narration before a tool call only at the `full` level.
  */
+/**
+ * Whether the panel was last left open. The panel is rebuilt for every turn, so
+ * a fold the reader chose is kept here for the rest of the visit.
+ */
+let panelLeftOpen = true;
+
 export const ProcessPanel = memo(function ProcessPanel({
   streaming,
   groupJid,
@@ -87,7 +94,11 @@ export const ProcessPanel = memo(function ProcessPanel({
   runtimeJid: string;
   visibility: Exclude<ProcessVisibility, 'hidden'>;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(() => panelLeftOpen);
+  const toggle = () => {
+    panelLeftOpen = !expanded;
+    setExpanded(!expanded);
+  };
   const bodyId = useId();
   const elapsed = useRunElapsed(runtimeJid);
   const summary = summarizeProcess(streaming, elapsed);
@@ -104,7 +115,7 @@ export const ProcessPanel = memo(function ProcessPanel({
     <div className="font-sans" data-hc-process-panel="">
       <button
         type="button"
-        onClick={() => setExpanded(!expanded)}
+        onClick={toggle}
         aria-expanded={expanded}
         aria-controls={expanded ? bodyId : undefined}
         className={cn(
@@ -142,7 +153,7 @@ export const ProcessPanel = memo(function ProcessPanel({
             hasContent={!!streaming.steps?.length}
             groupJid={groupJid}
             live
-            commentary={false}
+            commentary={visibility === 'full'}
             thinkingText={visibility === 'full'}
           />
           {streaming.todos && streaming.todos.length > 0 && (

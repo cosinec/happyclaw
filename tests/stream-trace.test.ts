@@ -106,6 +106,7 @@ describe('trace rows mirror the Web', () => {
   test('what never becomes a row', () => {
     for (const type of [
       'text_delta',
+      'commentary',
       'thinking_delta',
       'thinking_start',
       'thinking_end',

@@ -949,6 +949,71 @@ describe('Responses to Anthropic compatibility and ownership', () => {
     },
   );
 
+  describe('how much readable reasoning the backend returned', () => {
+    const reasoning = (summary: Json[] = []) => ({
+      type: 'reasoning',
+      id: 'rs_1',
+      summary,
+      encrypted_content: 'cipher',
+    });
+
+    test('a reasoning item with only its cipher is a block with no summary text', () => {
+      const { converter, message } = translate([
+        created,
+        added(reasoning()),
+        done(reasoning()),
+        completed,
+      ]);
+      expect(converter.getReasoningStats()).toEqual({
+        blocks: 1,
+        summaryChars: 0,
+      });
+      // The block is still delivered (with its signature): what the Web shows
+      // as "thought for N seconds, no text" is a real, empty block.
+      expect(message.content.map((block: Json) => block.type)).toEqual([
+        'thinking',
+      ]);
+    });
+
+    test('summary text is counted, across parts and blocks', () => {
+      const { converter } = translate([
+        created,
+        added(reasoning()),
+        { type: 'response.reasoning_summary_part.added', summary_index: 0 },
+        {
+          type: 'response.reasoning_summary_text.delta',
+          summary_index: 0,
+          delta: '先看目录',
+        },
+        { type: 'response.reasoning_summary_part.added', summary_index: 1 },
+        {
+          type: 'response.reasoning_summary_text.delta',
+          summary_index: 1,
+          delta: '再读文件',
+        },
+        done(reasoning()),
+        completed,
+      ]);
+      const stats = converter.getReasoningStats();
+      expect(stats.blocks).toBe(1);
+      // Two parts of four characters, joined by a blank line.
+      expect(stats.summaryChars).toBe('先看目录\n\n再读文件'.length);
+    });
+
+    test('a response with no reasoning reports none', () => {
+      const { converter } = translate([
+        created,
+        added({ type: 'message', id: 'm1', content: [] }),
+        { type: 'response.output_text.delta', item_id: 'm1', delta: 'hi' },
+        completed,
+      ]);
+      expect(converter.getReasoningStats()).toEqual({
+        blocks: 0,
+        summaryChars: 0,
+      });
+    });
+  });
+
   test.each([
     [{ type: 'response.output_text.delta', delta: 'text' }],
     [{ type: 'response.reasoning_summary_text.delta', delta: 'thought' }],

@@ -652,7 +652,9 @@ import {
   getActiveStreamingTexts,
   clearStreamingSnapshot,
   broadcastFollowUpUpdate,
+  broadcastMessageTrace,
 } from './web.js';
+import { ProactiveCommentaryRelay } from './process-commentary.js';
 import { installSkillForUser, deleteSkillForUser } from './routes/skills.js';
 import { verifyPairingCode } from './telegram-pairing.js';
 import { sdkQuery } from './sdk-query.js';
@@ -6970,6 +6972,26 @@ async function projectTerminalScheduledGroupRuns(input: {
  * The container stays alive for idleTimeout after each result, allowing
  * rapid-fire messages to be piped in without spawning a new container.
  */
+/**
+ * Tell the clients which message carries a proactive turn's stored trace. The
+ * turn is settling around this call: a failure here must not stop the idle
+ * status and the cursor commit that follow it.
+ */
+function announceTurnTrace(
+  messageChatJid: string,
+  messageId: string,
+  turnId: string,
+): void {
+  try {
+    broadcastMessageTrace(messageChatJid, messageId, turnId);
+  } catch (err) {
+    logger.warn(
+      { err, chatJid: messageChatJid, messageId, turnId },
+      'Failed to announce a stored turn trace',
+    );
+  }
+}
+
 async function processGroupMessages(chatJid: string): Promise<boolean> {
   let group = registeredGroups[chatJid];
   if (!group) {
@@ -7894,15 +7916,22 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     mode: interactionMode,
     getVisibility: resolveProcessVisibility,
   });
+  // The narration before a tool call, for a proactive Workspace at `full`.
+  const commentaryRelay = new ProactiveCommentaryRelay();
   // A proactive turn has no single SDK reply to carry its trace. Hang it on the
-  // chat(s) its utterances were stored under, once the turn is complete.
+  // chat(s) its utterances were stored under, once the turn is complete. Those
+  // utterances were announced mid-turn, before the trace existed, so each
+  // client is told which message now carries it.
   const persistProactiveTurnTrace = (inputId: string): void => {
     const chatJids = new Set<string>([chatJid]);
     const bound = resolveIpcOutputWorkspaceJid(chatJid);
     if (bound) chatJids.add(bound);
     for (const jid of chatJids) {
-      if (!getLastAgentMessageIdForTurn(jid, inputId)) continue;
-      turnTraces.persist({ chatJid: jid, inputId, keep: true });
+      const lastMessageId = getLastAgentMessageIdForTurn(jid, inputId);
+      if (!lastMessageId) continue;
+      if (turnTraces.persist({ chatJid: jid, inputId, keep: true })) {
+        announceTurnTrace(jid, lastMessageId, inputId);
+      }
     }
     turnTraces.discard(inputId);
   };
@@ -9016,9 +9045,19 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               resolveContainerOutputInputTurnId(result, lastProcessed.id),
               result.streamEvent,
             );
+            const processVisibility = resolveProcessVisibility();
+            // The narration before a tool call goes out ahead of the call.
+            for (const note of commentaryRelay.take(
+              interactionMode,
+              processVisibility,
+              result.streamEvent,
+              resolveContainerOutputInputTurnId(result, lastProcessed.id),
+            )) {
+              broadcastStreamEvent(chatJid, note);
+            }
             const webStreamEvent = projectSdkStreamEventForWeb(
               interactionMode,
-              resolveProcessVisibility(),
+              processVisibility,
               result.streamEvent,
             );
             if (webStreamEvent) {
@@ -17224,9 +17263,14 @@ async function processAgentConversation(
     mode: interactionMode,
     getVisibility: resolveProcessVisibility,
   });
+  const commentaryRelay = new ProactiveCommentaryRelay();
   const persistProactiveTurnTrace = (inputId: string): void => {
-    if (getLastAgentMessageIdForTurn(virtualChatJid, inputId)) {
-      turnTraces.persist({ chatJid: virtualChatJid, inputId });
+    const lastMessageId = getLastAgentMessageIdForTurn(virtualChatJid, inputId);
+    if (
+      lastMessageId &&
+      turnTraces.persist({ chatJid: virtualChatJid, inputId })
+    ) {
+      announceTurnTrace(virtualChatJid, lastMessageId, inputId);
     }
     turnTraces.discard(inputId);
   };
@@ -18199,9 +18243,19 @@ async function processAgentConversation(
         resolveContainerOutputInputTurnId(output, lastProcessed.id),
         output.streamEvent,
       );
+      const processVisibility = resolveProcessVisibility();
+      // The narration before a tool call goes out ahead of the call.
+      for (const note of commentaryRelay.take(
+        interactionMode,
+        processVisibility,
+        output.streamEvent,
+        resolveContainerOutputInputTurnId(output, lastProcessed.id),
+      )) {
+        broadcastStreamEvent(chatJid, note, agentId);
+      }
       const webStreamEvent = projectSdkStreamEventForWeb(
         interactionMode,
-        resolveProcessVisibility(),
+        processVisibility,
         output.streamEvent,
       );
       if (webStreamEvent) {
