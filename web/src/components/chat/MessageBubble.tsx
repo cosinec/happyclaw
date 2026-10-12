@@ -259,8 +259,6 @@ export const MessageBubble = memo(
           : undefined,
       [thinkingContent],
     );
-    // Reasoning without a summary still says how long the model thought.
-    const hasReasoning = !!thinkingContent || (thinkingDurationMs ?? 0) >= 1000;
     // What the server kept of a turn this tab did not stream, shown as the
     // same rows and loaded when one is opened. A proactive workspace shows
     // only what its owner chose: nothing when hidden, no reasoning text at
@@ -274,11 +272,19 @@ export const MessageBubble = memo(
         ? normalizeProcessVisibility(group?.process_visibility)
         : 'full';
     });
+    const loadTurnTrace = useChatStore((s) => s.loadTurnTrace);
+    // At the hidden level none of what this tab holds of the process is shown:
+    // it may have been read when the level was higher.
+    const processShown = process !== 'hidden';
+    // Reasoning without a summary still says how long the model thought.
+    const hasReasoning =
+      processShown && (!!thinkingContent || (thinkingDurationMs ?? 0) >= 1000);
     // The timeline layout sums a reply up in the same card its streaming left
     // off with: one row, the steps in order behind it. A reply without steps
     // (an older turn) and the classic layout keep the reasoning and the trace
     // as the two rows they always were.
     const settledSteps =
+      processShown &&
       layout === 'timeline' &&
       replySteps &&
       hasProcess(visibleSteps(replySteps.steps, process === 'full'))
@@ -294,7 +300,7 @@ export const MessageBubble = memo(
       message.is_from_me &&
       !!message.has_trace &&
       !!message.turn_id &&
-      process !== 'hidden' &&
+      processShown &&
       !hasReasoning &&
       !settledSteps &&
       !(traceEvents && traceEvents.length > 0);
@@ -343,7 +349,8 @@ export const MessageBubble = memo(
     // Same base JID the stream rendered with, so its blocks' rendered trees
     // are reused (links resolve against the workspace either way).
     const markdownJid = message.chat_jid.replace(/#agent:.*$/, '');
-    const executionTrace = !settledSteps &&
+    const executionTrace = processShown &&
+      !settledSteps &&
       traceEvents &&
       traceEvents.length > 0 && (
         <>
@@ -371,6 +378,15 @@ export const MessageBubble = memo(
           thinkingText={process === 'full'}
           durationMs={thinkingDurationMs}
           defaultOpen={openOnLoad !== null}
+          // Rebuilt steps are plausible, not exact: the reader who opens them
+          // gets the server's, and keeps these if it has none.
+          onOpenChange={
+            settledSteps.provisional
+              ? (open) => {
+                  if (open) void loadTurnTrace(message);
+                }
+              : undefined
+          }
         />
       </>
     );
