@@ -1168,6 +1168,307 @@ describe('what the steps cache may hold in all', () => {
   });
 });
 
+describe('a turn trace that is answered after the view of its workspace changed', () => {
+  const group = (over: Partial<GroupInfo> = {}): GroupInfo =>
+    ({
+      name: 'w',
+      folder: 'trace',
+      added_at: '2026-01-01T00:00:00.000Z',
+      interaction_mode: 'proactive',
+      process_visibility: 'hidden',
+      ...over,
+    }) as GroupInfo;
+  const viewIs = (over: Partial<GroupInfo>, jid = JID) =>
+    useChatStore.setState((s) => ({
+      groups: { ...s.groups, [jid]: group(over) },
+    }));
+  const SECRET = '不该留在内存里的推理全文';
+  const full = () => ({
+    turn_id: 'turn-1',
+    thinking: SECRET,
+    thinking_duration_ms: 5000,
+    trace: [row('a', '工具 Read', { toolUseId: 'a' })],
+    steps: [
+      thinking('t0', { text: SECRET }),
+      toolStep('a', 'Read', { resultPreview: '文件内容' }),
+    ],
+    steps_dropped: 0,
+  });
+  /** A request the test answers when it chooses. */
+  const inFlight = () => {
+    let answer!: (value: unknown) => void;
+    let fail!: (error: unknown) => void;
+    apiGetMock.mockReturnValueOnce(
+      new Promise((resolve, reject) => {
+        answer = resolve;
+        fail = reject;
+      }),
+    );
+    return { answer, fail };
+  };
+  const held = (id = 'm1') => {
+    const s = useChatStore.getState();
+    return [
+      s.thinkingCache[id],
+      s.thinkingDurationCache[id],
+      s.traceCache[id],
+      s.stepsCache[id],
+    ];
+  };
+
+  beforeEach(() => {
+    viewIs({ process_visibility: 'hidden' });
+    // The reply is on screen: a change of view lets go of what is held for it.
+    useChatStore.setState({ messages: { [JID]: [message()] } });
+  });
+
+  it('does not mark the reply empty when the level is raised after it was asked for (404)', async () => {
+    const request = inFlight();
+    const loading = useChatStore.getState().loadTurnTrace(message());
+    expect(useChatStore.getState().turnTraceStatus.m1).toBe('loading');
+
+    viewIs({ process_visibility: 'full' });
+    request.fail({ status: 404, message: 'Not found' });
+    expect(await loading).toBe(false);
+
+    // Not 'empty', which would hide its row for good, and not stuck loading.
+    expect(useChatStore.getState().turnTraceStatus.m1).toBeUndefined();
+    expect(held()).toEqual([undefined, undefined, undefined, undefined]);
+
+    // It can be asked for again, and now it is shown.
+    apiGetMock.mockResolvedValueOnce(full());
+    expect(await useChatStore.getState().loadTurnTrace(message())).toBe(true);
+    expect(apiGetMock).toHaveBeenCalledTimes(2);
+    expect(useChatStore.getState().stepsCache.m1?.steps).toHaveLength(2);
+  });
+
+  it('does not mark the reply empty when an answer with nothing in it comes after the level was raised', async () => {
+    const request = inFlight();
+    const loading = useChatStore.getState().loadTurnTrace(message());
+    viewIs({ process_visibility: 'full' });
+    request.answer({ turn_id: 'turn-1', thinking: '', trace: [], steps: [] });
+    await loading;
+    expect(useChatStore.getState().turnTraceStatus.m1).toBeUndefined();
+  });
+
+  it('does not mark the reply failed when the request fails after the view changed', async () => {
+    const request = inFlight();
+    const loading = useChatStore.getState().loadTurnTrace(message());
+    viewIs({ process_visibility: 'full' });
+    request.fail({ status: 0, message: 'Network error' });
+    await loading;
+    expect(useChatStore.getState().turnTraceStatus.m1).toBeUndefined();
+    expect(useChatStore.getState().error).toBeNull();
+  });
+
+  it('does not keep what the old level showed when the level is lowered after it was asked for', async () => {
+    viewIs({ process_visibility: 'full' });
+    const request = inFlight();
+    const loading = useChatStore.getState().loadTurnTrace(message());
+
+    viewIs({ process_visibility: 'activity' });
+    request.answer(full());
+    expect(await loading).toBe(false);
+
+    expect(held()).toEqual([undefined, undefined, undefined, undefined]);
+    expect(useChatStore.getState().turnTraceStatus.m1).toBeUndefined();
+    expect(JSON.stringify(useChatStore.getState())).not.toContain(SECRET);
+  });
+
+  it.each([
+    ['full', 'hidden'],
+    ['activity', 'hidden'],
+    ['hidden', 'activity'],
+  ] as const)(
+    'drops an answer asked for at %s when the level has become %s',
+    async (from, to) => {
+      viewIs({ process_visibility: from });
+      const request = inFlight();
+      const loading = useChatStore.getState().loadTurnTrace(message());
+      viewIs({ process_visibility: to });
+      request.answer(full());
+      await loading;
+      expect(held()).toEqual([undefined, undefined, undefined, undefined]);
+      expect(useChatStore.getState().turnTraceStatus.m1).toBeUndefined();
+    },
+  );
+
+  it('drops an answer asked for in an Assistant workspace that has become a proactive one', async () => {
+    viewIs({ interaction_mode: 'assistant', process_visibility: 'full' });
+    const request = inFlight();
+    const loading = useChatStore.getState().loadTurnTrace(message());
+    viewIs({ interaction_mode: 'proactive', process_visibility: 'full' });
+    request.answer(full());
+    await loading;
+    expect(held()).toEqual([undefined, undefined, undefined, undefined]);
+  });
+
+  it('follows the workspace of a session reply', async () => {
+    const reply = message('a1', { chat_jid: `${JID}#agent:s1` });
+    viewIs({ process_visibility: 'full' });
+    const request = inFlight();
+    const loading = useChatStore.getState().loadTurnTrace(reply);
+    viewIs({ process_visibility: 'activity' });
+    request.answer(full());
+    await loading;
+    expect(held('a1')).toEqual([undefined, undefined, undefined, undefined]);
+  });
+
+  it('is not left loading when the workspace was not known yet and has now arrived as a hidden one', async () => {
+    useChatStore.setState({ groups: {} });
+    const request = inFlight();
+    const loading = useChatStore.getState().loadTurnTrace(message());
+    // Not a change the store lets go of caches for: nothing was held yet.
+    viewIs({ process_visibility: 'hidden' });
+    expect(useChatStore.getState().turnTraceStatus.m1).toBe('loading');
+    request.answer(full());
+    await loading;
+    expect(held()).toEqual([undefined, undefined, undefined, undefined]);
+    expect(useChatStore.getState().turnTraceStatus.m1).toBeUndefined();
+  });
+
+  describe('when the view is the same as when it was asked for', () => {
+    it('writes what the server answered', async () => {
+      viewIs({ process_visibility: 'full' });
+      const request = inFlight();
+      const loading = useChatStore.getState().loadTurnTrace(message());
+      request.answer({
+        ...full(),
+        steps: [thinking('t0', { text: SECRET })],
+      });
+      expect(await loading).toBe(true);
+      const state = useChatStore.getState();
+      expect(state.thinkingCache.m1).toBe(SECRET);
+      expect(state.stepsCache.m1?.steps).toHaveLength(1);
+      expect(state.turnTraceStatus.m1).toBeUndefined();
+    });
+
+    it('marks a turn the server no longer shows as empty (404)', async () => {
+      const request = inFlight();
+      const loading = useChatStore.getState().loadTurnTrace(message());
+      request.fail({ status: 404, message: 'Not found' });
+      await loading;
+      expect(useChatStore.getState().turnTraceStatus.m1).toBe('empty');
+    });
+
+    it('marks a failure as failed, to be asked for again', async () => {
+      const request = inFlight();
+      const loading = useChatStore.getState().loadTurnTrace(message());
+      request.fail({ status: 0, message: 'Network error' });
+      await loading;
+      expect(useChatStore.getState().turnTraceStatus.m1).toBe('failed');
+    });
+
+    it('writes when only the name or the pin of the workspace changed meanwhile', async () => {
+      viewIs({ process_visibility: 'full' });
+      const request = inFlight();
+      const loading = useChatStore.getState().loadTurnTrace(message());
+      viewIs({
+        process_visibility: 'full',
+        name: '改了名',
+        pinned_at: '2026-10-10T00:00:00.000Z',
+      });
+      request.answer(full());
+      await loading;
+      expect(useChatStore.getState().thinkingCache.m1).toBe(SECRET);
+    });
+
+    it('writes when the view went away and came back', async () => {
+      viewIs({ process_visibility: 'full' });
+      const request = inFlight();
+      const loading = useChatStore.getState().loadTurnTrace(message());
+      viewIs({ process_visibility: 'hidden' });
+      viewIs({ process_visibility: 'full' });
+      request.answer(full());
+      await loading;
+      expect(useChatStore.getState().thinkingCache.m1).toBe(SECRET);
+      expect(useChatStore.getState().turnTraceStatus.m1).toBeUndefined();
+    });
+
+    it('writes in an Assistant workspace whatever level it carries meanwhile', async () => {
+      viewIs({ interaction_mode: 'assistant', process_visibility: 'hidden' });
+      const request = inFlight();
+      const loading = useChatStore.getState().loadTurnTrace(message());
+      viewIs({ interaction_mode: 'assistant', process_visibility: 'full' });
+      request.answer(full());
+      await loading;
+      expect(useChatStore.getState().thinkingCache.m1).toBe(SECRET);
+    });
+  });
+
+  describe('when the reply is asked for again under the new view', () => {
+    it('keeps the later request loading while the earlier one is dropped', async () => {
+      viewIs({ process_visibility: 'hidden' });
+      const first = inFlight();
+      const firstLoad = useChatStore.getState().loadTurnTrace(message());
+
+      viewIs({ process_visibility: 'full' });
+      const second = inFlight();
+      const secondLoad = useChatStore.getState().loadTurnTrace(message());
+      expect(useChatStore.getState().turnTraceStatus.m1).toBe('loading');
+
+      // The old answer comes first: it is dropped, the new request still loads.
+      first.fail({ status: 404, message: 'Not found' });
+      expect(await firstLoad).toBe(false);
+      expect(useChatStore.getState().turnTraceStatus.m1).toBe('loading');
+      expect(held()).toEqual([undefined, undefined, undefined, undefined]);
+
+      second.answer(full());
+      expect(await secondLoad).toBe(true);
+      expect(useChatStore.getState().turnTraceStatus.m1).toBeUndefined();
+      expect(useChatStore.getState().thinkingCache.m1).toBe(SECRET);
+    });
+
+    it('leaves the later request its loading when an earlier one of the same view answers first', async () => {
+      viewIs({ process_visibility: 'full' });
+      const first = inFlight();
+      const firstLoad = useChatStore.getState().loadTurnTrace(message());
+
+      // The view goes away and comes back, which lets go of the loading, and
+      // the reply is asked for again.
+      viewIs({ process_visibility: 'hidden' });
+      viewIs({ process_visibility: 'full' });
+      const second = inFlight();
+      const secondLoad = useChatStore.getState().loadTurnTrace(message());
+      expect(useChatStore.getState().turnTraceStatus.m1).toBe('loading');
+
+      first.answer(full());
+      expect(await firstLoad).toBe(false);
+      expect(useChatStore.getState().turnTraceStatus.m1).toBe('loading');
+
+      second.answer(full());
+      expect(await secondLoad).toBe(true);
+      expect(useChatStore.getState().turnTraceStatus.m1).toBeUndefined();
+      expect(useChatStore.getState().thinkingCache.m1).toBe(SECRET);
+    });
+
+    it('does not let the earlier answer overwrite the later one', async () => {
+      viewIs({ process_visibility: 'full' });
+      const first = inFlight();
+      const firstLoad = useChatStore.getState().loadTurnTrace(message());
+
+      viewIs({ process_visibility: 'activity' });
+      const second = inFlight();
+      const secondLoad = useChatStore.getState().loadTurnTrace(message());
+      second.answer({
+        turn_id: 'turn-1',
+        thinking: '',
+        trace: [row('a', '工具 Read', { toolUseId: 'a' })],
+        steps: [toolStep('a', 'Read')],
+        steps_dropped: 0,
+      });
+      await secondLoad;
+
+      first.answer(full());
+      await firstLoad;
+      const state = useChatStore.getState();
+      expect(state.thinkingCache.m1).toBeUndefined();
+      expect(state.stepsCache.m1?.steps).toHaveLength(1);
+      expect(JSON.stringify(state)).not.toContain(SECRET);
+    });
+  });
+});
+
 describe('has_trace on a message', () => {
   it('is kept from a message the WebSocket delivers', () => {
     useChatStore.getState().handleWsNewMessage(JID, {
