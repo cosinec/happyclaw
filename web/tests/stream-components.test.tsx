@@ -381,6 +381,24 @@ describe('StepTimeline', () => {
     expect(html).toContain('memory.md');
   });
 
+  it('names an open commentary row, so its button is not an empty one', () => {
+    // The latest three rows start open; an open row shows its text below.
+    const html = timeline(
+      [
+        step({
+          id: 'note-0',
+          kind: 'text',
+          text: '先查一下记忆再回答。',
+          commentary: true,
+        }),
+      ],
+      { commentary: true },
+    );
+    expect(html).toContain('aria-expanded="true"');
+    expect(html).toContain('过程说明');
+    expect(html).toContain('先查一下记忆再回答。');
+  });
+
   it('says a reasoning step ended without any text when text is allowed', () => {
     const html = timeline(
       [

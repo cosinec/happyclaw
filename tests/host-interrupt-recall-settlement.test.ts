@@ -1454,15 +1454,15 @@ describe('process visibility in the real output handlers (behavioural)', () => {
         jid === 'web:proactive-trace-home' ? null : 'web:proactive-trace-home',
       getLastAgentMessageIdForTurn: db.getLastAgentMessageIdForTurn,
       broadcastMessageTrace: vi.fn(),
+      logger: { warn: vi.fn() },
       turnTraces: new TurnTraceTracker({
         mode: 'proactive',
         getVisibility: () => 'activity',
       }),
     };
-    createRuntimeSourceHarness(globals).install(
-      'persistProactiveTurnTrace',
-      'processGroupMessages',
-    );
+    const harness = createRuntimeSourceHarness(globals);
+    harness.install('announceTurnTrace');
+    harness.install('persistProactiveTurnTrace', 'processGroupMessages');
     const persist = globals.persistProactiveTurnTrace as (id: string) => void;
     const collect = (turnId: string) =>
       globals.turnTraces.observe(turnId, {
@@ -1515,15 +1515,15 @@ describe('process visibility in the real output handlers (behavioural)', () => {
       virtualChatJid: session,
       getLastAgentMessageIdForTurn: db.getLastAgentMessageIdForTurn,
       broadcastMessageTrace: vi.fn(),
+      logger: { warn: vi.fn() },
       turnTraces: new TurnTraceTracker({
         mode: 'proactive',
         getVisibility: () => 'full',
       }),
     };
-    createRuntimeSourceHarness(globals).install(
-      'persistProactiveTurnTrace',
-      'processAgentConversation',
-    );
+    const harness = createRuntimeSourceHarness(globals);
+    harness.install('announceTurnTrace');
+    harness.install('persistProactiveTurnTrace', 'processAgentConversation');
     const persist = globals.persistProactiveTurnTrace as (id: string) => void;
     db.ensureChatExists(session);
     db.storeMessageDirect(
@@ -1556,5 +1556,44 @@ describe('process visibility in the real output handlers (behavioural)', () => {
     });
     persist('turn-s2');
     expect(globals.broadcastMessageTrace).toHaveBeenCalledTimes(1);
+  });
+
+  test('a failing announcement does not keep the turn from settling', () => {
+    const session = 'web:proactive-trace-home#agent:s3';
+    const globals: Record<string, any> = {
+      virtualChatJid: session,
+      getLastAgentMessageIdForTurn: db.getLastAgentMessageIdForTurn,
+      broadcastMessageTrace: vi.fn(() => {
+        throw new Error('socket gone');
+      }),
+      logger: { warn: vi.fn() },
+      turnTraces: new TurnTraceTracker({
+        mode: 'proactive',
+        getVisibility: () => 'full',
+      }),
+    };
+    const harness = createRuntimeSourceHarness(globals);
+    harness.install('announceTurnTrace');
+    harness.install('persistProactiveTurnTrace', 'processAgentConversation');
+    db.ensureChatExists(session);
+    db.storeMessageDirect(
+      'utterance-s3',
+      session,
+      'happyclaw-agent',
+      'Agent',
+      '一句话',
+      '2026-10-12T02:10:00.000Z',
+      true,
+      { meta: { turnId: 'turn-s3', sourceKind: 'sdk_send_message' } },
+    );
+    globals.turnTraces.observe('turn-s3', {
+      eventType: 'tool_use_start',
+      toolName: 'Bash',
+      toolUseId: 'tool-s3',
+    });
+    expect(() => globals.persistProactiveTurnTrace('turn-s3')).not.toThrow();
+    // The trace is stored all the same, and the failure is only logged.
+    expect(db.getTurnTrace(session, 'turn-s3')).toBeDefined();
+    expect(globals.logger.warn).toHaveBeenCalledTimes(1);
   });
 });

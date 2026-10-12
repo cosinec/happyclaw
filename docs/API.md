@@ -166,8 +166,11 @@ Workspace↔AgentProfile 绑定行上，因此：仅 `web:` 前缀工作区可�
 | `full`     | `activity` 加上主 Agent 与子 Agent 的 `thinking_delta`（推理摘要），以及主 Agent 调用工具前写下的过程说明 `commentary`                          |
 
 `commentary` 由宿主合成，Runner 不会发这个事件：主 Agent 的文字先被扣住，只有紧接着
-调用了工具才作为一条完整的 `commentary`（先于该次调用）放行；没有工具跟在后面的文字
-（回合结尾、未发送的回复）、`send_message` 之前的文字、子 Agent 的文字都不会放行。
+调用了工具才作为一条完整的 `commentary`（先于该次调用，带该调用的 `queryRunId`）放行；
+没有工具跟在后面的文字（回合结尾、未发送的回复）、紧接着 `send_message` 调用的文字
+（即回复本身）、子 Agent 的文字都不会放行。宿主逐个调用判断、不向前看：同一条消息里
+夹在文字与 `send_message` 之间的其它工具调用，会让这段文字在那个调用处放行。只有从
+消息开头读起的文字才会被扣住，所以中途调高级别时，正在写的那句话的后半截不放行。
 它只广播给 Web，不进入 IM 渠道，也不写入 `turn_traces`；重连快照不含它。
 
 任何级别都不会发送 `text_delta`（含子 Agent 文本）、`usage`、`memory_recall`、

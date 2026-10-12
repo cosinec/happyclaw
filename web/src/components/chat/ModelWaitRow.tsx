@@ -46,8 +46,8 @@ export function ModelWaitRow({
           className="mt-1 border-l-2 border-surface-border py-0.5 pl-3 text-caption text-faint-foreground"
           data-hc-model-silent=""
         >
-          模型还没有返回内容。有的模型（如 ChatGPT
-          订阅）静默推理、不提供思考摘要，只显示用时。
+          仍在等待模型返回内容。有的模型（如 ChatGPT
+          订阅）静默推理，不提供思考摘要，只显示用时。
         </p>
       ) : (
         <div

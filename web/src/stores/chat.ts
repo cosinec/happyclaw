@@ -433,6 +433,35 @@ function messageSequenceBoundary(
   return boundary;
 }
 
+/**
+ * Traces announced for a message this tab has not received yet, by chat and
+ * message id. The server sends `message_trace` for a message it already
+ * announced, but a message with attachments reaches the Web after its
+ * thumbnails are made and can come second.
+ */
+const pendingTraceMarks = new Set<string>();
+const MAX_PENDING_TRACE_MARKS = 100;
+
+function traceMarkKey(chatJid: string, messageId: string): string {
+  return `${chatJid}\0${messageId}`;
+}
+
+function rememberPendingTraceMark(chatJid: string, messageId: string): void {
+  const key = traceMarkKey(chatJid, messageId);
+  pendingTraceMarks.delete(key);
+  pendingTraceMarks.add(key);
+  while (pendingTraceMarks.size > MAX_PENDING_TRACE_MARKS) {
+    const oldest = pendingTraceMarks.values().next().value;
+    if (oldest === undefined) break;
+    pendingTraceMarks.delete(oldest);
+  }
+}
+
+/** Whether a mark waited for this message; it is spent either way. */
+function takePendingTraceMark(chatJid: string, messageId: string): boolean {
+  return pendingTraceMarks.delete(traceMarkKey(chatJid, messageId));
+}
+
 const MAX_THINKING_CACHE_SIZE = 500;
 
 /**
@@ -3470,17 +3499,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
       agentSep >= 0
         ? messageChatJid.slice(agentSep + agentMarker.length)
         : null;
-    const marks = (message: Message) =>
-      message.id === messageId &&
-      message.chat_jid === messageChatJid &&
-      !message.has_trace;
+    const isIt = (message: Message) =>
+      message.id === messageId && message.chat_jid === messageChatJid;
+    const marks = (message: Message) => isIt(message) && !message.has_trace;
     const mark = (list: Message[]) =>
       list.map((message) =>
         marks(message) ? { ...message, has_trace: true } : message,
       );
 
     let snapshot: { messages: Message[]; hasMore: boolean } | null = null;
+    let known = false;
     set((s) => {
+      known =
+        Object.values(s.messages).some((list) => list.some(isIt)) ||
+        Object.values(s.agentMessages).some((list) => list.some(isIt));
       let messages = s.messages;
       for (const [key, list] of Object.entries(s.messages)) {
         if (list.some(marks)) {
@@ -3501,6 +3533,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       return { messages, agentMessages };
     });
+    // A message with attachments is announced after its thumbnails are made, so
+    // this can arrive first: keep the mark for the message when it does.
+    if (!known) rememberPendingTraceMark(messageChatJid, messageId);
     // The PWA repaints a session from its stored snapshot first: keep the
     // flag there too, or a reload before the next fetch would drop the rows.
     if (workspaceJid && agentId && snapshot) {
@@ -4510,7 +4545,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       workflow_runs:
         completedWorkflowRuns.length > 0 ? completedWorkflowRuns : undefined,
       turn_id: wsMsg.turn_id ?? null,
-      ...(wsMsg.has_trace ? { has_trace: true } : {}),
+      ...(wsMsg.has_trace ||
+      takePendingTraceMark(wsMsg.chat_jid || chatJid, wsMsg.id)
+        ? { has_trace: true }
+        : {}),
       session_id: wsMsg.session_id ?? null,
       sdk_message_uuid: wsMsg.sdk_message_uuid ?? null,
       source_kind: wsMsg.source_kind ?? null,

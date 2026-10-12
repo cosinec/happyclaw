@@ -77,6 +77,12 @@ export function summarizeProcess(
  * fold it. It never shows the model's reply text, nor a sub-agent's words;
  * reasoning and the narration before a tool call only at the `full` level.
  */
+/**
+ * Whether the panel was last left open. The panel is rebuilt for every turn, so
+ * a fold the reader chose is kept here for the rest of the visit.
+ */
+let panelLeftOpen = true;
+
 export const ProcessPanel = memo(function ProcessPanel({
   streaming,
   groupJid,
@@ -88,7 +94,11 @@ export const ProcessPanel = memo(function ProcessPanel({
   runtimeJid: string;
   visibility: Exclude<ProcessVisibility, 'hidden'>;
 }) {
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(() => panelLeftOpen);
+  const toggle = () => {
+    panelLeftOpen = !expanded;
+    setExpanded(!expanded);
+  };
   const bodyId = useId();
   const elapsed = useRunElapsed(runtimeJid);
   const summary = summarizeProcess(streaming, elapsed);
@@ -105,7 +115,7 @@ export const ProcessPanel = memo(function ProcessPanel({
     <div className="font-sans" data-hc-process-panel="">
       <button
         type="button"
-        onClick={() => setExpanded(!expanded)}
+        onClick={toggle}
         aria-expanded={expanded}
         aria-controls={expanded ? bodyId : undefined}
         className={cn(

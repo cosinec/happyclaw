@@ -276,6 +276,18 @@ describe('narration handed over whole (a proactive workspace)', () => {
     ]);
   });
 
+  it('never gives two steps one id, even after narration was filtered out', () => {
+    // Lowering the level drops the narration steps from the middle of the list.
+    let list = openThinkingStep(empty(), 0);
+    list = closeThinkingStep(list, 1);
+    list = addCommentaryStep(list, 2, '先看一下。');
+    list = startToolStep(list, { toolUseId: 't1', toolName: 'Read' }, 3);
+    list = { ...list, steps: list.steps.filter((step) => !step.commentary) };
+    list = closeThinkingStep(openThinkingStep(list, 4), 5);
+    const ids = list.steps.map((step) => step.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
   it('ignores blank text and keeps the end of a long passage', () => {
     expect(addCommentaryStep(empty(), 0, ' \n ').steps).toEqual([]);
     const long = addCommentaryStep(empty(), 0, `${'x'.repeat(3000)}END`);

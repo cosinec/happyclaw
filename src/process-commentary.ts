@@ -14,8 +14,12 @@
  *   event, just ahead of the call;
  * - text that no tool follows (the end of a turn, an unsent reply) is dropped
  *   with the message that carried it, never sent;
- * - text before send_message is dropped too: it is the message itself, which
- *   the user receives as a chat message;
+ * - text directly before a send_message call is dropped too: it is the message
+ *   itself, which the user receives as a chat message. (The relay decides at
+ *   each call and does not look ahead: a message that puts another tool call
+ *   between its text and send_message has already released the text there.)
+ * - only a message seen from its start is held: after the level is raised in
+ *   the middle of a sentence, the rest of that sentence is not narration;
  * - a sub-Agent's text is never held (its stream is its own task's).
  *
  * The events are broadcast to the Web only. Nothing here reaches an IM channel
@@ -33,12 +37,24 @@ import {
 /** Most of a held passage kept; its end wins, as in the Web's commentary row. */
 export const MAX_COMMENTARY_CHARS = 4000;
 
-/** Status texts after which no held text can belong to a later tool call. */
+/**
+ * Status texts that end the message being held. `requesting` is what the CLI
+ * yields once per model request, so it is also where the next message starts;
+ * the host's own `idle` bypasses the relay, which is why a change of turn (the
+ * `turnKey`) resets as well.
+ */
 const BOUNDARY_STATUS_TEXTS: ReadonlySet<string> = new Set([
   'requesting',
   'idle',
   'interrupted',
 ]);
+
+/**
+ * The Runner's banner for a request that is being sent again. The message
+ * starts over, so what the failed attempt streamed must not be repeated by the
+ * next one. Matches both languages of the banner.
+ */
+const API_RETRY_STATUS = /^API (?:重试中|retry in progress)/i;
 
 /**
  * Per-run holder of the text a model message has written so far. One per
@@ -47,6 +63,8 @@ const BOUNDARY_STATUS_TEXTS: ReadonlySet<string> = new Set([
  */
 export class ProactiveCommentaryRelay {
   private held = '';
+  /** The start of the message being read was seen (its `requesting`). */
+  private armed = false;
   private turnKey: string | undefined;
 
   /**
@@ -63,17 +81,17 @@ export class ProactiveCommentaryRelay {
     turnKey?: string,
   ): StreamEvent[] {
     if (mode !== 'proactive' || visibility !== 'full') {
-      this.held = '';
+      this.reset();
       return [];
     }
     if (turnKey !== this.turnKey) {
-      this.held = '';
+      this.reset();
       this.turnKey = turnKey;
     }
     if (isSubagentEvent(event)) return [];
     switch (event.eventType) {
       case 'text_delta':
-        if (event.text) this.hold(event.text);
+        if (this.armed && event.text) this.hold(event.text);
         return [];
       case 'tool_use_start': {
         const text = this.held.trim();
@@ -93,14 +111,26 @@ export class ProactiveCommentaryRelay {
         });
         return note ? [note] : [];
       }
-      case 'status':
-        if (event.statusText && BOUNDARY_STATUS_TEXTS.has(event.statusText)) {
+      case 'status': {
+        const status = event.statusText;
+        if (status === 'requesting') {
+          this.held = '';
+          this.armed = true;
+        } else if (status && BOUNDARY_STATUS_TEXTS.has(status)) {
+          this.reset();
+        } else if (status && API_RETRY_STATUS.test(status)) {
           this.held = '';
         }
         return [];
+      }
       default:
         return [];
     }
+  }
+
+  private reset(): void {
+    this.held = '';
+    this.armed = false;
   }
 
   private hold(delta: string): void {

@@ -108,6 +108,33 @@ describe('a trace stored after its message was announced', () => {
     expect(useChatStore.getState().agentMessages.s1[0].has_trace).toBe(true);
   });
 
+  it('keeps a mark that arrives before its message, and applies it when the message does', () => {
+    // A message with attachments is announced after its thumbnails are made, so
+    // the trace notice can overtake it.
+    useChatStore.getState().handleMessageTrace(JID, 'late');
+    useChatStore.getState().handleWsNewMessage(JID, {
+      ...utterance('late'),
+      source_kind: 'sdk_send_message',
+    } as never);
+    const arrived = useChatStore
+      .getState()
+      .messages[JID].find((message) => message.id === 'late');
+    expect(arrived?.has_trace).toBe(true);
+    // Spent: a later message with that id is not marked again.
+    useChatStore.setState({ messages: { [JID]: [] } });
+    useChatStore.getState().handleWsNewMessage(JID, utterance('late') as never);
+    expect(useChatStore.getState().messages[JID][0]?.has_trace).toBeUndefined();
+  });
+
+  it('does not keep a mark for a message it already has', () => {
+    useChatStore.setState({ messages: { [JID]: [utterance('m1')] } });
+    useChatStore.getState().handleMessageTrace(JID, 'm1');
+    useChatStore.setState({ messages: { [JID]: [] } });
+    // Had the mark been kept, this arrival would be marked a second time.
+    useChatStore.getState().handleWsNewMessage(JID, utterance('m1') as never);
+    expect(useChatStore.getState().messages[JID][0]?.has_trace).toBeUndefined();
+  });
+
   it('ignores a message this tab never loaded, and one already marked', () => {
     useChatStore.setState({
       messages: { [JID]: [utterance('m1', { has_trace: true })] },

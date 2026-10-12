@@ -6972,6 +6972,26 @@ async function projectTerminalScheduledGroupRuns(input: {
  * The container stays alive for idleTimeout after each result, allowing
  * rapid-fire messages to be piped in without spawning a new container.
  */
+/**
+ * Tell the clients which message carries a proactive turn's stored trace. The
+ * turn is settling around this call: a failure here must not stop the idle
+ * status and the cursor commit that follow it.
+ */
+function announceTurnTrace(
+  messageChatJid: string,
+  messageId: string,
+  turnId: string,
+): void {
+  try {
+    broadcastMessageTrace(messageChatJid, messageId, turnId);
+  } catch (err) {
+    logger.warn(
+      { err, chatJid: messageChatJid, messageId, turnId },
+      'Failed to announce a stored turn trace',
+    );
+  }
+}
+
 async function processGroupMessages(chatJid: string): Promise<boolean> {
   let group = registeredGroups[chatJid];
   if (!group) {
@@ -7910,7 +7930,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const lastMessageId = getLastAgentMessageIdForTurn(jid, inputId);
       if (!lastMessageId) continue;
       if (turnTraces.persist({ chatJid: jid, inputId, keep: true })) {
-        broadcastMessageTrace(jid, lastMessageId, inputId);
+        announceTurnTrace(jid, lastMessageId, inputId);
       }
     }
     turnTraces.discard(inputId);
@@ -17250,7 +17270,7 @@ async function processAgentConversation(
       lastMessageId &&
       turnTraces.persist({ chatJid: virtualChatJid, inputId })
     ) {
-      broadcastMessageTrace(virtualChatJid, lastMessageId, inputId);
+      announceTurnTrace(virtualChatJid, lastMessageId, inputId);
     }
     turnTraces.discard(inputId);
   };

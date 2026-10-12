@@ -49,17 +49,19 @@ describe('Runner events reach the Web only through the projection', () => {
 
   test('a proactive turn announces the trace it stores', () => {
     // The reply was announced mid-turn, before its trace existed. Each place
-    // that stores a proactive turn's trace says so to the clients.
-    expect(
-      source.match(/broadcastMessageTrace\(/g)?.length,
-    ).toBeGreaterThanOrEqual(2);
-    for (const name of ['persistProactiveTurnTrace']) {
-      const bodies = source.split(`const ${name} = (`).slice(1);
-      expect(bodies).toHaveLength(2);
-      for (const body of bodies) {
-        expect(body.slice(0, 900)).toContain('broadcastMessageTrace(');
-      }
+    // that stores a proactive turn's trace says so to the clients, through a
+    // helper that cannot keep the turn from settling.
+    const bodies = source.split('const persistProactiveTurnTrace = (').slice(1);
+    expect(bodies).toHaveLength(2);
+    for (const body of bodies) {
+      expect(body.slice(0, 900)).toContain('announceTurnTrace(');
     }
+    const helper = source.slice(
+      source.indexOf('function announceTurnTrace('),
+      source.indexOf('async function processGroupMessages('),
+    );
+    expect(helper).toContain('broadcastMessageTrace(');
+    expect(helper).toMatch(/try \{[\s\S]*broadcastMessageTrace[\s\S]*\} catch/);
   });
 
   test('the terminal warmup run projects its events like any other turn', () => {

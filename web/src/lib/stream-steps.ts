@@ -68,8 +68,15 @@ export function stepList(
   return { steps: steps ?? [], dropped: dropped ?? 0 };
 }
 
+/**
+ * An id for the next step of its kind. Steps can leave the list other than from
+ * the front (narration is filtered out when the level is lowered), so the
+ * length alone can name a step that is still there.
+ */
 function nextId(list: StepList, prefix: string): string {
-  return `${prefix}-${list.dropped + list.steps.length}`;
+  let n = list.dropped + list.steps.length;
+  while (list.steps.some((step) => step.id === `${prefix}-${n}`)) n += 1;
+  return `${prefix}-${n}`;
 }
 
 function append(list: StepList, step: StreamingStep): StepList {

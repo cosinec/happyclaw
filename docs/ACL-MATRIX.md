@@ -144,7 +144,8 @@ Memory 随 Workspace 保留，不跨 Workspace 复制。
 模型自己产出的文字（`text_delta`、工具结果文本、子 Agent 的提示词与回答）在任何级别
 都不会广播，也不会写入轨迹。唯一的例外是 `full` 级别的过程说明（`commentary`）：主
 Agent 在调用工具前写下的那段话，仅在确有工具调用跟在后面时才由宿主放行，只广播给
-Web、不写入轨迹；回合结尾的文字、未发送的回复和 `send_message` 之前的文字从不放行。
+Web、不写入轨迹；回合结尾的文字、未发送的回复和紧接着 `send_message` 调用的文字不放行
+（宿主逐个调用判断，不向前看，详见 `docs/API.md`）。
 过滤读取**当前**级别，而不是回合运行时的级别。Assistant
 模式工作区与 fire-and-forget 的 Spawn Agent 不受该设置影响。轨迹的读取权限与消息
 列表相同：只有能读取该聊天历史的用户可读；admin 没有跨 owner bypass，无权限与不存在
