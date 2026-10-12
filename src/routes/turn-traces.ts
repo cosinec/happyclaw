@@ -1,12 +1,12 @@
 /**
  * GET /api/groups/:jid/turn-traces/:turnId
  *
- * The thinking summary and execution trace of one finished turn. The Web used
- * to keep them in browser memory only; the host now stores them when the turn
- * settles (turn_traces) and the message list flags the messages that have one
- * (`has_trace`). Access follows the message list: whoever can read a chat's
- * history can read its traces, and a proactive workspace shows what its
- * *current* process visibility allows.
+ * The thinking summary, execution trace and ordered steps of one finished
+ * turn. The Web used to keep them in browser memory only; the host now stores
+ * them when the turn settles (turn_traces) and the message list flags the
+ * messages that have one (`has_trace`). Access follows the message list:
+ * whoever can read a chat's history can read its traces, and a proactive
+ * workspace shows what its *current* process visibility allows.
  */
 
 import { Hono } from 'hono';

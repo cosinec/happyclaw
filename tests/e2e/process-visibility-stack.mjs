@@ -696,6 +696,7 @@ async function runScenario(ctx, { label, interaction, visibility, expect }) {
       `got ${traceNotices.length}`,
     );
   }
+  let storedTurnId;
   if (expect.trace === 'none') {
     check(
       label,
@@ -724,6 +725,7 @@ async function runScenario(ctx, { label, interaction, visibility, expect }) {
       `flagged ${flagged.length}`,
     );
     const turnId = (flagged[flagged.length - 1] || finalMsg)?.turn_id;
+    storedTurnId = turnId;
     const r = await http_(
       'GET',
       `/api/groups/${enc(jid)}/turn-traces/${enc(turnId)}`,
@@ -802,11 +804,115 @@ async function runScenario(ctx, { label, interaction, visibility, expect }) {
         !t.trace.some((x) => /thinking_(start|end)/.test(JSON.stringify(x))),
         '',
       );
+      checkStoredSteps(label, interaction, expect, t);
     }
   }
 
   for (const c of [conn, conn2, conn3]) c.ws.close();
-  return { jid, counts };
+  return { jid, counts, turnId: storedTurnId };
+}
+
+/**
+ * The settled turn as an ordered timeline: reasoning -> Bash -> reasoning, with
+ * the model's note before the tool in an Assistant workspace, and never the
+ * answer, the speech tool or (proactive) any model text but the reasoning.
+ */
+function checkStoredSteps(label, interaction, expect, t) {
+  const steps = Array.isArray(t.steps) ? t.steps : [];
+  const describe = (s) => (s.kind === 'tool' ? `tool:${s.toolName}` : s.kind);
+  const timeline = steps.filter((s) => s.kind !== 'text').map(describe);
+  check(
+    label,
+    'stored steps run reasoning -> Bash -> reasoning, in the order they happened',
+    JSON.stringify(timeline) ===
+      JSON.stringify(['thinking', 'tool:Bash', 'thinking']),
+    JSON.stringify(steps.map(describe)),
+  );
+  check(
+    label,
+    'no step is left running and none was dropped',
+    steps.length > 0 &&
+      steps.every(
+        (s) => s.status === 'done' && typeof s.endedAt === 'number',
+      ) &&
+      t.steps_dropped === 0,
+    JSON.stringify(steps.map((s) => [s.kind, s.status, s.endedAt])),
+  );
+  check(
+    label,
+    'steps are in time order and each ends no earlier than it began',
+    steps.every(
+      (s, i) => s.endedAt >= s.at && (i === 0 || s.at >= steps[i - 1].at),
+    ),
+    JSON.stringify(steps.map((s) => [s.at, s.endedAt])),
+  );
+  const thinking = steps.filter((s) => s.kind === 'thinking');
+  check(
+    label,
+    'every reasoning step has a duration',
+    thinking.length === 2 &&
+      thinking.every(
+        (s) => typeof s.durationMs === 'number' && s.durationMs > 0,
+      ),
+    JSON.stringify(thinking.map((s) => s.durationMs)),
+  );
+  if (expect.trace === 'with-thinking') {
+    check(
+      label,
+      'reasoning steps hold their text and title',
+      /Planning the demo/.test(thinking[0]?.text || '') &&
+        thinking[0]?.title === 'Planning the demo' &&
+        /Wrapping up/.test(thinking[1]?.text || '') &&
+        thinking[1]?.title === 'Wrapping up',
+      JSON.stringify(thinking.map((s) => [s.title, s.text?.slice(0, 30)])),
+    );
+  } else {
+    check(
+      label,
+      'reasoning steps keep their status and times but no text or title at the activity level',
+      thinking.every((s) => s.text === undefined && s.title === undefined) &&
+        !JSON.stringify(steps).includes('Planning the demo') &&
+        !JSON.stringify(steps).includes('Wrapping up'),
+      JSON.stringify(thinking),
+    );
+  }
+  const raw = JSON.stringify(steps);
+  const bash = steps.find((s) => s.kind === 'tool');
+  check(
+    label,
+    'the Bash step names its call',
+    typeof bash?.toolUseId === 'string' && bash.toolUseId.length > 0,
+    JSON.stringify(bash),
+  );
+  check(
+    label,
+    'steps never hold the answer text',
+    !raw.includes(ANSWER) && !raw.includes(SENTINEL),
+    raw.slice(0, 300),
+  );
+  if (interaction === 'assistant') {
+    const texts = steps.filter((s) => s.kind === 'text');
+    check(
+      label,
+      'the note written before the tool is a step between the reasoning and the call',
+      texts.length === 1 &&
+        texts[0].text === NARRATION &&
+        steps.indexOf(texts[0]) ===
+          steps.findIndex((s) => s.kind === 'tool') - 1,
+      JSON.stringify(texts),
+    );
+  } else {
+    check(
+      label,
+      'a proactive turn has no text step, its speech tool is no step and no tool output is kept',
+      !steps.some((s) => s.kind === 'text') &&
+        !raw.includes(NARRATION) &&
+        !raw.includes(PROACTIVE_TEXT) &&
+        !raw.includes('send_message') &&
+        bash?.resultPreview === undefined,
+      raw.slice(0, 300),
+    );
+  }
 }
 
 async function main() {
@@ -951,6 +1057,76 @@ async function main() {
   ];
   const outcomes = [];
   for (const s of scenarios) outcomes.push(await runScenario(ctx, s));
+
+  // The stored steps follow the *current* level, not the one the turn ran at.
+  console.log(
+    '\n== steps-level (full -> activity -> hidden -> full, stored turn)',
+  );
+  const fullRun = outcomes[3];
+  const stepsUrl = `/api/groups/${enc(fullRun.jid)}/turn-traces/${enc(fullRun.turnId)}`;
+  const setLevel = (process_visibility) =>
+    http_('PATCH', `/api/groups/${enc(fullRun.jid)}`, {
+      cookie,
+      body: { process_visibility },
+    });
+  const reasoningOf = (r) =>
+    (r.json?.steps || []).filter((s) => s.kind === 'thinking');
+  const atFull = await http_('GET', stepsUrl, { cookie });
+  check(
+    'steps-level',
+    'at full the reasoning steps hold their text',
+    atFull.status === 200 &&
+      reasoningOf(atFull).length === 2 &&
+      reasoningOf(atFull).every((s) => !!s.text && !!s.title),
+    `HTTP ${atFull.status} ${JSON.stringify(reasoningOf(atFull)).slice(0, 200)}`,
+  );
+  check(
+    'steps-level',
+    'lowered to activity',
+    (await setLevel('activity')).status === 200,
+  );
+  const atActivity = await http_('GET', stepsUrl, { cookie });
+  check(
+    'steps-level',
+    'at activity the same steps lose their text and titles but keep their times',
+    atActivity.status === 200 &&
+      atActivity.json.steps.length === atFull.json.steps.length &&
+      reasoningOf(atActivity).every(
+        (s) =>
+          s.text === undefined &&
+          s.title === undefined &&
+          typeof s.durationMs === 'number',
+      ) &&
+      !JSON.stringify(atActivity.json).includes('Planning the demo') &&
+      atActivity.json.thinking === '',
+    JSON.stringify(atActivity.json?.steps)?.slice(0, 240),
+  );
+  check(
+    'steps-level',
+    'lowered to hidden',
+    (await setLevel('hidden')).status === 200,
+  );
+  const atHidden = await http_('GET', stepsUrl, { cookie });
+  check(
+    'steps-level',
+    'at hidden the turn is a 404 that carries no step',
+    atHidden.status === 404 &&
+      !JSON.stringify(atHidden.json).includes('thinking'),
+    `HTTP ${atHidden.status} ${JSON.stringify(atHidden.json)?.slice(0, 120)}`,
+  );
+  check(
+    'steps-level',
+    'raised to full again',
+    (await setLevel('full')).status === 200,
+  );
+  const backAtFull = await http_('GET', stepsUrl, { cookie });
+  check(
+    'steps-level',
+    'and the reasoning text is back',
+    backAtFull.status === 200 &&
+      reasoningOf(backAtFull).every((s) => !!s.text && !!s.title),
+    `HTTP ${backAtFull.status}`,
+  );
 
   // Live change without a restart: hidden -> full on the same workspace.
   console.log(
