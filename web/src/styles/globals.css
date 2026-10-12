@@ -792,6 +792,12 @@ pre code.language-diff .hljs-deletion {
     transparent
   );
 }
+/* The live process window follows its end: its top edge fades once something
+   has scrolled out of it. */
+[data-scroll-fade='top'] {
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 1.75rem);
+  mask-image: linear-gradient(to bottom, transparent, #000 1.75rem);
+}
 /* Share images show tables and code in full, nothing to hint at. */
 .share-card-content [data-scroll-fade] {
   -webkit-mask-image: none;

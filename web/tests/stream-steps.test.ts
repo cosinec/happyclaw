@@ -4,7 +4,6 @@ import {
   addCommentaryStep,
   answerStart,
   appendThinkingText,
-  buildTimelineView,
   closeOpenSteps,
   closeTextStep,
   closeThinkingStep,
@@ -83,6 +82,65 @@ describe('thinking steps', () => {
 });
 
 describe('tool steps', () => {
+  it('previews the start of a long result, not its end', () => {
+    const output = `${'HEAD '.repeat(10)}${'x'.repeat(600)}TAIL`;
+    let list = startToolStep(empty(), { toolUseId: 't1', toolName: 'Bash' }, 0);
+    list = endToolStep(list, 't1', 5, output);
+    const preview = list.steps[0].resultPreview ?? '';
+    expect(preview.startsWith('HEAD HEAD HEAD')).toBe(true);
+    expect(preview).not.toContain('TAIL');
+    expect(preview.length).toBeLessThanOrEqual(400);
+    expect(preview.endsWith('…')).toBe(true);
+  });
+
+  it('trusts the SDK is_error over the text, even for an empty failure', () => {
+    let list = startToolStep(empty(), { toolUseId: 't1', toolName: 'Bash' }, 0);
+    list = startToolStep(list, { toolUseId: 't2', toolName: 'Bash' }, 1);
+    list = startToolStep(list, { toolUseId: 't3', toolName: 'Bash' }, 2);
+    // no text at all, but the SDK says it failed
+    list = endToolStep(list, 't1', 5, undefined, { isError: true });
+    // the legacy prefix still marks a failure when the SDK sent no flag
+    list = endToolStep(list, 't2', 6, '⚠️ boom');
+    // text that happens to start with the prefix is not a failure if the SDK says so
+    list = endToolStep(list, 't3', 7, '⚠️ just output', { isError: false });
+    expect(list.steps.map((step) => step.status)).toEqual([
+      'error',
+      'error',
+      'done',
+    ]);
+    expect(list.steps[1].resultPreview).toBe('boom');
+    // a successful result keeps its text, emoji included
+    expect(list.steps[2].resultPreview).toBe('⚠️ just output');
+  });
+
+  it('keeps what the tool did as facts', () => {
+    let list = startToolStep(empty(), { toolUseId: 't1', toolName: 'Edit' }, 0);
+    list = endToolStep(list, 't1', 5, 'edited', {
+      facts: { added: 12, removed: 3 },
+    });
+    expect(list.steps[0].resultFacts).toEqual({ added: 12, removed: 3 });
+    // a later end without facts does not erase them
+    list = endToolStep(list, 't1', 6, 'edited');
+    expect(list.steps[0].resultFacts).toEqual({ added: 12, removed: 3 });
+  });
+
+  it('keeps a sub-agent call running but records what it reported', () => {
+    let list = ensureTaskStep(
+      empty(),
+      { taskId: 'k1', toolUseId: 'k1', title: '读文件' },
+      0,
+    );
+    list = endToolStep(list, 'k1', 9, 'done', {
+      facts: { agent: { toolUses: 4, tokens: 1200 } },
+    });
+    expect(list.steps[0]).toMatchObject({
+      kind: 'task',
+      status: 'running',
+      resultFacts: { agent: { toolUses: 4, tokens: 1200 } },
+    });
+    expect(list.steps[0].endedAt).toBeUndefined();
+  });
+
   it('runs, then finishes with what it returned', () => {
     let list = startToolStep(
       empty(),
@@ -96,7 +154,7 @@ describe('tool steps', () => {
       status: 'done',
       endedAt: 400,
       summary: 'ls -la',
-      resultPreview: 'total 8 drwx',
+      resultPreview: 'total 8\ndrwx',
     });
   });
 
@@ -239,6 +297,31 @@ describe('text steps', () => {
     expect(list.steps[0].text).toBe('x'.repeat(30));
   });
 
+  it('closes every running text step, each with its own part of the text', () => {
+    const first = '先说明第一件事。';
+    const second = '再说明第二件事。';
+    // Text, a reasoning burst, then text again before the tool: the first
+    // text step is still running when the second opens.
+    let list = openTextStep(empty(), 0, 0);
+    list = openThinkingStep(list, 5);
+    list = closeThinkingStep(list, 8);
+    list = openTextStep(list, 9, first.length);
+    expect(list.steps.filter((step) => step.kind === 'text')).toHaveLength(2);
+
+    list = closeOpenSteps(list, 20, first + second, 0);
+    list = startToolStep(list, { toolUseId: 't1', toolName: 'Bash' }, 21);
+    list = endToolStep(list, 't1', 30);
+    list = startToolStep(list, { toolUseId: 't2', toolName: 'Bash' }, 31);
+
+    const texts = list.steps
+      .filter((step) => step.kind === 'text')
+      .map((step) => [step.status, step.text]);
+    expect(texts).toEqual([
+      ['done', first],
+      ['done', second],
+    ]);
+  });
+
   it('has no answer start without steps', () => {
     expect(answerStart(undefined, 0)).toBeUndefined();
     expect(answerStart([], 0)).toBeUndefined();
@@ -353,26 +436,6 @@ describe('the timeline view', () => {
     }
     return list;
   };
-
-  it('shows few steps whole', () => {
-    const view = buildTimelineView(tools(4).steps);
-    expect(view.folded).toEqual([]);
-    expect(view.rows).toHaveLength(4);
-    expect([...view.expanded]).toHaveLength(3);
-  });
-
-  it('folds the older steps into one line and opens the latest three', () => {
-    const steps = tools(10).steps;
-    const view = buildTimelineView(steps);
-    expect(view.folded.map((step) => step.toolUseId)).toEqual([
-      't0',
-      't1',
-      't2',
-      't3',
-    ]);
-    expect(view.rows).toHaveLength(6);
-    expect([...view.expanded]).toEqual(steps.slice(-3).map((step) => step.id));
-  });
 
   it('summarizes what was folded', () => {
     let list = tools(2);

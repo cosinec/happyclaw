@@ -57,6 +57,7 @@ import {
 } from './run-lifecycle';
 import { extractErrorMessage } from '../utils/error';
 import { markdownTail } from '../lib/markdown-blocks';
+import { hasListedSteps } from '../lib/process-steps';
 import {
   MAX_THINKING_TEXT,
   capThinkingText,
@@ -261,6 +262,9 @@ interface TurnTraceResponse {
   thinking?: string | null;
   thinking_duration_ms?: number | null;
   trace?: StreamingTraceEvent[] | null;
+  /** The ordered steps; `[]` for a turn recorded before steps were kept. */
+  steps?: StreamingStep[] | null;
+  steps_dropped?: number | null;
   created_at?: string;
 }
 
@@ -316,6 +320,12 @@ export interface StreamingState {
   steps?: StreamingStep[];
   /** Steps dropped from the front of `steps` at its cap. */
   stepsDropped?: number;
+  /**
+   * Part of `steps` was rebuilt from a reconnect snapshot (this tab joined the
+   * run part-way): their order is plausible, not exact, and the finished
+   * reply's steps are fetched from the server when the reader opens them.
+   */
+  stepsRebuilt?: boolean;
   /**
    * Characters cut from the head of `partialText` at its cap, so the offsets
    * text steps hold into the whole text stay valid.
@@ -934,6 +944,18 @@ function mergePendingMessageUsage(
   };
 }
 
+/** The steps of one finished reply, as its settled process card takes them. */
+export interface ReplySteps {
+  steps: StreamingStep[];
+  /** Steps dropped from the front once the cap was reached. */
+  dropped: number;
+  /**
+   * Rebuilt in a tab that joined the run part-way, not the server's record:
+   * the reader who opens the card gets the server's (see `loadTurnTrace`).
+   */
+  provisional?: boolean;
+}
+
 interface ChatState {
   groups: Record<string, GroupInfo>;
   adminHostOnlyMode: boolean;
@@ -957,6 +979,12 @@ interface ChatState {
    * final message id, so the reply keeps its collapsed "执行详情".
    */
   traceCache: Record<string, StreamingTraceEvent[]>;
+  /**
+   * The ordered steps a finished reply streamed, by final message id: what its
+   * settled process card lists. A reply without an entry (an older turn, or the
+   * classic layout's) keeps the reasoning and trace rows.
+   */
+  stepsCache: Record<string, ReplySteps>;
   /**
    * A message whose reasoning and trace the server kept but this tab has not
    * loaded: `loading` while asked, `failed` to try again on the next ask,
@@ -1345,9 +1373,195 @@ const SETTLE_FALLBACK_MS = 1500;
 const MAX_CACHED_TRACE_EVENTS = 60;
 
 /**
- * Thinking and execution details of a finished reply, keyed by its final
- * message id. Only taken from a projection that belongs to the finished
- * reply: a settled or interrupted card, or a live one with no newer run.
+ * A trace cut to what is kept for a finished reply: the newest rows, but never
+ * a denied permission, which the streaming card shows as a banner above its
+ * steps and which would otherwise vanish when the final message replaces it.
+ */
+function capCachedTrace(rows: StreamingTraceEvent[]): StreamingTraceEvent[] {
+  if (rows.length <= MAX_CACHED_TRACE_EVENTS) return rows;
+  const denied = rows.filter((row) => row.kind === 'permission');
+  let room = Math.max(0, MAX_CACHED_TRACE_EVENTS - denied.length);
+  const kept = new Set<StreamingTraceEvent>(denied);
+  for (let i = rows.length - 1; i >= 0 && room > 0; i -= 1) {
+    if (kept.has(rows[i])) continue;
+    kept.add(rows[i]);
+    room -= 1;
+  }
+  return rows.filter((row) => kept.has(row));
+}
+
+/**
+ * What the Web shows of a turn's process in a workspace, as one comparable
+ * value: all of it (with what the tools returned) in an Assistant workspace,
+ * and in a proactive one the level its owner chose, without the tool results
+ * at any level. A reply's cached process was read for one of these.
+ */
+function processView(group: GroupInfo | undefined): string {
+  return normalizeInteractionMode(group?.interaction_mode) === 'proactive'
+    ? `proactive:${normalizeProcessVisibility(group?.process_visibility)}`
+    : 'assistant';
+}
+
+/** The view of the workspace a runtime (the workspace or a session) belongs to. */
+function processViewOfRuntime(
+  s: Pick<ChatState, 'groups'>,
+  runtimeJid: string,
+): string {
+  return processView(s.groups[runtimeJid.replace(/#agent:.*$/, '')]);
+}
+
+/**
+ * The turn-trace request in flight for each message, newest last. A reply of
+ * the view that has changed since it was asked for, or of a request that a
+ * newer one has taken over, is not written (see `loadTurnTrace`).
+ */
+const turnTraceRequests = new Map<string, symbol>();
+
+/**
+ * The reasoning, trace and steps this tab holds for the replies of workspaces
+ * and their sessions, let go. They were read at the view that was in force: a
+ * lowered level must not leave what it hides in memory or on screen, and a
+ * raised one must not leave the replies without what it now shows (or marked
+ * empty). The replies load again, at the new view, when they are opened.
+ */
+function withoutProcessCaches(
+  s: ChatState,
+  jids: readonly string[],
+): Partial<ChatState> {
+  const ids = new Set<string>();
+  for (const jid of jids) {
+    for (const message of s.messages[jid] ?? []) ids.add(message.id);
+  }
+  const sessionPrefixes = jids.map((jid) => `${jid}#agent:`);
+  for (const messages of Object.values(s.agentMessages)) {
+    for (const message of messages) {
+      if (
+        sessionPrefixes.some((prefix) => message.chat_jid.startsWith(prefix))
+      ) {
+        ids.add(message.id);
+      }
+    }
+  }
+  const without = <V>(cache: Record<string, V>): Record<string, V> => {
+    const next: Record<string, V> = {};
+    for (const [id, value] of Object.entries(cache)) {
+      if (!ids.has(id)) next[id] = value;
+    }
+    return next;
+  };
+  return {
+    thinkingCache: without(s.thinkingCache),
+    thinkingDurationCache: without(s.thinkingDurationCache),
+    traceCache: without(s.traceCache),
+    stepsCache: without(s.stepsCache),
+    turnTraceStatus: without(s.turnTraceStatus),
+  };
+}
+
+/** A reply's steps as they stay, whether or not the server had better ones. */
+function notProvisional(held: ReplySteps): ReplySteps {
+  const { provisional: _provisional, ...rest } = held;
+  return rest;
+}
+
+/**
+ * What all the cached steps may hold in text, in characters. The entries are
+ * capped in number (500) and each by the reducer, but a long run's reasoning,
+ * summaries and output previews can still add up to far more than a tab
+ * should keep, and the reasoning is held a second time in `thinkingCache`.
+ */
+export const MAX_STEPS_CACHE_CHARS = 4_000_000;
+
+const stepsCharsOf = new WeakMap<ReplySteps, number>();
+
+/** The text a reply's steps carry: what its cache entry weighs. */
+function stepsChars(entry: ReplySteps): number {
+  let chars = stepsCharsOf.get(entry);
+  if (chars === undefined) {
+    chars = 0;
+    for (const step of entry.steps) {
+      chars +=
+        (step.text?.length ?? 0) +
+        (step.resultPreview?.length ?? 0) +
+        (step.summary?.length ?? 0) +
+        (step.title?.length ?? 0);
+    }
+    stepsCharsOf.set(entry, chars);
+  }
+  return chars;
+}
+
+/** Messages the reader has in front of them: this workspace, or its open tab. */
+function idsOnScreen(
+  s: Pick<
+    ChatState,
+    'currentGroup' | 'messages' | 'agentMessages' | 'activeAgentTab'
+  >,
+): Set<string> {
+  const ids = new Set<string>();
+  const jid = s.currentGroup;
+  if (!jid) return ids;
+  const agentId = s.activeAgentTab[jid];
+  const shown = agentId ? s.agentMessages[agentId] : s.messages[jid];
+  for (const message of shown ?? []) ids.add(message.id);
+  return ids;
+}
+
+/**
+ * The steps of a reply written to the cache: it is the newest entry, and what
+ * the cache holds is kept to its count and to `MAX_STEPS_CACHE_CHARS` in all.
+ * Past that the oldest entries go first, those of messages that are not in
+ * front of the reader before those that are; the entry just written stays.
+ */
+function withReplySteps(
+  s: ChatState,
+  messageId: string,
+  entry: ReplySteps,
+): Record<string, ReplySteps> {
+  const { [messageId]: _replaced, ...others } = s.stepsCache;
+  const cache = capThinkingCache({ ...others, [messageId]: entry });
+  const sizes = new Map<string, number>();
+  let total = 0;
+  for (const [id, held] of Object.entries(cache)) {
+    const chars = stepsChars(held);
+    sizes.set(id, chars);
+    total += chars;
+  }
+  if (total <= MAX_STEPS_CACHE_CHARS) return cache;
+  const onScreen = idsOnScreen(s);
+  const older = Object.keys(cache).filter((id) => id !== messageId);
+  const order = [
+    ...older.filter((id) => !onScreen.has(id)),
+    ...older.filter((id) => onScreen.has(id)),
+  ];
+  const gone = new Set<string>();
+  for (const id of order) {
+    if (total <= MAX_STEPS_CACHE_CHARS) break;
+    total -= sizes.get(id) ?? 0;
+    gone.add(id);
+  }
+  return Object.fromEntries(
+    Object.entries(cache).filter(([id]) => !gone.has(id)),
+  );
+}
+
+/**
+ * A step without what its tool or sub-agent returned: the preview of the
+ * output and the numbers read from it. A proactive workspace never shows them.
+ */
+export function withoutToolResults(step: StreamingStep): StreamingStep {
+  if (step.resultPreview === undefined && step.resultFacts === undefined) {
+    return step;
+  }
+  const { resultPreview: _preview, resultFacts: _facts, ...rest } = step;
+  return rest;
+}
+
+/**
+ * Thinking, execution details and ordered steps of a finished reply, keyed by
+ * its final message id. Only taken from a projection that belongs to the
+ * finished reply: a settled or interrupted card, or a live one with no newer
+ * run.
  */
 function finalizedReplyCaches(
   s: ChatState,
@@ -1359,7 +1573,18 @@ function finalizedReplyCaches(
   const thinkingText = state?.thinkingText || fallbackThinking;
   const duration = state ? totalThinkingMs(state) : fallbackDuration;
   const trace = (state?.traceEvents ?? []).filter(isUserVisibleTraceEvent);
+  // A projection that was never settled may still hold a running step.
+  const steps = state ? finishSteps(stepsOf(state), Date.now(), false) : null;
   return {
+    ...(steps && hasListedSteps(steps.steps)
+      ? {
+          stepsCache: withReplySteps(s, messageId, {
+            steps: steps.steps,
+            dropped: steps.dropped,
+            ...(state?.stepsRebuilt ? { provisional: true } : {}),
+          }),
+        }
+      : {}),
     ...(thinkingText
       ? {
           thinkingCache: capThinkingCache({
@@ -1380,7 +1605,7 @@ function finalizedReplyCaches(
       ? {
           traceCache: capThinkingCache({
             ...s.traceCache,
-            [messageId]: trace.slice(-MAX_CACHED_TRACE_EVENTS),
+            [messageId]: capCachedTrace(trace),
           }),
         }
       : {}),
@@ -2480,7 +2705,10 @@ function applyStreamEvent(
       if (!event.toolUseId || event.parentToolUseId) break;
       setSteps(
         next,
-        endToolStep(stepsOf(next), event.toolUseId, at, event.toolResult),
+        endToolStep(stepsOf(next), event.toolUseId, at, event.toolResult, {
+          isError: event.toolIsError,
+          facts: event.toolResultFacts,
+        }),
       );
       const ended = prev.activeTools.find(
         (t) => t.toolUseId === event.toolUseId,
@@ -2738,6 +2966,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   thinkingCache: {},
   thinkingDurationCache: {},
   traceCache: {},
+  stepsCache: {},
   turnTraceStatus: {},
   stopRequests: {},
   settledStreaming: {},
@@ -3390,6 +3619,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             { ...nextAgentMessages, ...nextMessages },
             s.traceCache,
           ),
+          stepsCache: retainThinkingCacheForMessages(
+            { ...nextAgentMessages, ...nextMessages },
+            s.stepsCache,
+          ),
           turnTraceStatus: retainThinkingCacheForMessages(
             { ...nextAgentMessages, ...nextMessages },
             s.turnTraceStatus,
@@ -3639,6 +3872,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           [jid]: { ...group, interaction_mode: interactionMode },
         };
       };
+      // The caches of the process the mode no longer shows go with the
+      // groups (see the subscription below the store).
       set((state) => ({
         groups: patchGroups(state.groups),
         error: null,
@@ -3803,6 +4038,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             { ...s.agentMessages, ...nextMessages },
             s.traceCache,
           ),
+          stepsCache: retainThinkingCacheForMessages(
+            { ...s.agentMessages, ...nextMessages },
+            s.stepsCache,
+          ),
           turnTraceStatus: retainThinkingCacheForMessages(
             { ...s.agentMessages, ...nextMessages },
             s.turnTraceStatus,
@@ -3851,20 +4090,55 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!turnId) return false;
     const current = get();
     if (current.turnTraceStatus[id] === 'loading') return false;
+    // Steps a tab rebuilt from a snapshot are asked for again, to be replaced
+    // by the server's; whatever else a cache holds is all there is to load.
+    const upgrading = current.stepsCache[id]?.provisional === true;
     if (
-      current.thinkingCache[id] !== undefined ||
-      current.thinkingDurationCache[id] !== undefined ||
-      current.traceCache[id] !== undefined
+      !upgrading &&
+      (current.thinkingCache[id] !== undefined ||
+        current.thinkingDurationCache[id] !== undefined ||
+        current.traceCache[id] !== undefined ||
+        current.stepsCache[id] !== undefined)
     ) {
       return true;
     }
     set((s) => ({
       turnTraceStatus: { ...s.turnTraceStatus, [id]: 'loading' },
     }));
+    // What the server answers is for the view the workspace had when asked.
+    // If the owner has changed it since (the caches were let go meanwhile),
+    // the answer is not written: it would put back what the old view showed,
+    // or mark the reply empty for a view that may show it. The request that
+    // is still the latest only gives up its 'loading', so the reply can be
+    // asked for again under the new view.
+    const request = Symbol(id);
+    turnTraceRequests.set(id, request);
+    const viewAsked = processViewOfRuntime(current, jid);
+    const stale = () =>
+      turnTraceRequests.get(id) !== request ||
+      processViewOfRuntime(get(), jid) !== viewAsked;
+    const finish = () => {
+      if (turnTraceRequests.get(id) === request) turnTraceRequests.delete(id);
+    };
+    const dropped = (): boolean => {
+      if (!stale()) return false;
+      if (turnTraceRequests.get(id) === request) {
+        set((s) => {
+          if (s.turnTraceStatus[id] !== 'loading') return s;
+          const status = { ...s.turnTraceStatus };
+          delete status[id];
+          return { turnTraceStatus: status };
+        });
+      }
+      finish();
+      return true;
+    };
     try {
       const data = await api.get<TurnTraceResponse>(
         `/api/groups/${encodeURIComponent(jid)}/turn-traces/${encodeURIComponent(turnId)}`,
       );
+      if (dropped()) return false;
+      const proactive = isProactiveRuntime(get(), jid);
       const thinking = capThinkingText(data.thinking || '');
       const duration = data.thinking_duration_ms ?? undefined;
       const rows = (Array.isArray(data.trace) ? data.trace : []).filter(
@@ -3872,9 +4146,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
       );
       // The host keeps the speech tool's rows of a proactive turn; the live
       // view leaves them out, so the reloaded one does too.
-      const trace = (
-        isProactiveRuntime(get(), jid) ? withoutSpeechTool(rows) : rows
-      ).slice(-MAX_CACHED_TRACE_EVENTS);
+      const trace = capCachedTrace(proactive ? withoutSpeechTool(rows) : rows);
+      // A proactive turn's speech tool is no step either, and what a tool or a
+      // sub-agent returned is not shown (the server leaves both out already; a
+      // server that sends more cannot put them on screen).
+      const sent = Array.isArray(data.steps) ? data.steps : [];
+      const steps = proactive
+        ? sent
+            .filter((step) => step.toolName !== SPEECH_TOOL_NAME)
+            .map(withoutToolResults)
+        : sent;
+      const keepsSteps = hasListedSteps(steps);
       const keepsDuration =
         duration !== undefined &&
         Number.isFinite(duration) &&
@@ -3882,11 +4164,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
         (!!thinking || duration >= 1000);
       set((s) => {
         const status = { ...s.turnTraceStatus };
-        if (!thinking && !keepsDuration && trace.length === 0) {
+        // A card already shows the steps this tab has: the server having
+        // nothing more is no reason to take it away.
+        if (
+          !upgrading &&
+          !thinking &&
+          !keepsDuration &&
+          trace.length === 0 &&
+          !keepsSteps
+        ) {
           status[id] = 'empty';
         } else {
           delete status[id];
         }
+        const held = s.stepsCache[id];
         return {
           turnTraceStatus: capThinkingCache(status),
           ...(thinking
@@ -3913,20 +4204,49 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 }),
               }
             : {}),
+          ...(keepsSteps
+            ? {
+                stepsCache: withReplySteps(s, id, {
+                  steps,
+                  dropped:
+                    typeof data.steps_dropped === 'number' &&
+                    data.steps_dropped > 0
+                      ? data.steps_dropped
+                      : 0,
+                }),
+              }
+            : upgrading && held
+              ? { stepsCache: { ...s.stepsCache, [id]: notProvisional(held) } }
+              : {}),
         };
       });
       return true;
     } catch (err) {
       // A turn the server no longer shows (its owner hid the process) is
       // nothing to load; anything else may work on the next ask.
+      if (dropped()) return false;
       const gone = (err as { status?: number } | null)?.status === 404;
-      set((s) => ({
-        turnTraceStatus: {
-          ...s.turnTraceStatus,
-          [id]: gone ? 'empty' : 'failed',
-        },
-      }));
+      set((s) => {
+        const status = { ...s.turnTraceStatus };
+        const held = s.stepsCache[id];
+        if (upgrading) {
+          // The reader keeps the card they have, and nothing is marked on it.
+          delete status[id];
+          return {
+            turnTraceStatus: status,
+            // Gone for good: do not ask again. A failure may work next time.
+            ...(gone && held
+              ? { stepsCache: { ...s.stepsCache, [id]: notProvisional(held) } }
+              : {}),
+          };
+        }
+        return {
+          turnTraceStatus: { ...status, [id]: gone ? 'empty' : 'failed' },
+        };
+      });
       return false;
+    } finally {
+      finish();
     }
   },
 
@@ -5825,6 +6145,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (local && sameTurn && local.steps && local.steps.length > 0) {
         restored.steps = local.steps;
         restored.stepsDropped = local.stepsDropped;
+        restored.stepsRebuilt = local.stepsRebuilt;
         restored.partialBase = local.partialBase;
         restored.thinkingGap = local.thinkingGap;
         if (local.thinkingTitle) restored.thinkingTitle = local.thinkingTitle;
@@ -5861,6 +6182,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         });
         restored.steps = rebuilt.steps;
         restored.stepsDropped = rebuilt.dropped;
+        restored.stepsRebuilt = true;
       }
       return level ? scrubForVisibility(restored, level) : restored;
     };
@@ -6223,3 +6545,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
   },
 }));
+
+// What the replies a tab holds were read at is the view their workspace had
+// then. Whoever changes it (this tab, another one, the settings page, a load
+// of the groups) replaces `groups`, so the caches are let go here, for every
+// workspace whose view differs from the one before, rather than in each place
+// that replaces them. A workspace the previous groups did not have is not a
+// change.
+useChatStore.subscribe((state, previous) => {
+  if (state.groups === previous.groups) return;
+  const changed: string[] = [];
+  for (const [jid, group] of Object.entries(state.groups)) {
+    const before = previous.groups[jid];
+    if (before && processView(before) !== processView(group)) changed.push(jid);
+  }
+  if (changed.length === 0) return;
+  useChatStore.setState((current) => withoutProcessCaches(current, changed));
+});

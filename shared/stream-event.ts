@@ -298,6 +298,48 @@ export interface ClaudeContextAudit {
   warnings: string[];
 }
 
+/**
+ * What a tool did, as numbers and flags, read by the Runner from the SDK's
+ * structured `tool_use_result`. Never a path, file content or model text, so a
+ * UI can show "+12 −3" or "读取 120 行" without carrying the result itself.
+ * Every field is optional: a tool fills what it knows. Declared identically in
+ * shared/stream-event.ts and shared/stream-steps.ts (tests keep them equal).
+ */
+export interface ToolResultFacts {
+  /** Lines an edit or write added / removed. */
+  added?: number;
+  removed?: number;
+  /** A Write created the file (rather than updating it). */
+  created?: boolean;
+  /** Read: lines returned, and the file's total. */
+  lines?: number;
+  totalLines?: number;
+  /** Glob / Grep: files and matches found. */
+  files?: number;
+  matches?: number;
+  /** A failed command's exit code (parsed from `Exit code N`). */
+  exitCode?: number;
+  /** WebFetch: HTTP status and bytes received. */
+  httpCode?: number;
+  bytes?: number;
+  /** WebSearch: searches made. */
+  searches?: number;
+  /** Duration the tool itself reported. */
+  durationMs?: number;
+  /** A sub-agent's totals, from the Task / Agent tool's result. */
+  agent?: {
+    toolUses?: number;
+    reads?: number;
+    searches?: number;
+    edits?: number;
+    commands?: number;
+    added?: number;
+    removed?: number;
+    tokens?: number;
+    durationMs?: number;
+  };
+}
+
 export interface StreamEvent {
   eventType: StreamEventType;
   /** Which runtime actor produced the event. */
@@ -331,6 +373,12 @@ export interface StreamEvent {
    *  `tool_result` events so the card/Web can surface what a tool returned,
    *  aligning the trace with what Claude Code shows. */
   toolResult?: string;
+  /** `tool_result` events: the SDK's own `is_error` flag. Authoritative; the
+   *  "⚠️" prefix of `toolResult` is the older signal and misses a failure with
+   *  no text. */
+  toolIsError?: boolean;
+  /** `tool_result` events: what the tool did, as numbers (see ToolResultFacts). */
+  toolResultFacts?: ToolResultFacts;
   elapsedSeconds?: number;
   /** Wall-clock length of one reasoning block, set on `thinking_end`. */
   thinkingDurationMs?: number;

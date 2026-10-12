@@ -1,4 +1,12 @@
 /**
+ * Canonical source. Build step copies this file to:
+ *   - src/thinking-text.ts
+ *   - web/src/lib/thinking-text.ts
+ *
+ * DO NOT edit the copies directly -- edit this file and run `make sync-types`.
+ */
+
+/**
  * Reasoning text helpers. The model's thinking arrives as a stream of deltas
  * with no block boundaries, so everything the UI needs from it (paragraph
  * breaks between bursts, a bounded size, a short title for the collapsed

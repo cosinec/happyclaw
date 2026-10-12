@@ -199,6 +199,8 @@ describe('schema version head', () => {
     // turn's process the Web shows (schema-v80-process-visibility.test.ts).
     // v81: turn_traces, the persisted thinking summary and execution trace of a
     // turn (schema-v81-turn-traces.test.ts).
-    expect(db.CURRENT_SCHEMA_VERSION).toBe(81);
+    // v82: turn_traces.steps_json / steps_dropped, the turn's steps in the
+    // order they happened (schema-v82-turn-steps.test.ts).
+    expect(db.CURRENT_SCHEMA_VERSION).toBe(82);
   });
 });

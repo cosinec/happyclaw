@@ -32,6 +32,9 @@ const {
   presentTurnTrace,
   resolveTurnTraceExposure,
 } = await import('../src/turn-trace.js');
+const { TurnStepRecorder } = await import('../src/turn-steps.js');
+const { MAX_STEPS } = await import('../src/stream-steps.js');
+const { THINKING_OMITTED_MARKER } = await import('../src/thinking-text.js');
 
 import type {
   StreamEvent,
@@ -141,6 +144,18 @@ describe('TurnTraceAccumulator', () => {
       thinking: '',
       thinkingDurationMs: 2_000,
       trace: [],
+      steps: [
+        {
+          id: 'thinking-0',
+          kind: 'thinking',
+          at: 0,
+          endedAt: 1_500,
+          status: 'done',
+          text: '',
+          durationMs: 2_000,
+        },
+      ],
+      stepsDropped: 0,
     });
   });
 
@@ -227,6 +242,160 @@ describe('TurnTraceAccumulator', () => {
     const content = first.toContent({ includeThinking: true })!;
     expect(content.thinking).toBe('甲\n\n乙');
     expect(content.thinkingDurationMs).toBe(300 + 150);
+    // the steps of the later part follow the earlier one's
+    expect(content.steps.map((s) => [s.kind, s.text])).toEqual([
+      ['thinking', '甲'],
+      ['thinking', '乙'],
+    ]);
+  });
+
+  test('the steps of a turn come in the order it ran, without the answer', () => {
+    const acc = new TurnTraceAccumulator(0);
+    acc.observe(ev('thinking_delta', { text: '**读**\n\n先读。' }), 100);
+    acc.observe(ev('text_delta', { text: '我读一下。' }), 200);
+    acc.observe(
+      ev('tool_use_start', {
+        toolName: 'Read',
+        toolUseId: 'r',
+        toolInputSummary: 'a.ts',
+      }),
+      300,
+    );
+    acc.observe(ev('tool_use_end', { toolUseId: 'r' }), 400);
+    acc.observe(ev('text_delta', { text: '结论。' }), 500);
+    const { steps, stepsDropped } = acc.toContent({
+      includeThinking: true,
+      now: 600,
+    })!;
+    expect(
+      steps.map((s) => [s.kind, s.status, s.title ?? s.text ?? s.toolName]),
+    ).toEqual([
+      ['thinking', 'done', '读'],
+      ['text', 'done', '我读一下。'],
+      ['tool', 'done', 'Read'],
+    ]);
+    expect(stepsDropped).toBe(0);
+  });
+
+  test('steps alone are worth keeping, even when no trace row was made for them', () => {
+    const acc = new TurnTraceAccumulator(0);
+    acc.observe(
+      ev('tool_use_start', {
+        toolName: 'Read',
+        toolUseId: 'r',
+        displayLevel: 'debug',
+      }),
+      10,
+    );
+    expect(acc.isEmpty).toBe(false);
+    const content = acc.toContent({ includeThinking: true, now: 20 })!;
+    expect(content.trace).toEqual([]);
+    expect(content.thinkingDurationMs).toBeNull();
+    expect(content.steps.map((s) => s.toolName)).toEqual(['Read']);
+  });
+
+  test('a turn with only an answer has no steps, and so yields nothing', () => {
+    const acc = new TurnTraceAccumulator(0);
+    acc.observe(ev('text_delta', { text: '你好' }), 10);
+    expect(acc.isEmpty).toBe(true);
+    expect(acc.toContent({ includeThinking: true })).toBeNull();
+  });
+
+  test('without the thinking text a step keeps its status and times only, and no note', () => {
+    const acc = new TurnTraceAccumulator(0);
+    acc.observe(ev('thinking_delta', { text: '**机密**\n\n内容。' }), 100);
+    acc.observe(ev('text_delta', { text: '我先看看。' }), 200);
+    acc.observe(
+      ev('tool_use_start', { toolName: 'Read', toolUseId: 'r' }),
+      300,
+    );
+    const { steps } = acc.toContent({ includeThinking: false, now: 400 })!;
+    expect(steps.map((s) => s.kind)).toEqual(['thinking', 'tool']);
+    expect(steps[0]).toEqual({
+      id: 'thinking-0',
+      kind: 'thinking',
+      at: 0,
+      endedAt: 200,
+      status: 'done',
+      durationMs: 200,
+    });
+    expect(JSON.stringify(steps)).not.toContain('机密');
+    expect(JSON.stringify(steps)).not.toContain('我先看看');
+  });
+
+  test('keeps the newest steps and says how many went, even when none of them ever finished', () => {
+    const acc = new TurnTraceAccumulator(0);
+    for (let i = 0; i < MAX_STEPS + 20; i += 1) {
+      acc.observe(
+        ev('tool_use_start', { toolName: 'Read', toolUseId: `r${i}` }),
+        i,
+      );
+    }
+    const { steps, stepsDropped } = acc.toContent({
+      includeThinking: true,
+      now: 1_000,
+    })!;
+    expect(steps).toHaveLength(MAX_STEPS);
+    expect(stepsDropped).toBe(20);
+    expect(steps[0].toolUseId).toBe('r20');
+  });
+
+  test('thinking beyond 64KB is cut from the oldest step; titles and times stay', () => {
+    const acc = new TurnTraceAccumulator(0);
+    const paragraph = `${'推理'.repeat(500)}\n\n`;
+    // 40 bursts of ~3KB each, set apart by tools: 120KB in all
+    for (let i = 0; i < 40; i += 1) {
+      acc.observe(
+        ev('thinking_delta', { text: `**第${i}段**\n\n${paragraph}` }),
+        i * 10,
+      );
+      acc.observe(
+        ev('tool_use_start', { toolName: 'Read', toolUseId: `r${i}` }),
+        i * 10 + 5,
+      );
+    }
+    const { steps } = acc.toContent({ includeThinking: true, now: 1_000 })!;
+    const thinking = steps.filter((s) => s.kind === 'thinking');
+    expect(thinking).toHaveLength(40);
+    const bytes = thinking.reduce(
+      (sum, s) => sum + Buffer.byteLength(s.text ?? '', 'utf8'),
+      0,
+    );
+    expect(bytes).toBeLessThanOrEqual(MAX_TURN_TRACE_THINKING_BYTES);
+    // the oldest lost its text but not its title, the newest is whole
+    expect(thinking[0].text).toBe(THINKING_OMITTED_MARKER);
+    // no burst reads as one that had nothing to show
+    expect(thinking.every((s) => !!s.text)).toBe(true);
+    expect(thinking[0].title).toBe('第0段');
+    expect(thinking[0].endedAt).toBeDefined();
+    expect(thinking[39].text).toContain('推理'.repeat(500));
+    expect(thinking.at(-1)!.title).toBe('第39段');
+  });
+
+  test('a fault in the step recorder costs the steps, not the trace', () => {
+    const observe = vi
+      .spyOn(TurnStepRecorder.prototype, 'observe')
+      .mockImplementation(() => {
+        throw new Error('boom');
+      });
+    try {
+      const acc = new TurnTraceAccumulator(0);
+      acc.observe(ev('thinking_delta', { text: '想' }), 100);
+      acc.observe(ev('tool_use_start', { toolName: 'A', toolUseId: 'a' }), 200);
+      acc.observe(ev('tool_use_end', { toolUseId: 'a' }), 300);
+      // the recorder is not asked again after it failed
+      expect(observe).toHaveBeenCalledTimes(1);
+      const content = acc.toContent({ includeThinking: true, now: 400 })!;
+      expect(content.thinking).toBe('想');
+      expect(content.trace.map((row) => row.title)).toEqual([
+        '工具 A',
+        '工具完成 a',
+      ]);
+      expect(content.steps).toEqual([]);
+      expect(content.stepsDropped).toBe(0);
+    } finally {
+      observe.mockRestore();
+    }
   });
 });
 
@@ -253,6 +422,120 @@ describe('TurnTraceTracker', () => {
     expect(row.thinkingDurationMs).toBeGreaterThan(0);
     // once stored, the turn is no longer pending
     expect(instance.persist({ chatJid: 'web:a', inputId: 'in-1' })).toBe(false);
+  });
+
+  test('an Assistant turn stores its steps in order, without the answer', () => {
+    const { instance, stored } = tracker('assistant');
+    playTurn(instance, 'in-1');
+    instance.persist({ chatJid: 'web:a', inputId: 'in-1', now: 5_000 });
+    const [row] = stored;
+    expect(row.stepsDropped).toBe(0);
+    const steps = JSON.parse(row.stepsJson!);
+    expect(
+      steps.map(
+        (s: {
+          kind: string;
+          status: string;
+          text?: string;
+          toolName?: string;
+        }) => [s.kind, s.status, s.text ?? s.toolName],
+      ),
+    ).toEqual([
+      ['thinking', 'done', '先看目录'],
+      ['tool', 'done', 'Bash'],
+      ['thinking', 'done', '再总结'],
+    ]);
+    expect(steps[1]).toMatchObject({
+      toolUseId: 'tool-1',
+      summary: 'command: ls',
+      resultPreview: 'a.txt',
+    });
+    expect(row.stepsJson).not.toContain('这是答案');
+  });
+
+  test('activity stores the structure of the steps but no thinking text or title', () => {
+    const { instance, stored } = tracker('proactive', { current: 'activity' });
+    playTurn(instance, 'in-1');
+    instance.persist({ chatJid: 'web:a', inputId: 'in-1' });
+    const steps = JSON.parse(stored[0].stepsJson!);
+    expect(steps.map((s: { kind: string }) => s.kind)).toEqual([
+      'thinking',
+      'tool',
+      'thinking',
+    ]);
+    expect(stored[0].stepsJson).not.toContain('先看目录');
+    expect(steps[0].text).toBeUndefined();
+    expect(steps[0].title).toBeUndefined();
+    expect(steps[0].durationMs).toBeGreaterThan(0);
+  });
+
+  test('a proactive turn stores neither its speech tool nor the narration the host composes', () => {
+    const { instance, stored } = tracker('proactive', { current: 'full' });
+    instance.observe('in-1', ev('thinking_delta', { text: '想' }), 10);
+    instance.observe(
+      'in-1',
+      ev('commentary', { agentScope: 'main', text: '我先读文件。' }),
+      20,
+    );
+    instance.observe(
+      'in-1',
+      ev('tool_use_start', { toolName: 'Read', toolUseId: 'r' }),
+      30,
+    );
+    instance.observe(
+      'in-1',
+      ev('tool_use_start', {
+        toolName: 'mcp__happyclaw__send_message',
+        toolUseId: 'say',
+        toolInputSummary: '你好',
+      }),
+      40,
+    );
+    instance.observe('in-1', ev('tool_result', { toolUseId: 'say' }), 50);
+    instance.persist({ chatJid: 'web:a', inputId: 'in-1' });
+    const steps = JSON.parse(stored[0].stepsJson!);
+    expect(steps.map((s: { kind: string }) => s.kind)).toEqual([
+      'thinking',
+      'tool',
+    ]);
+    expect(stored[0].stepsJson).not.toContain('send_message');
+    expect(stored[0].stepsJson).not.toContain('我先读文件');
+    // the existing trace is untouched by this
+    expect(stored[0].traceJson).toContain('send_message');
+  });
+
+  test('the number of steps dropped at the cap is stored with the rest', () => {
+    const { instance, stored } = tracker('assistant');
+    for (let i = 0; i < MAX_STEPS + 20; i += 1) {
+      instance.observe(
+        'in-1',
+        ev('tool_use_start', { toolName: 'Read', toolUseId: `r${i}` }),
+        i,
+      );
+      instance.observe('in-1', ev('tool_use_end', { toolUseId: `r${i}` }), i);
+    }
+    instance.persist({ chatJid: 'web:a', inputId: 'in-1', now: 1_000 });
+    expect(stored[0].stepsDropped).toBe(20);
+    const steps = JSON.parse(stored[0].stepsJson!);
+    expect(steps).toHaveLength(MAX_STEPS);
+    expect(steps[0].toolUseId).toBe('r20');
+  });
+
+  test('an Assistant turn keeps the speech tool as the tool call it is', () => {
+    const { instance, stored } = tracker('assistant');
+    instance.observe(
+      'in-1',
+      ev('tool_use_start', {
+        toolName: 'mcp__happyclaw__send_message',
+        toolUseId: 'say',
+      }),
+      10,
+    );
+    instance.persist({ chatJid: 'web:a', inputId: 'in-1' });
+    expect(JSON.parse(stored[0].stepsJson!)[0]).toMatchObject({
+      kind: 'tool',
+      toolName: 'mcp__happyclaw__send_message',
+    });
   });
 
   test('turns of one warm Runner are kept apart', () => {
@@ -366,6 +649,77 @@ describe('TurnTraceTracker', () => {
     expect(
       JSON.parse(stored[1].traceJson).map((r: { title: string }) => r.title),
     ).toEqual(['工具 A', '工具 B', '工具 C']);
+    // the steps grow with the sequence, each part after the one before
+    expect(
+      JSON.parse(stored[0].stepsJson!).map(
+        (s: { toolName: string }) => s.toolName,
+      ),
+    ).toEqual(['A']);
+    const steps = JSON.parse(stored[1].stepsJson!);
+    expect(steps.map((s: { toolName: string }) => s.toolName)).toEqual([
+      'A',
+      'B',
+      'C',
+    ]);
+    expect(new Set(steps.map((s: { id: string }) => s.id)).size).toBe(3);
+  });
+
+  test('a background sub-agent that ends in a later part of a held reply sequence is still one step', () => {
+    const { instance, stored } = tracker('assistant');
+    instance.observe(
+      'in-1',
+      ev('tool_use_start', {
+        toolName: 'Agent',
+        toolUseId: 'ag1',
+        toolInputSummary: '后台调研',
+      }),
+      10,
+    );
+    instance.observe(
+      'in-1',
+      ev('task_start', {
+        taskId: 'ag1',
+        toolUseId: 'ag1',
+        taskDescription: '后台调研',
+      }),
+      20,
+    );
+    // the first part is delivered while the sub-agent still runs
+    instance.persist({
+      chatJid: 'web:a',
+      inputId: 'in-1',
+      turnId: 'in-1',
+      keep: true,
+      now: 100,
+    });
+    // the continuation turn only hears that it finished
+    instance.observe(
+      'in-2',
+      ev('task_notification', {
+        taskId: 'ag1',
+        toolUseId: 'ag1',
+        taskStatus: 'completed',
+        taskSummary: '调研完成：3 处',
+      }),
+      900,
+    );
+    instance.persist({
+      chatJid: 'web:a',
+      inputId: 'in-2',
+      turnId: 'in-1',
+      now: 1_000,
+    });
+    expect(stored).toHaveLength(2);
+    const steps = JSON.parse(stored[1].stepsJson!);
+    expect(steps).toHaveLength(1);
+    expect(steps[0]).toMatchObject({
+      id: 'task-ag1',
+      kind: 'task',
+      title: '后台调研',
+      summary: '调研完成：3 处',
+      status: 'done',
+      endedAt: 900,
+    });
   });
 
   test('a failing store never loses the reply', () => {
@@ -501,7 +855,23 @@ describe('stored traces and the messages that carry them', () => {
         { title: '工具结果' },
         { title: '工具完成 tool-1' },
       ],
+      steps: [
+        { kind: 'thinking', text: '先看目录' },
+        { kind: 'tool', toolName: 'Bash' },
+        { kind: 'thinking', text: '再总结' },
+      ],
+      steps_dropped: 0,
     });
+  });
+
+  test('a stored turn without steps reads as none', () => {
+    storeTrace('no-steps');
+    const record = db.getTurnTrace(JID, 'no-steps')!;
+    expect(record.steps_json).toBe('[]');
+    expect(record.steps_dropped).toBe(0);
+    expect(
+      presentTurnTrace(record, { visible: true, includeThinking: true }),
+    ).toMatchObject({ steps: [], steps_dropped: 0 });
   });
 
   test('presenting honours the exposure and survives a damaged trace', () => {
@@ -619,14 +989,17 @@ describe('stored traces and the messages that carry them', () => {
     expect(resolveTurnTraceExposure('expo-hidden')).toEqual({
       visible: false,
       includeThinking: false,
+      proactive: true,
     });
     expect(resolveTurnTraceExposure('expo-activity')).toEqual({
       visible: true,
       includeThinking: false,
+      proactive: true,
     });
     expect(resolveTurnTraceExposure('expo-full')).toEqual({
       visible: true,
       includeThinking: true,
+      proactive: true,
     });
     // fire-and-forget Spawn Agents keep Assistant semantics
     expect(
