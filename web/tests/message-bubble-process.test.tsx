@@ -884,3 +884,147 @@ describe('steps this tab rebuilt after joining the run part-way', () => {
     expect(text()).toContain('服务端的第二段');
   });
 });
+
+describe('what a tool returned, once the workspace is a proactive one', () => {
+  const FAILED = [
+    step({
+      id: 'thinking-0',
+      kind: 'thinking',
+      durationMs: 3000,
+      title: '确认范围',
+      text: '**确认范围**\n\n先跑测试。',
+    }),
+    step({
+      id: 'tool-a',
+      kind: 'tool',
+      at: 1_004_000,
+      endedAt: 1_005_000,
+      status: 'error',
+      toolName: 'Bash',
+      toolUseId: 'a',
+      summary: 'command: npm run unique-check',
+      resultPreview: 'FAIL secret-output-line',
+      resultFacts: { exitCode: 7 },
+    }),
+    step({
+      id: 'task-1',
+      kind: 'task',
+      at: 1_005_000,
+      endedAt: 1_006_000,
+      taskId: 'task-1',
+      toolUseId: 'task-1',
+      toolName: 'Task',
+      title: '核对子任务',
+      summary: '子任务进度',
+      resultPreview: '子代理的结论内容',
+      resultFacts: { agent: { toolUses: 5, tokens: 4321 } },
+    }),
+  ];
+  const mode = (
+    interaction_mode: 'assistant' | 'proactive',
+    process_visibility?: 'hidden' | 'activity' | 'full',
+  ) =>
+    useChatStore.setState({
+      groups: { [JID]: group({ interaction_mode, process_visibility }) },
+    });
+  const view = async () => {
+    await mount(reply({ source_kind: 'sdk_send_message' }));
+    await click(summaryRow());
+  };
+  /** What another tab did is only known from the groups the next load brings. */
+  const loadGroupsAs = async (over: Partial<GroupInfo>) => {
+    apiGetMock.mockResolvedValueOnce({ groups: { [JID]: group(over) } });
+    await act(async () => {
+      await useChatStore.getState().loadGroups();
+    });
+  };
+
+  it('are shown in an Assistant workspace: the output of a failed call and its facts', async () => {
+    mode('assistant');
+    seed({ steps: FAILED });
+    await view();
+    expect(text()).toContain('npm run unique-check');
+    expect(text()).toContain('secret-output-line');
+    expect(text()).toContain('退出码 7');
+  });
+
+  it.each(['activity', 'full'] as const)(
+    'are not shown at the %s level, whatever the cache still holds',
+    async (level) => {
+      // The cache was read before the workspace became proactive.
+      mode('proactive', level);
+      seed({ steps: FAILED });
+      await view();
+      expect(card()).toBeTruthy();
+      // What the call was and that it failed stay; what it returned does not.
+      expect(text()).toContain('npm run unique-check');
+      expect(text()).not.toContain('secret-output-line');
+      expect(text()).not.toContain('退出码');
+      expect(text()).not.toContain('子代理的结论内容');
+      expect(text()).not.toContain('4321');
+    },
+  );
+
+  it('are not shown in a session of a proactive workspace', async () => {
+    mode('proactive', 'full');
+    seed({ steps: FAILED });
+    await mount(
+      reply({ chat_jid: `${JID}#agent:s1`, source_kind: 'sdk_send_message' }),
+    );
+    await click(summaryRow());
+    expect(text()).not.toContain('secret-output-line');
+  });
+
+  it('are let go with the process when another tab makes the workspace proactive', async () => {
+    mode('assistant');
+    useChatStore.setState({ messages: { [JID]: [reply()] } });
+    seed({
+      steps: FAILED,
+      thinking: '**确认范围**\n\n先跑测试。',
+      duration: 3000,
+      trace: TRACE,
+    });
+    await mount(reply());
+    await click(summaryRow());
+    expect(text()).toContain('secret-output-line');
+
+    await loadGroupsAs({
+      interaction_mode: 'proactive',
+      process_visibility: 'full',
+    });
+    expect(text()).not.toContain('secret-output-line');
+    expect(text()).not.toContain('退出码');
+    expect(useChatStore.getState().stepsCache.m1).toBeUndefined();
+    expect(useChatStore.getState().thinkingCache.m1).toBeUndefined();
+    expect(useChatStore.getState().traceCache.m1).toBeUndefined();
+    // The reply offers its process again, to be loaded for the new view.
+    expect(text()).toContain('处理过程');
+    expect(text()).toContain('最终答案在这里。');
+  });
+
+  it('are let go when another tab lowers the level to hidden', async () => {
+    mode('proactive', 'full');
+    useChatStore.setState({ messages: { [JID]: [reply()] } });
+    seed({ steps: STEPS, thinking: '想', duration: 3000, trace: TRACE });
+    await mount(reply());
+    expect(card()).toBeTruthy();
+
+    await loadGroupsAs({
+      interaction_mode: 'proactive',
+      process_visibility: 'hidden',
+    });
+    expect(card()).toBeNull();
+    expect(text()).not.toContain('处理过程');
+    expect(useChatStore.getState().stepsCache.m1).toBeUndefined();
+  });
+
+  it('are kept in an Assistant workspace when another tab only renames it', async () => {
+    mode('assistant');
+    useChatStore.setState({ messages: { [JID]: [reply()] } });
+    seed({ steps: FAILED });
+    await mount(reply());
+    await loadGroupsAs({ name: '改了名', interaction_mode: 'assistant' });
+    expect(card()).toBeTruthy();
+    expect(useChatStore.getState().stepsCache.m1).toBeDefined();
+  });
+});

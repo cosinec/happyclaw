@@ -52,7 +52,8 @@ vi.mock('../web/src/utils/messageSnapshotCache', () => ({
   saveAgentMessageSnapshot: vi.fn(async () => undefined),
 }));
 
-const { useChatStore } = await import('../web/src/stores/chat');
+const { useChatStore, MAX_STEPS_CACHE_CHARS } =
+  await import('../web/src/stores/chat');
 const initialState = useChatStore.getState();
 
 const JID = 'web:finalize';
@@ -940,5 +941,85 @@ describe('streaming text cap', () => {
     flushRaf();
     const next = useChatStore.getState().streaming[JID]!.partialText;
     expect(next).toBe(`${cut}继续`);
+  });
+});
+
+describe('the steps cache across a finish', () => {
+  const entry = (label: string) => ({
+    steps: [
+      {
+        id: `thinking-${label}`,
+        kind: 'thinking' as const,
+        at: 1,
+        status: 'done' as const,
+        text: 'x'.repeat(1_000_000),
+      },
+    ],
+    dropped: 0,
+  });
+  const room = Math.floor(MAX_STEPS_CACHE_CHARS / 1_000_000);
+
+  function streamAndFinish() {
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    emit(
+      { eventType: 'thinking_delta', text: '先想一想。', turnId: 'turn-1' },
+      'run-a',
+    );
+    flushRaf();
+    emit(
+      {
+        eventType: 'tool_use_start',
+        toolName: 'Bash',
+        toolUseId: 'tool-1',
+        toolInputSummary: 'ls',
+        turnId: 'turn-1',
+      },
+      'run-a',
+    );
+    emit(
+      { eventType: 'tool_use_end', toolUseId: 'tool-1', turnId: 'turn-1' },
+      'run-a',
+    );
+    emit(
+      { eventType: 'text_delta', text: '最终答案。', turnId: 'turn-1' },
+      'run-a',
+    );
+    useChatStore.getState().handleRunFinished(JID, 'run-a');
+    useChatStore
+      .getState()
+      .handleWsNewMessage(JID, finalMessage('final-1', '最终答案。'));
+  }
+
+  it('lets go of the oldest entries once the finished reply takes it past the limit', () => {
+    const ids = Array.from({ length: room }, (_, i) => `old-${i}`);
+    useChatStore.setState({
+      stepsCache: Object.fromEntries(ids.map((id) => [id, entry(id)])),
+    });
+    streamAndFinish();
+    const keys = Object.keys(useChatStore.getState().stepsCache);
+    expect(keys).not.toContain('old-0');
+    expect(keys).toContain('old-1');
+    expect(keys.at(-1)).toBe('final-1');
+  });
+
+  it('keeps what is on screen, and leaves the cache alone within the limit', () => {
+    const ids = Array.from({ length: room }, (_, i) => `old-${i}`);
+    useChatStore.setState({
+      stepsCache: Object.fromEntries(ids.map((id) => [id, entry(id)])),
+      currentGroup: JID,
+      messages: { [JID]: [finalMessage('old-0', '旧的回复')] },
+    });
+    streamAndFinish();
+    const keys = Object.keys(useChatStore.getState().stepsCache);
+    expect(keys).toContain('old-0');
+    expect(keys).not.toContain('old-1');
+
+    reset();
+    useChatStore.setState({ stepsCache: { 'old-0': entry('old-0') } });
+    streamAndFinish();
+    expect(Object.keys(useChatStore.getState().stepsCache)).toEqual([
+      'old-0',
+      'final-1',
+    ]);
   });
 });

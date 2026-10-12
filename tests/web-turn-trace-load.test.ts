@@ -51,7 +51,7 @@ vi.mock('../web/src/utils/messageSnapshotCache', () => ({
   saveAgentMessageSnapshot: vi.fn(async () => undefined),
 }));
 
-const { useChatStore, mergeMessagesChronologically } =
+const { useChatStore, mergeMessagesChronologically, MAX_STEPS_CACHE_CHARS } =
   await import('../web/src/stores/chat');
 const initialState = useChatStore.getState();
 
@@ -753,9 +753,13 @@ describe('what the caches hold when the level of the process changes', () => {
     }) as GroupInfo;
   const held = { steps: [toolStep('a', 'Read')], dropped: 0 };
   /** Replies of the workspace, one of its sessions and another workspace. */
-  const seed = (over: Partial<GroupInfo> = {}) =>
+  const seed = (over: Partial<GroupInfo> = {}) => {
     useChatStore.setState({
       groups: { [JID]: group(over), [OTHER]: group({ folder: 'other' }) },
+    });
+    // Apart from the groups: changing a workspace's view lets go of its
+    // caches, and these are the ones read at the view it has now.
+    useChatStore.setState({
       messages: {
         [JID]: [message('m1')],
         [OTHER]: [message('o1', { chat_jid: OTHER })],
@@ -776,6 +780,7 @@ describe('what the caches hold when the level of the process changes', () => {
       stepsCache: { m1: held, a1: held, o1: held },
       turnTraceStatus: { m1: 'empty', a1: 'empty', o1: 'empty' },
     });
+  };
   const caches = (id: string) => {
     const s = useChatStore.getState();
     return [
@@ -845,11 +850,20 @@ describe('what the caches hold when the level of the process changes', () => {
     expect(caches('a1')).toEqual(none);
   });
 
-  it('keeps them when a mode change leaves the level as it was', async () => {
+  it('lets go of them when a proactive workspace at full becomes an Assistant one', async () => {
+    // Same level of detail, but an Assistant workspace also shows what the
+    // tools returned, which a proactive one's steps were read without.
     seed({ process_visibility: 'full' });
     apiPatchMock.mockResolvedValueOnce({ success: true });
     await useChatStore.getState().updateInteractionMode(JID, 'assistant');
-    expect(caches('m1')[3]).toBe(held);
+    expect(caches('m1')).toEqual(none);
+  });
+
+  it('lets go of them when an Assistant workspace becomes a proactive one at full', async () => {
+    seed({ interaction_mode: 'assistant', process_visibility: 'full' });
+    apiPatchMock.mockResolvedValueOnce({ success: true });
+    await useChatStore.getState().updateInteractionMode(JID, 'proactive');
+    expect(caches('m1')).toEqual(none);
   });
 
   it('keeps them when the server refuses the change', async () => {
@@ -859,6 +873,298 @@ describe('what the caches hold when the level of the process changes', () => {
       await useChatStore.getState().updateProcessVisibility(JID, 'hidden'),
     ).toBe(false);
     expect(caches('m1')[3]).toBe(held);
+  });
+});
+
+describe('what the caches hold when another tab or page changes the level', () => {
+  const OTHER = 'web:other';
+  const held = { steps: [toolStep('a', 'Read')], dropped: 0 };
+  const group = (over: Partial<GroupInfo> = {}): GroupInfo =>
+    ({
+      name: 'w',
+      folder: 'trace',
+      added_at: '2026-01-01T00:00:00.000Z',
+      interaction_mode: 'proactive',
+      process_visibility: 'full',
+      ...over,
+    }) as GroupInfo;
+  const seed = (over: Partial<GroupInfo> = {}) => {
+    useChatStore.setState({
+      groups: { [JID]: group(over), [OTHER]: group({ folder: 'other' }) },
+    });
+    // Apart from the groups: changing a workspace's view lets go of its
+    // caches, and these are the ones read at the view it has now.
+    useChatStore.setState({
+      messages: {
+        [JID]: [message('m1')],
+        [OTHER]: [message('o1', { chat_jid: OTHER })],
+      },
+      agents: {
+        [JID]: [{ id: 's1', kind: 'conversation' } as unknown as AgentInfo],
+      },
+      agentMessages: {
+        s1: [message('a1', { chat_jid: `${JID}#agent:s1` })],
+      },
+      thinkingCache: { m1: '想', a1: '想', o1: '想' },
+      thinkingDurationCache: { m1: 3000, a1: 3000, o1: 3000 },
+      traceCache: {
+        m1: [row('a', '工具 Read')],
+        a1: [row('a', '工具 Read')],
+        o1: [row('a', '工具 Read')],
+      },
+      stepsCache: { m1: held, a1: held, o1: held },
+      turnTraceStatus: { m1: 'empty', a1: 'empty', o1: 'empty' },
+    });
+  };
+  const caches = (id: string) => {
+    const s = useChatStore.getState();
+    return [
+      s.thinkingCache[id],
+      s.thinkingDurationCache[id],
+      s.traceCache[id],
+      s.stepsCache[id],
+      s.turnTraceStatus[id],
+    ];
+  };
+  const none = [undefined, undefined, undefined, undefined, undefined];
+  /** What another tab did is only known from the groups the next load brings. */
+  const loadGroupsAs = async (over: Partial<GroupInfo>) => {
+    apiGetMock.mockResolvedValueOnce({
+      groups: { [JID]: group(over), [OTHER]: group({ folder: 'other' }) },
+    });
+    await useChatStore.getState().loadGroups();
+  };
+
+  it.each([
+    ['full', 'hidden'],
+    ['full', 'activity'],
+    ['activity', 'full'],
+    ['hidden', 'full'],
+  ] as const)(
+    'lets go of what %s showed when a load finds the level %s',
+    async (from, to) => {
+      seed({ process_visibility: from });
+      await loadGroupsAs({ process_visibility: to });
+      expect(caches('m1')).toEqual(none);
+      expect(caches('a1')).toEqual(none);
+      // Another workspace did not change.
+      expect(caches('o1')[3]).toBe(held);
+      expect(useChatStore.getState().groups[JID].process_visibility).toBe(to);
+    },
+  );
+
+  it.each([
+    ['assistant', 'proactive'],
+    ['proactive', 'assistant'],
+  ] as const)(
+    'lets go of what an %s workspace showed when a load finds it %s, at the same level',
+    async (from, to) => {
+      seed({ interaction_mode: from, process_visibility: 'full' });
+      await loadGroupsAs({ interaction_mode: to, process_visibility: 'full' });
+      expect(caches('m1')).toEqual(none);
+    },
+  );
+
+  it('lets go of them when the groups are replaced some other way', async () => {
+    seed({ process_visibility: 'full' });
+    useChatStore.setState((s) => ({
+      groups: { ...s.groups, [JID]: group({ process_visibility: 'hidden' }) },
+    }));
+    expect(caches('m1')).toEqual(none);
+    expect(caches('o1')[3]).toBe(held);
+  });
+
+  it('keeps them when a load finds the workspace as it was', async () => {
+    seed({ process_visibility: 'activity' });
+    await loadGroupsAs({ process_visibility: 'activity' });
+    expect(caches('m1')[3]).toBe(held);
+    expect(caches('m1')[4]).toBe('empty');
+  });
+
+  it('keeps them when a load finds only the name, the pin or the profile changed', async () => {
+    seed({ process_visibility: 'full' });
+    await loadGroupsAs({
+      name: '改了名',
+      pinned_at: '2026-10-10T00:00:00.000Z',
+      agent_profile_name: '另一个',
+    } as Partial<GroupInfo>);
+    expect(caches('m1')[3]).toBe(held);
+  });
+
+  it('keeps an Assistant workspace, which shows everything whatever level it carries', async () => {
+    seed({ interaction_mode: 'assistant', process_visibility: 'hidden' });
+    await loadGroupsAs({
+      interaction_mode: 'assistant',
+      process_visibility: 'full',
+    });
+    expect(caches('m1')[3]).toBe(held);
+  });
+
+  it('has nothing to let go of the first time the workspaces load', async () => {
+    useChatStore.setState({
+      groups: {},
+      messages: { [JID]: [message('m1')] },
+      stepsCache: { m1: held },
+    });
+    await loadGroupsAs({ process_visibility: 'hidden' });
+    expect(caches('m1')[3]).toBe(held);
+  });
+
+  it('keeps what is held for a workspace that has gone from the list', async () => {
+    seed({ process_visibility: 'full' });
+    apiGetMock.mockResolvedValueOnce({
+      groups: { [OTHER]: group({ folder: 'other' }) },
+    });
+    await useChatStore.getState().loadGroups();
+    // Not a level change: what the deletion does with it is its own business.
+    expect(caches('m1')[3]).toBe(held);
+  });
+});
+
+describe('what the steps cache may hold in all', () => {
+  const chars = 900_000;
+  const big = (label: string, size = chars) => ({
+    steps: [
+      step({
+        id: `thinking-${label}`,
+        kind: 'thinking',
+        title: label,
+        text: 'x'.repeat(size),
+      }),
+    ],
+    dropped: 0,
+  });
+  const held = (...ids: string[]) =>
+    Object.fromEntries(ids.map((id) => [id, big(id)]));
+  const turn = (size = 1000) => ({
+    turn_id: 'turn-1',
+    thinking: '',
+    trace: [],
+    steps: big('new', size).steps,
+    steps_dropped: 0,
+  });
+  const room = Math.floor(MAX_STEPS_CACHE_CHARS / chars);
+
+  it('lets go of the oldest entries first when a load takes it past the limit', async () => {
+    const ids = Array.from({ length: room }, (_, i) => `old-${i}`);
+    useChatStore.setState({ stepsCache: held(...ids) });
+    apiGetMock.mockResolvedValueOnce(turn(chars));
+    await useChatStore.getState().loadTurnTrace(message('new'));
+    const keys = Object.keys(useChatStore.getState().stepsCache);
+    expect(keys).not.toContain('old-0');
+    expect(keys).toContain('old-1');
+    expect(keys.at(-1)).toBe('new');
+    expect(keys).toHaveLength(room);
+  });
+
+  it('keeps what is on screen, and lets go of the oldest that is not', async () => {
+    const ids = Array.from({ length: room }, (_, i) => `old-${i}`);
+    useChatStore.setState({
+      stepsCache: held(...ids),
+      currentGroup: JID,
+      messages: {
+        [JID]: [message('old-0'), message('old-1')],
+        'web:elsewhere': [message('old-2', { chat_jid: 'web:elsewhere' })],
+      },
+    });
+    apiGetMock.mockResolvedValueOnce(turn(chars));
+    await useChatStore.getState().loadTurnTrace(message('new'));
+    const keys = Object.keys(useChatStore.getState().stepsCache);
+    // The two the reader sees stay; the oldest of the rest goes.
+    expect(keys).toContain('old-0');
+    expect(keys).toContain('old-1');
+    expect(keys).not.toContain('old-2');
+    expect(keys).toContain('new');
+  });
+
+  it('keeps what is on screen in the session tab that is open', async () => {
+    const ids = Array.from({ length: room }, (_, i) => `old-${i}`);
+    useChatStore.setState({
+      stepsCache: held(...ids),
+      currentGroup: JID,
+      activeAgentTab: { [JID]: 's1' },
+      messages: { [JID]: [] },
+      agentMessages: {
+        s1: [message('old-0', { chat_jid: `${JID}#agent:s1` })],
+      },
+    });
+    apiGetMock.mockResolvedValueOnce(turn(chars));
+    await useChatStore.getState().loadTurnTrace(message('new'));
+    const keys = Object.keys(useChatStore.getState().stepsCache);
+    expect(keys).toContain('old-0');
+    expect(keys).not.toContain('old-1');
+  });
+
+  it('lets go of the oldest on screen only when the screen alone is past the limit', async () => {
+    const ids = Array.from({ length: room }, (_, i) => `old-${i}`);
+    useChatStore.setState({
+      stepsCache: held(...ids),
+      currentGroup: JID,
+      messages: { [JID]: ids.map((id) => message(id)) },
+    });
+    apiGetMock.mockResolvedValueOnce(turn(chars));
+    await useChatStore.getState().loadTurnTrace(message('new'));
+    const keys = Object.keys(useChatStore.getState().stepsCache);
+    expect(keys).not.toContain('old-0');
+    expect(keys).toContain('new');
+    expect(keys).toHaveLength(room);
+  });
+
+  it('counts the text a step carries, not how many steps there are', async () => {
+    const ids = Array.from({ length: room - 1 }, (_, i) => `old-${i}`);
+    useChatStore.setState({ stepsCache: held(...ids) });
+    // The text is spread over four fields of one step: all of it counts.
+    const quarter = chars / 4;
+    const spread = {
+      turn_id: 'turn-1',
+      steps: [
+        toolStep('a', 'Bash', {
+          title: 't'.repeat(quarter),
+          summary: 's'.repeat(quarter),
+          resultPreview: 'r'.repeat(quarter),
+          text: 'x'.repeat(quarter),
+        }),
+        toolStep('b', 'Bash', { summary: 's'.repeat(chars * 0.6) }),
+      ],
+      steps_dropped: 0,
+    };
+    apiGetMock.mockResolvedValueOnce(spread);
+    await useChatStore.getState().loadTurnTrace(message('new'));
+    const keys = Object.keys(useChatStore.getState().stepsCache);
+    expect(keys).not.toContain('old-0');
+    expect(keys).toContain('new');
+  });
+
+  it('counts an entry written again as the newest, so it is the last to go', async () => {
+    const ids = Array.from({ length: room }, (_, i) => `old-${i}`);
+    useChatStore.setState({
+      stepsCache: {
+        ...held(...ids),
+        'old-0': { ...big('old-0'), provisional: true },
+      },
+    });
+    apiGetMock.mockResolvedValueOnce(turn(chars * 1.5));
+    await useChatStore.getState().loadTurnTrace(message('old-0'));
+    const keys = Object.keys(useChatStore.getState().stepsCache);
+    expect(keys.at(-1)).toBe('old-0');
+    expect(keys).not.toContain('old-1');
+    expect(keys).toContain('old-2');
+  });
+
+  it('leaves the cache alone while it is within the limit', async () => {
+    const ids = Array.from({ length: room - 1 }, (_, i) => `old-${i}`);
+    useChatStore.setState({ stepsCache: held(...ids) });
+    apiGetMock.mockResolvedValueOnce(turn(10));
+    await useChatStore.getState().loadTurnTrace(message('new'));
+    const keys = Object.keys(useChatStore.getState().stepsCache);
+    expect(keys).toEqual([...ids, 'new']);
+  });
+
+  it('keeps the newest entry even when it alone is large', async () => {
+    useChatStore.setState({ stepsCache: held('old-0') });
+    apiGetMock.mockResolvedValueOnce(turn(MAX_STEPS_CACHE_CHARS + 1000));
+    await useChatStore.getState().loadTurnTrace(message('new'));
+    expect(Object.keys(useChatStore.getState().stepsCache)).toEqual(['new']);
   });
 });
 
