@@ -195,6 +195,10 @@ function scrubEvent(event: StreamEvent): StreamEvent {
   const type = event.eventType;
   const strip: Partial<StreamEvent> = {};
   if (event.toolInput) strip.toolInput = undefined;
+  // How much a tool did (lines, files, an exit code) is read from the same
+  // structured output as its text, so it goes with it. `toolIsError` is a flag,
+  // not text, and stays: it is what lets a failed call read as failed.
+  if (event.toolResultFacts) strip.toolResultFacts = undefined;
   if (type === 'tool_result') {
     strip.toolResult = undefined;
     strip.detail = undefined;
