@@ -54,6 +54,20 @@ describe('narration before a tool call (proactive, full)', () => {
     ]);
   });
 
+  test('the note belongs to the query attempt of the call it introduces', () => {
+    // The stream fence admits an event by its queryRunId; without it a late
+    // note of a superseded attempt would pass as the current one's.
+    const [note] = run([
+      text('先看一下。'),
+      tool('Read', { queryRunId: 'run-7', inputTurnId: 'input-3' }),
+    ]);
+    expect(note).toMatchObject({
+      queryRunId: 'run-7',
+      inputTurnId: 'input-3',
+      turnId: 'turn-1',
+    });
+  });
+
   test('every call gets its own narration, none repeats', () => {
     const relay = new ProactiveCommentaryRelay();
     const notes = [

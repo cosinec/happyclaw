@@ -79,11 +79,16 @@ export class ProactiveCommentaryRelay {
         const text = this.held.trim();
         this.held = '';
         if (!text || isMessageDeliveryTool(event.toolName)) return [];
+        // The note belongs to the query attempt of the call it introduces: the
+        // stream fence admits or drops it by `queryRunId`, so a late note of a
+        // superseded attempt cannot be shown as the current one's.
         const note = projectSdkStreamEventForWeb(mode, visibility, {
           eventType: 'commentary',
           agentScope: 'main',
           text,
+          queryRunId: event.queryRunId,
           turnId: event.turnId ?? turnKey,
+          inputTurnId: event.inputTurnId,
           sessionId: event.sessionId,
         });
         return note ? [note] : [];
