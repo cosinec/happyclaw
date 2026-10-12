@@ -121,8 +121,11 @@ test.describe('the step timeline', () => {
     );
     await group.click();
     await expect(timeline.getByText('useVirtualizer in web/src')).toBeVisible();
-    // A failed call says why, in its own row.
-    await expect(timeline.getByText('被权限策略拒绝')).toBeVisible();
+    // A failed call says why, in its own row, and is open to its output.
+    await expect(timeline.getByText('被权限策略拒绝').first()).toBeVisible();
+    await expect(
+      timeline.locator('pre', { hasText: '被权限策略拒绝' }),
+    ).toBeVisible();
   });
 
   test('has touch-sized buttons and nothing that sticks out sideways', async ({
