@@ -150,7 +150,9 @@ function RowFrame({
       {icon}
       <span
         className={cn(
-          grow ? 'min-w-0 flex-1 truncate' : 'shrink-0 font-medium',
+          grow
+            ? 'min-w-0 flex-1 truncate'
+            : 'max-w-[60%] shrink-0 truncate font-medium',
           tone === 'quiet' && !running
             ? 'text-muted-foreground'
             : 'text-foreground',

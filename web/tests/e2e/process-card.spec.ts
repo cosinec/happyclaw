@@ -256,6 +256,37 @@ test.describe('the live card', () => {
     await expectNoSidewaysOverflow(page);
   });
 
+  test('keeps a long label, or a long headline, within its row', async ({
+    page,
+  }) => {
+    await open(page, 'scenario=streaming');
+    // A sub-agent can be given a task of any length to name itself by.
+    const long = '检查移动端滚动性能并对比三种虚拟列表实现的帧率差异'.repeat(4);
+    const edges = await page.evaluate((text) => {
+      const right = (el: Element) => el.getBoundingClientRect().right;
+      const timeOf = (row: Element) =>
+        [...row.querySelectorAll('span')].find((span) =>
+          /^\d+(\.\d)?s$/.test(span.textContent ?? ''),
+        )!;
+      const agent = [
+        ...document.querySelectorAll('[data-hc-step-timeline] button'),
+      ].find((row) => row.textContent?.includes('检查移动端滚动性能'))!;
+      agent.querySelector('span.font-medium')!.textContent = text;
+      const head = document.querySelector('[data-hc-process-card] > button')!;
+      head.querySelector('span.truncate')!.textContent = text;
+      return {
+        window: right(document.querySelector('[data-hc-process-window]')!),
+        agentTime: right(timeOf(agent)),
+        card: right(document.querySelector('[data-hc-process-card]')!),
+        headTime: right(timeOf(head)),
+      };
+    }, long);
+    // The time stays in its row, however long the words before it.
+    expect(edges.agentTime).toBeLessThanOrEqual(edges.window + 1);
+    expect(edges.headTime).toBeLessThanOrEqual(edges.card + 1);
+    await expectNoSidewaysOverflow(page);
+  });
+
   test('stays as the reader left it while the run goes on', async ({
     page,
   }) => {
