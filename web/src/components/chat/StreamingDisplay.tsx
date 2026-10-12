@@ -320,8 +320,9 @@ function StreamingContent({
       ))}
     </div>
   );
-  // A settled card shows those cards itself, so its steps list them as a line.
-  const settledTasks = useMemo(
+  // A folded card shows the Workflow cards itself, below it: its steps list
+  // them as a line, and the rest of the sub-agents as rows to open.
+  const cardTasks = useMemo(
     () =>
       folded
         ? Object.fromEntries(
@@ -363,7 +364,7 @@ function StreamingContent({
             mode={live ? 'live' : 'settled'}
             steps={streaming.steps ?? NO_STEPS}
             stepsDropped={streaming.stepsDropped}
-            taskStates={settledTasks}
+            taskStates={cardTasks}
             activeTools={streaming.activeTools}
             waiting={waitingForModel}
             waitingSince={streaming.phaseStartedAt}

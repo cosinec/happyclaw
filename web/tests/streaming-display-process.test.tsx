@@ -270,7 +270,7 @@ describe('StreamingDisplay, the classic layout', () => {
     expect(text()).toContain('最终答案正文');
   });
 
-  it('does not summarise a stopped card: that is the timeline’s', async () => {
+  it('has no summary row for a card the classic layout shows', async () => {
     await mount(state(), { isWaiting: false });
     expect(card()).toBeNull();
     expect(text()).not.toContain('已处理');
