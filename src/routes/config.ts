@@ -89,6 +89,7 @@ import {
   getProviders,
   getEnabledProviders,
   getDefaultModelConfigId,
+  getUsableDefaultProvider,
   setDefaultModelConfig,
   DEFAULT_MODEL_DISABLE_ERROR,
   getBalancingConfig,
@@ -1420,7 +1421,9 @@ configRoutes.get(
         })),
         balancing,
         enabledCount: enabledProviders.length,
-        defaultModelConfigId: getDefaultModelConfigId(),
+        // The default that actually applies: one that lost its credential
+        // pins nothing, so the page must not present it as the default.
+        defaultModelConfigId: getUsableDefaultProvider()?.id ?? null,
       });
     } catch (err) {
       logger.error({ err }, 'Failed to list providers');
@@ -1493,7 +1496,7 @@ configRoutes.put(
         );
         const provider = mutation.value ?? null;
         const payload = {
-          defaultModelConfigId: getDefaultModelConfigId(),
+          defaultModelConfigId: getUsableDefaultProvider()?.id ?? null,
           provider: provider ? toPublicProvider(provider) : null,
           applied: mutation.applied,
         };
@@ -1888,9 +1891,12 @@ configRoutes.delete(
           modelChanged: true,
           baseUrlChanged: true,
         };
+        // Deleting the default returns unselected conversations to the
+        // automatic pool; the operator is told, and the audit says so.
+        const wasDefault = !!previous && getDefaultModelConfigId() === id;
         const mutation = await mutateClaudeConfigForAllGroups(
           actor,
-          { trigger: 'provider_delete', providerId: id },
+          { trigger: 'provider_delete', providerId: id, wasDefault },
           () => {
             if (previous) {
               deleteProvider(id);
@@ -1898,6 +1904,7 @@ configRoutes.delete(
               invalidateProviderUsageCache(id);
               appendClaudeConfigAuditBestEffort(actor, 'delete_provider', [
                 `id:${id}`,
+                ...(wasDefault ? ['default_cleared'] : []),
               ]);
             }
             return { id };
@@ -1929,7 +1936,11 @@ configRoutes.delete(
             503,
           );
         }
-        return c.json({ ok: true, applied: mutation.applied });
+        return c.json({
+          ok: true,
+          applied: mutation.applied,
+          defaultCleared: wasDefault,
+        });
       });
     } catch (err) {
       const message =

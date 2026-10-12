@@ -2685,10 +2685,9 @@ export function resolveProviderById(providerId: string): {
   if (!provider) {
     logger.warn(
       { providerId },
-      'resolveProviderById: provider not found, falling back to first enabled',
+      'resolveProviderById: provider not found, falling back to the default or first enabled',
     );
-    const fallback =
-      state.providers.find((p) => p.enabled) || state.providers[0];
+    const fallback = selectGlobalProvider(state) || state.providers[0];
     if (!fallback) return { config: defaultsFromEnv(), customEnv: {} };
     return {
       config: providerToConfig(fallback),
@@ -2947,13 +2946,20 @@ export function toPublicClaudeProviderConfig(
   };
 }
 
-/** The configuration the host's own, non-conversation Claude calls use. */
+/**
+ * The configuration the host's own, non-conversation Claude calls use: the
+ * default while it can serve (the same test as getUsableDefaultProvider),
+ * else the first enabled one.
+ */
 function selectGlobalProvider(
   state: StoredStateV5,
 ): UnifiedProvider | undefined {
   return (
     state.providers.find(
-      (p) => p.enabled && p.id === state.defaultModelConfigId,
+      (p) =>
+        p.enabled &&
+        p.id === state.defaultModelConfigId &&
+        providerHasCredentials(p),
     ) ?? state.providers.find((p) => p.enabled)
   );
 }

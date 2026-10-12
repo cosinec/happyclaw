@@ -381,6 +381,39 @@ describe('global default model configuration', () => {
     expect(runtimeConfig.getUsableDefaultProvider()).toBeNull();
   });
 
+  test('a default that lost its credential is not what the host calls fall back to either', () => {
+    official('creds-a');
+    const b = official('creds-b');
+    runtimeConfig.setDefaultModelConfig(b.id);
+    expect(runtimeConfig.getClaudeProviderConfig()).toMatchObject({
+      anthropicModel: 'creds-b-model',
+    });
+
+    runtimeConfig.updateProviderSecrets(b.id, { clearAnthropicApiKey: true });
+
+    expect(runtimeConfig.getUsableDefaultProvider()).toBeNull();
+    expect(runtimeConfig.getClaudeProviderConfig()).toMatchObject({
+      anthropicModel: 'creds-a-model',
+    });
+    expect(
+      runtimeConfig.resolveProviderById('missing').config.anthropicModel,
+    ).toBe('creds-a-model');
+  });
+
+  test('looking up a configuration that does not exist falls back to the default', () => {
+    official('fallback-a');
+    const b = official('fallback-b');
+    runtimeConfig.setDefaultModelConfig(b.id);
+
+    expect(
+      runtimeConfig.resolveProviderById('missing').config.anthropicModel,
+    ).toBe('fallback-b-model');
+    runtimeConfig.setDefaultModelConfig(null);
+    expect(
+      runtimeConfig.resolveProviderById('missing').config.anthropicModel,
+    ).toBe('fallback-a-model');
+  });
+
   test("the host's own Claude calls follow the default, else the first enabled", () => {
     official('host-a');
     const b = official('host-b');

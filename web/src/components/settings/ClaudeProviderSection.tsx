@@ -191,8 +191,14 @@ export function ClaudeProviderSection({
     setPendingDeleteProvider(null);
 
     try {
-      await api.delete(`/api/config/claude/providers/${provider.id}`);
-      setNotice(`已删除模型配置「${provider.name}」`);
+      const result = await api.delete<{ defaultCleared?: boolean }>(
+        `/api/config/claude/providers/${provider.id}`,
+      );
+      setNotice(
+        result?.defaultCleared
+          ? `已删除模型配置「${provider.name}」；它是默认模型，未手动选择的对话已恢复为在已启用配置间自动轮换`
+          : `已删除模型配置「${provider.name}」`,
+      );
       await loadProviders();
     } catch (err) {
       setError(getErrorMessage(err, '删除模型配置失败'));
@@ -353,7 +359,11 @@ export function ClaudeProviderSection({
         title="删除模型配置"
         message={
           pendingDeleteProvider
-            ? `确认删除模型配置「${pendingDeleteProvider.name}」？`
+            ? `确认删除模型配置「${pendingDeleteProvider.name}」？${
+                pendingDeleteProvider.id === defaultModelConfigId
+                  ? '它是当前默认模型，删除后未手动选择的对话会恢复为在已启用配置间自动轮换。'
+                  : ''
+              }`
             : '确认删除该模型配置？'
         }
         confirmText="确认删除"

@@ -201,8 +201,8 @@ export function ProviderList({
         const defaultTitle = isDefault
           ? '取消默认：未手动选择模型的对话恢复为在已启用配置间自动轮换'
           : provider.enabled
-            ? '设为默认：未手动选择模型的对话都使用它'
-            : '设为默认（将同时启用该配置）：未手动选择模型的对话都使用它';
+            ? '设为默认：未手动选择模型的对话都使用它，不再自动轮换，也不会在账号间故障转移'
+            : '设为默认（将同时启用该配置）：未手动选择模型的对话都使用它，不再自动轮换，也不会在账号间故障转移';
 
         return (
           <div key={provider.id} className="min-w-0">

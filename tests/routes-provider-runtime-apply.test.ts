@@ -372,6 +372,63 @@ describe('provider runtime apply is a lossless configuration mutation', () => {
       expect(runtimeConfig.getDefaultModelConfigId()).toBeNull();
     });
 
+    test('the list does not present a default that lost its credential', async () => {
+      const chosen = runtimeConfig.createProvider({
+        name: unique('default-uncredentialed'),
+        type: 'official',
+        anthropicApiKey: 'soon-gone',
+        enabled: true,
+      });
+      runtimeConfig.createProvider({
+        name: unique('default-credentialed'),
+        type: 'official',
+        anthropicApiKey: 'stays',
+        enabled: true,
+      });
+      expect((await putDefault(chosen.id)).status).toBe(200);
+      expect(await listedDefault()).toBe(chosen.id);
+
+      runtimeConfig.updateProviderSecrets(chosen.id, {
+        clearAnthropicApiKey: true,
+      });
+
+      // Runtime already treats it as no default; the page must agree.
+      expect(runtimeConfig.getUsableDefaultProvider()).toBeNull();
+      expect(await listedDefault()).toBeNull();
+    });
+
+    test('deleting the default says so; deleting another configuration does not', async () => {
+      const chosen = runtimeConfig.createProvider({
+        name: unique('default-told'),
+        type: 'official',
+        anthropicApiKey: 'told-key',
+        enabled: true,
+      });
+      const other = runtimeConfig.createProvider({
+        name: unique('default-untold'),
+        type: 'official',
+        anthropicApiKey: 'untold-key',
+        enabled: true,
+      });
+      expect((await putDefault(chosen.id)).status).toBe(200);
+
+      const deletedOther = await deleteProvider(other.id);
+      expect(deletedOther.status).toBe(200);
+      expect(await deletedOther.json()).toMatchObject({
+        ok: true,
+        defaultCleared: false,
+      });
+      expect(await listedDefault()).toBe(chosen.id);
+
+      const deletedDefault = await deleteProvider(chosen.id);
+      expect(deletedDefault.status).toBe(200);
+      expect(await deletedDefault.json()).toMatchObject({
+        ok: true,
+        defaultCleared: true,
+      });
+      expect(await listedDefault()).toBeNull();
+    });
+
     test('other edits keep the default', async () => {
       const chosen = runtimeConfig.createProvider({
         name: unique('default-edited'),

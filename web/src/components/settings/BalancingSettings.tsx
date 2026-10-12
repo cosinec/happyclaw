@@ -124,7 +124,7 @@ export function BalancingSettings({
         >
           <p className="px-4 py-3 text-caption text-muted-foreground">
             {hasDefault
-              ? '已设置默认模型：未手动选择模型的对话固定使用默认模型，不参与自动分配；取消默认后，以下策略恢复生效。'
+              ? '已设置默认模型：未手动选择模型的对话固定使用默认模型，不参与自动分配，也不会在账号间故障转移；取消默认后，以下策略恢复生效。'
               : '启用多个提供商后，系统会根据以下策略自动分配会话请求。'}
           </p>
 

@@ -419,8 +419,9 @@ Provider：
 - `PUT /api/config/claude/default`，请求体 `{ modelConfigId: string | null }`：
   设置全局默认模型配置，`null` 取消并回到已启用配置间的自动轮换。没有会话选择、
   智能体绑定和工作区环境变量的运行都使用它，不再参与负载均衡；未启用的配置在
-  设为默认时同时启用，没有可用凭据的配置返回 400；删除默认配置会清除默认。
-  `GET /api/config/claude/providers` 返回 `defaultModelConfigId`（无默认为 `null`）
+  设为默认时同时启用，没有可用凭据的配置返回 400；删除默认配置会清除默认，
+  响应带 `defaultCleared: true`。`GET /api/config/claude/providers` 返回生效中的
+  `defaultModelConfigId`（无默认，或默认已失去凭据而不再生效时为 `null`）
 - `POST /api/config/claude/providers/:id/duplicate`，服务端连同加密密钥复制为
   停用的新 Provider；OAuth 授权的 Provider 拒绝复制
 - `POST /api/config/claude/providers/test`，按草稿字段（可选 `providerId`

@@ -1348,15 +1348,19 @@ function resolvePinnedModelConfigId(
   // The global default is the weakest explicit choice: a Workspace that
   // carries its own provider environment keeps it.
   const defaultProvider = getUsableDefaultProvider();
-  if (defaultProvider && !(session && workspaceHasProviderEnv(session))) {
+  if (
+    defaultProvider &&
+    !(session && workspaceHasProviderEnv(session.groupFolder))
+  ) {
     return defaultProvider.id;
   }
   const enabledProviders = getEnabledProviders();
   return enabledProviders.length === 1 ? enabledProviders[0].id : null;
 }
 
-function workspaceHasProviderEnv(session: { groupFolder: string }): boolean {
-  const override = getContainerEnvConfig(session.groupFolder);
+/** Whether the Workspace brings its own provider environment, bypassing the pool. */
+function workspaceHasProviderEnv(groupFolder: string): boolean {
+  const override = getContainerEnvConfig(groupFolder);
   return !!(
     override.anthropicApiKey ||
     override.anthropicAuthToken ||
@@ -1390,14 +1394,7 @@ export function shouldRotatePoolProviderAfterTurn(
   if (resolvePinnedModelConfigId(modelConfigId, { groupFolder, agentId })) {
     return false;
   }
-  const override = getContainerEnvConfig(groupFolder);
-  if (
-    override.anthropicApiKey ||
-    override.anthropicAuthToken ||
-    override.anthropicBaseUrl
-  ) {
-    return false;
-  }
+  if (workspaceHasProviderEnv(groupFolder)) return false;
   return (
     getEnabledProviders().length > 1 &&
     getBalancingConfig().strategy !== 'failover'
@@ -1471,14 +1468,7 @@ export function willClearSessionOnProviderSwitch(
 
   // Env-level provider override means the pool is bypassed entirely — no
   // pool-driven switch, so the session is never cleared on this account.
-  const override = getContainerEnvConfig(groupFolder);
-  if (
-    override.anthropicApiKey ||
-    override.anthropicAuthToken ||
-    override.anthropicBaseUrl
-  ) {
-    return false;
-  }
+  if (workspaceHasProviderEnv(groupFolder)) return false;
 
   if (!boundId) return false;
 
@@ -1567,14 +1557,7 @@ export function launchOAuthRefreshCandidates(
   const providers = pinned
     ? getProviders().filter((provider) => provider.id === pinned)
     : (() => {
-        const override = getContainerEnvConfig(groupFolder);
-        if (
-          override.anthropicApiKey ||
-          override.anthropicAuthToken ||
-          override.anthropicBaseUrl
-        ) {
-          return [];
-        }
+        if (workspaceHasProviderEnv(groupFolder)) return [];
         return getEnabledProviders();
       })();
   return providers
@@ -1804,13 +1787,7 @@ function selectPoolProvider(
     };
   }
 
-  const override = getContainerEnvConfig(groupFolder);
-  const hasOverride = !!(
-    override.anthropicApiKey ||
-    override.anthropicAuthToken ||
-    override.anthropicBaseUrl
-  );
-  if (hasOverride) return null;
+  if (workspaceHasProviderEnv(groupFolder)) return null;
 
   // Refresh pool state from V4 config
   const enabledProviders = getEnabledProviders();
