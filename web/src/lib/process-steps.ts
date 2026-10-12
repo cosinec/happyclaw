@@ -5,6 +5,7 @@
  * The shared reducer (`stream-steps`) owns the steps themselves.
  */
 import { describeToolCall } from '../components/chat/ToolActivityCard';
+import { SPEECH_TOOL_NAME } from './process-visibility';
 import {
   railSteps,
   summarizeSteps,
@@ -68,6 +69,35 @@ export function isReadOnlyStep(step: StreamingStep): boolean {
 /** The step is a question put to the reader: the card shows it, not a row. */
 export function isQuestionStep(step: StreamingStep): boolean {
   return step.kind === 'tool' && step.toolName === 'AskUserQuestion';
+}
+
+/**
+ * What a finished call returned, if there is something to read: the start of
+ * its output. A call still running has none, and neither has the speech tool
+ * (calling it is the reply, not work) or a workspace that withholds results.
+ */
+export function toolOutput(step: StreamingStep): string | undefined {
+  if (step.kind !== 'tool' || step.status === 'running') return undefined;
+  if (step.toolName === SPEECH_TOOL_NAME || isQuestionStep(step)) {
+    return undefined;
+  }
+  const output = step.resultPreview?.trimEnd();
+  return output?.trim() ? output : undefined;
+}
+
+/** A failed call shows why it failed without being asked to; a good one does not. */
+export function toolOpensByDefault(step: StreamingStep): boolean {
+  return step.status === 'error' && toolOutput(step) !== undefined;
+}
+
+/** The first line of an output that has any text: what the row can say of it. */
+export function firstOutputLine(output: string): string {
+  return (
+    output
+      .split('\n')
+      .find((line) => line.trim() !== '')
+      ?.trim() ?? ''
+  );
 }
 
 export type ProcessItem =

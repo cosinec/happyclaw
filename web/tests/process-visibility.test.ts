@@ -175,6 +175,40 @@ describe('filterProactiveStreamEvent', () => {
     expect(start.toolName).toBe('AskUserQuestion');
   });
 
+  it('strips how much a tool did with what it returned, and keeps that it failed', () => {
+    const returned = event({
+      eventType: 'tool_result',
+      toolUseId: 't1',
+      toolResult: '秘密',
+      toolIsError: true,
+      toolResultFacts: { exitCode: 1, lines: 120, added: 12 },
+    });
+    for (const level of ['activity', 'full'] as const) {
+      const result = filterProactiveStreamEvent(level, returned)!;
+      expect(result.toolResultFacts).toBeUndefined();
+      expect(result.toolResult).toBeUndefined();
+      // A flag, not text: a failed call still reads as failed.
+      expect(result.toolIsError).toBe(true);
+      expect(result.toolUseId).toBe('t1');
+    }
+    // Nothing is taken from the event it was handed.
+    expect(returned.toolResultFacts).toEqual({
+      exitCode: 1,
+      lines: 120,
+      added: 12,
+    });
+    expect(filterProactiveStreamEvent('hidden', returned)).toBeNull();
+  });
+
+  it('passes a result that carries only the flag as it is', () => {
+    const failed = event({
+      eventType: 'tool_result',
+      toolUseId: 't1',
+      toolIsError: true,
+    });
+    expect(filterProactiveStreamEvent('activity', failed)).toBe(failed);
+  });
+
   it('strips what a sub-agent was asked and answered', () => {
     const start = filterProactiveStreamEvent(
       'full',
