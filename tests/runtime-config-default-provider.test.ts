@@ -400,6 +400,24 @@ describe('global default model configuration', () => {
     ).toBe('creds-a-model');
   });
 
+  test('a default whose credential is cleared stops being the default, and stays so', () => {
+    const a = official('clear-a');
+    official('clear-b');
+    runtimeConfig.setDefaultModelConfig(a.id);
+
+    runtimeConfig.updateProviderSecrets(a.id, { clearAnthropicApiKey: true });
+
+    // Dropped at the write, so every reader and guard agrees at once.
+    expect(runtimeConfig.getDefaultModelConfigId()).toBeNull();
+    expect(readStored()).not.toHaveProperty('defaultModelConfigId');
+    // Switching it off is no longer refused, and restoring the key does not
+    // quietly make it the default again.
+    expect(runtimeConfig.setProviderEnabled(a.id, false).enabled).toBe(false);
+    runtimeConfig.updateProviderSecrets(a.id, { anthropicApiKey: 'back' });
+    runtimeConfig.setProviderEnabled(a.id, true);
+    expect(runtimeConfig.getDefaultModelConfigId()).toBeNull();
+  });
+
   test('looking up a configuration that does not exist falls back to the default', () => {
     official('fallback-a');
     const b = official('fallback-b');

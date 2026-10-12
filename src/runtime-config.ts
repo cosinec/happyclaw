@@ -1664,15 +1664,19 @@ interface StoredStateV5 {
   defaultModelConfigId: string | null;
 }
 
-/** A pointer that names no provider (deleted, or never valid) is no pointer. */
+/**
+ * A pointer is only kept while it names a configuration that exists and holds
+ * a credential: a default that was deleted or lost its key stops being one,
+ * everywhere at once (the settings page, the guards and the runtime), and is
+ * not resurrected by restoring the key.
+ */
 function normalizeDefaultModelConfigId(
-  providers: ReadonlyArray<{ id: string }>,
+  providers: ReadonlyArray<UnifiedProvider>,
   candidate: unknown,
 ): string | null {
-  return typeof candidate === 'string' &&
-    providers.some((provider) => provider.id === candidate)
-    ? candidate
-    : null;
+  if (typeof candidate !== 'string') return null;
+  const named = providers.find((provider) => provider.id === candidate);
+  return named && providerHasCredentials(named) ? candidate : null;
 }
 
 /** Legacy subscriptions can predate the internal identifier used to mint grants. */

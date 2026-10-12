@@ -392,9 +392,15 @@ describe('provider runtime apply is a lossless configuration mutation', () => {
         clearAnthropicApiKey: true,
       });
 
-      // Runtime already treats it as no default; the page must agree.
+      // Runtime already treats it as no default; the page must agree, and
+      // nothing may still guard it as if it were one.
       expect(runtimeConfig.getUsableDefaultProvider()).toBeNull();
+      expect(runtimeConfig.getDefaultModelConfigId()).toBeNull();
       expect(await listedDefault()).toBeNull();
+      expect((await setProviderEnabled(chosen.id, false)).status).toBe(200);
+      const deleted = await deleteProvider(chosen.id);
+      expect(deleted.status).toBe(200);
+      expect(await deleted.json()).toMatchObject({ defaultCleared: false });
     });
 
     test('deleting the default says so; deleting another configuration does not', async () => {
