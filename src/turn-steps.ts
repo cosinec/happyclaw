@@ -549,9 +549,11 @@ export interface StepsView {
    */
   includeThinking: boolean;
   /**
-   * A proactive Workspace: its speech tool is no step, and no step holds model
-   * text but the reasoning (a turn stored while the Workspace was an Assistant
-   * one may still hold the narration between tool calls).
+   * A proactive Workspace: its speech tool is no step, no step holds model
+   * text but the reasoning, and none holds what a tool returned. A turn can
+   * hold all of that and still be read here: it ran under an Assistant contract
+   * (the Workspace was an Assistant one then, or a channel mount overrides its
+   * mode) and the Workspace's *current* mode decides what is shown.
    */
   proactive?: boolean;
 }
@@ -567,21 +569,31 @@ export function viewSteps(
 ): StreamingStep[] {
   const out: StreamingStep[] = [];
   for (const step of steps) {
+    let shown = step;
     if (view.proactive) {
-      if (step.kind === 'text') continue;
-      if (step.kind === 'tool' && isMessageDeliveryTool(step.toolName)) {
+      if (shown.kind === 'text') continue;
+      if (shown.kind === 'tool' && isMessageDeliveryTool(shown.toolName)) {
         continue;
+      }
+      // What a tool or a sub-agent returned, and the numbers read from it, are
+      // model-facing text: a proactive Workspace never sends them (the status of
+      // the call, which says whether it failed, stays).
+      if (
+        shown.resultPreview !== undefined ||
+        shown.resultFacts !== undefined
+      ) {
+        const { resultPreview: _preview, resultFacts: _facts, ...rest } = shown;
+        shown = rest;
       }
     }
     if (!view.includeThinking) {
-      if (step.kind === 'text') continue;
-      if (step.kind === 'thinking') {
-        const { text: _text, title: _title, ...rest } = step;
-        out.push(rest);
-        continue;
+      if (shown.kind === 'text') continue;
+      if (shown.kind === 'thinking') {
+        const { text: _text, title: _title, ...rest } = shown;
+        shown = rest;
       }
     }
-    out.push(step);
+    out.push(shown);
   }
   return out;
 }

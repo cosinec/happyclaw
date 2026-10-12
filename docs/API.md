@@ -260,7 +260,11 @@ WebFetch 的状态码与字节数，WebSearch 的搜索次数，子 Agent 的工
 返回 404 且消息不带 `has_trace`，`activity` 返回空的 `thinking`，且 `steps` 里的思考
 步骤只留状态与时间（无 `text`、`title`），`full` 返回思考步骤全文。主动模式的 `steps`
 在任何级别都不含 `text` 步骤（模型的文字，包括 `commentary`，不写入 `turn_traces`），
-也不含发言工具 `mcp__happyclaw__send_message` 的步骤（它调用的就是回复本身）；
+也不含发言工具 `mcp__happyclaw__send_message` 的步骤（它调用的就是回复本身），tool 与
+task 步骤上没有 `resultPreview` 和 `resultFacts`，`trace` 里“工具结果”“Task 启动”行没有
+`detail`（工具输出与子 Agent 的提示词）；这些是读取时按**当前**模式去掉的，所以曾按
+Assistant 契约记录的回合（工作区后来改成主动模式，或渠道挂载的
+`interaction_mode_override` 为 `assistant`）在主动模式工作区里读取时同样没有它们。
 Assistant 模式和 fire-and-forget 的 Spawn Agent 不受该设置影响，发言工具在其中与
 其他工具一样是一个工具步骤。消息、聊天或工作区被删除时对应的轨迹一并清除，服务启动时
 清理孤儿轨迹。

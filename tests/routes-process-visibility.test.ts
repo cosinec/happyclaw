@@ -56,6 +56,7 @@ const db = await import('../src/db.js');
 const webContext = await import('../src/web-context.js');
 const groupRoutes = (await import('../src/routes/groups.js')).default;
 const turnTraceRoutes = (await import('../src/routes/turn-traces.js')).default;
+const { TurnTraceTracker } = await import('../src/turn-trace.js');
 
 const OWNER_ID = 'visibility-owner';
 const STRANGER_ID = 'visibility-stranger';
@@ -311,6 +312,7 @@ function seedTurn(
     thinking?: string;
     stepsJson?: string;
     stepsDropped?: number;
+    traceJson?: string;
   } = {},
 ): void {
   db.ensureChatExists(chatJid);
@@ -357,9 +359,11 @@ function seedTurn(
     turnId,
     thinking: options.thinking ?? '想了想',
     thinkingDurationMs: 4_200,
-    traceJson: JSON.stringify([
-      { id: '1-a', timestamp: 1, kind: 'tool', title: '工具 Bash' },
-    ]),
+    traceJson:
+      options.traceJson ??
+      JSON.stringify([
+        { id: '1-a', timestamp: 1, kind: 'tool', title: '工具 Bash' },
+      ]),
     stepsJson: options.stepsJson,
     stepsDropped: options.stepsDropped,
   });
@@ -733,5 +737,202 @@ describe('turn trace steps over HTTP', () => {
       expect(body.steps_dropped).toBe(0);
       expect(body.thinking).toBe('想了想');
     }
+  });
+});
+
+/** A turn that ran under an Assistant contract: tools returned things. */
+const SECRET = 'API_KEY=hunter2';
+const RETURNED_STEPS = [
+  {
+    id: 'thinking-0',
+    kind: 'thinking',
+    at: 1_000,
+    endedAt: 1_500,
+    status: 'done',
+    durationMs: 500,
+    text: '**读取配置**\n\n先看一下。',
+    title: '读取配置',
+  },
+  {
+    id: 'tool-read-1',
+    kind: 'tool',
+    at: 1_500,
+    endedAt: 1_600,
+    status: 'done',
+    toolUseId: 'read-1',
+    toolName: 'Read',
+    summary: 'file: .env',
+    resultPreview: SECRET,
+    resultFacts: { lines: 3, totalLines: 3 },
+  },
+  {
+    id: 'tool-bash-2',
+    kind: 'tool',
+    at: 1_600,
+    endedAt: 1_700,
+    status: 'error',
+    toolUseId: 'bash-2',
+    toolName: 'Bash',
+    resultPreview: `cat: ${SECRET}: Permission denied`,
+    resultFacts: { exitCode: 1 },
+  },
+  {
+    id: 'task-agent-3',
+    kind: 'task',
+    at: 1_700,
+    endedAt: 1_800,
+    status: 'done',
+    taskId: 'agent-3',
+    toolUseId: 'agent-3',
+    toolName: 'Agent',
+    title: '调研',
+    summary: '读了 3 个文件',
+    resultPreview: `最终回答：${SECRET}`,
+    resultFacts: { agent: { toolUses: 4 } },
+  },
+];
+const RETURNED_TRACE = [
+  { id: 't1', timestamp: 1, kind: 'tool', title: '工具 Read' },
+  {
+    id: 't2',
+    timestamp: 2,
+    kind: 'tool',
+    title: '工具结果',
+    detail: SECRET,
+    toolUseId: 'read-1',
+  },
+  {
+    id: 't3',
+    timestamp: 3,
+    kind: 'task',
+    title: 'Task 启动',
+    detail: `读 .env 并回报 ${SECRET}`,
+    toolUseId: 'agent-3',
+  },
+  {
+    id: 't4',
+    timestamp: 4,
+    kind: 'hook',
+    title: 'Hook 结束',
+    detail: 'hook output',
+  },
+];
+
+describe('what a tool returned, read in a proactive workspace', () => {
+  const seedReturned = (jid: string, turnId = 'turn-1') =>
+    seedTurn(jid, turnId, {
+      stepsJson: JSON.stringify(RETURNED_STEPS),
+      traceJson: JSON.stringify(RETURNED_TRACE),
+    });
+
+  /** Nothing a tool returned, in the steps or in the rows of the trace. */
+  const expectNothingReturned = (body: TraceBody) => {
+    const raw = JSON.stringify(body);
+    expect(raw).not.toContain('hunter2');
+    expect(raw).not.toContain('Permission denied');
+    expect(raw).not.toContain('resultPreview');
+    expect(raw).not.toContain('resultFacts');
+    expect(body.steps.map((s) => s.id)).toEqual(
+      expect.arrayContaining(['tool-read-1', 'tool-bash-2', 'task-agent-3']),
+    );
+    // how the calls ended, what they were given and the rest of the trace stay
+    expect(body.steps.find((s) => s.id === 'tool-bash-2')).toMatchObject({
+      status: 'error',
+    });
+    expect(body.steps.find((s) => s.id === 'tool-read-1')).toMatchObject({
+      summary: 'file: .env',
+    });
+    expect(body.steps.find((s) => s.id === 'task-agent-3')).toMatchObject({
+      title: '调研',
+      summary: '读了 3 个文件',
+    });
+    expect(body.trace.map((row: any) => row.title)).toEqual([
+      '工具 Read',
+      '工具结果',
+      'Task 启动',
+      'Hook 结束',
+    ]);
+    expect(
+      body.trace.find((row: any) => row.title === 'Hook 结束'),
+    ).toMatchObject({ detail: 'hook output' });
+  };
+
+  test('an Assistant workspace serves it, until it becomes a proactive one', async () => {
+    asUser(OWNER_ID);
+    const { jid } = workspace('returned-switch', 'assistant', 'hidden');
+    seedReturned(jid);
+
+    const before = await readTrace(jid, 'turn-1');
+    expect(JSON.stringify(before.steps)).toContain(SECRET);
+    expect(JSON.stringify(before.trace)).toContain(SECRET);
+
+    const response = await patchGroup(jid, {
+      interaction_mode: 'proactive',
+      process_visibility: 'full',
+    });
+    expect(response.status).toBe(200);
+    expectNothingReturned(await readTrace(jid, 'turn-1'));
+
+    // and at every level that shows the process
+    db.setWorkspaceProcessVisibility('returned-switch', 'activity');
+    expectNothingReturned(await readTrace(jid, 'turn-1'));
+
+    // back to an Assistant workspace, it is shown again: the stored turn is intact
+    await patchGroup(jid, { interaction_mode: 'assistant' });
+    const again = await readTrace(jid, 'turn-1');
+    expect(JSON.stringify(again.steps)).toContain(SECRET);
+    expect(JSON.stringify(again.trace)).toContain(SECRET);
+  });
+
+  test('a turn a channel mount ran as an Assistant one is read by the proactive workspace', async () => {
+    asUser(OWNER_ID);
+    const { jid } = workspace('returned-override', 'proactive', 'full');
+    // The mount's interaction_mode_override makes the Runner for its messages
+    // an Assistant one, so the tracker records under that contract...
+    const tracker = new TurnTraceTracker({
+      mode: 'assistant',
+      getVisibility: () => 'hidden',
+    });
+    const events = [
+      { eventType: 'thinking_delta', text: '**读取配置**\n\n先看一下。' },
+      {
+        eventType: 'tool_use_start',
+        toolName: 'Read',
+        toolUseId: 'read-1',
+        toolInputSummary: 'file: .env',
+      },
+      {
+        eventType: 'tool_result',
+        toolUseId: 'read-1',
+        toolResult: SECRET,
+        detail: SECRET,
+        toolResultFacts: { lines: 3, totalLines: 3 },
+      },
+      { eventType: 'tool_use_end', toolUseId: 'read-1' },
+    ] as const;
+    events.forEach((event, i) =>
+      tracker.observe('in-1', event as any, i * 100),
+    );
+    expect(tracker.persist({ chatJid: jid, inputId: 'in-1', now: 1_000 })).toBe(
+      true,
+    );
+    const stored = db.getTurnTrace(jid, 'in-1')!;
+    // ... which keeps what the tool returned
+    expect(stored.steps_json).toContain(SECRET);
+    expect(stored.trace_json).toContain(SECRET);
+
+    // ... and the workspace, which is proactive, reads it under its own.
+    const body = await readTrace(jid, 'in-1');
+    expect(body.steps.map((s) => s.toolName ?? s.kind)).toEqual([
+      'thinking',
+      'Read',
+    ]);
+    expect(JSON.stringify(body)).not.toContain('hunter2');
+    expect(JSON.stringify(body.steps)).not.toContain('resultFacts');
+    expect(JSON.stringify(body.steps)).not.toContain('resultPreview');
+    expect(body.trace.some((row: any) => row.title === '工具结果')).toBe(true);
+    expect(body.trace.some((row: any) => 'detail' in row && row.detail)).toBe(
+      false,
+    );
   });
 });
