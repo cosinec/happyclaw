@@ -260,15 +260,19 @@ export function processSpanMs(
   return Number.isFinite(span) && span > 0 ? span : fallback;
 }
 
-/** "3.2 秒", "14 秒", "1 分 12 秒"; nothing for under a second. */
+/**
+ * "3.2 秒", "14 秒", "1 分 12 秒"; nothing for under a second. From ten seconds
+ * on the span is rounded to the whole second before it is cut into minutes, so
+ * 59.6 seconds is "1 分", never "60 秒".
+ */
 export function formatSpanZh(ms: number | undefined): string {
   if (ms == null || !Number.isFinite(ms) || ms < 1000) return '';
   const seconds = ms / 1000;
   if (seconds < 10) return `${Math.round(seconds * 10) / 10} 秒`;
-  if (seconds < 60) return `${Math.round(seconds)} 秒`;
-  const minutes = Math.floor(seconds / 60);
-  const rest = Math.round(seconds - minutes * 60);
-  if (rest === 60) return `${minutes + 1} 分`;
+  const whole = Math.round(seconds);
+  if (whole < 60) return `${whole} 秒`;
+  const minutes = Math.floor(whole / 60);
+  const rest = whole % 60;
   return rest === 0 ? `${minutes} 分` : `${minutes} 分 ${rest} 秒`;
 }
 
