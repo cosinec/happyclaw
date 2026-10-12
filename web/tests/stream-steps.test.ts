@@ -4,7 +4,6 @@ import {
   addCommentaryStep,
   answerStart,
   appendThinkingText,
-  buildTimelineView,
   closeOpenSteps,
   closeTextStep,
   closeThinkingStep,
@@ -437,26 +436,6 @@ describe('the timeline view', () => {
     }
     return list;
   };
-
-  it('shows few steps whole', () => {
-    const view = buildTimelineView(tools(4).steps);
-    expect(view.folded).toEqual([]);
-    expect(view.rows).toHaveLength(4);
-    expect([...view.expanded]).toHaveLength(3);
-  });
-
-  it('folds the older steps into one line and opens the latest three', () => {
-    const steps = tools(10).steps;
-    const view = buildTimelineView(steps);
-    expect(view.folded.map((step) => step.toolUseId)).toEqual([
-      't0',
-      't1',
-      't2',
-      't3',
-    ]);
-    expect(view.rows).toHaveLength(6);
-    expect([...view.expanded]).toEqual(steps.slice(-3).map((step) => step.id));
-  });
 
   it('summarizes what was folded', () => {
     let list = tools(2);

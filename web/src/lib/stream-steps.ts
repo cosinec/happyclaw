@@ -680,19 +680,8 @@ export function summarizeSteps(steps: readonly StreamingStep[]): StepSummary {
   return summary;
 }
 
-/** Rows kept visible in the timeline; older steps fold into one line. */
+/** Rows the live timeline keeps visible; older steps fold into one line. */
 export const TIMELINE_ROWS = 6;
-/** Of those, the latest are shown open. */
-export const TIMELINE_EXPANDED = 3;
-
-export interface TimelineView {
-  /** Earlier steps folded into the summary line, oldest first. */
-  folded: StreamingStep[];
-  /** The last steps, oldest first. */
-  rows: StreamingStep[];
-  /** Ids of the rows that start open. */
-  expanded: ReadonlySet<string>;
-}
 
 /** Steps the timeline lists: everything but the answer and empty commentary. */
 export function railSteps(steps: readonly StreamingStep[]): StreamingStep[] {
@@ -701,21 +690,6 @@ export function railSteps(steps: readonly StreamingStep[]): StreamingStep[] {
     (step, index) =>
       index !== answer && !(step.kind === 'text' && !step.text?.trim()),
   );
-}
-
-export function buildTimelineView(
-  steps: readonly StreamingStep[],
-  rows: number = TIMELINE_ROWS,
-  expanded: number = TIMELINE_EXPANDED,
-): TimelineView {
-  const rail = railSteps(steps);
-  const folded = rail.length > rows ? rail.slice(0, rail.length - rows) : [];
-  const visible = rail.slice(folded.length);
-  return {
-    folded,
-    rows: visible,
-    expanded: new Set(visible.slice(-expanded).map((step) => step.id)),
-  };
 }
 
 // ── rebuilding after a reconnect ────────────────────────────────────────
