@@ -1156,9 +1156,16 @@ codexGatewayApp.post(
         return;
       }
       grant.lastVerdict = 'ok';
+      const reasoning = converter.getReasoningStats();
       logGatewaySuccess(grant, responsesRequest.model, converter.getUsage(), {
         ...(followUps ? { followUps } : {}),
         ...(invalidFrames ? { invalidFrames } : {}),
+        ...(reasoning.blocks
+          ? {
+              reasoningBlocks: reasoning.blocks,
+              reasoningSummaryChars: reasoning.summaryChars,
+            }
+          : {}),
       });
     };
 
