@@ -239,6 +239,31 @@ describe('text steps', () => {
     expect(list.steps[0].text).toBe('x'.repeat(30));
   });
 
+  it('closes every running text step, each with its own part of the text', () => {
+    const first = '先说明第一件事。';
+    const second = '再说明第二件事。';
+    // Text, a reasoning burst, then text again before the tool: the first
+    // text step is still running when the second opens.
+    let list = openTextStep(empty(), 0, 0);
+    list = openThinkingStep(list, 5);
+    list = closeThinkingStep(list, 8);
+    list = openTextStep(list, 9, first.length);
+    expect(list.steps.filter((step) => step.kind === 'text')).toHaveLength(2);
+
+    list = closeOpenSteps(list, 20, first + second, 0);
+    list = startToolStep(list, { toolUseId: 't1', toolName: 'Bash' }, 21);
+    list = endToolStep(list, 't1', 30);
+    list = startToolStep(list, { toolUseId: 't2', toolName: 'Bash' }, 31);
+
+    const texts = list.steps
+      .filter((step) => step.kind === 'text')
+      .map((step) => [step.status, step.text]);
+    expect(texts).toEqual([
+      ['done', first],
+      ['done', second],
+    ]);
+  });
+
   it('has no answer start without steps', () => {
     expect(answerStart(undefined, 0)).toBeUndefined();
     expect(answerStart([], 0)).toBeUndefined();

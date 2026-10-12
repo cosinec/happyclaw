@@ -212,7 +212,10 @@ export function openTextStep(
 
 /**
  * A tool or sub-agent started after this text: it was commentary, not the
- * answer. Keep its text (the end of it, bounded) on the step.
+ * answer. Keep its text (the end of it, bounded) on the step. Text can reopen
+ * after a reasoning burst without the earlier text step having closed, so
+ * every running text step closes here, each with the part of the text between
+ * its own start and the start of the next one.
  */
 export function closeTextStep(
   list: StepList,
@@ -220,18 +223,26 @@ export function closeTextStep(
   wholeText: string,
   base: number,
 ): StepList {
-  const index = findIndexBy(
-    list,
-    (step) => step.kind === 'text' && step.status === 'running',
-  );
-  if (index < 0) return list;
-  const step = list.steps[index];
-  const own = wholeText.slice(Math.max(0, (step.from ?? 0) - base)).trim();
-  return replaceAt(list, index, {
-    status: 'done',
-    endedAt: at,
-    text: tail(own, MAX_TEXT_STEP_CHARS),
+  const open: number[] = [];
+  list.steps.forEach((step, index) => {
+    if (step.kind === 'text' && step.status === 'running') open.push(index);
   });
+  if (open.length === 0) return list;
+  const steps = list.steps.slice();
+  open.forEach((index, n) => {
+    const step = steps[index];
+    const start = Math.max(0, (step.from ?? 0) - base);
+    const nextFrom = n + 1 < open.length ? steps[open[n + 1]].from : undefined;
+    const end =
+      nextFrom === undefined ? undefined : Math.max(start, nextFrom - base);
+    steps[index] = {
+      ...step,
+      status: 'done',
+      endedAt: at,
+      text: tail(wholeText.slice(start, end).trim(), MAX_TEXT_STEP_CHARS),
+    };
+  });
+  return { steps, dropped: list.dropped };
 }
 
 /**
