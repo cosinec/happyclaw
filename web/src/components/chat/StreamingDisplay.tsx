@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import {
   shouldRecoverStaleWaiting,
@@ -14,7 +14,7 @@ import { TodoProgressPanel } from './TodoProgressPanel';
 import { ToolActivityCard, ToolRow } from './ToolActivityCard';
 import { AskUserQuestionCard } from './AskUserQuestionCard';
 import { ModelWaitRow } from './ModelWaitRow';
-import { StepTimeline } from './StepTimeline';
+import { ProcessCard, hasProcess } from './ProcessCard';
 import { SubAgentCard } from './SubAgentCard';
 import { ThinkingBlock } from './ThinkingBlock';
 import { WorkflowRunCard } from './WorkflowRunCard';
@@ -58,6 +58,8 @@ function initialThinkingExpanded(
 ): boolean {
   return !streaming?.thinkingText || streaming.isThinking;
 }
+
+const NO_STEPS: StreamingStep[] = [];
 
 /** Finished tools the classic layout keeps listed under the running ones. */
 const CLASSIC_FINISHED_TOOLS = 4;
@@ -252,12 +254,14 @@ function StreamingContent({
   );
 
   // A timeline card that is not live (settled for its final, or stopped) is
-  // shaped like the finished message: the reasoning and the execution details
-  // each folded to a row, the answer below, so the swap between them keeps
-  // its height. Every layout and state fills the same slots in the same order
-  // (an unused one is `false`), so the answer keeps its element, and its
-  // rendered Markdown, when the card settles.
+  // shaped like the finished message: the process folded to one summary row,
+  // the answer below, so the swap between them keeps its height. A frozen card
+  // that has no steps (an older mirror, a snapshot) keeps the two rows the
+  // reasoning and the execution details fold to. Every layout and state fills
+  // the same slots in the same order (an unused one is `false`), so the answer
+  // keeps its element, and its rendered Markdown, when the card settles.
   const folded = timeline && !live;
+  const legacyFolded = folded && !hasProcess(streaming.steps ?? []);
   const toolRows =
     !timeline &&
     (toolSteps ? toolSteps.length > 0 : streaming.activeTools.length > 0) ? (
@@ -316,15 +320,29 @@ function StreamingContent({
       ))}
     </div>
   );
+  // A settled card shows those cards itself, so its steps list them as a line.
+  const settledTasks = useMemo(
+    () =>
+      folded
+        ? Object.fromEntries(
+            Object.entries(streaming.taskStates).filter(
+              ([, task]) => !isWorkflowTask(task),
+            ),
+          )
+        : streaming.taskStates,
+    [folded, streaming.taskStates],
+  );
 
   return (
     <>
       {/* System status */}
       {!folded && systemStatus}
 
-      {/* Reasoning block: live in the classic layout, folded once over */}
+      {/* Reasoning block: live in the classic layout; folded once over only
+          for a frozen card that has no steps to be summed up */}
       {folded
-        ? hasThinkingRow && (
+        ? legacyFolded &&
+          hasThinkingRow && (
             <ThinkingBlock
               text={streaming.thinkingText}
               title={streaming.thinkingTitle}
@@ -336,20 +354,21 @@ function StreamingContent({
           ? false
           : reasoning}
 
-      {/* The steps in order (timeline), or the tools: running and latest done */}
-      {timeline && !folded ? (
+      {/* The process (timeline): live headline over its steps, or one summary
+          row once settled; or the tools: running and latest done (classic) */}
+      {timeline ? (
         <>
           <PermissionAlert traceEvents={streaming.traceEvents} />
-          <StepTimeline
-            steps={streaming.steps}
+          <ProcessCard
+            mode={live ? 'live' : 'settled'}
+            steps={streaming.steps ?? NO_STEPS}
             stepsDropped={streaming.stepsDropped}
-            taskStates={streaming.taskStates}
+            taskStates={settledTasks}
             activeTools={streaming.activeTools}
             waiting={waitingForModel}
             waitingSince={streaming.phaseStartedAt}
             hasContent={hasContent}
             groupJid={groupJid}
-            live={live}
           />
         </>
       ) : (
@@ -363,12 +382,10 @@ function StreamingContent({
       {tasksCards}
 
       {/* Permission denials — surfaced prominently in red, not buried in trace */}
-      {(folded || !timeline) && (
-        <PermissionAlert traceEvents={streaming.traceEvents} />
-      )}
+      {!timeline && <PermissionAlert traceEvents={streaming.traceEvents} />}
 
       {/* Full trace */}
-      {(folded || !timeline) && (
+      {(!timeline || legacyFolded) && (
         <TracePanel
           traceEvents={streaming.traceEvents}
           taskCount={tasks.length}

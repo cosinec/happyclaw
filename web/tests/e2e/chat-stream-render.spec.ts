@@ -61,9 +61,15 @@ test.describe('the step timeline', () => {
     page,
   }) => {
     await open(page, 'scenario=streaming');
+    const card = block(page).locator('[data-hc-process-card]');
+    await expect(card).toHaveAttribute('data-mode', 'live');
     const timeline = block(page).getByRole('list', { name: '处理步骤' });
     await expect(timeline).toBeVisible();
     await expect(timeline).toHaveAttribute('data-hc-step-timeline', '');
+
+    // The header says what the run is doing now: the reasoning being written.
+    const header = card.getByRole('button', { name: /核对行高估算/ }).first();
+    await expect(header).toHaveAttribute('aria-expanded', 'true');
 
     // The oldest steps fold into one line that says what they were.
     await expect(
@@ -79,18 +85,20 @@ test.describe('the step timeline', () => {
       timeline.getByText(/npx vitest run tests\/frontend-session-sidebar-copy/),
     ).toBeVisible();
     await expect(timeline.getByText('检查移动端滚动性能')).toBeVisible();
-    await expect(timeline.getByText('思考中…')).toBeVisible();
+    await expect(
+      timeline.getByRole('button', { name: /核对行高估算/ }),
+    ).toBeVisible();
 
-    // The answer is the text under the steps, not one of them.
+    // The answer is the text under the steps' window, not one of them.
     const answer = block(page).getByText(
       /^正在把会话列表改成虚拟滚动。目前已经替换了/,
     );
     await expect(answer).toBeVisible();
-    const [list, text] = await Promise.all([
-      timeline.boundingBox(),
+    const [window, text] = await Promise.all([
+      card.locator('[data-hc-process-window]').boundingBox(),
       answer.boundingBox(),
     ]);
-    expect(text!.y).toBeGreaterThanOrEqual(list!.y + list!.height - 1);
+    expect(text!.y).toBeGreaterThanOrEqual(window!.y + window!.height - 1);
     await expectNoSidewaysOverflow(page);
   });
 
@@ -99,11 +107,19 @@ test.describe('the step timeline', () => {
     const timeline = block(page).getByRole('list', { name: '处理步骤' });
     const folded = timeline.getByRole('button', { name: /较早 4 步/ });
     await expect(folded).toHaveAttribute('aria-expanded', 'false');
-    await expect(timeline.getByText('useVirtualizer in web/src')).toHaveCount(
+    await expect(timeline.getByText('已浏览 1 个文件 · 搜索 1 次')).toHaveCount(
       0,
     );
     await folded.click();
     await expect(folded).toHaveAttribute('aria-expanded', 'true');
+    // The two read-only calls among them are one row, which opens in its turn.
+    const group = timeline.getByRole('button', {
+      name: /已浏览 1 个文件 · 搜索 1 次/,
+    });
+    await expect(timeline.getByText('useVirtualizer in web/src')).toHaveCount(
+      0,
+    );
+    await group.click();
     await expect(timeline.getByText('useVirtualizer in web/src')).toBeVisible();
     // A failed call says why, in its own row.
     await expect(timeline.getByText('被权限策略拒绝')).toBeVisible();
@@ -113,10 +129,10 @@ test.describe('the step timeline', () => {
     page,
   }) => {
     await open(page, 'scenario=streaming');
-    const timeline = block(page).getByRole('list', { name: '处理步骤' });
-    const buttons = timeline.getByRole('button');
+    const card = block(page).locator('[data-hc-process-card]');
+    const buttons = card.getByRole('button');
     const count = await buttons.count();
-    expect(count).toBeGreaterThan(2);
+    expect(count).toBeGreaterThan(3);
     for (let i = 0; i < count; i += 1) {
       const box = await buttons.nth(i).boundingBox();
       // 40px is the touch target the coarse-pointer variants ask for.
@@ -144,13 +160,12 @@ test.describe('the step timeline', () => {
     await open(page, 'scenario=settled');
     const card = page.locator('[data-hc-stream-card="settled"]');
     await expect(card).toBeVisible();
-    // Reasoning and execution details each fold to a row; nothing spins.
-    await expect(
-      card.getByRole('button', { name: /已思考 21 秒/ }),
-    ).toBeVisible();
-    await expect(
-      card.getByRole('button', { name: /执行详情.*已使用 2 个工具/ }),
-    ).toBeVisible();
+    // The process folds to one summary row; nothing spins.
+    const summary = card.getByRole('button', {
+      name: /已处理 .* · 6 个工具 · 3 段思考 · 1 个失败/,
+    });
+    await expect(summary).toBeVisible();
+    await expect(summary).toHaveAttribute('aria-expanded', 'false');
     await expect(page.locator('[data-hc-step-timeline]')).toHaveCount(0);
     await expect(card.locator('.animate-spin')).toHaveCount(0);
     await expect(card.getByText('正在把会话列表改成虚拟滚动。')).toBeVisible();
@@ -165,9 +180,11 @@ test.describe('reasoning', () => {
     await expect(body.locator('strong')).toHaveCount(3);
     await expect(body.locator('li')).toHaveCount(2);
     await expect(body.locator('pre code')).toContainText('useChatStore');
-    // The latest title is on the collapsed row too.
+    // The latest title is the card's headline too.
     await expect(
-      block(page).getByRole('button', { name: /思考中….*确认行高估算/ }),
+      block(page)
+        .locator('[data-hc-process-card] > button')
+        .filter({ hasText: '确认行高估算' }),
     ).toBeVisible();
     await expectNoSidewaysOverflow(page);
   });
@@ -322,7 +339,8 @@ test.describe('a proactive workspace', () => {
       steps.getByRole('button', { name: /检查移动端滚动性能/ }),
     ).toHaveCount(0);
     // The model reasoned for 6.4 seconds; what it wrote stays out of view.
-    await expect(steps.getByText('已思考 6.4 秒')).toBeVisible();
+    await expect(steps.getByText('6.4s')).toBeVisible();
+    await expect(steps.getByText('确认订阅范围')).toHaveCount(0);
     await expect(panel.getByText('计划')).toBeVisible();
     await expectNoModelText(page);
     await expectNoSidewaysOverflow(page);
@@ -334,19 +352,20 @@ test.describe('a proactive workspace', () => {
     await open(page, 'scenario=proactive&visibility=full');
     const panel = page.locator('[data-hc-process-panel]');
     const steps = panel.getByRole('list', { name: '处理步骤' });
-    const reasoning = steps.getByRole('button', { name: /已思考 6.4 秒/ });
-    await expect(reasoning).toContainText('确认订阅范围');
+    const reasoning = steps.getByRole('button', { name: /确认订阅范围/ });
+    await expect(reasoning).toContainText('6.4s');
     await reasoning.click();
     await expect(
       steps
         .locator('[data-hc-thinking-body]')
         .filter({ hasText: '用户希望保持排序' }),
     ).toBeVisible();
-    // A sub-agent's reasoning comes with it, in a card that opens; its text
+    // A sub-agent's reasoning comes with it, in a row that opens; its text
     // never does.
-    await expect(
-      steps.getByRole('button', { name: /检查移动端滚动性能/ }),
-    ).toBeVisible();
+    const agent = steps.getByRole('button', { name: /检查移动端滚动性能/ });
+    await expect(agent).toBeVisible();
+    await expect(steps.getByText('子 Agent 的思考')).toHaveCount(0);
+    await agent.click();
     await expect(steps.getByText('子 Agent 的思考')).toBeVisible();
     await expectNoModelText(page, [
       '确认订阅范围',
@@ -620,7 +639,7 @@ test.describe('on a wide screen', () => {
     const steps = panel.getByRole('list', { name: '处理步骤' });
     await expect(steps.getByText('先查一下记忆再回答。')).toBeVisible();
     await expect(steps.getByText('memory.md')).toBeVisible();
-    await expect(steps.getByText(/已思考 1\.\d 秒/)).toBeVisible();
+    await expect(steps.getByText(/^1\.\ds$/)).toBeVisible();
     await expect(steps.getByText('模型未返回思考内容')).toBeVisible();
     // Never the reply: nothing of it outside the process panel.
     await expect(page.locator('[data-hc-streaming-block]')).not.toContainText(
@@ -655,7 +674,7 @@ test.describe('on a wide screen', () => {
       .locator('[data-hc-process-panel]')
       .getByRole('list', { name: '处理步骤' });
     await expect(steps.getByText('memory.md')).toBeVisible();
-    await expect(steps.getByText(/已思考 1\.\d 秒/)).toBeVisible();
+    await expect(steps.getByText(/^1\.\ds$/)).toBeVisible();
     await expect(page.locator('[data-hc-streaming-block]')).not.toContainText(
       '先查一下记忆再回答。',
     );
