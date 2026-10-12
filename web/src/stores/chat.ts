@@ -1402,6 +1402,21 @@ function processView(group: GroupInfo | undefined): string {
     : 'assistant';
 }
 
+/** The view of the workspace a runtime (the workspace or a session) belongs to. */
+function processViewOfRuntime(
+  s: Pick<ChatState, 'groups'>,
+  runtimeJid: string,
+): string {
+  return processView(s.groups[runtimeJid.replace(/#agent:.*$/, '')]);
+}
+
+/**
+ * The turn-trace request in flight for each message, newest last. A reply of
+ * the view that has changed since it was asked for, or of a request that a
+ * newer one has taken over, is not written (see `loadTurnTrace`).
+ */
+const turnTraceRequests = new Map<string, symbol>();
+
 /**
  * The reasoning, trace and steps this tab holds for the replies of workspaces
  * and their sessions, let go. They were read at the view that was in force: a
@@ -4090,10 +4105,39 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => ({
       turnTraceStatus: { ...s.turnTraceStatus, [id]: 'loading' },
     }));
+    // What the server answers is for the view the workspace had when asked.
+    // If the owner has changed it since (the caches were let go meanwhile),
+    // the answer is not written: it would put back what the old view showed,
+    // or mark the reply empty for a view that may show it. The request that
+    // is still the latest only gives up its 'loading', so the reply can be
+    // asked for again under the new view.
+    const request = Symbol(id);
+    turnTraceRequests.set(id, request);
+    const viewAsked = processViewOfRuntime(current, jid);
+    const stale = () =>
+      turnTraceRequests.get(id) !== request ||
+      processViewOfRuntime(get(), jid) !== viewAsked;
+    const finish = () => {
+      if (turnTraceRequests.get(id) === request) turnTraceRequests.delete(id);
+    };
+    const dropped = (): boolean => {
+      if (!stale()) return false;
+      if (turnTraceRequests.get(id) === request) {
+        set((s) => {
+          if (s.turnTraceStatus[id] !== 'loading') return s;
+          const status = { ...s.turnTraceStatus };
+          delete status[id];
+          return { turnTraceStatus: status };
+        });
+      }
+      finish();
+      return true;
+    };
     try {
       const data = await api.get<TurnTraceResponse>(
         `/api/groups/${encodeURIComponent(jid)}/turn-traces/${encodeURIComponent(turnId)}`,
       );
+      if (dropped()) return false;
       const proactive = isProactiveRuntime(get(), jid);
       const thinking = capThinkingText(data.thinking || '');
       const duration = data.thinking_duration_ms ?? undefined;
@@ -4180,6 +4224,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch (err) {
       // A turn the server no longer shows (its owner hid the process) is
       // nothing to load; anything else may work on the next ask.
+      if (dropped()) return false;
       const gone = (err as { status?: number } | null)?.status === 404;
       set((s) => {
         const status = { ...s.turnTraceStatus };
@@ -4200,6 +4245,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         };
       });
       return false;
+    } finally {
+      finish();
     }
   },
 

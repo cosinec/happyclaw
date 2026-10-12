@@ -556,6 +556,35 @@ describe('in the timeline layout', () => {
     expect(rowButton('处理过程')).toBeTruthy();
   });
 
+  test('keeps its row when the level is raised while it is loading and the old answer is a 404', async () => {
+    useChatStore.setState({
+      groups: { [JID]: proactive('activity') },
+      messages: { [JID]: [reply({ source_kind: 'sdk_send_message' })] },
+    });
+    let fail!: (error: unknown) => void;
+    apiGetMock.mockReturnValueOnce(new Promise((_, reject) => (fail = reject)));
+    mount(reply({ source_kind: 'sdk_send_message' }));
+    act(() => rowButton('处理过程')?.click());
+    expect(rowButton('处理过程')?.disabled).toBe(true);
+
+    // The owner raises the level (another tab): the answer is for the old one.
+    act(() => useChatStore.setState({ groups: { [JID]: proactive('full') } }));
+    await act(async () => fail({ status: 404, message: 'Not found' }));
+    expect(rowButton('处理过程')).toBeTruthy();
+    expect(rowButton('处理过程')?.disabled).toBe(false);
+
+    // And it loads, now at the new level.
+    apiGetMock.mockResolvedValueOnce({
+      turn_id: 'turn-1',
+      steps: STEPS,
+      steps_dropped: 0,
+    });
+    act(() => rowButton('处理过程')?.click());
+    await flush();
+    expect(card()).toBeTruthy();
+    expect(rowButton('处理过程')).toBeUndefined();
+  });
+
   test('has none at the hidden level', () => {
     useChatStore.setState({ groups: { [JID]: proactive('hidden') } });
     mount(reply({ source_kind: 'sdk_send_message' }));
