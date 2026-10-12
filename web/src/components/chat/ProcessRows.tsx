@@ -217,7 +217,7 @@ function RowFrame({
         </div>
       )}
       {open && children && (
-        // Under the label: the icon and its gap are 26px with the row's padding.
+        // Under the label: the row's padding, the icon and its gap add up to 26px.
         <div id={panelId} className="mb-1 ml-6.5">
           {children}
         </div>

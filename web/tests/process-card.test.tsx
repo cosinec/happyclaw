@@ -207,7 +207,9 @@ describe('ProcessCard, live', () => {
       />,
     );
     expect(header()?.textContent).toContain('核对行高估算');
-    await advance(300);
+    await advance(299);
+    expect(header()?.textContent).toContain('核对行高估算');
+    await advance(1);
     expect(header()?.textContent).toContain('读取文件 · /repo/a.ts');
     expect(header()?.textContent).not.toContain('核对行高估算');
   });
