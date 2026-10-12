@@ -34,6 +34,7 @@ const {
 } = await import('../src/turn-trace.js');
 const { TurnStepRecorder } = await import('../src/turn-steps.js');
 const { MAX_STEPS } = await import('../src/stream-steps.js');
+const { THINKING_OMITTED_MARKER } = await import('../src/thinking-text.js');
 
 import type {
   StreamEvent,
@@ -362,7 +363,9 @@ describe('TurnTraceAccumulator', () => {
     );
     expect(bytes).toBeLessThanOrEqual(MAX_TURN_TRACE_THINKING_BYTES);
     // the oldest lost its text but not its title, the newest is whole
-    expect(thinking[0].text).toBeUndefined();
+    expect(thinking[0].text).toBe(THINKING_OMITTED_MARKER);
+    // no burst reads as one that had nothing to show
+    expect(thinking.every((s) => !!s.text)).toBe(true);
     expect(thinking[0].title).toBe('第0段');
     expect(thinking[0].endedAt).toBeDefined();
     expect(thinking[39].text).toContain('推理'.repeat(500));
@@ -659,6 +662,64 @@ describe('TurnTraceTracker', () => {
       'C',
     ]);
     expect(new Set(steps.map((s: { id: string }) => s.id)).size).toBe(3);
+  });
+
+  test('a background sub-agent that ends in a later part of a held reply sequence is still one step', () => {
+    const { instance, stored } = tracker('assistant');
+    instance.observe(
+      'in-1',
+      ev('tool_use_start', {
+        toolName: 'Agent',
+        toolUseId: 'ag1',
+        toolInputSummary: '后台调研',
+      }),
+      10,
+    );
+    instance.observe(
+      'in-1',
+      ev('task_start', {
+        taskId: 'ag1',
+        toolUseId: 'ag1',
+        taskDescription: '后台调研',
+      }),
+      20,
+    );
+    // the first part is delivered while the sub-agent still runs
+    instance.persist({
+      chatJid: 'web:a',
+      inputId: 'in-1',
+      turnId: 'in-1',
+      keep: true,
+      now: 100,
+    });
+    // the continuation turn only hears that it finished
+    instance.observe(
+      'in-2',
+      ev('task_notification', {
+        taskId: 'ag1',
+        toolUseId: 'ag1',
+        taskStatus: 'completed',
+        taskSummary: '调研完成：3 处',
+      }),
+      900,
+    );
+    instance.persist({
+      chatJid: 'web:a',
+      inputId: 'in-2',
+      turnId: 'in-1',
+      now: 1_000,
+    });
+    expect(stored).toHaveLength(2);
+    const steps = JSON.parse(stored[1].stepsJson!);
+    expect(steps).toHaveLength(1);
+    expect(steps[0]).toMatchObject({
+      id: 'task-ag1',
+      kind: 'task',
+      title: '后台调研',
+      summary: '调研完成：3 处',
+      status: 'done',
+      endedAt: 900,
+    });
   });
 
   test('a failing store never loses the reply', () => {

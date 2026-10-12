@@ -240,9 +240,13 @@ Workspace↔AgentProfile 绑定行上，因此：仅 `web:` 前缀工作区可�
 Web store 和宿主记录器并逐项比对。只记录主 Agent 的顶层步骤：子 Agent 自己的工具与
 文字属于它的 `task` 步骤，不单独成行。回合最后一个工具之后的文字是回复本身，不是步骤；
 `text` 步骤是 Assistant 模式里调用工具前写下的说明。思考文本合计超过 64KB 时从最早的
-步骤开始截（保留标题与时间），步骤超过 100 条时丢弃最早的，被丢弃的条数写在
-`steps_dropped`。该字段加入之前结算的回合读作 `steps: []`、`steps_dropped: 0`（不回填），
-`steps_json` 损坏同样读作空，不会让请求失败。
+步骤开始截（保留标题与时间），被截掉的文本换成“（已省略较早的思考）”标记，不会读成
+一段没有内容的思考；步骤超过 100 条时丢弃最早的，被丢弃的条数写在`steps_dropped`。
+`title`、`summary`、`toolName`、`skillName` 等字符串分别限制在 200、400、120、120 个
+字符以内，超出的以 `…` 结尾。一个回合若分成多段（后台任务让回复被扣住，后续各段共用第一段
+的 turn id），各段的步骤按先后接在一起；后台子 Agent 在前一段启动、后一段才收到
+`task_notification` 时仍是同一个步骤。该字段加入之前结算的回合读作 `steps: []`、
+`steps_dropped: 0`（不回填），`steps_json` 损坏同样读作空，不会让请求失败。
 
 主 Agent 顶层工具的 `tool_result` 事件除结果文本外还带两个可选字段：`toolIsError`
 是 SDK 的 `is_error`（失败但没有任何输出的调用也会发出该事件），`toolResultFacts`
