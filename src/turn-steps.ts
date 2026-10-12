@@ -47,7 +47,7 @@ import {
   type StreamingStep,
   type ToolResultFacts,
 } from './stream-steps.js';
-import { isSubagentEvent } from './stream-trace.js';
+import { capTailByBytes, isSubagentEvent } from './stream-trace.js';
 import { THINKING_OMITTED_MARKER } from './thinking-text.js';
 import { isMessageDeliveryTool } from './workspace-interaction-runtime.js';
 
@@ -713,32 +713,6 @@ const MIN_KEPT_THINKING_BYTES = 256;
 /** The head of a reasoning text that had its oldest part dropped. */
 const OMITTED_PREFIX = `${THINKING_OMITTED_MARKER}\n\n`;
 const OMITTED_MARKER_BYTES = Buffer.byteLength(THINKING_OMITTED_MARKER, 'utf8');
-const OMITTED_PREFIX_BYTES = Buffer.byteLength(OMITTED_PREFIX, 'utf8');
-
-/**
- * The end of `text` that fits `maxBytes` of UTF-8, off a surrogate pair and
- * from a paragraph start when one is close enough to keep half of it.
- */
-function tailByBytes(text: string, maxBytes: number): string {
-  let lo = 0;
-  let hi = text.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (Buffer.byteLength(text.slice(mid), 'utf8') <= maxBytes) hi = mid;
-    else lo = mid + 1;
-  }
-  let start = lo;
-  const code = text.charCodeAt(start);
-  if (start > 0 && code >= 0xdc00 && code <= 0xdfff) start += 1;
-  const boundary = text.indexOf('\n\n', start);
-  if (
-    boundary >= 0 &&
-    text.length - (boundary + 2) >= (text.length - start) / 2
-  ) {
-    start = boundary + 2;
-  }
-  return text.slice(start);
-}
 
 /**
  * Bound the reasoning text of all thinking steps to `maxBytes` of UTF-8: the
@@ -774,9 +748,10 @@ export function capStepsThinkingBytes(
       // The tail of this one fits what is left. One that already starts with
       // the marker (cut when it was a single burst) loses it with its head:
       // the cut is longer than the marker.
+      // (`text` is longer than `kept`, so capTailByBytes always cuts it.)
       out[index] = {
         ...step,
-        text: OMITTED_PREFIX + tailByBytes(text, kept - OMITTED_PREFIX_BYTES),
+        text: capTailByBytes(text, kept, OMITTED_PREFIX),
       };
       excess = 0;
     }
