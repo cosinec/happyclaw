@@ -73,6 +73,8 @@ export interface ProvidersListResponse {
   providers: ProviderWithHealth[];
   balancing: BalancingConfig;
   enabledCount: number;
+  /** The configuration unselected conversations run on; null = automatic pool. */
+  defaultModelConfigId: string | null;
 }
 
 export interface ClaudeApplyResult {

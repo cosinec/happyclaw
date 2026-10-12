@@ -177,6 +177,30 @@ function chatGptSelection(
 }
 
 describe('describeDefaultModel', () => {
+  test('names the configuration the global default resolves to', () => {
+    expect(
+      describeDefaultModel(
+        selection({
+          default: { source: 'default', modelConfigId: 'glm', enabledCount: 3 },
+        }),
+      ),
+    ).toBe('GLM');
+  });
+
+  test('names a ChatGPT default by the model it runs', () => {
+    expect(
+      describeDefaultModel(
+        chatGptSelection({
+          default: {
+            source: 'default',
+            modelConfigId: 'chatgpt',
+            enabledCount: 2,
+          },
+        }),
+      ),
+    ).toBe('gpt-6.1-sol');
+  });
+
   test('names the configuration an Agent or single provider resolves to', () => {
     expect(
       describeDefaultModel(
@@ -279,7 +303,7 @@ describe('ModelSelector', () => {
 });
 
 describe('ChatGPT models', () => {
-  test('a login lists its models under its own heading and marks the default one', async () => {
+  test('a login lists its models under its own heading, by name only', async () => {
     mocks.get.mockResolvedValue(chatGptSelection());
     await render(null);
     await open(trigger());
@@ -290,9 +314,15 @@ describe('ChatGPT models', () => {
       expect.stringContaining('gpt-6-astra'),
       expect.stringContaining('gpt-5.5'),
     ]);
-    expect(itemByText('gpt-6.1-sol')?.textContent).toContain('主力编码');
-    expect(itemByText('gpt-6.1-sol')?.textContent).toContain('配置默认');
-    expect(itemByText('gpt-6-astra')?.textContent).not.toContain('配置默认');
+    // The catalog may still carry commentary; the picker never shows it.
+    expect(
+      menuItems()
+        .slice(2)
+        .map((item) => item.textContent),
+    ).toEqual(['gpt-6.1-sol', 'gpt-6-astra', 'gpt-5.5']);
+    expect(document.body.textContent).not.toMatch(
+      /主力编码|旗舰|遗留|配置默认/,
+    );
     const headings = [
       ...document.querySelectorAll('[data-slot="dropdown-menu-label"]'),
     ].map((node) => node.textContent);
@@ -680,6 +710,56 @@ describe('reasoning effort button', () => {
     );
     expect(mocks.toastSuccess).toHaveBeenCalledWith(
       '已恢复默认推理档位，从下一个请求开始生效',
+    );
+  });
+
+  test('shows the global default in the trigger and selects the default row', async () => {
+    const defaulted = chatGptSelection({
+      default: {
+        source: 'default',
+        modelConfigId: 'chatgpt',
+        enabledCount: 2,
+      },
+    });
+    mocks.get.mockResolvedValue(defaulted);
+    await render(null);
+    expect(trigger().textContent).toContain('默认 · gpt-6.1-sol');
+    expect(trigger().textContent).not.toContain('自动');
+    await open(trigger());
+    const checked = menuItems().filter(
+      (item) => item.getAttribute('aria-checked') === 'true',
+    );
+    expect(checked).toHaveLength(1);
+    expect(checked[0].textContent).toContain('默认 · gpt-6.1-sol');
+    expect(document.body.textContent).toContain('使用模型配置里设为默认的模型');
+  });
+
+  test('the effort button acts on the login the global default resolves to', async () => {
+    const defaulted = chatGptSelection({
+      default: {
+        source: 'default',
+        modelConfigId: 'chatgpt',
+        enabledCount: 2,
+      },
+    });
+    mocks.get.mockResolvedValue(defaulted);
+    mocks.put.mockResolvedValue({
+      ...defaulted,
+      selectedModelConfigId: 'chatgpt',
+      selectedEffort: 'high',
+    });
+    await render(null);
+    expect(effortTrigger()!.disabled).toBe(false);
+    await open(effortTrigger()!);
+    await act(async () => itemByText('high')!.click());
+    expect(mocks.put).toHaveBeenCalledWith(
+      '/api/groups/web%3Aws/model-selection',
+      {
+        agentId: null,
+        modelConfigId: 'chatgpt',
+        model: null,
+        effort: 'high',
+      },
     );
   });
 

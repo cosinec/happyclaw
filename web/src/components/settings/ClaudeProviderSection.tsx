@@ -41,6 +41,9 @@ export function ClaudeProviderSection({
 }: ClaudeProviderSectionProps) {
   const [providers, setProviders] = useState<ProviderWithHealth[]>([]);
   const enabledCount = providers.filter((provider) => provider.enabled).length;
+  const [defaultModelConfigId, setDefaultModelConfigId] = useState<
+    string | null
+  >(null);
   const [balancing, setBalancing] = useState<BalancingConfig | null>(null);
   const balancingRef = useRef<BalancingConfig | null>(null);
   const balancingRevisionRef = useRef(0);
@@ -71,6 +74,7 @@ export function ClaudeProviderSection({
         '/api/config/claude/providers',
       );
       setProviders(data.providers);
+      setDefaultModelConfigId(data.defaultModelConfigId ?? null);
       balancingRef.current = data.balancing;
       setBalancing(data.balancing);
     } catch (err) {
@@ -129,6 +133,37 @@ export function ClaudeProviderSection({
       }
     },
     [loadProviders, setNotice, setError],
+  );
+
+  // ─── 设为默认 / 取消默认（再次点击当前默认即取消）─────────────────
+  const handleSetDefault = useCallback(
+    async (provider: ProviderWithHealth) => {
+      const clearing = provider.id === defaultModelConfigId;
+      setTogglingId(provider.id);
+      try {
+        await api.put(
+          '/api/config/claude/default',
+          { modelConfigId: clearing ? null : provider.id },
+          120_000,
+        );
+        await loadProviders();
+        setNotice(
+          clearing
+            ? `已取消默认模型「${provider.name}」，未手动选择的对话恢复为在已启用配置间自动轮换`
+            : provider.enabled
+              ? `已将「${provider.name}」设为默认模型`
+              : `已将「${provider.name}」设为默认模型，并同时启用`,
+        );
+      } catch (err) {
+        // A 503 can mean the choice was persisted but runtime teardown failed
+        // afterward: reload so the badge shows what is really stored.
+        await loadProviders().catch(() => {});
+        setError(getErrorMessage(err, '设置默认模型失败'));
+      } finally {
+        setTogglingId(null);
+      }
+    },
+    [defaultModelConfigId, loadProviders, setNotice, setError],
   );
 
   // ─── 重置健康状态 ─────────────────────────────────────────────
@@ -272,12 +307,14 @@ export function ClaudeProviderSection({
       >
         <ProviderList
           providers={providers}
+          defaultModelConfigId={defaultModelConfigId}
           onEdit={(p) => {
             setEditingProvider(p);
             setEditorOpen(true);
           }}
           onDelete={(p) => setPendingDeleteProvider(p)}
           onToggle={handleToggle}
+          onSetDefault={handleSetDefault}
           onResetHealth={handleResetHealth}
           onDuplicate={handleDuplicate}
           onAdd={handleAdd}
@@ -290,6 +327,7 @@ export function ClaudeProviderSection({
         {balancing && providers.length >= 2 && (
           <BalancingSettings
             balancing={balancing}
+            hasDefault={defaultModelConfigId !== null}
             onChange={handleBalancingChange}
             disabled={busy}
             saving={balancingSaving}

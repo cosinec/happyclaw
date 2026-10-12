@@ -103,6 +103,9 @@ Public：
 
 `model-selection` 以 `agentId`（GET 查询参数、PUT 请求体）区分 Runtime Session，
 缺省表示主会话。GET 返回当前选择、默认值的解析来源和全部已保存模型配置（不含凭据）；
+`default.source` 取值 `agent`（智能体绑定）、`workspace_env`（工作区自带 Provider
+环境变量）、`default`（`PUT /api/config/claude/default` 设置的全局默认）、`single`
+（唯一启用的配置）、`pool`（已启用配置间自动轮换）、`none`，顺序与运行时解析一致；
 PUT 的 `modelConfigId` 为 `null` 时恢复默认。会话选择优先于智能体绑定的模型配置，
 可以选择未启用的配置；切换后该会话的暖 Runner 在当前轮次结束后退出，下一条消息
 使用新配置。
@@ -412,7 +415,12 @@ Provider：
 - `PUT /api/config/claude/providers/:id/secrets`，同样接受
   `claudeCredentialInput`；凭据变更只排空该 Provider 的 Runner
 - `POST /api/config/claude/providers/:id/toggle`，没有可用凭据的 Provider
-  不能启用
+  不能启用；全局默认的 Provider 不能禁用
+- `PUT /api/config/claude/default`，请求体 `{ modelConfigId: string | null }`：
+  设置全局默认模型配置，`null` 取消并回到已启用配置间的自动轮换。没有会话选择、
+  智能体绑定和工作区环境变量的运行都使用它，不再参与负载均衡；未启用的配置在
+  设为默认时同时启用，没有可用凭据的配置返回 400；删除默认配置会清除默认。
+  `GET /api/config/claude/providers` 返回 `defaultModelConfigId`（无默认为 `null`）
 - `POST /api/config/claude/providers/:id/duplicate`，服务端连同加密密钥复制为
   停用的新 Provider；OAuth 授权的 Provider 拒绝复制
 - `POST /api/config/claude/providers/test`，按草稿字段（可选 `providerId`

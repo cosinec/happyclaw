@@ -199,7 +199,7 @@ export function buildCodexSelectionView(
       provider.codexOAuthLastRefreshError?.kind === 'reauth_required',
     models: models.map((entry) => ({
       value: entry.value,
-      label: entry.label,
+      label: entry.value,
       efforts: codexPickableEfforts(entry.efforts, context.canExceedCeiling),
       defaultEffort: defaultEffortOn(entry.value),
     })),

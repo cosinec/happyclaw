@@ -89,7 +89,7 @@ const CODEX_LEGACY_EFFORTS = ['low', 'medium', 'high', 'xhigh'] as const;
 
 // 每个模型支持的 reasoning.effort 档位不同（如 gpt-6-luna 无 ultra、gpt-5.5 无
 // max/ultra），选了模型目录不支持的档位会被上游 Responses API 拒绝（400）。
-// 顺序、标签与 defaultEffort 逐项照抄后端 CODEX_MODEL_CATALOG。
+// 顺序、标签（即模型名）与 defaultEffort 逐项照抄后端 CODEX_MODEL_CATALOG。
 const CODEX_FALLBACK_MODEL_OPTIONS: ReadonlyArray<{
   value: string;
   label: string;
@@ -98,49 +98,49 @@ const CODEX_FALLBACK_MODEL_OPTIONS: ReadonlyArray<{
 }> = [
   {
     value: 'gpt-6.1-sol',
-    label: 'gpt-6.1-sol（主力编码）',
+    label: 'gpt-6.1-sol',
     efforts: CODEX_FULL_EFFORTS,
     defaultEffort: 'low',
   },
   {
     value: 'gpt-6-astra',
-    label: 'gpt-6-astra（旗舰·最强推理）',
+    label: 'gpt-6-astra',
     efforts: CODEX_FULL_EFFORTS,
     defaultEffort: 'low',
   },
   {
     value: 'gpt-6-sol',
-    label: 'gpt-6-sol（上一代编码）',
+    label: 'gpt-6-sol',
     efforts: CODEX_FULL_EFFORTS,
     defaultEffort: 'medium',
   },
   {
     value: 'gpt-6-luna',
-    label: 'gpt-6-luna（快速轻量）',
+    label: 'gpt-6-luna',
     efforts: CODEX_CAPPED_EFFORTS,
     defaultEffort: 'medium',
   },
   {
     value: 'gpt-5.6-sol',
-    label: 'gpt-5.6-sol（旧款编码）',
+    label: 'gpt-5.6-sol',
     efforts: CODEX_FULL_EFFORTS,
     defaultEffort: 'low',
   },
   {
     value: 'gpt-5.6-terra',
-    label: 'gpt-5.6-terra（旧款均衡）',
+    label: 'gpt-5.6-terra',
     efforts: CODEX_FULL_EFFORTS,
     defaultEffort: 'medium',
   },
   {
     value: 'gpt-5.6-luna',
-    label: 'gpt-5.6-luna（旧款快速）',
+    label: 'gpt-5.6-luna',
     efforts: CODEX_CAPPED_EFFORTS,
     defaultEffort: 'medium',
   },
   {
     value: 'gpt-5.5',
-    label: 'gpt-5.5（遗留）',
+    label: 'gpt-5.5',
     efforts: CODEX_LEGACY_EFFORTS,
     defaultEffort: 'medium',
   },
@@ -1319,8 +1319,8 @@ export function ProviderEditor({
                       {codexModelChoices.map((m) => (
                         <NativeSelectOption key={m.value} value={m.value}>
                           {m.value === codexCatalog.defaultModel
-                            ? `${m.label}·默认`
-                            : m.label}
+                            ? `${m.value}·默认`
+                            : m.value}
                         </NativeSelectOption>
                       ))}
                     </NativeSelect>

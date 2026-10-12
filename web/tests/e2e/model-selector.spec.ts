@@ -170,6 +170,10 @@ test.describe('model and effort buttons', () => {
     await expect(
       page.getByText('ChatGPT 订阅 (someone@example.com)'),
     ).toBeVisible();
+    // Models are listed by name; whatever commentary the catalog carries stays out.
+    await expect(page.getByRole('menu')).not.toContainText(
+      /主力编码|旗舰|遗留|配置默认/,
+    );
     await radio(page, 'gpt-6-astra').click();
     await expect.poll(() => puts.length).toBe(1);
     expect(puts[0]).toMatchObject({

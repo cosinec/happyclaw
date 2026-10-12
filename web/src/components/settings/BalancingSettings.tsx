@@ -13,6 +13,8 @@ import type { BalancingConfig } from './types';
 
 interface BalancingSettingsProps {
   balancing: BalancingConfig;
+  /** A default model is set: unselected conversations bypass the pool. */
+  hasDefault: boolean;
   onChange: (updates: Partial<BalancingConfig>) => void;
   disabled: boolean;
   saving: boolean;
@@ -33,6 +35,7 @@ function clampInteger(
 
 export function BalancingSettings({
   balancing,
+  hasDefault,
   onChange,
   disabled,
   saving,
@@ -120,7 +123,9 @@ export function BalancingSettings({
           aria-label="负载均衡设置"
         >
           <p className="px-4 py-3 text-caption text-muted-foreground">
-            启用多个提供商后，系统会根据以下策略自动分配会话请求。
+            {hasDefault
+              ? '已设置默认模型：未手动选择模型的对话固定使用默认模型，不参与自动分配；取消默认后，以下策略恢复生效。'
+              : '启用多个提供商后，系统会根据以下策略自动分配会话请求。'}
           </p>
 
           <SettingsRow

@@ -50,6 +50,7 @@ import {
   getClaudeProviderConfig,
   getContainerEnvConfig,
   getEnabledProviders,
+  getUsableDefaultProvider,
   getBalancingConfig,
   getProviders,
   providerHasCredentials,
@@ -1262,23 +1263,6 @@ function getAgentProfileMcpPolicyMode(
 }
 
 /**
- * Resolve the model configuration that *pins* provider selection, or null when
- * selection should go through the balancing pool.
- *
- * An explicit Agent-level `modelConfigId` is authoritative: a top-level Agent
- * owns exactly one complete model configuration and must never be rerouted to a
- * different gateway or subscription.
- *
- * With no Agent-level choice, every enabled configuration belongs to the
- * automatic pool. A single enabled configuration is treated as pinned only to
- * keep the existing single-provider lifecycle efficient; multiple enabled
- * configurations must fall through to balancing.
- *
- * Every decision derived from "is selection pinned?" must call this, or the
- * sites disagree: selection would rotate while failure handling still treats
- * the provider as pinned (and therefore terminal).
- */
-/**
  * Pick the model tier this turn should run on.
  *
  * Per-model quotas are per account, so the pool drains the primary tier —
@@ -1332,6 +1316,26 @@ function stickyBindingCanServeTier(
   return !providerPool.isModelQuarantined(boundId, model);
 }
 
+/**
+ * Resolve the model configuration that *pins* provider selection, or null when
+ * selection should go through the balancing pool.
+ *
+ * An explicit conversation pick or Agent-level `modelConfigId` is
+ * authoritative: a top-level Agent owns exactly one complete model
+ * configuration and must never be rerouted to a different gateway or
+ * subscription.
+ *
+ * With neither, the configuration the operator marked as the global default
+ * pins (unless the Workspace brings its own provider environment). Only when
+ * no default is set does every enabled configuration belong to the automatic
+ * pool: a single enabled configuration is treated as pinned to keep the
+ * single-provider lifecycle efficient, and multiple enabled configurations
+ * fall through to balancing.
+ *
+ * Every decision derived from "is selection pinned?" must call this, or the
+ * sites disagree: selection would rotate while failure handling still treats
+ * the provider as pinned (and therefore terminal).
+ */
 function resolvePinnedModelConfigId(
   modelConfigId?: string | null,
   session?: { groupFolder: string; agentId?: string | null },
@@ -1341,8 +1345,23 @@ function resolvePinnedModelConfigId(
     : null;
   if (sessionSelection) return sessionSelection;
   if (modelConfigId) return modelConfigId;
+  // The global default is the weakest explicit choice: a Workspace that
+  // carries its own provider environment keeps it.
+  const defaultProvider = getUsableDefaultProvider();
+  if (defaultProvider && !(session && workspaceHasProviderEnv(session))) {
+    return defaultProvider.id;
+  }
   const enabledProviders = getEnabledProviders();
   return enabledProviders.length === 1 ? enabledProviders[0].id : null;
+}
+
+function workspaceHasProviderEnv(session: { groupFolder: string }): boolean {
+  const override = getContainerEnvConfig(session.groupFolder);
+  return !!(
+    override.anthropicApiKey ||
+    override.anthropicAuthToken ||
+    override.anthropicBaseUrl
+  );
 }
 
 /**
@@ -5055,9 +5074,10 @@ export async function runAgentWithModelFallback(
   }
   // A top-level Agent owns exactly one complete model configuration. Retrying
   // through other enabled configurations would violate that contract and can
-  // send a Workspace to a different gateway or official subscription. An
-  // auto-resolved default is not such a contract, so a multi-provider pool
-  // still retries across its members (see resolvePinnedModelConfigId).
+  // send a Workspace to a different gateway or official subscription. The
+  // global default binds the same way, but only because the operator chose
+  // it; with none chosen a multi-provider pool still retries across its
+  // members (see resolvePinnedModelConfigId).
   const selectedModelConfigId = resolvePinnedModelConfigId(
     input.agentProfile?.modelConfigId,
     {
