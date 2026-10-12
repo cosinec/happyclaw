@@ -136,6 +136,8 @@ describe('schema v81 turn traces', () => {
       thinking: '**Planning**\n\nCheck the gateway.',
       thinking_duration_ms: 12_400,
       trace_json: JSON.stringify([{ id: 't1', kind: 'tool', title: 'Grep' }]),
+      steps_json: '[]',
+      steps_dropped: 0,
       created_at: '2026-10-12T00:00:00.000Z',
     });
 
