@@ -507,6 +507,44 @@ describe('in the timeline layout', () => {
     expect(container?.textContent).not.toContain('处理过程');
   });
 
+  describe('steps that leave nothing to show', () => {
+    // Narration, then the answer: the card lists the narration at the full
+    // level only, and nothing of an older turn's rows is kept for it.
+    const NARRATION: StreamingStep[] = [
+      step({ id: 'text-0', kind: 'text', text: '先看一下目录。' }),
+      step({ id: 'text-1', kind: 'text', text: '最终答案。' }),
+    ];
+    const turn = {
+      turn_id: 'turn-1',
+      thinking: '',
+      trace: [],
+      steps: NARRATION,
+    };
+
+    test('take the row away at a level that hides the narration', async () => {
+      useChatStore.setState({ groups: { [JID]: proactive('activity') } });
+      apiGetMock.mockResolvedValueOnce(turn);
+      mount(reply({ source_kind: 'sdk_send_message' }));
+      act(() => rowButton('处理过程')?.click());
+      await flush();
+      expect(card()).toBeNull();
+      expect(container?.textContent).not.toContain('处理过程');
+      expect(apiGetMock).toHaveBeenCalledTimes(1);
+    });
+
+    test('take the rows away in the classic layout, which has no card for them', async () => {
+      storage.set(LAYOUT_KEY, 'classic');
+      apiGetMock.mockResolvedValueOnce(turn);
+      mount(reply());
+      act(() => rowButton('执行详情')?.click());
+      await flush();
+      expect(card()).toBeNull();
+      expect(rowButton('执行详情')).toBeUndefined();
+      expect(rowButton('思考过程')).toBeUndefined();
+      expect(apiGetMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
   test('shows no row for a message that has nothing kept', () => {
     mount(reply({ has_trace: undefined }));
     expect(container?.textContent).not.toContain('处理过程');

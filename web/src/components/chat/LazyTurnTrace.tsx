@@ -108,8 +108,13 @@ export function LazyTurnTrace({
 }) {
   const { layout } = useStreamLayout();
   const status = useChatStore((s) => s.turnTraceStatus[message.id]);
+  // Loaded, and the bubble still asks: the steps hold nothing this layout or
+  // level shows, so there is nothing left to load (the row would only spin).
+  const loadedSteps = useChatStore(
+    (s) => s.stepsCache[message.id] !== undefined,
+  );
   const loadTurnTrace = useChatStore((s) => s.loadTurnTrace);
-  if (status === 'empty') return null;
+  if (status === 'empty' || loadedSteps) return null;
   const loading = status === 'loading';
   const failed = status === 'failed';
   const ask = (row: 'thinking' | 'trace' | 'process') => () => {
