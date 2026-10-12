@@ -330,10 +330,24 @@ test('a reader scrolled into the reply keeps their place through the finish', as
   await expect(page.getByRole('button', { name: '回到底部' })).toBeVisible();
 });
 
-test('a reader scrolled into the reply keeps their place when the card folds at the end of the run', async ({
-  page,
-}) => {
-  await openHarness(page);
+// Chromium holds a reader's place by itself when what is above them changes
+// size; Safari does not. Both are run, the second with that turned off, so the
+// card has to keep the place on its own.
+for (const anchoring of ['native', 'none'] as const) {
+  test(`a reader scrolled into the reply keeps their place when the card folds at the end of the run (scroll anchoring: ${anchoring})`, async ({
+    page,
+  }) => {
+    await openHarness(page);
+    if (anchoring === 'none') {
+      await page.addStyleTag({
+        content: '[data-hc-chat-view] * { overflow-anchor: none !important }',
+      });
+    }
+    await readerFolds(page);
+  });
+}
+
+async function readerFolds(page: Page) {
   await streamReply(page, 'run-fold');
   await page.evaluate(() => {
     const view = document.querySelector('[data-hc-chat-view]')!;
@@ -368,7 +382,7 @@ test('a reader scrolled into the reply keeps their place when the card folds at 
   expect(
     Math.max(...(ys as number[])) - Math.min(...(ys as number[])),
   ).toBeLessThan(3);
-});
+}
 
 test('a pinned reader stays at the end, and the answer stays put, when the card folds', async ({
   page,

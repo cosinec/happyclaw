@@ -290,38 +290,75 @@ function scrollParent(el: HTMLElement): HTMLElement | null {
 /**
  * The card folds by itself when its run ends, and what is below it moves up by
  * what it gave up. A reader who has scrolled past it, into the answer, would
- * see the text jump away from them: the difference comes off the scroll
- * position. A reader at the end of the chat is not in this case (the browser
- * has clamped the position to the shorter page), nor is one who can see the
- * card (what they watch is the card, and it is theirs to fold).
+ * see the text jump away from them (Safari has no scroll anchoring to hold it;
+ * where there is, the net movement is what counts). So while the card is live
+ * this notes where the text below it is on screen, and once it has folded the
+ * scroll position takes up the difference. Not for a reader at the end of the
+ * chat (the browser clamped the position to the shorter page: nothing moved on
+ * screen) nor one who can see the card (what they watch is the card).
  */
 function useFoldAnchor(
   ref: RefObject<HTMLElement | null>,
   mode: ProcessCardProps['mode'],
 ) {
-  const last = useRef<{
-    height: number;
-    mode: ProcessCardProps['mode'];
-  } | null>(null);
-  useLayoutEffect(() => {
+  const scroller = useRef<HTMLElement | null>(null);
+  const listening = useRef<HTMLElement | null>(null);
+  // Where the text below the card was last seen on screen, and whether the
+  // card was already above the top of the view.
+  const seen = useRef<{ y: number; cardAbove: boolean } | null>(null);
+  const was = useRef(mode);
+
+  const look = useCallback(() => {
     const el = ref.current;
-    if (!el) {
-      last.current = null;
+    const below = el?.parentElement?.lastElementChild;
+    if (el && !scroller.current) scroller.current = scrollParent(el);
+    if (!el || !below || below === el || !scroller.current) {
+      seen.current = null;
       return;
     }
-    const before = last.current;
-    last.current = { height: el.offsetHeight, mode };
-    if (!before || before.mode !== 'live' || mode !== 'settled') return;
-    const shrunk = before.height - el.offsetHeight;
-    const scroller = shrunk > 0 ? scrollParent(el) : null;
-    if (!scroller) return;
-    const wentAbove =
-      el.getBoundingClientRect().top + before.height <=
-      scroller.getBoundingClientRect().top;
-    const gap =
-      scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
-    if (wentAbove && gap > 1) scroller.scrollTop -= shrunk;
+    seen.current = {
+      y: below.getBoundingClientRect().top,
+      cardAbove:
+        el.getBoundingClientRect().bottom <=
+        scroller.current.getBoundingClientRect().top,
+    };
+  }, [ref]);
+
+  // Every commit, and every scroll the reader makes, while the card is live.
+  useLayoutEffect(() => {
+    const before = was.current;
+    was.current = mode;
+    const el = ref.current;
+    if (mode === 'live') {
+      look();
+      if (scroller.current && listening.current !== scroller.current) {
+        listening.current?.removeEventListener('scroll', look);
+        listening.current = scroller.current;
+        listening.current.addEventListener('scroll', look, { passive: true });
+      }
+      return;
+    }
+    listening.current?.removeEventListener('scroll', look);
+    listening.current = null;
+    const sighting = seen.current;
+    const below = el?.parentElement?.lastElementChild;
+    const view = scroller.current;
+    seen.current = null;
+    if (before !== 'live' || !sighting?.cardAbove || !below || !view) return;
+    if (below === el) return;
+    // Reading the position lays the folded page out; the net movement is what
+    // the reader would see, whoever has moved the scroll position already.
+    const drift = below.getBoundingClientRect().top - sighting.y;
+    const gap = view.scrollHeight - view.scrollTop - view.clientHeight;
+    if (Math.abs(drift) > 1 && gap > 1) view.scrollTop += drift;
   });
+  useEffect(
+    () => () => {
+      listening.current?.removeEventListener('scroll', look);
+      listening.current = null;
+    },
+    [look],
+  );
 }
 
 /**
