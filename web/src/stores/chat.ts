@@ -1391,31 +1391,40 @@ function capCachedTrace(rows: StreamingTraceEvent[]): StreamingTraceEvent[] {
 }
 
 /**
- * How much of a turn's process the Web shows in a workspace: a proactive one
- * by the level its owner chose, any other all of it.
+ * What the Web shows of a turn's process in a workspace, as one comparable
+ * value: all of it (with what the tools returned) in an Assistant workspace,
+ * and in a proactive one the level its owner chose, without the tool results
+ * at any level. A reply's cached process was read for one of these.
  */
-function effectiveProcessLevel(
-  group: GroupInfo | undefined,
-): ProcessVisibility {
+function processView(group: GroupInfo | undefined): string {
   return normalizeInteractionMode(group?.interaction_mode) === 'proactive'
-    ? normalizeProcessVisibility(group?.process_visibility)
-    : 'full';
+    ? `proactive:${normalizeProcessVisibility(group?.process_visibility)}`
+    : 'assistant';
 }
 
 /**
- * The reasoning, trace and steps this tab holds for the replies of a workspace
- * and its sessions, let go. They were read at the level that was in force: a
+ * The reasoning, trace and steps this tab holds for the replies of workspaces
+ * and their sessions, let go. They were read at the view that was in force: a
  * lowered level must not leave what it hides in memory or on screen, and a
  * raised one must not leave the replies without what it now shows (or marked
- * empty). The replies load again, at the new level, when they are opened.
+ * empty). The replies load again, at the new view, when they are opened.
  */
-function withoutProcessCaches(s: ChatState, jid: string): Partial<ChatState> {
+function withoutProcessCaches(
+  s: ChatState,
+  jids: readonly string[],
+): Partial<ChatState> {
   const ids = new Set<string>();
-  for (const message of s.messages[jid] ?? []) ids.add(message.id);
-  const sessionPrefix = `${jid}#agent:`;
+  for (const jid of jids) {
+    for (const message of s.messages[jid] ?? []) ids.add(message.id);
+  }
+  const sessionPrefixes = jids.map((jid) => `${jid}#agent:`);
   for (const messages of Object.values(s.agentMessages)) {
     for (const message of messages) {
-      if (message.chat_jid.startsWith(sessionPrefix)) ids.add(message.id);
+      if (
+        sessionPrefixes.some((prefix) => message.chat_jid.startsWith(prefix))
+      ) {
+        ids.add(message.id);
+      }
     }
   }
   const without = <V>(cache: Record<string, V>): Record<string, V> => {
@@ -1441,10 +1450,91 @@ function notProvisional(held: ReplySteps): ReplySteps {
 }
 
 /**
+ * What all the cached steps may hold in text, in characters. The entries are
+ * capped in number (500) and each by the reducer, but a long run's reasoning,
+ * summaries and output previews can still add up to far more than a tab
+ * should keep, and the reasoning is held a second time in `thinkingCache`.
+ */
+export const MAX_STEPS_CACHE_CHARS = 4_000_000;
+
+const stepsCharsOf = new WeakMap<ReplySteps, number>();
+
+/** The text a reply's steps carry: what its cache entry weighs. */
+function stepsChars(entry: ReplySteps): number {
+  let chars = stepsCharsOf.get(entry);
+  if (chars === undefined) {
+    chars = 0;
+    for (const step of entry.steps) {
+      chars +=
+        (step.text?.length ?? 0) +
+        (step.resultPreview?.length ?? 0) +
+        (step.summary?.length ?? 0) +
+        (step.title?.length ?? 0);
+    }
+    stepsCharsOf.set(entry, chars);
+  }
+  return chars;
+}
+
+/** Messages the reader has in front of them: this workspace, or its open tab. */
+function idsOnScreen(
+  s: Pick<
+    ChatState,
+    'currentGroup' | 'messages' | 'agentMessages' | 'activeAgentTab'
+  >,
+): Set<string> {
+  const ids = new Set<string>();
+  const jid = s.currentGroup;
+  if (!jid) return ids;
+  const agentId = s.activeAgentTab[jid];
+  const shown = agentId ? s.agentMessages[agentId] : s.messages[jid];
+  for (const message of shown ?? []) ids.add(message.id);
+  return ids;
+}
+
+/**
+ * The steps of a reply written to the cache: it is the newest entry, and what
+ * the cache holds is kept to its count and to `MAX_STEPS_CACHE_CHARS` in all.
+ * Past that the oldest entries go first, those of messages that are not in
+ * front of the reader before those that are; the entry just written stays.
+ */
+function withReplySteps(
+  s: ChatState,
+  messageId: string,
+  entry: ReplySteps,
+): Record<string, ReplySteps> {
+  const { [messageId]: _replaced, ...others } = s.stepsCache;
+  const cache = capThinkingCache({ ...others, [messageId]: entry });
+  const sizes = new Map<string, number>();
+  let total = 0;
+  for (const [id, held] of Object.entries(cache)) {
+    const chars = stepsChars(held);
+    sizes.set(id, chars);
+    total += chars;
+  }
+  if (total <= MAX_STEPS_CACHE_CHARS) return cache;
+  const onScreen = idsOnScreen(s);
+  const older = Object.keys(cache).filter((id) => id !== messageId);
+  const order = [
+    ...older.filter((id) => !onScreen.has(id)),
+    ...older.filter((id) => onScreen.has(id)),
+  ];
+  const gone = new Set<string>();
+  for (const id of order) {
+    if (total <= MAX_STEPS_CACHE_CHARS) break;
+    total -= sizes.get(id) ?? 0;
+    gone.add(id);
+  }
+  return Object.fromEntries(
+    Object.entries(cache).filter(([id]) => !gone.has(id)),
+  );
+}
+
+/**
  * A step without what its tool or sub-agent returned: the preview of the
  * output and the numbers read from it. A proactive workspace never shows them.
  */
-function withoutToolResults(step: StreamingStep): StreamingStep {
+export function withoutToolResults(step: StreamingStep): StreamingStep {
   if (step.resultPreview === undefined && step.resultFacts === undefined) {
     return step;
   }
@@ -1473,13 +1563,10 @@ function finalizedReplyCaches(
   return {
     ...(steps && hasListedSteps(steps.steps)
       ? {
-          stepsCache: capThinkingCache({
-            ...s.stepsCache,
-            [messageId]: {
-              steps: steps.steps,
-              dropped: steps.dropped,
-              ...(state?.stepsRebuilt ? { provisional: true } : {}),
-            },
+          stepsCache: withReplySteps(s, messageId, {
+            steps: steps.steps,
+            dropped: steps.dropped,
+            ...(state?.stepsRebuilt ? { provisional: true } : {}),
           }),
         }
       : {}),
@@ -3770,18 +3857,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
           [jid]: { ...group, interaction_mode: interactionMode },
         };
       };
-      set((state) => {
-        const groups = patchGroups(state.groups);
-        return {
-          groups,
-          // A mode shows more or less of the process than the other.
-          ...(effectiveProcessLevel(state.groups[jid]) !==
-          effectiveProcessLevel(groups[jid])
-            ? withoutProcessCaches(state, jid)
-            : {}),
-          error: null,
-        };
-      });
+      // The caches of the process the mode no longer shows go with the
+      // groups (see the subscription below the store).
+      set((state) => ({
+        groups: patchGroups(state.groups),
+        error: null,
+      }));
       useGroupsStore.setState((state) => ({
         groups: patchGroups(state.groups),
       }));
@@ -3834,16 +3915,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             );
           }
         }
-        const groups = patchGroups(state.groups);
         return {
-          groups,
+          groups: patchGroups(state.groups),
           streaming: nextStreaming,
           agentStreaming: nextAgentStreaming,
-          // What the replies already loaded were read at is no longer the level.
-          ...(effectiveProcessLevel(state.groups[jid]) !==
-          effectiveProcessLevel(groups[jid])
-            ? withoutProcessCaches(state, jid)
-            : {}),
           error: null,
         };
       });
@@ -4087,16 +4162,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
             : {}),
           ...(keepsSteps
             ? {
-                stepsCache: capThinkingCache({
-                  ...s.stepsCache,
-                  [id]: {
-                    steps,
-                    dropped:
-                      typeof data.steps_dropped === 'number' &&
-                      data.steps_dropped > 0
-                        ? data.steps_dropped
-                        : 0,
-                  },
+                stepsCache: withReplySteps(s, id, {
+                  steps,
+                  dropped:
+                    typeof data.steps_dropped === 'number' &&
+                    data.steps_dropped > 0
+                      ? data.steps_dropped
+                      : 0,
                 }),
               }
             : upgrading && held
@@ -6426,3 +6498,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
   },
 }));
+
+// What the replies a tab holds were read at is the view their workspace had
+// then. Whoever changes it (this tab, another one, the settings page, a load
+// of the groups) replaces `groups`, so the caches are let go here, for every
+// workspace whose view differs from the one before, rather than in each place
+// that replaces them. A workspace the previous groups did not have is not a
+// change.
+useChatStore.subscribe((state, previous) => {
+  if (state.groups === previous.groups) return;
+  const changed: string[] = [];
+  for (const [jid, group] of Object.entries(state.groups)) {
+    const before = previous.groups[jid];
+    if (before && processView(before) !== processView(group)) changed.push(jid);
+  }
+  if (changed.length === 0) return;
+  useChatStore.setState((current) => withoutProcessCaches(current, changed));
+});
