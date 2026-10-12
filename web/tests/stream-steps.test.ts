@@ -123,6 +123,23 @@ describe('tool steps', () => {
     expect(list.steps[0].resultFacts).toEqual({ added: 12, removed: 3 });
   });
 
+  it('keeps a sub-agent call running but records what it reported', () => {
+    let list = ensureTaskStep(
+      empty(),
+      { taskId: 'k1', toolUseId: 'k1', title: '读文件' },
+      0,
+    );
+    list = endToolStep(list, 'k1', 9, 'done', {
+      facts: { agent: { toolUses: 4, tokens: 1200 } },
+    });
+    expect(list.steps[0]).toMatchObject({
+      kind: 'task',
+      status: 'running',
+      resultFacts: { agent: { toolUses: 4, tokens: 1200 } },
+    });
+    expect(list.steps[0].endedAt).toBeUndefined();
+  });
+
   it('runs, then finishes with what it returned', () => {
     let list = startToolStep(
       empty(),

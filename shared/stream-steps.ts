@@ -461,8 +461,13 @@ export function endToolStep(
     extra.isError ?? (!!result && result.startsWith(FAILURE_PREFIX));
   const text = result ? previewOf(result.replace(/^⚠️\s*/, '')) : '';
   // A sub-agent ends on its own lifecycle (a background one outlives the call
-  // that started it), not when its tool returns.
-  if (step.kind === 'task' && !failed) return list;
+  // that started it), not when its tool returns. What the call reported about
+  // the sub-agent's work (its totals) still lands on the step.
+  if (step.kind === 'task' && !failed) {
+    return extra.facts
+      ? replaceAt(list, index, { resultFacts: extra.facts })
+      : list;
+  }
   return replaceAt(list, index, {
     status: failed ? 'error' : step.status === 'error' ? 'error' : 'done',
     endedAt: step.endedAt ?? at,
