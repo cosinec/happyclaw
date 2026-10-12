@@ -1,4 +1,12 @@
 /**
+ * Canonical source. Build step copies this file to:
+ *   - src/stream-steps.ts
+ *   - web/src/lib/stream-steps.ts
+ *
+ * DO NOT edit the copies directly -- edit this file and run `make sync-types`.
+ */
+
+/**
  * The steps of one streamed reply in the order they happened: the reasoning
  * bursts, the tool calls, the sub-agents and the model's own commentary. The
  * streaming state keeps its older fields (one reasoning text, the active
@@ -10,7 +18,7 @@ import {
   MAX_STEP_THINKING_TEXT,
   capThinkingText,
   extractThinkingTitle,
-} from './thinking-text';
+} from './thinking-text.js';
 
 export type StepKind = 'thinking' | 'tool' | 'task' | 'text';
 export type StepStatus = 'running' | 'done' | 'error';

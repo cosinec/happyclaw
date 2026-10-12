@@ -430,7 +430,9 @@ npm run self-test
 - 只使用 Node.js/npm，不使用 Bun。
 - 三个 Node 项目分别位于根目录、`web/`、`container/agent-runner/`，均使用
   `npm ci` 和已提交 lockfile。
-- 修改共享类型后运行 `make sync-types`；`make typecheck` 会检查副本一致性。
+- 修改共享类型后运行 `make sync-types`；`make typecheck` 会检查副本一致性。回复步骤归并器
+  （`shared/stream-steps.ts`、`shared/thinking-text.ts`）同步到后端和 Web：后端用同一套
+  纯函数记录已结算回合的有序步骤，与 Web 流式时渲染的步骤不会漂移。
 - 修改 Prompt 后确保 `scripts/check-agent-runner-prompts.sh` 通过。
 - 修改文档后运行 `npm run docs:check`。
 - SDK/CLI 升级必须显式执行 `make update-sdk`，验证后提交 package.json 与 lockfile。
