@@ -847,17 +847,28 @@ export class StreamEventProcessor {
     }
   }
 
-  /** Send a tool call's input summary as it settles (or is corrected). */
-  private emitToolInputSummary(toolUseId: string, summary: string): void {
-    const call = this.toolCalls.get(toolUseId);
-    if (!call?.announced) return;
-    call.summary = summary;
+  /**
+   * Send a tool call's input summary as it settles (or is corrected). A
+   * sub-agent's tool has no entry in `toolCalls`, so the call says where it
+   * belongs.
+   */
+  private emitToolInputSummary(
+    toolUseId: string,
+    summary: string,
+    call: {
+      toolName: string;
+      parentToolUseId: string | null;
+      isNested: boolean;
+    },
+  ): void {
+    const tracked = this.toolCalls.get(toolUseId);
+    if (tracked) tracked.summary = summary;
     this.emit({
       status: 'stream',
       result: null,
       streamEvent: {
         eventType: 'tool_progress',
-        toolName: call.name,
+        toolName: call.toolName,
         toolUseId,
         parentToolUseId: call.parentToolUseId,
         isNested: call.isNested,
@@ -939,7 +950,10 @@ export class StreamEventProcessor {
         toolInputSummary: inputSummary,
       },
     });
-    if (block.id) {
+    // A sub-agent's tool never has its result read here (that is for the main
+    // agent's messages), so remembering it would only crowd the table. A tool
+    // the main agent runs inside a Skill is its own and is remembered.
+    if (block.id && !isNested) {
       this.rememberToolCall(block.id, {
         name: block.name,
         announced: true,
@@ -1242,7 +1256,11 @@ export class StreamEventProcessor {
         const early = extractEarlyToolInputSummary(pendingGeneric.inputJson);
         if (early) {
           pendingGeneric.earlySummary = early;
-          this.emitToolInputSummary(pendingGeneric.toolUseId, early);
+          this.emitToolInputSummary(
+            pendingGeneric.toolUseId,
+            early,
+            pendingGeneric,
+          );
         } else if (pendingGeneric.inputJson.length >= EARLY_INPUT_SCAN_MAX) {
           pendingGeneric.scanExhausted = true;
         }
@@ -1264,7 +1282,11 @@ export class StreamEventProcessor {
         this.pendingGenericInput.delete(blockIndex);
         // A key that streamed after the early summary may outrank it.
         if (summary !== pendingGeneric.earlySummary) {
-          this.emitToolInputSummary(pendingGeneric.toolUseId, summary);
+          this.emitToolInputSummary(
+            pendingGeneric.toolUseId,
+            summary,
+            pendingGeneric,
+          );
         }
       }
     }
@@ -2045,8 +2067,11 @@ export class StreamEventProcessor {
    * and emit a `tool_result` event so the trace shows what a tool returned.
    *
    * The event also says how the call ended, apart from its text: `toolIsError`
-   * (the SDK's own `is_error`, so a failure with no output still reads as one)
-   * and `toolResultFacts` (numbers from the SDK's structured `tool_use_result`).
+   * (the SDK's own `is_error`, so a failure with no output still reads as one;
+   * the SDK leaves it out on success, which is sent as false rather than left
+   * to the "⚠️" prefix a reader falls back on, since a successful output may
+   * itself begin with that emoji) and `toolResultFacts` (numbers from the SDK's
+   * structured `tool_use_result`).
    */
   processMainToolResults(message: any): void {
     if (message.type !== 'user') return;
@@ -2084,9 +2109,7 @@ export class StreamEventProcessor {
             eventType: 'tool_result',
             toolUseId: block.tool_use_id,
             ...(shown ? { toolResult: shown, detail: shown } : {}),
-            ...(typeof block.is_error === 'boolean'
-              ? { toolIsError: block.is_error }
-              : {}),
+            toolIsError: isError,
             ...(facts ? { toolResultFacts: facts } : {}),
           },
         });
@@ -2161,7 +2184,11 @@ export class StreamEventProcessor {
       if (!call.announced || SPECIAL_TOOLS.includes(block.name)) continue;
       const summary = summarizeToolInput(block.input);
       if (summary && summary !== call.summary) {
-        this.emitToolInputSummary(block.id, summary);
+        this.emitToolInputSummary(block.id, summary, {
+          toolName: call.name,
+          parentToolUseId: call.parentToolUseId,
+          isNested: call.isNested,
+        });
       }
     }
   }

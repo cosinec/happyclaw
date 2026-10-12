@@ -380,6 +380,44 @@ describe('the input summary of a streaming tool call', () => {
     expect(summaries('toolu_b')[0]).not.toContain('mysecret123');
   });
 
+  test('a sub-agent tool is summarized where it belongs, tracked or not', () => {
+    const { processor, events } = makeProcessor();
+    const nested = (event: Record<string, unknown>) =>
+      processor.processStreamEvent({
+        type: 'stream_event',
+        parent_tool_use_id: 'toolu_task',
+        event,
+      });
+    nested({
+      type: 'content_block_start',
+      index: 0,
+      content_block: {
+        type: 'tool_use',
+        name: 'Read',
+        id: 'toolu_in',
+        input: {},
+      },
+    });
+    nested({
+      type: 'content_block_delta',
+      index: 0,
+      delta: {
+        type: 'input_json_delta',
+        partial_json: '{"file_path":"/repo/in.ts","limit":5}',
+      },
+    });
+    expect(events().filter((e) => e.toolInputSummary !== undefined)).toEqual([
+      {
+        eventType: 'tool_progress',
+        toolName: 'Read',
+        toolUseId: 'toolu_in',
+        parentToolUseId: 'toolu_task',
+        isNested: true,
+        toolInputSummary: 'file_path: /repo/in.ts',
+      },
+    ]);
+  });
+
   test('tools with their own input handling are left to it', () => {
     const { processor, summaries } = makeProcessor();
     start(processor, 'Skill', 'toolu_s');

@@ -89,6 +89,8 @@ const { TurnTraceTracker, presentTurnTrace } =
   await import('../src/turn-trace.js');
 const { projectSdkStreamEventForWeb } =
   await import('../src/workspace-interaction-runtime.js');
+const { StreamEventProcessor } =
+  await import('../container/agent-runner/src/stream-processor.js');
 import type { InteractionMode, ProcessVisibility } from '../src/types.js';
 
 const initialState = useChatStore.getState();
@@ -681,6 +683,156 @@ describe('the host records the steps the Web builds', () => {
     ]);
     expect(JSON.stringify(steps)).not.toContain('resultFacts');
     expect(JSON.stringify(steps)).not.toContain('私有内容');
+  });
+
+  /**
+   * The events the real Runner emits for one top-level tool call, as a script:
+   * its input streamed in, then the SDK's result message.
+   */
+  function runnerScript(
+    toolName: string,
+    toolUseId: string,
+    input: Record<string, unknown>,
+    result: { content: string; isError?: boolean; structured?: unknown },
+  ): Script {
+    const events: StreamEvent[] = [];
+    const processor = new StreamEventProcessor(
+      (output) => {
+        if (output.streamEvent) {
+          events.push(output.streamEvent as unknown as StreamEvent);
+        }
+      },
+      () => {},
+    );
+    processor.processStreamEvent({
+      type: 'stream_event',
+      parent_tool_use_id: null,
+      event: {
+        type: 'content_block_start',
+        index: 0,
+        content_block: {
+          type: 'tool_use',
+          name: toolName,
+          id: toolUseId,
+          input: {},
+        },
+      },
+    });
+    processor.processStreamEvent({
+      type: 'stream_event',
+      parent_tool_use_id: null,
+      event: {
+        type: 'content_block_delta',
+        index: 0,
+        delta: {
+          type: 'input_json_delta',
+          partial_json: JSON.stringify(input),
+        },
+      },
+    });
+    processor.processMainToolResults({
+      type: 'user',
+      parent_tool_use_id: null,
+      message: {
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: toolUseId,
+            content: result.content,
+            // The SDK leaves is_error out when a call succeeded.
+            ...(result.isError === undefined
+              ? {}
+              : { is_error: result.isError }),
+          },
+        ],
+      },
+      tool_use_result: result.structured,
+    });
+    return events.map((event, index) => [index * 10, event]);
+  }
+
+  it('a successful output that begins with the failure mark stays a success: Runner events to both sides', () => {
+    const warn = uid('warn');
+    const script = runnerScript(
+      'Bash',
+      warn,
+      { command: 'echo "⚠️ heads up: nothing is wrong"' },
+      {
+        content: '⚠️ heads up: nothing is wrong',
+        structured: { stdout: '⚠️ heads up: nothing is wrong', stderr: '' },
+      },
+    );
+    // The Runner says the call did not fail, so its text is not read as one.
+    const ended = script.find(([, e]) => e.eventType === 'tool_result')![1];
+    expect(ended).toMatchObject({ toolIsError: false });
+    const [step] = expectSameSteps(script, 500);
+    expect(step).toMatchObject({
+      kind: 'tool',
+      status: 'done',
+      resultPreview: '⚠️ heads up: nothing is wrong',
+    });
+
+    // A failure carries the flag and the mark the Runner adds; the preview is
+    // the output without the mark.
+    const bad = uid('bad');
+    const [failed] = expectSameSteps(
+      runnerScript(
+        'Bash',
+        bad,
+        { command: 'exit 3' },
+        {
+          content: 'Exit code 3\nboom',
+          isError: true,
+          structured: 'Error: Exit code 3\nboom',
+        },
+      ),
+      500,
+    );
+    expect(failed).toMatchObject({
+      status: 'error',
+      resultPreview: 'Exit code 3\nboom',
+      resultFacts: { exitCode: 3 },
+    });
+  });
+
+  it('a Runner that does not send the flag is still read by the mark', () => {
+    const old = uid('old');
+    const withoutFlag = runnerScript(
+      'Bash',
+      old,
+      { command: 'false' },
+      { content: 'Exit code 1', isError: true },
+    ).map(([at, event]): [number, StreamEvent] => {
+      const { toolIsError: _flag, toolResultFacts: _facts, ...rest } = event;
+      return [at, rest as StreamEvent];
+    });
+    expect(
+      withoutFlag.find(([, e]) => e.eventType === 'tool_result')![1],
+    ).not.toHaveProperty('toolIsError');
+    const [step] = expectSameSteps(withoutFlag, 500);
+    expect(step).toMatchObject({
+      status: 'error',
+      resultPreview: 'Exit code 1',
+    });
+  });
+
+  it('a proactive turn: a successful ⚠️ output is a success, and its text stays private', () => {
+    const warn = uid('warn');
+    const [step] = expectSameSteps(
+      runnerScript(
+        'Bash',
+        warn,
+        { command: 'cat notes.txt' },
+        {
+          content: '⚠️ private',
+          structured: { stdout: '⚠️ private', stderr: '' },
+        },
+      ),
+      500,
+      { mode: 'proactive', projected: true },
+    );
+    expect(step).toMatchObject({ status: 'done' });
+    expect(JSON.stringify(step)).not.toContain('private');
   });
 
   it('a proactive turn: the speech tool is no step, the rest is the same', () => {

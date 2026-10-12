@@ -957,13 +957,15 @@ async function runFactsScenario(ctx, { label, interaction, visibility }) {
     check(
       label,
       'Glob reports the files it found',
-      glob?.toolResultFacts?.files >= 1 && glob.toolIsError !== true,
+      glob?.toolResultFacts?.files >= 1 && glob.toolIsError === false,
       JSON.stringify(glob),
     );
     check(
       label,
       'Read reports the lines it returned',
-      read?.toolResultFacts?.lines >= 3 && read.toolResultFacts.totalLines >= 3,
+      read?.toolResultFacts?.lines >= 3 &&
+        read.toolResultFacts.totalLines >= 3 &&
+        read.toolIsError === false,
       JSON.stringify(read),
     );
     check(
@@ -1014,7 +1016,10 @@ async function runFactsScenario(ctx, { label, interaction, visibility }) {
           !('toolResultFacts' in e) &&
           e.toolResult === undefined &&
           e.detail === undefined,
-      ) && bash?.toolIsError === true,
+      ) &&
+        bash?.toolIsError === true &&
+        glob.toolIsError === false &&
+        read.toolIsError === false,
       JSON.stringify([glob, bash, read]),
     );
     check(
