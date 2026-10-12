@@ -42,7 +42,6 @@ const REFRESH_FAILURE_BACKOFF_MS = 5 * 60 * 1000;
 const MAX_UPSTREAM_BODY_BYTES = 2 * 1024 * 1024;
 const MAX_CATALOG_ENTRIES = 200;
 const MAX_SLUG_LENGTH = 128;
-const MAX_LABEL_LENGTH = 128;
 const KNOWN_EFFORT_SET = new Set<string>(CODEX_KNOWN_EFFORTS);
 const KNOWN_VERBOSITIES = new Set<string>(['low', 'medium', 'high']);
 const MAX_PLAN_ENTRIES = 100;
@@ -131,10 +130,6 @@ function resolveDiskCachePath(): string {
 
 let diskCachePathOverride: string | null | undefined;
 
-const curatedLabels = new Map(
-  CODEX_MODEL_CATALOG.map((entry) => [entry.value, entry.label]),
-);
-
 /** 上游 token 型字符串（套餐名、service tier id）：短、单行、可打印。 */
 function upstreamToken(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -222,9 +217,9 @@ function upstreamShape(
  * 上游 models.json（或账号 /models 响应，同一结构）→ 目录条目。只保留
  * visibility=list 的在售模型，并剔除 minimal_client_version 高于网关所扮演
  * 客户端版本的模型（后端会拒绝）；effort 档位先经已知档位白名单过滤再按
- * 上游顺序采用（上游数据不可信，未知档位会被请求侧透传导致 400）；已知
- * 模型保留人工中文标注，新模型用 display_name 自动生成标签。slug 去重
- * （首见优先），结果按上游 priority 升序（同官方选择器）。
+ * 上游顺序采用（上游数据不可信，未知档位会被请求侧透传导致 400）；标签
+ * 就是 slug 本身，不附加任何评价。slug 去重（首见优先），结果按上游
+ * priority 升序（同官方选择器）。
  */
 export function parseUpstreamModelCatalog(
   raw: unknown,
@@ -264,17 +259,12 @@ export function parseUpstreamModelCatalog(
       efforts.includes(item.default_reasoning_level)
         ? item.default_reasoning_level
         : undefined;
-    const curated = curatedLabels.get(slug);
-    const displayName =
-      typeof item.display_name === 'string' &&
-      item.display_name.trim().length <= MAX_LABEL_LENGTH
-        ? item.display_name.trim()
-        : '';
     seenSlugs.add(slug);
     entries.push({
       entry: {
         value: slug,
-        label: curated ?? (displayName ? `${slug}（${displayName}）` : slug),
+        // The model's name is its whole label: the pickers show no commentary.
+        label: slug,
         efforts,
         ...(upstreamDefault ? { defaultEffort: upstreamDefault } : {}),
         ...shape,
@@ -385,7 +375,11 @@ function loadDiskCache(): boolean {
       return false;
     }
     applyResolved({
-      models: models.filter((entry) => isCodexModelSupportedByClient(entry)),
+      models: models
+        .filter((entry) => isCodexModelSupportedByClient(entry))
+        // Caches written before labels became bare names still carry the
+        // commentary.
+        .map((entry) => ({ ...entry, label: entry.value })),
       source: 'disk-cache',
       fetchedAt: typeof parsed.fetchedAt === 'string' ? parsed.fetchedAt : null,
     });

@@ -56,7 +56,7 @@ export interface SessionModelSelection {
   selectedModel?: string | null;
   selectedEffort?: string | null;
   default: {
-    source: 'agent' | 'single' | 'pool' | 'workspace_env' | 'none';
+    source: 'agent' | 'default' | 'single' | 'pool' | 'workspace_env' | 'none';
     modelConfigId: string | null;
     enabledCount: number;
   };
@@ -77,8 +77,10 @@ export function describeDefaultModel(selection: SessionModelSelection): string {
   const named = selection.options.find((option) => option.id === modelConfigId);
   switch (source) {
     case 'agent':
+    case 'default':
     case 'single':
-      return named?.name ?? '默认';
+      // A ChatGPT configuration is named by the model it runs.
+      return (named?.codex ? named.codex.defaultModel : named?.name) ?? '默认';
     case 'pool':
       return `自动 · ${enabledCount} 个`;
     case 'workspace_env':
@@ -92,8 +94,10 @@ function defaultHint(selection: SessionModelSelection): string {
   switch (selection.default.source) {
     case 'agent':
       return '跟随智能体绑定的模型配置';
+    case 'default':
+      return '使用模型配置里设为默认的模型';
     case 'pool':
-      return '在已启用的模型配置间自动选择';
+      return '未设置默认模型，在已启用的模型配置间自动选择';
     case 'workspace_env':
       return '使用工作区环境变量中的模型网关';
     case 'single':
@@ -101,14 +105,6 @@ function defaultHint(selection: SessionModelSelection): string {
     default:
       return '使用系统设置';
   }
-}
-
-/** The part of a catalog label after the slug: "gpt-6.1-sol（主力编码）" → "主力编码". */
-function modelHint(model: CodexModelChoice): string {
-  if (!model.label.startsWith(model.value)) return '';
-  return model.label
-    .slice(model.value.length)
-    .replace(/^[\s（(]+|[\s）)]+$/g, '');
 }
 
 /** Whether a ChatGPT configuration can be chosen right now. */
@@ -159,7 +155,9 @@ export function resolveEffortContext(selection: SessionModelSelection): {
   const { selectedModelConfigId, default: fallback } = selection;
   const configId =
     selectedModelConfigId ??
-    (fallback.source === 'agent' || fallback.source === 'single'
+    (fallback.source === 'agent' ||
+    fallback.source === 'default' ||
+    fallback.source === 'single'
       ? fallback.modelConfigId
       : null);
   const option = selection.options.find((item) => item.id === configId);
@@ -473,9 +471,6 @@ export function ModelSelector({
                       {option.codex.models.map((model) => {
                         const isDefault =
                           model.value === option.codex?.defaultModel;
-                        const hint = [modelHint(model), isDefault && '配置默认']
-                          .filter(Boolean)
-                          .join(' · ');
                         return (
                           <DropdownMenuRadioItem
                             key={model.value}
@@ -490,11 +485,6 @@ export function ModelSelector({
                               <span className="shrink-0 font-mono text-caption">
                                 {model.value}
                               </span>
-                              {hint && (
-                                <span className="truncate text-micro text-muted-foreground">
-                                  {hint}
-                                </span>
-                              )}
                             </span>
                           </DropdownMenuRadioItem>
                         );

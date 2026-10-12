@@ -1296,6 +1296,7 @@ export function AgentProfilesPage() {
     mainAppearance,
   );
   const enabledModelCount = modelConfigs.filter((item) => item.enabled).length;
+  const defaultModelName = modelConfigs.find((item) => item.is_default)?.name;
 
   return (
     <div className="min-h-full bg-background lg:flex">
@@ -1834,8 +1835,9 @@ export function AgentProfilesPage() {
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="inherit">
-                            自动选择已启用模型
-                            {`（当前 ${enabledModelCount} 个）`}
+                            {defaultModelName
+                              ? `跟随默认模型（${defaultModelName}）`
+                              : `自动选择已启用模型（当前 ${enabledModelCount} 个）`}
                           </SelectItem>
                           {modelConfigs.map((model) => (
                             <SelectItem key={model.id} value={model.id}>
@@ -2007,7 +2009,9 @@ export function AgentProfilesPage() {
                         label="模型配置"
                         value={
                           modelConfigId === 'inherit'
-                            ? `自动选择已启用模型（当前 ${enabledModelCount} 个）`
+                            ? defaultModelName
+                              ? `跟随默认模型（${defaultModelName}）`
+                              : `自动选择已启用模型（当前 ${enabledModelCount} 个）`
                             : (modelConfigs.find(
                                 (item) => item.id === modelConfigId,
                               )?.name ?? '不可用模型配置')

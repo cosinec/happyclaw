@@ -18,7 +18,7 @@ export type CodexVerbosity = 'low' | 'medium' | 'high';
 export interface CodexModelCatalogEntry {
   /** 上游 Responses API 接受的模型 slug。 */
   value: string;
-  /** UI 展示文案。 */
+  /** UI 展示文案：模型名本身，不附加评价。 */
   label: string;
   /** 该模型支持的 reasoning.effort 档位（不支持的档位上游 400）。 */
   efforts: readonly string[];
@@ -113,7 +113,7 @@ const CURRENT_MODEL_TRAITS = {
 export const CODEX_MODEL_CATALOG: readonly CodexModelCatalogEntry[] = [
   {
     value: 'gpt-6.1-sol',
-    label: 'gpt-6.1-sol（主力编码）',
+    label: 'gpt-6.1-sol',
     efforts: CODEX_FULL_EFFORTS,
     defaultEffort: 'low',
     ...CURRENT_MODEL_TRAITS,
@@ -122,7 +122,7 @@ export const CODEX_MODEL_CATALOG: readonly CodexModelCatalogEntry[] = [
   },
   {
     value: 'gpt-6-astra',
-    label: 'gpt-6-astra（旗舰·最强推理）',
+    label: 'gpt-6-astra',
     efforts: CODEX_FULL_EFFORTS,
     defaultEffort: 'low',
     ...CURRENT_MODEL_TRAITS,
@@ -131,7 +131,7 @@ export const CODEX_MODEL_CATALOG: readonly CodexModelCatalogEntry[] = [
   },
   {
     value: 'gpt-6-sol',
-    label: 'gpt-6-sol（上一代编码）',
+    label: 'gpt-6-sol',
     efforts: CODEX_FULL_EFFORTS,
     defaultEffort: 'medium',
     ...CURRENT_MODEL_TRAITS,
@@ -140,7 +140,7 @@ export const CODEX_MODEL_CATALOG: readonly CodexModelCatalogEntry[] = [
   },
   {
     value: 'gpt-6-luna',
-    label: 'gpt-6-luna（快速轻量）',
+    label: 'gpt-6-luna',
     efforts: CODEX_CAPPED_EFFORTS,
     defaultEffort: 'medium',
     ...CURRENT_MODEL_TRAITS,
@@ -149,7 +149,7 @@ export const CODEX_MODEL_CATALOG: readonly CodexModelCatalogEntry[] = [
   },
   {
     value: 'gpt-5.6-sol',
-    label: 'gpt-5.6-sol（旧款编码）',
+    label: 'gpt-5.6-sol',
     efforts: CODEX_FULL_EFFORTS,
     defaultEffort: 'low',
     ...CURRENT_MODEL_TRAITS,
@@ -158,7 +158,7 @@ export const CODEX_MODEL_CATALOG: readonly CodexModelCatalogEntry[] = [
   },
   {
     value: 'gpt-5.6-terra',
-    label: 'gpt-5.6-terra（旧款均衡）',
+    label: 'gpt-5.6-terra',
     efforts: CODEX_FULL_EFFORTS,
     defaultEffort: 'medium',
     ...CURRENT_MODEL_TRAITS,
@@ -167,7 +167,7 @@ export const CODEX_MODEL_CATALOG: readonly CodexModelCatalogEntry[] = [
   },
   {
     value: 'gpt-5.6-luna',
-    label: 'gpt-5.6-luna（旧款快速）',
+    label: 'gpt-5.6-luna',
     efforts: CODEX_CAPPED_EFFORTS,
     defaultEffort: 'medium',
     ...CURRENT_MODEL_TRAITS,
@@ -176,7 +176,7 @@ export const CODEX_MODEL_CATALOG: readonly CodexModelCatalogEntry[] = [
   },
   {
     value: 'gpt-5.5',
-    label: 'gpt-5.5（遗留）',
+    label: 'gpt-5.5',
     efforts: CODEX_LEGACY_EFFORTS,
     defaultEffort: 'medium',
     ...CURRENT_MODEL_TRAITS,

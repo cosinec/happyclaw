@@ -30,6 +30,9 @@ const mocks = vi.hoisted(() => ({
     | 'round-robin'
     | 'weighted-round-robin'
     | 'failover',
+  /** The global default's id; null leaves the automatic pool in charge. */
+  defaultId: null as string | null,
+  workspaceEnv: {} as Record<string, string>,
 }));
 
 vi.mock('../src/config.js', async () => {
@@ -57,7 +60,10 @@ vi.mock('../src/runtime-config.js', async () => {
     ...actual,
     getProviders: () => mocks.providers,
     getEnabledProviders: () => mocks.providers.filter((p) => p.enabled),
-    getContainerEnvConfig: () => ({}),
+    getContainerEnvConfig: () => mocks.workspaceEnv,
+    getUsableDefaultProvider: () =>
+      mocks.providers.find((p) => p.id === mocks.defaultId && p.enabled) ??
+      null,
     getBalancingConfig: () => ({
       strategy: mocks.strategy,
       unhealthyThreshold: 3,
@@ -100,6 +106,8 @@ beforeEach(() => {
   db.setSessionModelSelection('grp', null, null);
   db.setSessionModelSelection('grp', 'agent-1', null);
   mocks.strategy = 'round-robin';
+  mocks.defaultId = null;
+  mocks.workspaceEnv = {};
   setProviders(['A', true], ['B', true], ['C', false]);
 });
 
@@ -180,5 +188,68 @@ describe('session model selection drives provider choice', () => {
     expect(
       runner.shouldRotatePoolProviderAfterTurn('grp', null, 'agent-1'),
     ).toBe(false);
+  });
+});
+
+describe('the global default model', () => {
+  beforeEach(() => {
+    setProviders(['A', true], ['B', true], ['D', true]);
+    mocks.defaultId = 'B';
+  });
+
+  test('every conversation that chose nothing runs on it, not on the pool', () => {
+    for (let i = 0; i < 6; i += 1) {
+      const result = runner.trySelectPoolProvider(`default-grp-${i}`, null);
+      expect(result?.profileId).toBe('B');
+      providerPool.releaseSession('B');
+    }
+  });
+
+  test('is a pin: the runner is kept warm and failure handling is terminal', () => {
+    expect(runner.shouldRotatePoolProviderAfterTurn('grp', null)).toBe(false);
+    expect(runner.launchOAuthRefreshCandidates('grp', null)).toEqual([]);
+  });
+
+  test('a conversation pick and an Agent binding both outrank it', () => {
+    db.setSessionModelSelection('grp', null, 'D');
+    const picked = runner.trySelectPoolProvider('grp', null, 'A');
+    expect(picked?.profileId).toBe('D');
+    providerPool.releaseSession('D');
+
+    db.setSessionModelSelection('grp', null, null);
+    const bound = runner.trySelectPoolProvider('grp', null, 'A');
+    expect(bound?.profileId).toBe('A');
+    providerPool.releaseSession('A');
+  });
+
+  test('a Workspace with its own provider environment keeps it', () => {
+    mocks.workspaceEnv = { anthropicBaseUrl: 'https://own.example.test' };
+    expect(runner.trySelectPoolProvider('grp', null)).toBeNull();
+    expect(runner.shouldRotatePoolProviderAfterTurn('grp', null)).toBe(false);
+  });
+
+  test('moving the default resets the bound session and predicts it', () => {
+    db.setSessionProviderId('grp', null, 'A');
+    expect(runner.willClearSessionOnProviderSwitch('grp', null)).toBe(true);
+    const result = runner.trySelectPoolProvider('grp', null);
+    expect(result).toMatchObject({
+      profileId: 'B',
+      previousProviderId: 'A',
+      resetSession: true,
+    });
+    providerPool.releaseSession('B');
+    expect(runner.willClearSessionOnProviderSwitch('grp', null)).toBe(false);
+  });
+
+  test('without a usable default the automatic pool decides again', () => {
+    mocks.defaultId = null;
+    expect(runner.shouldRotatePoolProviderAfterTurn('grp', null)).toBe(true);
+    const picked = new Set<string>();
+    for (let i = 0; i < 9; i += 1) {
+      const result = runner.trySelectPoolProvider(`pool-grp-${i}`, null);
+      picked.add(result!.profileId);
+      providerPool.releaseSession(result!.profileId);
+    }
+    expect(picked.size).toBeGreaterThan(1);
   });
 });
