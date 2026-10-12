@@ -47,7 +47,8 @@ import {
   type StreamingStep,
   type ToolResultFacts,
 } from './stream-steps.js';
-import { isSubagentEvent, capTailByBytes } from './stream-trace.js';
+import { isSubagentEvent } from './stream-trace.js';
+import { THINKING_OMITTED_MARKER } from './thinking-text.js';
 import { isMessageDeliveryTool } from './workspace-interaction-runtime.js';
 
 /**
@@ -116,6 +117,105 @@ function capReplyText(text: string): string {
 /** A text step that holds no commentary: the answer, or whitespace. */
 function isBlankTextStep(step: StreamingStep): boolean {
   return step.kind === 'text' && !step.text?.trim();
+}
+
+// The reducer bounds reasoning text, commentary and result previews; what a
+// call or a sub-agent is described with comes from events and is bounded here,
+// so the size of a stored turn does not depend on the size of its events.
+const MAX_TITLE_CHARS = 200;
+const MAX_SUMMARY_CHARS = 400;
+const MAX_NAME_CHARS = 120;
+const MAX_ID_CHARS = 200;
+
+const BOUNDED_TEXT = [
+  ['title', MAX_TITLE_CHARS],
+  ['summary', MAX_SUMMARY_CHARS],
+  ['toolName', MAX_NAME_CHARS],
+  ['skillName', MAX_NAME_CHARS],
+  ['resultPreview', MAX_SUMMARY_CHARS],
+] as const;
+const BOUNDED_IDS = ['id', 'toolUseId', 'taskId'] as const;
+
+/** `text` cut to `max` characters, off a surrogate pair. */
+function cutText(text: string, max: number): string {
+  let end = max;
+  const code = text.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+  return text.slice(0, end);
+}
+
+/** The step with its words and ids bounded; the step itself if they are. */
+function boundStep(step: StreamingStep): StreamingStep {
+  const patch: Partial<StreamingStep> = {};
+  for (const [key, max] of BOUNDED_TEXT) {
+    const value = step[key];
+    if (value !== undefined && value.length > max) {
+      patch[key] = `${cutText(value, max - 1)}…`;
+    }
+  }
+  for (const key of BOUNDED_IDS) {
+    const value = step[key];
+    if (value !== undefined && value.length > MAX_ID_CHARS) {
+      patch[key] = cutText(value, MAX_ID_CHARS);
+    }
+  }
+  return Object.keys(patch).length > 0 ? { ...step, ...patch } : step;
+}
+
+/** `id` if no step has it yet, else `id~1`, `id~2`…; the result is taken. */
+function takeUniqueId(taken: Set<string>, id: string): string {
+  let next = id;
+  for (let n = 1; taken.has(next); n += 1) next = `${id}~${n}`;
+  taken.add(next);
+  return next;
+}
+
+function withUniqueIds(steps: StreamingStep[]): StreamingStep[] {
+  const taken = new Set<string>();
+  return steps.map((step) => {
+    const id = takeUniqueId(taken, step.id);
+    return id === step.id ? step : { ...step, id };
+  });
+}
+
+/** The latest task step that is the same sub-agent as `step`, or -1. */
+function findSameTask(steps: readonly StreamingStep[], step: StreamingStep) {
+  const ids = [step.taskId, step.toolUseId].filter((id): id is string => !!id);
+  for (let index = steps.length - 1; index >= 0; index -= 1) {
+    const known = steps[index];
+    if (
+      known.kind === 'task' &&
+      ids.some((id) => known.taskId === id || known.toolUseId === id)
+    ) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+/** The title the reducer gives a sub-agent it knows nothing about. */
+const PLACEHOLDER_TASK_TITLE = 'Task';
+
+/**
+ * A sub-agent started in an earlier part of a held reply sequence and heard
+ * from in a later one: one step, which keeps its place and start, and takes
+ * from the later part how it ended and what it reported.
+ */
+function mergeTaskStep(
+  earlier: StreamingStep,
+  later: StreamingStep,
+): StreamingStep {
+  const real = (title?: string) =>
+    title && title !== PLACEHOLDER_TASK_TITLE ? title : undefined;
+  return {
+    ...earlier,
+    status: later.status,
+    endedAt: later.endedAt ?? earlier.endedAt,
+    title: real(earlier.title) ?? real(later.title) ?? earlier.title,
+    summary: later.summary ?? earlier.summary,
+    resultPreview: later.resultPreview ?? earlier.resultPreview,
+    resultFacts: later.resultFacts ?? earlier.resultFacts,
+  };
 }
 
 /** Records the steps of one turn (or of one part of a held reply sequence). */
@@ -228,12 +328,17 @@ export class TurnStepRecorder {
    */
   settled(at: number): StepList {
     const finished = finishSteps(this.list, at, false);
-    const steps = finished.steps.filter((step) => !isBlankTextStep(step));
+    const kept = finished.steps.filter((step) => !isBlankTextStep(step));
     // The reducer drops finished steps only, so a list of calls that never
     // reported back can still be over the cap; what is stored never is.
-    const overflow = Math.max(0, steps.length - MAX_STEPS);
+    const overflow = Math.max(0, kept.length - MAX_STEPS);
+    const newest = overflow > 0 ? kept.slice(overflow) : kept;
+    const bounded = newest.map(boundStep);
     return {
-      steps: overflow > 0 ? steps.slice(overflow) : steps,
+      // Cutting an id can make two the same.
+      steps: bounded.some((step, index) => step !== newest[index])
+        ? withUniqueIds(bounded)
+        : newest,
       dropped: finished.dropped + overflow,
     };
   }
@@ -247,12 +352,17 @@ export class TurnStepRecorder {
     if (other.list.steps.length === 0 && other.list.dropped === 0) return;
     const before = this.settled(this.lastEventAt ?? now);
     const after = other.settled(now);
-    const used = new Set(before.steps.map((step) => step.id));
+    const taken = new Set(before.steps.map((step) => step.id));
     const steps = [...before.steps];
     for (const step of after.steps) {
-      let id = step.id;
-      for (let n = 1; used.has(id); n += 1) id = `${step.id}~${n}`;
-      used.add(id);
+      // A background sub-agent can start in one part and end in a later one,
+      // which only hears of it by its notification: still the same step.
+      const same = step.kind === 'task' ? findSameTask(steps, step) : -1;
+      if (same >= 0) {
+        steps[same] = mergeTaskStep(steps[same], step);
+        continue;
+      }
+      const id = takeUniqueId(taken, step.id);
       steps.push(id === step.id ? step : { ...step, id });
     }
     const overflow = Math.max(0, steps.length - MAX_STEPS);
@@ -549,9 +659,11 @@ export interface StepsView {
    */
   includeThinking: boolean;
   /**
-   * A proactive Workspace: its speech tool is no step, and no step holds model
-   * text but the reasoning (a turn stored while the Workspace was an Assistant
-   * one may still hold the narration between tool calls).
+   * A proactive Workspace: its speech tool is no step, no step holds model
+   * text but the reasoning, and none holds what a tool returned. A turn can
+   * hold all of that and still be read here: it ran under an Assistant contract
+   * (the Workspace was an Assistant one then, or a channel mount overrides its
+   * mode) and the Workspace's *current* mode decides what is shown.
    */
   proactive?: boolean;
 }
@@ -567,32 +679,73 @@ export function viewSteps(
 ): StreamingStep[] {
   const out: StreamingStep[] = [];
   for (const step of steps) {
+    let shown = step;
     if (view.proactive) {
-      if (step.kind === 'text') continue;
-      if (step.kind === 'tool' && isMessageDeliveryTool(step.toolName)) {
+      if (shown.kind === 'text') continue;
+      if (shown.kind === 'tool' && isMessageDeliveryTool(shown.toolName)) {
         continue;
+      }
+      // What a tool or a sub-agent returned, and the numbers read from it, are
+      // model-facing text: a proactive Workspace never sends them (the status of
+      // the call, which says whether it failed, stays).
+      if (
+        shown.resultPreview !== undefined ||
+        shown.resultFacts !== undefined
+      ) {
+        const { resultPreview: _preview, resultFacts: _facts, ...rest } = shown;
+        shown = rest;
       }
     }
     if (!view.includeThinking) {
-      if (step.kind === 'text') continue;
-      if (step.kind === 'thinking') {
-        const { text: _text, title: _title, ...rest } = step;
-        out.push(rest);
-        continue;
+      if (shown.kind === 'text') continue;
+      if (shown.kind === 'thinking') {
+        const { text: _text, title: _title, ...rest } = shown;
+        shown = rest;
       }
     }
-    out.push(step);
+    out.push(shown);
   }
   return out;
 }
 
-/** A cut thinking text shorter than this is dropped whole. */
+/** A cut thinking text that would keep less than this is the marker alone. */
 const MIN_KEPT_THINKING_BYTES = 256;
+/** The head of a reasoning text that had its oldest part dropped. */
+const OMITTED_PREFIX = `${THINKING_OMITTED_MARKER}\n\n`;
+const OMITTED_MARKER_BYTES = Buffer.byteLength(THINKING_OMITTED_MARKER, 'utf8');
+const OMITTED_PREFIX_BYTES = Buffer.byteLength(OMITTED_PREFIX, 'utf8');
+
+/**
+ * The end of `text` that fits `maxBytes` of UTF-8, off a surrogate pair and
+ * from a paragraph start when one is close enough to keep half of it.
+ */
+function tailByBytes(text: string, maxBytes: number): string {
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (Buffer.byteLength(text.slice(mid), 'utf8') <= maxBytes) hi = mid;
+    else lo = mid + 1;
+  }
+  let start = lo;
+  const code = text.charCodeAt(start);
+  if (start > 0 && code >= 0xdc00 && code <= 0xdfff) start += 1;
+  const boundary = text.indexOf('\n\n', start);
+  if (
+    boundary >= 0 &&
+    text.length - (boundary + 2) >= (text.length - start) / 2
+  ) {
+    start = boundary + 2;
+  }
+  return text.slice(start);
+}
 
 /**
  * Bound the reasoning text of all thinking steps to `maxBytes` of UTF-8: the
- * oldest text goes first and the step keeps its title and times. Returns
- * `steps` itself when it already fits.
+ * oldest text goes first and the step keeps its title and times. What is cut
+ * is said so with the marker the reasoning text itself carries when its start
+ * is dropped, so the step does not read as a burst that had nothing to show.
+ * Returns `steps` itself when it already fits.
  */
 export function capStepsThinkingBytes(
   steps: StreamingStep[],
@@ -608,16 +761,23 @@ export function capStepsThinkingBytes(
   const out = steps.slice();
   for (let index = 0; index < out.length && excess > 0; index += 1) {
     const size = sizes[index];
-    if (size === 0) continue;
-    const { text, ...rest } = out[index];
+    // A text no longer than the marker gains nothing from being replaced by it.
+    if (size <= OMITTED_MARKER_BYTES) continue;
+    const step = out[index];
+    const text = step.text!;
     const kept = size - excess;
     if (kept < MIN_KEPT_THINKING_BYTES) {
-      // Not worth a stump with a cut marker.
-      out[index] = rest;
-      excess -= size;
+      // Not worth a stump.
+      out[index] = { ...step, text: THINKING_OMITTED_MARKER };
+      excess -= size - OMITTED_MARKER_BYTES;
     } else {
-      // The tail of this one fits what is left.
-      out[index] = { ...rest, text: capTailByBytes(text!, kept) };
+      // The tail of this one fits what is left. One that already starts with
+      // the marker (cut when it was a single burst) loses it with its head:
+      // the cut is longer than the marker.
+      out[index] = {
+        ...step,
+        text: OMITTED_PREFIX + tailByBytes(text, kept - OMITTED_PREFIX_BYTES),
+      };
       excess = 0;
     }
   }
@@ -745,7 +905,7 @@ function readStep(raw: unknown): StreamingStep | null {
   }
   const facts = readResultFacts(row.resultFacts);
   if (facts) step.resultFacts = facts;
-  return step;
+  return boundStep(step);
 }
 
 /** The steps of a stored row; damaged JSON or rows read as no steps. */
@@ -762,5 +922,6 @@ export function parseStoredSteps(json: string): StreamingStep[] {
     const step = readStep(raw);
     if (step) steps.push(step);
   }
-  return steps;
+  // The Web keys steps by id: bounding a long one must not make two the same.
+  return withUniqueIds(steps);
 }

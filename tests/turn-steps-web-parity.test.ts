@@ -208,7 +208,15 @@ function webSteps(
     ? live!.steps!
     : finishSteps(stepList(live!.steps, live!.stepsDropped), T0 + end, false)
         .steps;
-  return railSteps(steps);
+  // The one thing a proactive Workspace's stored steps lack that its live ones
+  // have is the text of a call's end (a permission denial's reason, "已停止"):
+  // what a tool returned is never served there, and neither is anything a
+  // preview could be made of.
+  return railSteps(steps).map((step) => {
+    if (mode !== 'proactive') return step;
+    const { resultPreview: _preview, resultFacts: _facts, ...rest } = step;
+    return rest;
+  });
 }
 
 /** What the host stores for the same turn, read back as the API returns it. */

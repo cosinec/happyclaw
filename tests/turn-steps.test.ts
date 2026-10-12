@@ -5,6 +5,7 @@ import type {
   StreamEventType,
 } from '../src/stream-event.types.js';
 import { MAX_STEPS, type StreamingStep } from '../src/stream-steps.js';
+import { THINKING_OMITTED_MARKER } from '../src/thinking-text.js';
 import {
   capStepsThinkingBytes,
   parseStoredSteps,
@@ -655,6 +656,104 @@ describe('a held reply sequence', () => {
     expect(steps.at(-1)!.toolUseId).toBe('b59');
   });
 
+  test('a background sub-agent that ends in the later part is one step, not two', () => {
+    const first = new TurnStepRecorder(0);
+    first.observe(
+      ev('tool_use_start', {
+        toolName: 'Agent',
+        toolUseId: 'ag1',
+        toolInputSummary: '后台调研',
+      }),
+      100,
+    );
+    first.observe(
+      ev('task_start', {
+        taskId: 'ag1',
+        toolUseId: 'ag1',
+        taskDescription: '后台调研',
+      }),
+      110,
+    );
+    first.observe(ev('text_delta', { text: '已在后台启动。' }), 200);
+    // still running when the first part ends
+
+    const second = new TurnStepRecorder(1_000);
+    second.observe(ev('thinking_delta', { text: '汇总' }), 1_050);
+    second.observe(
+      ev('task_notification', {
+        taskId: 'ag1',
+        toolUseId: 'ag1',
+        taskStatus: 'completed',
+        taskSummary: '调研完成：3 处',
+      }),
+      1_100,
+    );
+
+    first.absorb(second, 2_000);
+    const { steps } = first.settled(2_000);
+    expect(
+      steps.map((s) => [s.kind, s.kind === 'task' ? s.taskId : s.text]),
+    ).toEqual([
+      ['task', 'ag1'],
+      ['thinking', '汇总'],
+    ]);
+    expect(steps[0]).toMatchObject({
+      id: 'task-ag1',
+      status: 'done',
+      title: '后台调研',
+      summary: '调研完成：3 处',
+      at: 100,
+      endedAt: 1_100,
+    });
+    expect(new Set(steps.map((s) => s.id)).size).toBe(steps.length);
+  });
+
+  test('a sub-agent the later part reports as failed, under another task id, still merges', () => {
+    const first = new TurnStepRecorder(0);
+    first.observe(
+      ev('tool_use_start', { toolName: 'Agent', toolUseId: 'ag2' }),
+      100,
+    );
+    const second = new TurnStepRecorder(1_000);
+    second.observe(
+      ev('task_updated', {
+        taskId: 'sdk-7',
+        toolUseId: 'ag2',
+        taskPatch: { status: 'failed', error: 'boom' },
+      }),
+      1_100,
+    );
+    first.absorb(second, 2_000);
+    const { steps } = first.settled(2_000);
+    expect(steps).toHaveLength(1);
+    expect(steps[0]).toMatchObject({
+      toolUseId: 'ag2',
+      status: 'error',
+      summary: 'boom',
+      endedAt: 1_100,
+    });
+  });
+
+  test('a sub-agent the later part knows nothing of ends where the earlier part did', () => {
+    const first = new TurnStepRecorder(0);
+    first.observe(
+      ev('tool_use_start', { toolName: 'Agent', toolUseId: 'ag3' }),
+      100,
+    );
+    first.observe(ev('text_delta', { text: '好。' }), 300);
+    const second = new TurnStepRecorder(1_000);
+    second.observe(
+      ev('tool_use_start', { toolName: 'Read', toolUseId: 'r' }),
+      1_100,
+    );
+    first.absorb(second, 2_000);
+    const { steps } = first.settled(2_000);
+    expect(steps.map((s) => [s.kind, s.status, s.endedAt])).toEqual([
+      ['task', 'done', 300],
+      ['tool', 'done', 2_000],
+    ]);
+  });
+
   test('an empty later part adds nothing', () => {
     const first = new TurnStepRecorder(0);
     first.observe(ev('tool_use_start', { toolName: 'A', toolUseId: 'a' }), 10);
@@ -733,9 +832,12 @@ describe('viewSteps and capStepsThinkingBytes', () => {
     // 3 x 1000 bytes, room for 1500
     const capped = capStepsThinkingBytes(input, 1_500);
     const bytes = (s: StreamingStep) => Buffer.byteLength(s.text ?? '', 'utf8');
-    expect(capped[0].text).toBeUndefined();
+    // the oldest burst says it was cut instead of reading as one with no text
+    expect(capped[0].text).toBe(THINKING_OMITTED_MARKER);
     expect(capped[0]).toMatchObject({ title: '标题0', at: 0, durationMs: 1 });
-    expect(capped[1].text!.startsWith('…\n\n')).toBe(true);
+    expect(capped[1].text!.startsWith(`${THINKING_OMITTED_MARKER}\n\n`)).toBe(
+      true,
+    );
     expect(capped[1].text!.endsWith('b'.repeat(100))).toBe(true);
     expect(capped[2].text).toBe('c'.repeat(1_000));
     expect(
@@ -743,6 +845,230 @@ describe('viewSteps and capStepsThinkingBytes', () => {
     ).toBeLessThanOrEqual(1_500);
     // untouched when it fits
     expect(capStepsThinkingBytes(input, 10_000)).toBe(input);
+  });
+
+  test('a cut burst never reads as empty, and a cut text is not marked twice', () => {
+    const burst = (id: string, n: number, text: string): StreamingStep => ({
+      id,
+      kind: 'thinking',
+      at: n,
+      endedAt: n + 1,
+      status: 'done',
+      text,
+    });
+    const already = `${THINKING_OMITTED_MARKER}\n\n${'x'.repeat(2_000)}`;
+    const input = [
+      burst('a', 0, already),
+      burst('b', 1, 'b'.repeat(2_000)),
+      burst('c', 2, 'c'.repeat(2_000)),
+    ];
+    // room for the newest one only: the others are left as the marker
+    const capped = capStepsThinkingBytes(input, 2_100);
+    expect(capped.every((s) => (s.text ?? '') !== '')).toBe(true);
+    expect(capped[0].text).toBe(THINKING_OMITTED_MARKER);
+    expect(capped[1].text).toBe(THINKING_OMITTED_MARKER);
+    expect(capped[2].text).toBe('c'.repeat(2_000));
+    // room for a stump of the oldest one as well: marked once, not twice
+    const partial = capStepsThinkingBytes(input, 4_300);
+    expect(partial[0].text!.split(THINKING_OMITTED_MARKER)).toHaveLength(2);
+    expect(partial[0].text!.startsWith(`${THINKING_OMITTED_MARKER}\n\n`)).toBe(
+      true,
+    );
+    expect(partial[0].text!.endsWith('x'.repeat(100))).toBe(true);
+    expect(partial[1].text).toBe('b'.repeat(2_000));
+    expect(partial[2].text).toBe('c'.repeat(2_000));
+    const bytes = (s: StreamingStep) => Buffer.byteLength(s.text ?? '', 'utf8');
+    expect(partial.reduce((sum, s) => sum + bytes(s), 0)).toBeLessThanOrEqual(
+      4_300,
+    );
+  });
+
+  describe('what a tool returned, for a proactive Workspace', () => {
+    const returned: StreamingStep[] = [
+      {
+        id: 'tool-read-1',
+        kind: 'tool',
+        at: 1,
+        endedAt: 2,
+        status: 'done',
+        toolUseId: 'read-1',
+        toolName: 'Read',
+        summary: 'file: .env',
+        resultPreview: 'API_KEY=hunter2',
+        resultFacts: { lines: 3, totalLines: 3 },
+      },
+      {
+        id: 'tool-bash-2',
+        kind: 'tool',
+        at: 3,
+        endedAt: 4,
+        status: 'error',
+        toolUseId: 'bash-2',
+        toolName: 'Bash',
+        resultPreview: 'cat: secret: Permission denied',
+        resultFacts: { exitCode: 1 },
+      },
+      {
+        id: 'task-t-3',
+        kind: 'task',
+        at: 5,
+        endedAt: 6,
+        status: 'done',
+        taskId: 't',
+        toolUseId: 't',
+        toolName: 'Task',
+        title: '调研',
+        summary: '读了 3 个文件',
+        resultPreview: '子代理的最终回答 hunter2',
+        resultFacts: { agent: { toolUses: 4, tokens: 900 } },
+      },
+    ];
+
+    test('is never shown: no output, no numbers read from it', () => {
+      const shown = viewSteps(returned, {
+        includeThinking: true,
+        proactive: true,
+      });
+      expect(shown.map((s) => s.id)).toEqual([
+        'tool-read-1',
+        'tool-bash-2',
+        'task-t-3',
+      ]);
+      const raw = JSON.stringify(shown);
+      expect(raw).not.toContain('hunter2');
+      expect(raw).not.toContain('Permission denied');
+      expect(raw).not.toContain('resultPreview');
+      expect(raw).not.toContain('resultFacts');
+      // what the call was given, how it ended and what a task reported stay
+      expect(shown[0]).toMatchObject({
+        toolName: 'Read',
+        summary: 'file: .env',
+        status: 'done',
+      });
+      expect(shown[1]).toMatchObject({ status: 'error', endedAt: 4 });
+      expect(shown[2]).toMatchObject({
+        title: '调研',
+        summary: '读了 3 个文件',
+      });
+    });
+
+    test('is shown in an Assistant Workspace', () => {
+      expect(viewSteps(returned, { includeThinking: true })).toEqual(returned);
+    });
+
+    test('does not change the steps it was given', () => {
+      const copy = JSON.parse(JSON.stringify(returned));
+      viewSteps(returned, { includeThinking: true, proactive: true });
+      expect(returned).toEqual(copy);
+    });
+  });
+});
+
+describe('the size of a stored step', () => {
+  const LONG = '很长的描述'.repeat(5_000);
+
+  test('bounds the words a sub-agent, a tool and a skill are described with', () => {
+    const recorder = new TurnStepRecorder(0);
+    recorder.observe(
+      ev('task_start', {
+        taskId: 'task-1',
+        toolUseId: 'task-1',
+        taskDescription: LONG,
+      }),
+      10,
+    );
+    recorder.observe(
+      ev('task_progress', {
+        taskId: 'task-1',
+        toolUseId: 'task-1',
+        summary: LONG,
+      }),
+      20,
+    );
+    recorder.observe(
+      ev('tool_use_start', {
+        toolName: 'T'.repeat(5_000),
+        toolUseId: 'tool-1',
+        skillName: 'S'.repeat(5_000),
+        toolInputSummary: LONG,
+      }),
+      30,
+    );
+    recorder.observe(
+      ev('tool_result', { toolUseId: 'tool-1', toolResult: LONG }),
+      40,
+    );
+    const [task, tool] = recorder.settled(50).steps;
+    expect(task.title!.length).toBeLessThanOrEqual(200);
+    expect(task.summary!.length).toBeLessThanOrEqual(400);
+    expect(tool.toolName!.length).toBeLessThanOrEqual(120);
+    expect(tool.skillName!.length).toBeLessThanOrEqual(120);
+    expect(tool.summary!.length).toBeLessThanOrEqual(400);
+    expect(tool.resultPreview!.length).toBeLessThanOrEqual(400);
+    // a cut text says so, and keeps its start
+    expect(task.title!.endsWith('…')).toBe(true);
+    expect(task.title!.startsWith('很长的描述')).toBe(true);
+    expect(JSON.stringify([task, tool]).length).toBeLessThan(8_000);
+  });
+
+  test('leaves short fields as they are', () => {
+    const recorder = new TurnStepRecorder(0);
+    recorder.observe(
+      ev('task_start', {
+        taskId: 't',
+        toolUseId: 't',
+        taskDescription: '调研依赖',
+      }),
+      10,
+    );
+    recorder.observe(
+      ev('tool_use_start', {
+        toolName: 'Bash',
+        toolUseId: 'b',
+        toolInputSummary: 'ls',
+      }),
+      20,
+    );
+    const steps = recorder.settled(30).steps;
+    expect(steps[0].title).toBe('调研依赖');
+    expect(steps[1]).toMatchObject({ toolName: 'Bash', summary: 'ls' });
+  });
+
+  test('keeps ids unique when long ones are cut', () => {
+    const recorder = new TurnStepRecorder(0);
+    for (const suffix of ['a', 'b']) {
+      recorder.observe(
+        ev('tool_use_start', {
+          toolName: 'Read',
+          toolUseId: `${'x'.repeat(500)}${suffix}`,
+        }),
+        10,
+      );
+    }
+    const steps = recorder.settled(20).steps;
+    expect(steps).toHaveLength(2);
+    expect(steps.every((s) => s.id.length <= 220)).toBe(true);
+    expect(steps.every((s) => s.toolUseId!.length <= 200)).toBe(true);
+    expect(new Set(steps.map((s) => s.id)).size).toBe(2);
+  });
+
+  test('is also enforced on what is read back', () => {
+    const [step] = parseStoredSteps(
+      JSON.stringify([
+        {
+          id: 'task-1',
+          kind: 'task',
+          at: 1,
+          status: 'done',
+          title: LONG,
+          summary: LONG,
+          toolName: 'T'.repeat(5_000),
+        },
+      ]),
+    );
+    expect(step.title!.length).toBeLessThanOrEqual(200);
+    expect(step.summary!.length).toBeLessThanOrEqual(400);
+    expect(step.toolName!.length).toBeLessThanOrEqual(120);
   });
 });
 

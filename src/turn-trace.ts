@@ -27,6 +27,7 @@ import {
   capTailByBytes,
   ThinkingClock,
   ThinkingTextBuffer,
+  traceTitleFor,
   type TraceEventRecord,
 } from './stream-trace.js';
 import {
@@ -351,6 +352,33 @@ export interface PresentedTurnTrace {
   created_at: string;
 }
 
+/**
+ * The rows whose `detail` is what a tool returned or the prompt a sub-agent
+ * was given, titled as traceEventFor titles them.
+ */
+const RESULT_DETAIL_TITLES: ReadonlySet<string> = new Set(
+  (['tool_result', 'task_start'] as const).map((eventType) =>
+    traceTitleFor({ eventType }),
+  ),
+);
+
+/**
+ * The trace of a turn without the output of its tools and the prompts of its
+ * sub-agents, the way a proactive Workspace's own events are stripped of them.
+ * A turn recorded under an Assistant contract holds them in full. Returns
+ * `rows` itself when there are none.
+ */
+function withoutResultDetails(rows: TraceEventRecord[]): TraceEventRecord[] {
+  const carries = (row: TraceEventRecord) =>
+    row.detail !== undefined && RESULT_DETAIL_TITLES.has(row.title);
+  if (!rows.some(carries)) return rows;
+  return rows.map((row) => {
+    if (!carries(row)) return row;
+    const { detail: _detail, ...rest } = row;
+    return rest;
+  });
+}
+
 export function presentTurnTrace(
   record: TurnTraceRecord,
   exposure: TurnTraceExposure,
@@ -362,6 +390,7 @@ export function presentTurnTrace(
   } catch {
     /* a damaged trace still has its thinking and timing */
   }
+  if (exposure.proactive) trace = withoutResultDetails(trace);
   const steps = viewSteps(parseStoredSteps(record.steps_json), {
     includeThinking: exposure.includeThinking,
     proactive: exposure.proactive,

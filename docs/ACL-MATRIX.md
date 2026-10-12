@@ -146,10 +146,17 @@ Memory 随 Workspace 保留，不跨 Workspace 复制。
 Agent 在调用工具前写下的那段话，仅在确有工具调用跟在后面时才由宿主放行，只广播给
 Web、不写入轨迹；回合结尾的文字、未发送的回复和紧接着 `send_message` 调用的文字不放行
 （宿主逐个调用判断，不向前看，详见 `docs/API.md`）。
-`turn-traces` 的 `steps`（回合的有序步骤）在主动模式工作区不含过程说明（text 步骤）和
-发言工具 `send_message` 的步骤。工具结果事件上的 `toolIsError`（SDK 的 `is_error`，布尔）
-在任何级别都放行；`toolResultFacts`（工具做了什么的数字，如增删行数）只在 Assistant 模式
-下发，主动模式在任何级别都剥掉，步骤里也就没有 `resultFacts`。过滤读取**当前**级别，而不是回合运行时的级别。Assistant
+工具结果事件上的 `toolIsError`（SDK 的 `is_error`，布尔）在任何级别都放行；
+`toolResultFacts`（工具做了什么的数字，如增删行数）只在 Assistant 模式下发，主动模式在
+任何级别都剥掉。
+
+过滤读取**当前**级别和**当前**模式，而不是回合运行时的：一个回合可能按 Assistant 契约
+记录（工作区当时还是 Assistant 模式，或渠道挂载的 `interaction_mode_override` 为
+`assistant` 的消息由 Assistant Runner 处理），之后在主动模式工作区里读取。所以主动模式
+工作区读取 `turn-traces` 时，无论回合怎么记录，`steps` 都不含过程说明（text 步骤）、发言
+工具 `send_message` 的步骤，tool/task 步骤也都没有 `resultPreview`（工具输出、子 Agent
+的回答、权限拒绝的原因）和 `resultFacts`，只留下调用的输入摘要和成败状态；`trace` 里
+“工具结果”“Task 启动”两类行没有 `detail`（工具输出、子 Agent 的提示词）。Assistant
 模式工作区与 fire-and-forget 的 Spawn Agent 不受该设置影响。轨迹的读取权限与消息
 列表相同：只有能读取该聊天历史的用户可读；admin 没有跨 owner bypass，无权限与不存在
 都返回 404。
