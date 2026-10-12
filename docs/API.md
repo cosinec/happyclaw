@@ -92,7 +92,7 @@ Public：
   `data/extra/` 和任务运行历史
 - `POST /api/groups/:jid/reset-owner`，admin break-glass
 - `GET /api/groups/:jid/messages`
-- `GET /api/groups/:jid/turn-traces/:turnId`，已结算回合的思考摘要与执行轨迹
+- `GET /api/groups/:jid/turn-traces/:turnId`，已结算回合的思考摘要、执行轨迹与有序步骤
 - `DELETE /api/groups/:jid/messages/:messageId`
 - `GET /api/groups/:jid/messages/:messageId/attachments/:index/original`
 - `GET|PUT /api/groups/:jid/env`
@@ -183,10 +183,10 @@ Workspace↔AgentProfile 绑定行上，因此：仅 `web:` 前缀工作区可�
 在所有模式下都会记录到宿主的运行上下文快照。`activity` 及以上还会广播子 Agent 任务的
 `agent_status`，使 Task 标签与任务事件一致。
 
-回合结算时，宿主把该回合的思考摘要、思考耗时和执行轨迹写入 `turn_traces`
+回合结算时，宿主把该回合的思考摘要、思考耗时、执行轨迹和有序步骤写入 `turn_traces`
 （Assistant 模式总是写；主动模式仅当 `process_visibility` 不是 `hidden` 时写，且
-`activity` 级不保存思考文本；思考文本最多 64KB，保留尾部并以 `…` 开头标记被截断，
-轨迹最多 200 条）。`GET /api/groups/:jid/messages` 返回的消息带 `has_trace: true`
+`activity` 级不保存思考文本，步骤里的思考也不带文本与标题；思考文本最多 64KB，保留
+尾部并以 `…` 开头标记被截断，轨迹最多 200 条，步骤最多 100 条）。`GET /api/groups/:jid/messages` 返回的消息带 `has_trace: true`
 表示它是所属回合最后一条 agent 消息且该回合有轨迹，WebSocket `new_message` 在写入
 轨迹的同时也带这个标记。主动模式的回复在回合中途发出（`sdk_send_message`），那时轨迹
 还没有写入，所以回合结算写入轨迹之后，宿主再广播一条
@@ -202,15 +202,57 @@ Workspace↔AgentProfile 绑定行上，因此：仅 `web:` 前缀工作区可�
   "trace": [
     { "id": "…", "timestamp": 0, "kind": "tool", "title": "工具 Bash" }
   ],
+  "steps": [
+    {
+      "id": "thinking-0",
+      "kind": "thinking",
+      "at": 1791832926838,
+      "endedAt": 1791832927208,
+      "status": "done",
+      "durationMs": 370,
+      "title": "Planning the demo",
+      "text": "**Planning the demo**\n\nI will run one shell command first."
+    },
+    {
+      "id": "tool-toolu_bash_1-1",
+      "kind": "tool",
+      "at": 1791832927520,
+      "endedAt": 1791832929663,
+      "status": "done",
+      "toolUseId": "toolu_bash_1",
+      "toolName": "Bash",
+      "summary": "command: sleep 2; echo stub-demo-ok",
+      "resultPreview": "stub-demo-ok"
+    }
+  ],
+  "steps_dropped": 0,
   "created_at": "2026-01-01T00:00:00.000Z"
 }
 ```
 
 `trace` 的行与 Web 实时累积的一致（标题格式相同；工具进度不逐帧追加，只把输入摘要、
-技能名更新到该工具自己的“工具 X”行）。访问检查与消息列表相同
-（Runtime Session 的 `:jid` 为 `{workspaceJid}#agent:{sessionId}`）；主动模式工作区
-按**当前**可见性过滤：`hidden` 返回 404 且消息不带 `has_trace`，`activity` 返回空的
-`thinking`。消息、聊天或工作区被删除时对应的轨迹一并清除，服务启动时清理孤儿轨迹。
+技能名更新到该工具自己的“工具 X”行）。
+
+`steps` 是回合内各步骤按发生顺序排成的时间线，每项是 `shared/stream-steps.ts` 的
+`StreamingStep`（`kind` 为 `thinking`、`tool`、`task`、`text`；`at`、`endedAt` 为毫秒
+时间戳；结算后没有 `running`）。宿主用与 Web 同一套归并器从回合的流事件重建它，所以
+结算后的时间线与流式时一致；`tests/turn-steps-web-parity.test.ts` 把同一串事件喂给
+Web store 和宿主记录器并逐项比对。只记录主 Agent 的顶层步骤：子 Agent 自己的工具与
+文字属于它的 `task` 步骤，不单独成行。回合最后一个工具之后的文字是回复本身，不是步骤；
+`text` 步骤是 Assistant 模式里调用工具前写下的说明。思考文本合计超过 64KB 时从最早的
+步骤开始截（保留标题与时间），步骤超过 100 条时丢弃最早的，被丢弃的条数写在
+`steps_dropped`。该字段加入之前结算的回合读作 `steps: []`、`steps_dropped: 0`（不回填），
+`steps_json` 损坏同样读作空，不会让请求失败。
+
+访问检查与消息列表相同（Runtime Session 的 `:jid` 为
+`{workspaceJid}#agent:{sessionId}`）；主动模式工作区按**当前**可见性过滤：`hidden`
+返回 404 且消息不带 `has_trace`，`activity` 返回空的 `thinking`，且 `steps` 里的思考
+步骤只留状态与时间（无 `text`、`title`），`full` 返回思考步骤全文。主动模式的 `steps`
+在任何级别都不含 `text` 步骤（模型的文字，包括 `commentary`，不写入 `turn_traces`），
+也不含发言工具 `mcp__happyclaw__send_message` 的步骤（它调用的就是回复本身）；
+Assistant 模式和 fire-and-forget 的 Spawn Agent 不受该设置影响，发言工具在其中与
+其他工具一样是一个工具步骤。消息、聊天或工作区被删除时对应的轨迹一并清除，服务启动时
+清理孤儿轨迹。
 
 Home Workspace 固定归属当前用户的内置 HappyClaw。尝试通过
 `PATCH /api/groups/:jid/agent-profile` 将 Home 迁移到自定义 Agent 时返回：

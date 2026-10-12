@@ -307,7 +307,11 @@ describe('workspace process_visibility API', () => {
 function seedTurn(
   chatJid: string,
   turnId: string,
-  options: { thinking?: string } = {},
+  options: {
+    thinking?: string;
+    stepsJson?: string;
+    stepsDropped?: number;
+  } = {},
 ): void {
   db.ensureChatExists(chatJid);
   const at = (minute: number) =>
@@ -356,8 +360,63 @@ function seedTurn(
     traceJson: JSON.stringify([
       { id: '1-a', timestamp: 1, kind: 'tool', title: '工具 Bash' },
     ]),
+    stepsJson: options.stepsJson,
+    stepsDropped: options.stepsDropped,
   });
 }
+
+/** The ordered steps of a turn that reasoned, ran a tool, said something, spoke. */
+const STORED_STEPS = [
+  {
+    id: 'thinking-0',
+    kind: 'thinking',
+    at: 1_000,
+    endedAt: 1_900,
+    status: 'done',
+    durationMs: 900,
+    text: '**读取配置**\n\n先看一下目录。',
+    title: '读取配置',
+  },
+  {
+    id: 'text-1',
+    kind: 'text',
+    at: 1_900,
+    endedAt: 2_000,
+    status: 'done',
+    text: '我先列出文件。',
+  },
+  {
+    id: 'tool-bash-2',
+    kind: 'tool',
+    at: 2_000,
+    endedAt: 2_500,
+    status: 'done',
+    toolUseId: 'bash',
+    toolName: 'Bash',
+    summary: 'ls',
+    resultPreview: 'a.txt',
+  },
+  {
+    id: 'tool-say-3',
+    kind: 'tool',
+    at: 2_500,
+    endedAt: 2_600,
+    status: 'done',
+    toolUseId: 'say',
+    toolName: 'mcp__happyclaw__send_message',
+    summary: '你好',
+  },
+  {
+    id: 'thinking-4',
+    kind: 'thinking',
+    at: 2_600,
+    endedAt: 3_000,
+    status: 'done',
+    durationMs: 400,
+    text: '该回答了。',
+    title: '收尾',
+  },
+];
 
 const getMessages = async (jid: string) =>
   (await (
@@ -491,5 +550,188 @@ describe('turn traces over HTTP', () => {
     db.deleteMessage(jid, 'turn-d-b');
     db.deleteMessage(jid, 'turn-d-user');
     expect((await getTrace(jid, 'turn-d')).status).toBe(404);
+  });
+});
+
+interface TraceBody {
+  turn_id: string;
+  thinking: string;
+  thinking_duration_ms: number | null;
+  trace: unknown[];
+  steps: Array<Record<string, unknown>>;
+  steps_dropped: number;
+  created_at: string;
+}
+
+const readTrace = async (jid: string, turnId: string): Promise<TraceBody> =>
+  (await (await getTrace(jid, turnId)).json()) as TraceBody;
+
+describe('turn trace steps over HTTP', () => {
+  const seedSteps = (jid: string, turnId: string, stepsDropped = 0) =>
+    seedTurn(jid, turnId, {
+      stepsJson: JSON.stringify(STORED_STEPS),
+      stepsDropped,
+    });
+
+  test('an Assistant workspace serves every step in order, and the old fields as before', async () => {
+    asUser(OWNER_ID);
+    const { jid } = workspace('steps-assistant', 'assistant', 'hidden');
+    seedSteps(jid, 'turn-1', 7);
+
+    const response = await getTrace(jid, 'turn-1');
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as TraceBody;
+    expect(Object.keys(body).sort()).toEqual(
+      [
+        'created_at',
+        'steps',
+        'steps_dropped',
+        'thinking',
+        'thinking_duration_ms',
+        'trace',
+        'turn_id',
+      ].sort(),
+    );
+    expect(body.steps).toEqual(STORED_STEPS);
+    expect(body.steps_dropped).toBe(7);
+    expect(body).toMatchObject({
+      turn_id: 'turn-1',
+      thinking: '想了想',
+      thinking_duration_ms: 4_200,
+      trace: [{ title: '工具 Bash' }],
+    });
+  });
+
+  test('a proactive workspace at full shows the reasoning and tools, never its speech tool or model text', async () => {
+    asUser(OWNER_ID);
+    const { jid } = workspace('steps-full', 'proactive', 'full');
+    seedSteps(jid, 'turn-1');
+    const { steps } = await readTrace(jid, 'turn-1');
+    expect(steps.map((s) => s.id)).toEqual([
+      'thinking-0',
+      'tool-bash-2',
+      'thinking-4',
+    ]);
+    expect(steps[0]).toMatchObject({
+      text: '**读取配置**\n\n先看一下目录。',
+      title: '读取配置',
+    });
+    const raw = JSON.stringify(steps);
+    expect(raw).not.toContain('send_message');
+    expect(raw).not.toContain('你好');
+    expect(raw).not.toContain('我先列出文件');
+  });
+
+  test('activity keeps the status and times of the reasoning but not its text or title', async () => {
+    asUser(OWNER_ID);
+    const { jid } = workspace('steps-activity', 'proactive', 'activity');
+    seedSteps(jid, 'turn-1');
+    const body = await readTrace(jid, 'turn-1');
+    expect(body.steps).toEqual([
+      {
+        id: 'thinking-0',
+        kind: 'thinking',
+        at: 1_000,
+        endedAt: 1_900,
+        status: 'done',
+        durationMs: 900,
+      },
+      expect.objectContaining({ id: 'tool-bash-2', toolName: 'Bash' }),
+      {
+        id: 'thinking-4',
+        kind: 'thinking',
+        at: 2_600,
+        endedAt: 3_000,
+        status: 'done',
+        durationMs: 400,
+      },
+    ]);
+    const raw = JSON.stringify(body);
+    expect(raw).not.toContain('读取配置');
+    expect(raw).not.toContain('该回答了');
+    expect(raw).not.toContain('收尾');
+    expect(raw).not.toContain('send_message');
+  });
+
+  test('hidden is a 404 that carries no step', async () => {
+    asUser(OWNER_ID);
+    const { jid } = workspace('steps-hidden', 'proactive', 'hidden');
+    seedSteps(jid, 'turn-1');
+    const response = await getTrace(jid, 'turn-1');
+    expect(response.status).toBe(404);
+    expect(JSON.stringify(await response.json())).not.toContain('thinking-0');
+  });
+
+  test('the current level decides, whatever it was when the turn ran', async () => {
+    asUser(OWNER_ID);
+    const { jid, folder } = workspace('steps-live', 'proactive', 'full');
+    seedSteps(jid, 'turn-1');
+    expect((await readTrace(jid, 'turn-1')).steps[0].text).toBeDefined();
+    db.setWorkspaceProcessVisibility(folder, 'activity');
+    expect((await readTrace(jid, 'turn-1')).steps[0].text).toBeUndefined();
+    db.setWorkspaceProcessVisibility(folder, 'hidden');
+    expect((await getTrace(jid, 'turn-1')).status).toBe(404);
+    db.setWorkspaceProcessVisibility(folder, 'full');
+    expect((await readTrace(jid, 'turn-1')).steps[0].text).toBeDefined();
+  });
+
+  test('a spawn Agent of a proactive workspace keeps Assistant semantics', async () => {
+    asUser(OWNER_ID);
+    const { jid } = workspace('steps-spawn', 'proactive', 'hidden');
+    const agentId = 'steps-spawn-1';
+    db.createAgent({
+      id: agentId,
+      group_folder: 'steps-spawn',
+      chat_jid: jid,
+      name: 'Spawn',
+      prompt: '',
+      status: 'idle',
+      kind: 'spawn',
+      created_by: OWNER_ID,
+      created_at: new Date().toISOString(),
+      completed_at: null,
+      result_summary: null,
+      last_im_jid: null,
+      spawned_from_jid: null,
+    });
+    const virtualJid = `${jid}#agent:${agentId}`;
+    seedSteps(virtualJid, 'turn-s');
+    expect((await readTrace(virtualJid, 'turn-s')).steps).toEqual(STORED_STEPS);
+  });
+
+  test('a turn stored before steps were kept reads as none, the rest as before', async () => {
+    asUser(OWNER_ID);
+    const { jid } = workspace('steps-old', 'assistant');
+    seedTurn(jid, 'turn-old');
+    const body = await readTrace(jid, 'turn-old');
+    expect(body.steps).toEqual([]);
+    expect(body.steps_dropped).toBe(0);
+    expect(body).toMatchObject({
+      thinking: '想了想',
+      thinking_duration_ms: 4_200,
+      trace: [{ title: '工具 Bash' }],
+    });
+  });
+
+  test('damaged steps read as none instead of failing the request', async () => {
+    asUser(OWNER_ID);
+    const { jid } = workspace('steps-damaged', 'assistant');
+    seedTurn(jid, 'turn-bad-json', { stepsJson: '{not json', stepsDropped: 3 });
+    seedTurn(jid, 'turn-bad-shape', {
+      stepsJson: JSON.stringify({ steps: STORED_STEPS }),
+      stepsDropped: 3,
+    });
+    seedTurn(jid, 'turn-bad-rows', {
+      stepsJson: JSON.stringify([null, 'x', { kind: 'tool' }]),
+      stepsDropped: 3,
+    });
+    for (const turnId of ['turn-bad-json', 'turn-bad-shape', 'turn-bad-rows']) {
+      const response = await getTrace(jid, turnId);
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as TraceBody;
+      expect(body.steps).toEqual([]);
+      expect(body.steps_dropped).toBe(0);
+      expect(body.thinking).toBe('想了想');
+    }
   });
 });

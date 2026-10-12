@@ -5,7 +5,10 @@
  * refresh lost them. The host now collects them from the stream while the turn
  * runs and stores them in turn_traces when the turn settles; the Web fetches
  * them on demand (GET /api/groups/:jid/turn-traces/:turnId) and learns which
- * messages have one from `has_trace`.
+ * messages have one from `has_trace`. The same stream also yields the turn's
+ * steps in the order they happened (turn-steps.ts), which a settled reply
+ * shows as the timeline it streamed; the thinking text and the trace rows stay
+ * for the two-line view of turns stored before steps were kept.
  */
 
 import {
@@ -18,6 +21,7 @@ import {
 } from './db.js';
 import { logger } from './logger.js';
 import type { StreamEvent } from './stream-event.types.js';
+import type { StreamingStep } from './stream-steps.js';
 import {
   appendTraceEvent,
   capTailByBytes,
@@ -25,6 +29,12 @@ import {
   ThinkingTextBuffer,
   type TraceEventRecord,
 } from './stream-trace.js';
+import {
+  capStepsThinkingBytes,
+  parseStoredSteps,
+  TurnStepRecorder,
+  viewSteps,
+} from './turn-steps.js';
 import type {
   InteractionMode,
   NewMessage,
@@ -44,6 +54,15 @@ export interface TurnTraceContent {
   /** Null when the model never reasoned during the turn. */
   thinkingDurationMs: number | null;
   trace: TraceEventRecord[];
+  /** The turn's steps in the order they happened, settled. */
+  steps: StreamingStep[];
+  /** Steps dropped from the front of `steps` at the step cap. */
+  stepsDropped: number;
+}
+
+export interface TurnTraceAccumulatorOptions {
+  /** The turn is a proactive Workspace's: its speech tool is no step. */
+  proactive?: boolean;
 }
 
 /**
@@ -62,14 +81,26 @@ export class TurnTraceAccumulator {
   private readonly thinking = new ThinkingTextBuffer(capTurnThinking);
   private trace: TraceEventRecord[] = [];
   private readonly clock: ThinkingClock;
+  private readonly steps: TurnStepRecorder;
+  /** The step recorder failed: the turn keeps its trace and no steps. */
+  private stepsFailed = false;
+  private readonly proactive: boolean;
 
-  constructor(startedAt: number = Date.now()) {
+  constructor(
+    startedAt: number = Date.now(),
+    options: TurnTraceAccumulatorOptions = {},
+  ) {
     this.clock = new ThinkingClock(startedAt);
+    this.proactive = !!options.proactive;
+    this.steps = new TurnStepRecorder(startedAt, options);
   }
 
   get isEmpty(): boolean {
     return (
-      !this.thinking.text && this.trace.length === 0 && !this.clock.sawThinking
+      !this.thinking.text &&
+      this.trace.length === 0 &&
+      !this.clock.sawThinking &&
+      (this.stepsFailed || this.steps.isEmpty)
     );
   }
 
@@ -82,6 +113,15 @@ export class TurnTraceAccumulator {
       MAX_TURN_TRACE_EVENTS,
       now,
     );
+    if (this.stepsFailed) return;
+    // This runs on every stream event of the run: a fault in the step
+    // recorder must not take the reply with it.
+    try {
+      this.steps.observe(event, now);
+    } catch (error) {
+      this.stepsFailed = true;
+      logger.warn({ err: error }, 'Failed to record a turn step');
+    }
   }
 
   /** Append what `other` collected after this one (a held reply sequence). */
@@ -90,6 +130,8 @@ export class TurnTraceAccumulator {
     this.trace = [...this.trace, ...other.trace].slice(-MAX_TURN_TRACE_EVENTS);
     this.clock.durationMs += other.clock.totalMs(now);
     this.clock.sawThinking ||= other.clock.sawThinking;
+    this.stepsFailed ||= other.stepsFailed;
+    if (!this.stepsFailed) this.steps.absorb(other.steps, now);
   }
 
   /** What to store, or null when nothing worth keeping was collected. */
@@ -103,9 +145,30 @@ export class TurnTraceAccumulator {
     const thinkingDurationMs = this.clock.sawThinking
       ? Math.round(this.clock.totalMs(options.now))
       : null;
-    if (!thinking && this.trace.length === 0 && thinkingDurationMs === null)
+    const settled = this.stepsFailed
+      ? { steps: [], dropped: 0 }
+      : this.steps.settled(options.now ?? Date.now());
+    const steps = capStepsThinkingBytes(
+      viewSteps(settled.steps, {
+        includeThinking: options.includeThinking,
+        proactive: this.proactive,
+      }),
+      MAX_TURN_TRACE_THINKING_BYTES,
+    );
+    if (
+      !thinking &&
+      this.trace.length === 0 &&
+      thinkingDurationMs === null &&
+      steps.length === 0
+    )
       return null;
-    return { thinking, thinkingDurationMs, trace: [...this.trace] };
+    return {
+      thinking,
+      thinkingDurationMs,
+      trace: [...this.trace],
+      steps,
+      stepsDropped: steps.length > 0 ? settled.dropped : 0,
+    };
   }
 }
 
@@ -155,7 +218,9 @@ export class TurnTraceTracker {
     if (!visible) return;
     let turn = this.turns.get(inputId);
     if (!turn) {
-      turn = new TurnTraceAccumulator(now);
+      turn = new TurnTraceAccumulator(now, {
+        proactive: this.options.mode === 'proactive',
+      });
       this.turns.set(inputId, turn);
       while (this.turns.size > MAX_OPEN_TURNS) {
         const oldest = this.turns.keys().next().value;
@@ -218,6 +283,8 @@ export class TurnTraceTracker {
         thinking: content.thinking,
         thinkingDurationMs: content.thinkingDurationMs,
         traceJson: JSON.stringify(content.trace),
+        stepsJson: JSON.stringify(content.steps),
+        stepsDropped: content.stepsDropped,
       });
       return true;
     } catch (error) {
@@ -236,8 +303,16 @@ export class TurnTraceTracker {
 export interface TurnTraceExposure {
   /** False hides every trace (a proactive Workspace set to `hidden`). */
   visible: boolean;
-  /** False blanks the thinking text (`activity`). */
+  /**
+   * False blanks the thinking text, and the title and text of thinking steps
+   * (`activity`).
+   */
   includeThinking: boolean;
+  /**
+   * A proactive Workspace: its steps hold no model text but the reasoning, and
+   * not the tool it speaks through.
+   */
+  proactive?: boolean;
 }
 
 /**
@@ -259,6 +334,7 @@ export function resolveTurnTraceExposure(
   return {
     visible: visibility !== 'hidden',
     includeThinking: visibility === 'full',
+    proactive: true,
   };
 }
 
@@ -268,6 +344,10 @@ export interface PresentedTurnTrace {
   thinking: string;
   thinking_duration_ms: number | null;
   trace: TraceEventRecord[];
+  /** The turn's steps in order; empty for a turn stored before steps were kept. */
+  steps: StreamingStep[];
+  /** Steps dropped from the front of `steps` at the step cap. */
+  steps_dropped: number;
   created_at: string;
 }
 
@@ -282,11 +362,20 @@ export function presentTurnTrace(
   } catch {
     /* a damaged trace still has its thinking and timing */
   }
+  const steps = viewSteps(parseStoredSteps(record.steps_json), {
+    includeThinking: exposure.includeThinking,
+    proactive: exposure.proactive,
+  });
   return {
     turn_id: record.turn_id,
     thinking: exposure.includeThinking ? record.thinking : '',
     thinking_duration_ms: record.thinking_duration_ms,
     trace,
+    steps,
+    steps_dropped:
+      steps.length > 0 && Number.isFinite(record.steps_dropped)
+        ? Math.max(0, Math.floor(record.steps_dropped))
+        : 0,
     created_at: record.created_at,
   };
 }
