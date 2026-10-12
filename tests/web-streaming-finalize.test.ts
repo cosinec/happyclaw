@@ -76,6 +76,7 @@ function reset(): void {
       thinkingCache: {},
       thinkingDurationCache: {},
       traceCache: {},
+      stepsCache: {},
       stopRequests: {},
       settledStreaming: {},
       pendingThinking: {},
@@ -390,6 +391,175 @@ describe('run_finished before the final message', () => {
       '最终答案。',
     );
     expect(useChatStore.getState().waiting[JID]).toBe(true);
+  });
+});
+
+describe('the steps a finished reply keeps', () => {
+  function streamSteps(runtimeJid: string, agentId?: string) {
+    useChatStore.getState().handleRunStarted(runtimeJid, 'run-a');
+    emit(
+      { eventType: 'thinking_delta', text: '先想一想。', turnId: 'turn-1' },
+      'run-a',
+      agentId,
+    );
+    flushRaf();
+    emit(
+      {
+        eventType: 'tool_use_start',
+        toolName: 'Bash',
+        toolUseId: 'tool-1',
+        toolInputSummary: 'ls',
+        turnId: 'turn-1',
+      },
+      'run-a',
+      agentId,
+    );
+    emit(
+      { eventType: 'tool_use_end', toolUseId: 'tool-1', turnId: 'turn-1' },
+      'run-a',
+      agentId,
+    );
+    emit(
+      { eventType: 'text_delta', text: '最终答案。', turnId: 'turn-1' },
+      'run-a',
+      agentId,
+    );
+  }
+
+  it('moves the steps of the settled card onto the final message', () => {
+    streamSteps(JID);
+    useChatStore.getState().handleRunFinished(JID, 'run-a');
+    const settled = useChatStore.getState().settledStreaming[JID];
+    useChatStore
+      .getState()
+      .handleWsNewMessage(JID, finalMessage('final-1', '最终答案。'));
+
+    const cached = useChatStore.getState().stepsCache['final-1'];
+    // The card and the message list the same steps, in the same order.
+    expect(cached.steps).toEqual(settled?.steps);
+    expect(cached.steps.map((step) => step.kind)).toEqual([
+      'thinking',
+      'tool',
+      'text',
+    ]);
+    expect(cached.steps.every((step) => step.status !== 'running')).toBe(true);
+    expect(cached.dropped).toBe(0);
+  });
+
+  it('carries the count of steps dropped from the front', () => {
+    streamSteps(JID);
+    useChatStore.getState().handleRunFinished(JID, 'run-a');
+    useChatStore.setState((s) => ({
+      settledStreaming: {
+        [JID]: { ...s.settledStreaming[JID]!, stepsDropped: 7 },
+      },
+    }));
+    useChatStore
+      .getState()
+      .handleWsNewMessage(JID, finalMessage('final-1', '最终答案。'));
+    expect(useChatStore.getState().stepsCache['final-1'].dropped).toBe(7);
+  });
+
+  it('moves the steps of a session reply onto its final', () => {
+    useChatStore.setState({ agentWaiting: { [AGENT]: true } });
+    streamSteps(AGENT_JID, AGENT);
+    useChatStore.getState().handleRunFinished(AGENT_JID, 'run-a');
+    useChatStore
+      .getState()
+      .handleWsNewMessage(
+        JID,
+        finalMessage('agent-final', '最终答案。', { chat_jid: AGENT_JID }),
+        AGENT,
+      );
+    expect(
+      useChatStore
+        .getState()
+        .stepsCache['agent-final']?.steps.map((step) => step.kind),
+    ).toEqual(['thinking', 'tool', 'text']);
+  });
+
+  it('keeps the steps of a card a stop froze, its tool marked as stopped', () => {
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    emit(
+      { eventType: 'text_delta', text: '已输出', turnId: 'turn-1' },
+      'run-a',
+    );
+    flushRaf();
+    emit(
+      {
+        eventType: 'tool_use_start',
+        toolName: 'Bash',
+        toolUseId: 'tool-1',
+        toolInputSummary: 'sleep 60',
+        turnId: 'turn-1',
+      },
+      'run-a',
+    );
+    emit(
+      { eventType: 'text_delta', text: '，被打断', turnId: 'turn-1' },
+      'run-a',
+    );
+    flushRaf();
+    useChatStore.getState().handleStreamEvent(
+      JID,
+      {
+        eventType: 'status',
+        statusText: 'interrupted',
+        turnId: 'turn-1',
+      },
+      undefined,
+      'run-a',
+    );
+    expect(useChatStore.getState().streaming[JID]?.interrupted).toBe(true);
+    useChatStore
+      .getState()
+      .handleWsNewMessage(JID, finalMessage('final-1', '已输出，被打断'));
+
+    const bash = useChatStore
+      .getState()
+      .stepsCache['final-1']?.steps.find((step) => step.kind === 'tool');
+    expect(bash?.status).toBe('error');
+  });
+
+  it('closes a step that a never-settled projection still had running', () => {
+    streamSteps(JID);
+    emit(
+      {
+        eventType: 'tool_use_start',
+        toolName: 'Read',
+        toolUseId: 'tool-2',
+        toolInputSummary: 'a.ts',
+        turnId: 'turn-1',
+      },
+      'run-a',
+    );
+    expect(
+      useChatStore
+        .getState()
+        .streaming[JID]?.steps?.some((step) => step.status === 'running'),
+    ).toBe(true);
+    // No run_finished and no active run: the final replaces the live card.
+    useChatStore.setState({ activeRuns: {} });
+    useChatStore
+      .getState()
+      .handleWsNewMessage(JID, finalMessage('final-1', '最终答案。'));
+    const steps = useChatStore.getState().stepsCache['final-1']?.steps ?? [];
+    expect(steps.length).toBeGreaterThan(0);
+    expect(steps.some((step) => step.status === 'running')).toBe(false);
+  });
+
+  it('keeps nothing for a reply that only answered', () => {
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    emit(
+      { eventType: 'text_delta', text: '直接回答。', turnId: 'turn-1' },
+      'run-a',
+    );
+    flushRaf();
+    useChatStore.getState().handleRunFinished(JID, 'run-a');
+    useChatStore
+      .getState()
+      .handleWsNewMessage(JID, finalMessage('final-1', '直接回答。'));
+    expect(useChatStore.getState().stepsCache['final-1']).toBeUndefined();
   });
 });
 
