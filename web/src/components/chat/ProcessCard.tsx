@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
   type ReactNode,
+  type RefObject,
 } from 'react';
 import { ChevronRight, Sparkles } from 'lucide-react';
 import { m } from 'motion/react';
@@ -277,6 +278,52 @@ function WaitNote({ since, hasRows }: { since?: number; hasRows: boolean }) {
 
 // ── the card ────────────────────────────────────────────────────────────
 
+/** The nearest ancestor that scrolls vertically. */
+function scrollParent(el: HTMLElement): HTMLElement | null {
+  for (let node = el.parentElement; node; node = node.parentElement) {
+    const { overflowY } = getComputedStyle(node);
+    if (overflowY === 'auto' || overflowY === 'scroll') return node;
+  }
+  return null;
+}
+
+/**
+ * The card folds by itself when its run ends, and what is below it moves up by
+ * what it gave up. A reader who has scrolled past it, into the answer, would
+ * see the text jump away from them: the difference comes off the scroll
+ * position. A reader at the end of the chat is not in this case (the browser
+ * has clamped the position to the shorter page), nor is one who can see the
+ * card (what they watch is the card, and it is theirs to fold).
+ */
+function useFoldAnchor(
+  ref: RefObject<HTMLElement | null>,
+  mode: ProcessCardProps['mode'],
+) {
+  const last = useRef<{
+    height: number;
+    mode: ProcessCardProps['mode'];
+  } | null>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) {
+      last.current = null;
+      return;
+    }
+    const before = last.current;
+    last.current = { height: el.offsetHeight, mode };
+    if (!before || before.mode !== 'live' || mode !== 'settled') return;
+    const shrunk = before.height - el.offsetHeight;
+    const scroller = shrunk > 0 ? scrollParent(el) : null;
+    if (!scroller) return;
+    const wentAbove =
+      el.getBoundingClientRect().top + before.height <=
+      scroller.getBoundingClientRect().top;
+    const gap =
+      scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+    if (wentAbove && gap > 1) scroller.scrollTop -= shrunk;
+  });
+}
+
 /**
  * The process of a reply as one card, live or settled. Live, it is a headline
  * that says what the run is doing now over a window of its steps; settled, it
@@ -317,6 +364,8 @@ export const ProcessCard = memo(function ProcessCard({
   // What the reader chose; until then the card follows its own state.
   const [chosen, setChosen] = useState<boolean | undefined>(undefined);
   const bodyId = useId();
+  const rootRef = useRef<HTMLDivElement>(null);
+  useFoldAnchor(rootRef, mode);
   if (!listed && !waitVisible) return null;
 
   const open = chosen ?? (live ? true : (defaultOpen ?? false));
@@ -344,6 +393,7 @@ export const ProcessCard = memo(function ProcessCard({
 
   return (
     <div
+      ref={rootRef}
       data-hc-process-card=""
       data-mode={mode}
       data-hc-model-wait={!listed && waitVisible ? '' : undefined}
