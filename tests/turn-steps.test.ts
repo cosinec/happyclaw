@@ -178,6 +178,81 @@ describe('TurnStepRecorder', () => {
     });
   });
 
+  test('the SDK is_error decides a failure, with or without text', () => {
+    const steps = record(
+      [
+        [0, ev('tool_use_start', { toolName: 'Bash', toolUseId: 'silent' })],
+        // A failure that printed nothing.
+        [10, ev('tool_result', { toolUseId: 'silent', toolIsError: true })],
+        [20, ev('tool_use_start', { toolName: 'Bash', toolUseId: 'flagged' })],
+        [
+          30,
+          ev('tool_result', {
+            toolUseId: 'flagged',
+            toolResult: '⚠️ exit 1\nboom',
+            toolIsError: true,
+          }),
+        ],
+        // The flag, when the SDK gives one, outranks the text's prefix.
+        [40, ev('tool_use_start', { toolName: 'Bash', toolUseId: 'fine' })],
+        [
+          50,
+          ev('tool_result', {
+            toolUseId: 'fine',
+            toolResult: '⚠️ looks bad but is fine',
+            toolIsError: false,
+          }),
+        ],
+      ],
+      100,
+    );
+    expect(steps.map((s) => [s.toolUseId, s.status])).toEqual([
+      ['silent', 'error'],
+      ['flagged', 'error'],
+      ['fine', 'done'],
+    ]);
+  });
+
+  test('what a tool did rides on its step as numbers', () => {
+    const facts = { lines: 40, totalLines: 120 };
+    const agent = { agent: { toolUses: 3, tokens: 900, durationMs: 4_000 } };
+    const steps = record(
+      [
+        [0, ev('tool_use_start', { toolName: 'Read', toolUseId: 'r' })],
+        [
+          10,
+          ev('tool_result', {
+            toolUseId: 'r',
+            toolResult: 'text',
+            toolResultFacts: facts,
+          }),
+        ],
+        [20, ev('tool_use_start', { toolName: 'Edit', toolUseId: 'e' })],
+        [30, ev('tool_result', { toolUseId: 'e', toolResult: 'ok' })],
+        [40, ev('tool_use_start', { toolName: 'Agent', toolUseId: 'a' })],
+        [41, ev('task_start', { toolUseId: 'a', taskId: 'a' })],
+        [
+          50,
+          ev('tool_result', {
+            toolUseId: 'a',
+            toolResult: 'report',
+            toolResultFacts: agent,
+          }),
+        ],
+      ],
+      100,
+    );
+    expect(steps.find((s) => s.toolUseId === 'r')?.resultFacts).toEqual(facts);
+    expect(steps.find((s) => s.toolUseId === 'e')).not.toHaveProperty(
+      'resultFacts',
+    );
+    // A sub-agent's totals land on its step without ending it early.
+    expect(steps.find((s) => s.toolUseId === 'a')).toMatchObject({
+      kind: 'task',
+      resultFacts: agent,
+    });
+  });
+
   test('progress fills the tool step in and starts one it never saw', () => {
     const steps = record(
       [
@@ -692,6 +767,64 @@ describe('parseStoredSteps', () => {
       JSON.stringify([{ ...stored[0], secret: 'x', toolInput: { a: 1 } }]),
     );
     expect(step).toEqual(stored[0]);
+  });
+
+  test('reads the facts of a tool step as numbers only', () => {
+    const facts = {
+      added: 3,
+      removed: 1,
+      created: true,
+      lines: 10,
+      totalLines: 99,
+      files: 2,
+      matches: 7,
+      exitCode: 2,
+      httpCode: 200,
+      bytes: 1024,
+      searches: 1,
+      durationMs: 5,
+      agent: {
+        toolUses: 4,
+        reads: 1,
+        searches: 1,
+        edits: 1,
+        commands: 1,
+        added: 5,
+        removed: 6,
+        tokens: 700,
+        durationMs: 8,
+      },
+    };
+    const row = { id: 't', kind: 'tool', at: 1, status: 'done' };
+    expect(
+      parseStoredSteps(JSON.stringify([{ ...row, resultFacts: facts }]))[0]
+        .resultFacts,
+    ).toEqual(facts);
+
+    // Stored JSON is not trusted: strings, odd numbers and unknown keys go.
+    const [step] = parseStoredSteps(
+      JSON.stringify([
+        {
+          ...row,
+          resultFacts: {
+            added: '3',
+            removed: -1,
+            lines: 1.5,
+            files: 4,
+            created: 'yes',
+            path: '/etc/passwd',
+            agent: { tokens: 'many', reads: 2, secret: 'x' },
+          },
+        },
+      ]),
+    );
+    expect(step.resultFacts).toEqual({ files: 4, agent: { reads: 2 } });
+
+    for (const resultFacts of [null, 7, 'x', [], {}, { agent: {} }, { a: 1 }]) {
+      expect(
+        parseStoredSteps(JSON.stringify([{ ...row, resultFacts }]))[0],
+      ).not.toHaveProperty('resultFacts');
+    }
   });
 
   test('damaged json, a non-array and unusable rows read as no steps', () => {
