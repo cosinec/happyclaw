@@ -315,7 +315,7 @@ describe('tool_result events of the main agent', () => {
     }
   });
 
-  test('the SDK is_error rides along as toolIsError, and is left out when absent', () => {
+  test('every result says whether it failed: the SDK leaves is_error out on success', () => {
     const { processor, results } = makeProcessor();
     startTool(processor, 'Bash', 'toolu_fail', 0);
     startTool(processor, 'Bash', 'toolu_ok', 1);
@@ -326,6 +326,8 @@ describe('tool_result events of the main agent', () => {
     processor.processMainToolResults(
       resultMessage('toolu_ok', samples.bashSuccess),
     );
+    // The fixture's Read result has no is_error, as the SDK sends it.
+    expect(samples.read).not.toHaveProperty('isError');
     processor.processMainToolResults(
       resultMessage('toolu_unset', samples.read),
     );
@@ -335,7 +337,36 @@ describe('tool_result events of the main agent', () => {
     expect(fail.toolResult).toBe('⚠️ Exit code 3\n<output>');
     expect(ok.toolIsError).toBe(false);
     expect(ok.toolResult).toBe('<content>');
-    expect(unset).not.toHaveProperty('toolIsError');
+    expect(unset.toolIsError).toBe(false);
+  });
+
+  test('a successful output that begins with the failure mark is not marked as a failure', () => {
+    const { processor, results } = makeProcessor();
+    startTool(processor, 'Bash', 'toolu_warn');
+    processor.processMainToolResults(
+      resultMessage('toolu_warn', {
+        content: '⚠️ heads up: nothing is wrong',
+        toolUseResult: { stdout: '⚠️ heads up: nothing is wrong', stderr: '' },
+      }),
+    );
+    expect(results()[0]).toMatchObject({
+      toolIsError: false,
+      toolResult: '⚠️ heads up: nothing is wrong',
+    });
+    // A failure carries the mark the Runner adds, and the flag.
+    const failed = makeProcessor();
+    startTool(failed.processor, 'Bash', 'toolu_bad');
+    failed.processor.processMainToolResults(
+      resultMessage('toolu_bad', {
+        content: '⚠️ heads up: nothing is wrong',
+        isError: true,
+        toolUseResult: undefined,
+      }),
+    );
+    expect(failed.results()[0]).toMatchObject({
+      toolIsError: true,
+      toolResult: '⚠️ ⚠️ heads up: nothing is wrong',
+    });
   });
 
   test('a failure with no output is still reported, as a failure', () => {
@@ -410,6 +441,7 @@ describe('tool_result events of the main agent', () => {
         toolUseId: 'toolu_g',
         toolResult: '<content>',
         detail: '<content>',
+        toolIsError: false,
       },
     ]);
   });
@@ -438,7 +470,7 @@ describe('tool_result events of the main agent', () => {
       undefined,
       undefined,
     ]);
-    expect(results().map((e) => e.toolIsError)).toEqual([undefined, true]);
+    expect(results().map((e) => e.toolIsError)).toEqual([false, true]);
   });
 
   test('a tool never seen starting has no facts; an assistant frame is enough to name it', () => {
@@ -526,6 +558,49 @@ describe('tool_result events of the main agent', () => {
     expect(events().filter((e) => e.eventType === 'tool_result')).toHaveLength(
       1,
     );
+  });
+
+  test('a sub-agent calling many tools does not push its Task out of the table', () => {
+    const { processor, results, events } = makeProcessor();
+    startTool(processor, 'Agent', 'toolu_task');
+    // 600 tool calls under the Task, each streamed with its input as the
+    // sub-agent's own events arrive.
+    for (let i = 0; i < 600; i++) {
+      processor.processStreamEvent({
+        type: 'stream_event',
+        parent_tool_use_id: 'toolu_task',
+        event: {
+          type: 'content_block_start',
+          index: i,
+          content_block: {
+            type: 'tool_use',
+            name: 'Read',
+            id: `toolu_inner_${i}`,
+            input: {},
+          },
+        },
+      });
+    }
+    processor.processMainToolResults(
+      resultMessage('toolu_task', samples.agent),
+    );
+    expect(results()[0].toolResultFacts?.agent).toEqual({
+      toolUses: 2,
+      reads: 1,
+      searches: 0,
+      edits: 0,
+      commands: 1,
+      added: 0,
+      removed: 0,
+      tokens: 190,
+      durationMs: 2248,
+    });
+    // The sub-agent's tools were announced all the same.
+    expect(
+      events().filter(
+        (e) => e.eventType === 'tool_use_start' && e.isNested === true,
+      ),
+    ).toHaveLength(600);
   });
 
   test('no event carries a string beyond the result text it always had', () => {
