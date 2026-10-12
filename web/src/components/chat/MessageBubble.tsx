@@ -22,6 +22,7 @@ import {
   type Message,
   type ReplySteps,
   type StreamingTraceEvent,
+  withoutToolResults,
 } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { EmojiAvatar } from '../common/EmojiAvatar';
@@ -272,7 +273,28 @@ export const MessageBubble = memo(
         ? normalizeProcessVisibility(group?.process_visibility)
         : 'full';
     });
+    // A proactive workspace never shows what a tool returned, at any level.
+    const proactive = useChatStore(
+      (s) =>
+        normalizeInteractionMode(
+          s.groups[message.chat_jid.replace(/#agent:.*$/, '')]
+            ?.interaction_mode,
+        ) === 'proactive',
+    );
     const loadTurnTrace = useChatStore((s) => s.loadTurnTrace);
+    // The steps this tab holds were read for the workspace as it was then. The
+    // caches are let go when its view changes; this is what shows meanwhile:
+    // the steps as the workspace shows them now.
+    const shownSteps = useMemo(
+      () =>
+        replySteps && proactive
+          ? {
+              ...replySteps,
+              steps: replySteps.steps.map(withoutToolResults),
+            }
+          : replySteps,
+      [replySteps, proactive],
+    );
     // At the hidden level none of what this tab holds of the process is shown:
     // it may have been read when the level was higher.
     const processShown = process !== 'hidden';
@@ -286,9 +308,9 @@ export const MessageBubble = memo(
     const settledSteps =
       processShown &&
       layout === 'timeline' &&
-      replySteps &&
-      hasProcess(visibleSteps(replySteps.steps, process === 'full'))
-        ? replySteps
+      shownSteps &&
+      hasProcess(visibleSteps(shownSteps.steps, process === 'full'))
+        ? shownSteps
         : null;
     // One row asked for both: the reasoning opens if there is any to read.
     const openThinking =
