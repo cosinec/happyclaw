@@ -83,6 +83,46 @@ describe('thinking steps', () => {
 });
 
 describe('tool steps', () => {
+  it('previews the start of a long result, not its end', () => {
+    const output = `${'HEAD '.repeat(10)}${'x'.repeat(600)}TAIL`;
+    let list = startToolStep(empty(), { toolUseId: 't1', toolName: 'Bash' }, 0);
+    list = endToolStep(list, 't1', 5, output);
+    const preview = list.steps[0].resultPreview ?? '';
+    expect(preview.startsWith('HEAD HEAD HEAD')).toBe(true);
+    expect(preview).not.toContain('TAIL');
+    expect(preview.length).toBeLessThanOrEqual(400);
+    expect(preview.endsWith('…')).toBe(true);
+  });
+
+  it('trusts the SDK is_error over the text, even for an empty failure', () => {
+    let list = startToolStep(empty(), { toolUseId: 't1', toolName: 'Bash' }, 0);
+    list = startToolStep(list, { toolUseId: 't2', toolName: 'Bash' }, 1);
+    list = startToolStep(list, { toolUseId: 't3', toolName: 'Bash' }, 2);
+    // no text at all, but the SDK says it failed
+    list = endToolStep(list, 't1', 5, undefined, { isError: true });
+    // the legacy prefix still marks a failure when the SDK sent no flag
+    list = endToolStep(list, 't2', 6, '⚠️ boom');
+    // text that happens to start with the prefix is not a failure if the SDK says so
+    list = endToolStep(list, 't3', 7, '⚠️ just output', { isError: false });
+    expect(list.steps.map((step) => step.status)).toEqual([
+      'error',
+      'error',
+      'done',
+    ]);
+    expect(list.steps[1].resultPreview).toBe('boom');
+  });
+
+  it('keeps what the tool did as facts', () => {
+    let list = startToolStep(empty(), { toolUseId: 't1', toolName: 'Edit' }, 0);
+    list = endToolStep(list, 't1', 5, 'edited', {
+      facts: { added: 12, removed: 3 },
+    });
+    expect(list.steps[0].resultFacts).toEqual({ added: 12, removed: 3 });
+    // a later end without facts does not erase them
+    list = endToolStep(list, 't1', 6, 'edited');
+    expect(list.steps[0].resultFacts).toEqual({ added: 12, removed: 3 });
+  });
+
   it('runs, then finishes with what it returned', () => {
     let list = startToolStep(
       empty(),
@@ -96,7 +136,7 @@ describe('tool steps', () => {
       status: 'done',
       endedAt: 400,
       summary: 'ls -la',
-      resultPreview: 'total 8 drwx',
+      resultPreview: 'total 8\ndrwx',
     });
   });
 

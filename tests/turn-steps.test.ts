@@ -89,7 +89,7 @@ describe('TurnStepRecorder', () => {
     expect(steps[2]).toMatchObject({
       toolUseId: 'bash-1',
       summary: 'ls -la',
-      resultPreview: 'a.txt b.txt',
+      resultPreview: 'a.txt\nb.txt',
     });
     // the last text is the answer: it is the message itself, not a step
     expect(steps.some((s) => s.text?.includes('答案'))).toBe(false);

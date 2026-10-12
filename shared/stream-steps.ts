@@ -20,6 +20,48 @@ import {
   extractThinkingTitle,
 } from './thinking-text.js';
 
+/**
+ * What a tool did, as numbers and flags, read by the Runner from the SDK's
+ * structured `tool_use_result`. Never a path, file content or model text, so a
+ * UI can show "+12 −3" or "读取 120 行" without carrying the result itself.
+ * Every field is optional: a tool fills what it knows. Declared identically in
+ * shared/stream-event.ts and shared/stream-steps.ts (tests keep them equal).
+ */
+export interface ToolResultFacts {
+  /** Lines an edit or write added / removed. */
+  added?: number;
+  removed?: number;
+  /** A Write created the file (rather than updating it). */
+  created?: boolean;
+  /** Read: lines returned, and the file's total. */
+  lines?: number;
+  totalLines?: number;
+  /** Glob / Grep: files and matches found. */
+  files?: number;
+  matches?: number;
+  /** A failed command's exit code (parsed from `Exit code N`). */
+  exitCode?: number;
+  /** WebFetch: HTTP status and bytes received. */
+  httpCode?: number;
+  bytes?: number;
+  /** WebSearch: searches made. */
+  searches?: number;
+  /** Duration the tool itself reported. */
+  durationMs?: number;
+  /** A sub-agent's totals, from the Task / Agent tool's result. */
+  agent?: {
+    toolUses?: number;
+    reads?: number;
+    searches?: number;
+    edits?: number;
+    commands?: number;
+    added?: number;
+    removed?: number;
+    tokens?: number;
+    durationMs?: number;
+  };
+}
+
 export type StepKind = 'thinking' | 'tool' | 'task' | 'text';
 export type StepStatus = 'running' | 'done' | 'error';
 
@@ -41,8 +83,10 @@ export interface StreamingStep {
   skillName?: string;
   /** tool: what the call was given. task: the latest progress summary. */
   summary?: string;
-  /** tool: the start of what it returned. */
+  /** tool: the start of what it returned (newlines kept, bounded). */
   resultPreview?: string;
+  /** tool: what it did, as numbers; absent when the Runner did not send any. */
+  resultFacts?: ToolResultFacts;
   /** task: key into the streaming state's `taskStates`. */
   taskId?: string;
   /** text: where it starts in the reply's whole text (see `partialBase`). */
@@ -64,7 +108,7 @@ export interface StepList {
 export const MAX_STEPS = 100;
 /** The commentary kept for a closed text step. */
 const MAX_TEXT_STEP_CHARS = 2000;
-const MAX_RESULT_PREVIEW_CHARS = 200;
+const MAX_RESULT_PREVIEW_CHARS = 400;
 
 /** Tools that run as a sub-agent: shown as a task, not as a tool row. */
 export const TASK_TOOL_NAMES: ReadonlySet<string> = new Set(['Task', 'Agent']);
@@ -125,6 +169,22 @@ function findIndexBy(
 
 function tail(text: string, max: number): string {
   return text.length > max ? `…${text.slice(-(max - 1))}` : text;
+}
+
+function head(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+/** A tool's output as a preview: its start, newlines kept, runs of space folded. */
+function previewOf(text: string): string {
+  return head(
+    text
+      .replace(/[ \t]+/g, ' ')
+      .replace(/ ?\n ?/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim(),
+    MAX_RESULT_PREVIEW_CHARS,
+  );
 }
 
 // ── thinking ────────────────────────────────────────────────────────────
@@ -379,32 +439,35 @@ export function progressToolStep(
 /** Failed tool results are marked by the runner with this prefix. */
 const FAILURE_PREFIX = '⚠️';
 
+/** What the SDK reported about how a call ended, beside its text. */
+export interface ToolEndExtra {
+  /** The SDK's own `is_error`; wins over the text's failure prefix. */
+  isError?: boolean;
+  facts?: ToolResultFacts;
+}
+
 /** The call returned (`result` is its text, if any) or ended. */
 export function endToolStep(
   list: StepList,
   toolUseId: string,
   at: number,
   result?: string,
+  extra: ToolEndExtra = {},
 ): StepList {
   const index = toolIndex(list, toolUseId);
   if (index < 0) return list;
   const step = list.steps[index];
-  const failed = !!result && result.startsWith(FAILURE_PREFIX);
-  const text = result
-    ? result
-        .replace(/^⚠️\s*/, '')
-        .replace(/\s+/g, ' ')
-        .trim()
-    : '';
+  const failed =
+    extra.isError ?? (!!result && result.startsWith(FAILURE_PREFIX));
+  const text = result ? previewOf(result.replace(/^⚠️\s*/, '')) : '';
   // A sub-agent ends on its own lifecycle (a background one outlives the call
   // that started it), not when its tool returns.
   if (step.kind === 'task' && !failed) return list;
   return replaceAt(list, index, {
     status: failed ? 'error' : step.status === 'error' ? 'error' : 'done',
     endedAt: step.endedAt ?? at,
-    resultPreview: text
-      ? tail(text, MAX_RESULT_PREVIEW_CHARS).replace(/^…/, '')
-      : step.resultPreview,
+    resultPreview: text || step.resultPreview,
+    ...(extra.facts ? { resultFacts: extra.facts } : {}),
   });
 }
 
@@ -420,7 +483,7 @@ export function failToolStep(
   return replaceAt(list, index, {
     status: 'error',
     endedAt: list.steps[index].endedAt ?? at,
-    resultPreview: tail(reason, MAX_RESULT_PREVIEW_CHARS),
+    resultPreview: head(reason, MAX_RESULT_PREVIEW_CHARS),
   });
 }
 
