@@ -18,12 +18,19 @@ const HEADER_BUTTON_CLASS =
  */
 const BODY_CLASS =
   'mt-1 mb-3 max-h-64 overflow-y-auto overscroll-contain border-l-2 border-surface-border pl-3 text-muted-foreground [&_[data-markdown-root]]:text-label [&_[data-markdown-root]]:leading-6 [&_[data-markdown-root]]:text-muted-foreground [&_strong]:text-foreground/85';
+/**
+ * The same text as one row of the process timeline: that has its own line on
+ * the left, so the body brings none, and it sits under the row's label.
+ */
+const ROW_BODY_CLASS =
+  'mt-0.5 mb-1.5 max-h-48 overflow-y-auto overscroll-contain text-muted-foreground [&_[data-markdown-root]]:text-label [&_[data-markdown-root]]:leading-6 [&_[data-markdown-root]]:text-muted-foreground [&_strong]:text-foreground/85';
 
 export function ThinkingBody({
   id,
   text,
   live = false,
   groupJid,
+  variant = 'block',
   className,
 }: {
   id?: string;
@@ -31,6 +38,8 @@ export function ThinkingBody({
   /** The text is still arriving: render it as streamed Markdown, throttled. */
   live?: boolean;
   groupJid?: string;
+  /** `row`: inside a row of the process timeline, without a line of its own. */
+  variant?: 'block' | 'row';
   className?: string;
 }) {
   const shown = useThrottledValue(
@@ -57,7 +66,7 @@ export function ThinkingBody({
       ref={scrollRef}
       onScroll={handleScroll}
       data-hc-thinking-body=""
-      className={cn(BODY_CLASS, className)}
+      className={cn(variant === 'row' ? ROW_BODY_CLASS : BODY_CLASS, className)}
     >
       {live ? (
         <StreamingMarkdown content={shown} variant="docs" groupJid={groupJid} />
