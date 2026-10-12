@@ -206,4 +206,29 @@ describe('deriveHeadline', () => {
   it('has nothing to say for nothing', () => {
     expect(derive([])).toBeNull();
   });
+
+  it('carries when what is going on began, for the clock beside it', () => {
+    expect(
+      derive([
+        tool('Bash', { status: 'running', at: 5000, summary: 'npm test' }),
+      ]),
+    ).toMatchObject({ source: 'tool', startedAt: 5000, running: true });
+    expect(
+      derive([thinking({ status: 'running', at: 7000, title: '想' })]),
+    ).toMatchObject({ source: 'thinking', startedAt: 7000 });
+    expect(
+      deriveHeadline({
+        steps: [],
+        waiting: true,
+        thinkingText: true,
+        waitingSince: 9000,
+      }),
+    ).toMatchObject({ source: 'waiting', startedAt: 9000 });
+  });
+
+  it('has no clock for the last thing done', () => {
+    const last = derive([tool('Bash', { at: 5000, summary: 'npm test' })]);
+    expect(last).toMatchObject({ running: false });
+    expect(last?.startedAt).toBeUndefined();
+  });
 });

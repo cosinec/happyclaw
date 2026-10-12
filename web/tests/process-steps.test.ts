@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  SETTLED_TIMELINE_ROWS,
+  buildProcessView,
   cleanToolSummary,
   describeGroup,
   describeSettled,
@@ -7,12 +9,14 @@ import {
   groupProcessSteps,
   hasListedSteps,
   isReadOnlyStep,
+  itemSteps,
   processSpanMs,
   stepDurationMs,
   summarizeGroup,
   summarizeSettled,
   summarizedSteps,
   toolCategory,
+  toolOutput,
   visibleSteps,
 } from '../src/lib/process-steps';
 import { summarizeSteps, type StreamingStep } from '../src/lib/stream-steps';
@@ -362,5 +366,126 @@ describe('cleanToolSummary', () => {
     expect(cleanToolSummary('{"limit":10}')).toBe('{"limit":10}');
     expect(cleanToolSummary('  ')).toBeUndefined();
     expect(cleanToolSummary(undefined)).toBeUndefined();
+  });
+});
+
+describe('buildProcessView', () => {
+  const reads = (count: number) =>
+    Array.from({ length: count }, (_, i) =>
+      tool(`r${i}`, 'Read', { at: i * 100, endedAt: i * 100 + 50 }),
+    );
+  const commands = (count: number, from = 0) =>
+    Array.from({ length: count }, (_, i) =>
+      tool(`b${from + i}`, 'Bash', { at: (from + i) * 100 }),
+    );
+
+  it('groups the whole list before it takes the latest rows', () => {
+    // Twelve calls in a row are one row: there is nothing to fold.
+    const view = buildProcessView(reads(12));
+    expect(view.folded).toEqual([]);
+    expect(view.rows).toHaveLength(1);
+    expect(view.rows[0]).toMatchObject({ type: 'group', id: 'group-r0' });
+    expect(itemSteps(view.rows)).toHaveLength(12);
+  });
+
+  it('gives a group the same identity however many calls join it', () => {
+    const ids = [2, 6, 7, 9, 20].map((count) => {
+      const [group] = buildProcessView(reads(count)).rows;
+      return group.type === 'group' ? group.id : null;
+    });
+    expect(ids).toEqual(Array(5).fill('group-r0'));
+  });
+
+  it('keeps a group where it was when rows come after it, and folds it whole', () => {
+    const steps = [...reads(5), ...commands(6)];
+    const before = buildProcessView(steps);
+    expect(before.rows).toHaveLength(6);
+    expect(before.rows.every((item) => item.type === 'step')).toBe(true);
+    // The group is the oldest of seven items: it slides out whole, never in part.
+    expect(before.folded).toHaveLength(1);
+    expect(before.folded[0]).toMatchObject({ type: 'group', id: 'group-r0' });
+    expect(itemSteps(before.folded)).toHaveLength(5);
+    const grown = buildProcessView([...reads(8), ...commands(6)]);
+    expect(grown.folded[0]).toMatchObject({ type: 'group', id: 'group-r0' });
+    expect(itemSteps(grown.folded)).toHaveLength(8);
+  });
+
+  it('lists a question put to the reader nowhere', () => {
+    const view = buildProcessView([
+      tool('a', 'Bash'),
+      tool('q', 'AskUserQuestion'),
+      tool('c', 'Bash'),
+    ]);
+    expect(itemSteps(view.rows).map((s) => s.id)).toEqual(['a', 'c']);
+  });
+
+  it('folds a live list past six rows and a settled one past thirty', () => {
+    const steps = commands(11);
+    expect(buildProcessView(steps).folded).toHaveLength(5);
+    expect(buildProcessView(steps, SETTLED_TIMELINE_ROWS).folded).toEqual([]);
+    expect(SETTLED_TIMELINE_ROWS).toBe(30);
+    expect(
+      buildProcessView(commands(33), SETTLED_TIMELINE_ROWS).folded,
+    ).toHaveLength(3);
+  });
+});
+
+describe('a list of nothing but a question', () => {
+  const question = tool('q', 'AskUserQuestion', { status: 'running' });
+
+  it('has nothing to list, nor to sum up', () => {
+    expect(hasListedSteps([question])).toBe(false);
+    expect(summarizedSteps([question])).toEqual([]);
+    expect(hasListedSteps([question, tool('a', 'Read')])).toBe(true);
+  });
+});
+
+describe('the summary of a run that dropped steps', () => {
+  it('says there were earlier steps it did not count', () => {
+    const steps = [
+      step({ id: 't1', kind: 'thinking', at: 0, endedAt: 3000 }),
+      tool('a', 'Bash', { at: 3000, endedAt: 9000 }),
+    ];
+    expect(summarizeSettled(steps, undefined, 12)).toBe(
+      '已处理 9 秒 · 1 个工具 · 1 段思考 · 另有较早 12 步',
+    );
+    expect(summarizeSettled([tool('a', 'Bash')], undefined, 3)).toBe(
+      '已使用 1 个工具 · 另有较早 3 步',
+    );
+    expect(
+      summarizeSettled([tool('a', 'Bash', { status: 'error' })], undefined, 3),
+    ).toBe('已使用 1 个工具 · 1 个失败 · 另有较早 3 步');
+    expect(summarizeSettled([tool('a', 'Bash')])).toBe('已使用 1 个工具');
+  });
+});
+
+describe('toolOutput of a failed command', () => {
+  const failed = (resultPreview: string, exitCode?: number) =>
+    tool('b', 'Bash', {
+      status: 'error',
+      resultPreview,
+      ...(exitCode === undefined ? {} : { resultFacts: { exitCode } }),
+    });
+
+  it('leaves out the exit code line the facts already say', () => {
+    expect(toolOutput(failed('Exit code 3\nnpm ERR! missing', 3))).toBe(
+      'npm ERR! missing',
+    );
+    expect(toolOutput(failed('\n  exit code: 3\nboom', 3))).toBe('boom');
+  });
+
+  it('leaves nothing to open when that line was all there was', () => {
+    expect(toolOutput(failed('Exit code 3', 3))).toBeUndefined();
+  });
+
+  it('keeps a line that says another code, or any line without the facts', () => {
+    expect(toolOutput(failed('Exit code 2\nboom', 3))).toBe(
+      'Exit code 2\nboom',
+    );
+    expect(toolOutput(failed('Exit code 3\nboom'))).toBe('Exit code 3\nboom');
+    // Not the first line: that is the program's own words.
+    expect(toolOutput(failed('boom\nExit code 3', 3))).toBe(
+      'boom\nExit code 3',
+    );
   });
 });

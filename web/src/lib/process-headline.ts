@@ -19,7 +19,11 @@ export interface ProcessHeadline {
   detail?: string;
   /** Something is going on right now (the line shimmers) or this is the last thing it did. */
   running: boolean;
-  /** Label and detail in one string: what changes the line, and what is announced. */
+  /** When what is going on began (ms): the step's start, or the wait's. */
+  startedAt?: number;
+  /** The step the line comes from, if it comes from one. */
+  stepId?: string;
+  /** Label and detail in one string: what changes the line. */
   text: string;
 }
 
@@ -31,6 +35,7 @@ function headline(
   label: string,
   detail: string | undefined,
   running: boolean,
+  from?: { startedAt?: number; stepId?: string },
 ): ProcessHeadline {
   const shown = detail?.trim() || undefined;
   return {
@@ -38,6 +43,10 @@ function headline(
     label,
     detail: shown,
     running,
+    ...(running && from?.startedAt != null
+      ? { startedAt: from.startedAt }
+      : {}),
+    ...(from?.stepId ? { stepId: from.stepId } : {}),
     text: shown ? `${label} · ${shown}` : label,
   };
 }
@@ -69,6 +78,7 @@ function fromStep(
   running: boolean,
   thinkingText: boolean,
 ): ProcessHeadline {
+  const from = { startedAt: step.at, stepId: step.id };
   switch (step.kind) {
     case 'thinking': {
       const title = thinkingTitle(step, thinkingText);
@@ -77,20 +87,28 @@ function fromStep(
         title ?? (running ? THINKING_HEADLINE : '思考'),
         undefined,
         running,
+        from,
       );
     }
     case 'tool': {
       const { label, detail } = toolWords(step);
-      return headline('tool', label, detail, running);
+      return headline('tool', label, detail, running, from);
     }
     case 'task':
-      return headline('task', '子 Agent', step.title ?? step.summary, running);
+      return headline(
+        'task',
+        '子 Agent',
+        step.title ?? step.summary,
+        running,
+        from,
+      );
     case 'text':
       return headline(
         'step',
         '过程说明',
         stripInlineMarkdown(step.text ?? ''),
         false,
+        from,
       );
   }
 }
@@ -101,6 +119,8 @@ export interface HeadlineInput {
   waiting: boolean;
   /** Reasoning titles may be shown; off, only that the model reasoned. */
   thinkingText: boolean;
+  /** When that request began (ms). */
+  waitingSince?: number;
 }
 
 /** The line for the run as it stands; `null` when there is nothing to say yet. */
@@ -108,6 +128,7 @@ export function deriveHeadline({
   steps,
   waiting,
   thinkingText,
+  waitingSince,
 }: HeadlineInput): ProcessHeadline | null {
   let thinking: StreamingStep | undefined;
   let tool: StreamingStep | undefined;
@@ -121,7 +142,11 @@ export function deriveHeadline({
   }
   const current = thinking ?? tool ?? task;
   if (current) return fromStep(current, true, thinkingText);
-  if (waiting) return headline('waiting', WAITING_HEADLINE, undefined, true);
+  if (waiting) {
+    return headline('waiting', WAITING_HEADLINE, undefined, true, {
+      startedAt: waitingSince,
+    });
+  }
 
   const listed = railSteps(steps).filter((step) => !isQuestionStep(step));
   const last = listed[listed.length - 1];

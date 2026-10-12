@@ -85,8 +85,13 @@ test.describe('the step timeline', () => {
       timeline.getByText(/npx vitest run tests\/frontend-session-sidebar-copy/),
     ).toBeVisible();
     await expect(timeline.getByText('检查移动端滚动性能')).toBeVisible();
+    // The reasoning being written is titled by the header, once: its row says
+    // only that it is reasoning, and holds what it wrote.
+    const writing = timeline.getByRole('button', { name: /^思考.*进行中/ });
+    await expect(writing).toBeVisible();
+    await expect(writing).not.toContainText('核对行高估算');
     await expect(
-      timeline.getByRole('button', { name: /核对行高估算/ }),
+      timeline.locator('[data-hc-thinking-body]').getByText('核对行高估算'),
     ).toBeVisible();
 
     // The answer is the text under the steps' window, not one of them.
@@ -423,9 +428,13 @@ test.describe('a finished reply that has its steps', () => {
     await summary.click();
     const steps = reply.getByRole('list', { name: '处理步骤' });
     await expect(summary).toHaveAttribute('aria-expanded', 'true');
-    // The latest rows are listed, the earlier ones fold into one line.
+    // A finished run lists all its rows: none folds away at this length.
+    await expect(steps.getByText(/较早/)).toHaveCount(0);
     await expect(
-      steps.getByRole('button', { name: /较早 4 步 · 3 个工具/ }),
+      steps.getByRole('button', { name: /确认订阅范围.*5\.8s/ }),
+    ).toBeVisible();
+    await expect(
+      steps.getByRole('button', { name: /已浏览 1 个文件 · 搜索 1 次/ }),
     ).toBeVisible();
     await expect(
       steps.getByRole('button', { name: /比较方案.*7\.0s/ }),
