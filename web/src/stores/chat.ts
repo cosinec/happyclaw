@@ -2508,7 +2508,10 @@ function applyStreamEvent(
       if (!event.toolUseId || event.parentToolUseId) break;
       setSteps(
         next,
-        endToolStep(stepsOf(next), event.toolUseId, at, event.toolResult),
+        endToolStep(stepsOf(next), event.toolUseId, at, event.toolResult, {
+          isError: event.toolIsError,
+          facts: event.toolResultFacts,
+        }),
       );
       const ended = prev.activeTools.find(
         (t) => t.toolUseId === event.toolUseId,

@@ -45,6 +45,7 @@ import {
   type StepList,
   type StepStatus,
   type StreamingStep,
+  type ToolResultFacts,
 } from './stream-steps.js';
 import { isSubagentEvent, capTailByBytes } from './stream-trace.js';
 import { isMessageDeliveryTool } from './workspace-interaction-runtime.js';
@@ -405,7 +406,10 @@ export class TurnStepRecorder {
 
   private observeToolResult(event: StreamEvent, now: number): void {
     if (!event.toolUseId || event.parentToolUseId) return;
-    this.list = endToolStep(this.list, event.toolUseId, now, event.toolResult);
+    this.list = endToolStep(this.list, event.toolUseId, now, event.toolResult, {
+      isError: event.toolIsError,
+      facts: event.toolResultFacts,
+    });
     const ended = this.activeTools.get(event.toolUseId);
     if (!ended || TOOLS_ENDED_BY_LIFECYCLE.has(ended.toolName)) return;
     this.activeTools.delete(event.toolUseId);
@@ -638,6 +642,69 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
 }
 
+const FACT_COUNTS = [
+  'added',
+  'removed',
+  'lines',
+  'totalLines',
+  'files',
+  'matches',
+  'exitCode',
+  'httpCode',
+  'bytes',
+  'searches',
+  'durationMs',
+] as const;
+const AGENT_FACT_COUNTS = [
+  'toolUses',
+  'reads',
+  'searches',
+  'edits',
+  'commands',
+  'added',
+  'removed',
+  'tokens',
+  'durationMs',
+] as const;
+
+function readCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+/**
+ * The facts of a stored tool step: whole non-negative numbers under the keys
+ * of the contract and the one boolean, nothing else. Stored JSON is not
+ * trusted to be what the recorder wrote.
+ */
+function readResultFacts(raw: unknown): ToolResultFacts | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return undefined;
+  }
+  const row = raw as Record<string, unknown>;
+  const facts: ToolResultFacts = {};
+  for (const key of FACT_COUNTS) {
+    const count = readCount(row[key]);
+    if (count !== undefined) facts[key] = count;
+  }
+  if (typeof row.created === 'boolean') facts.created = row.created;
+  if (
+    typeof row.agent === 'object' &&
+    row.agent !== null &&
+    !Array.isArray(row.agent)
+  ) {
+    const agentRow = row.agent as Record<string, unknown>;
+    const agent: NonNullable<ToolResultFacts['agent']> = {};
+    for (const key of AGENT_FACT_COUNTS) {
+      const count = readCount(agentRow[key]);
+      if (count !== undefined) agent[key] = count;
+    }
+    if (Object.keys(agent).length > 0) facts.agent = agent;
+  }
+  return Object.keys(facts).length > 0 ? facts : undefined;
+}
+
 /** A stored step with only the fields of the contract, or null if unusable. */
 function readStep(raw: unknown): StreamingStep | null {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
@@ -676,6 +743,8 @@ function readStep(raw: unknown): StreamingStep | null {
   ] as const) {
     if (typeof row[key] === 'string') step[key] = row[key] as string;
   }
+  const facts = readResultFacts(row.resultFacts);
+  if (facts) step.resultFacts = facts;
   return step;
 }
 

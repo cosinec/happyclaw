@@ -18,6 +18,7 @@ import {
   railSteps,
   stepList,
   type StreamingStep,
+  type ToolResultFacts,
 } from '../web/src/lib/stream-steps';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'turn-steps-parity-'));
@@ -86,6 +87,8 @@ vi.mock('../web/src/utils/messageSnapshotCache', () => ({
 const { useChatStore } = await import('../web/src/stores/chat');
 const { TurnTraceTracker, presentTurnTrace } =
   await import('../src/turn-trace.js');
+const { projectSdkStreamEventForWeb } =
+  await import('../src/workspace-interaction-runtime.js');
 import type { InteractionMode, ProcessVisibility } from '../src/types.js';
 
 const initialState = useChatStore.getState();
@@ -166,6 +169,12 @@ interface Options {
   mode?: InteractionMode;
   /** The turn was stopped by the user. */
   stopped?: boolean;
+  /**
+   * The Web is fed what the host would broadcast (the events as the Workspace
+   * lets the Web see them), as in production, rather than the raw script. The
+   * host's own recorder takes the raw script either way and projects it.
+   */
+  projected?: boolean;
 }
 
 /** What the Web shows of the settled reply: the rail, as the timeline lists it. */
@@ -181,7 +190,11 @@ function webSteps(
   store.handleRunStarted(JID, RUN);
   for (const [offset, event] of script) {
     vi.setSystemTime(T0 + offset);
-    useChatStore.getState().handleStreamEvent(JID, event, undefined, RUN);
+    const shown = options.projected
+      ? projectSdkStreamEventForWeb(mode, 'full', event)
+      : event;
+    if (!shown) continue;
+    useChatStore.getState().handleStreamEvent(JID, shown, undefined, RUN);
     flushRaf();
   }
   vi.setSystemTime(T0 + end);
@@ -539,6 +552,137 @@ describe('the host records the steps the Web builds', () => {
     });
   });
 
+  it("how a tool ended: the SDK flag, what it did, and a sub-agent's totals", () => {
+    const silent = uid('silent');
+    const read = uid('read');
+    const edit = uid('edit');
+    const fine = uid('fine');
+    const task = uid('task');
+    const steps = expectSameSteps(
+      [
+        // A failure with no output at all: only the flag says so.
+        [0, ev('tool_use_start', { toolName: 'Bash', toolUseId: silent })],
+        [10, ev('tool_result', { toolUseId: silent, toolIsError: true })],
+        [20, ev('tool_use_end', { toolUseId: silent })],
+        [30, ev('tool_use_start', { toolName: 'Read', toolUseId: read })],
+        [
+          40,
+          ev('tool_result', {
+            toolUseId: read,
+            toolResult: 'x',
+            toolIsError: false,
+            toolResultFacts: { lines: 40, totalLines: 120 },
+          }),
+        ],
+        [50, ev('tool_use_end', { toolUseId: read })],
+        // The flag outranks the text's own failure prefix.
+        [60, ev('tool_use_start', { toolName: 'Edit', toolUseId: edit })],
+        [
+          70,
+          ev('tool_result', {
+            toolUseId: edit,
+            toolResult: '⚠️ was this a failure',
+            toolIsError: true,
+            toolResultFacts: { added: 2, removed: 1 },
+          }),
+        ],
+        [80, ev('tool_use_start', { toolName: 'Edit', toolUseId: fine })],
+        [
+          90,
+          ev('tool_result', {
+            toolUseId: fine,
+            toolResult: '⚠️ only looks like one',
+            toolIsError: false,
+          }),
+        ],
+        // A sub-agent's totals land on its task step, which runs on.
+        [100, ev('tool_use_start', { toolName: 'Agent', toolUseId: task })],
+        [
+          101,
+          ev('task_start', {
+            toolUseId: task,
+            taskId: task,
+            taskDescription: '调研',
+          }),
+        ],
+        [
+          120,
+          ev('tool_result', {
+            toolUseId: task,
+            toolResult: 'report',
+            toolResultFacts: {
+              agent: { toolUses: 3, reads: 2, tokens: 900, durationMs: 4_000 },
+            },
+          }),
+        ],
+        [
+          130,
+          ev('task_notification', {
+            toolUseId: task,
+            taskId: task,
+            taskStatus: 'completed',
+            taskSummary: '完成',
+          }),
+        ],
+      ],
+      200,
+    );
+    const byId = (id: string) => steps.find((s) => s.toolUseId === id)!;
+    expect(byId(silent)).toMatchObject({ status: 'error' });
+    expect(byId(silent)).not.toHaveProperty('resultFacts');
+    expect(byId(read)).toMatchObject({
+      status: 'done',
+      resultFacts: { lines: 40, totalLines: 120 },
+    });
+    expect(byId(edit)).toMatchObject({
+      status: 'error',
+      resultFacts: { added: 2, removed: 1 },
+    });
+    expect(byId(fine)).toMatchObject({ status: 'done' });
+    expect(steps.find((s) => s.kind === 'task')).toMatchObject({
+      status: 'done',
+      resultFacts: { agent: { toolUses: 3, reads: 2 } },
+    });
+  });
+
+  it('a proactive turn: a failure still shows, the numbers read from output do not', () => {
+    const silent = uid('silent');
+    const read = uid('read');
+    const steps = expectSameSteps(
+      [
+        [0, ev('tool_use_start', { toolName: 'Bash', toolUseId: silent })],
+        [
+          10,
+          ev('tool_result', {
+            toolUseId: silent,
+            toolIsError: true,
+            toolResultFacts: { exitCode: 2 },
+          }),
+        ],
+        [20, ev('tool_use_end', { toolUseId: silent })],
+        [30, ev('tool_use_start', { toolName: 'Read', toolUseId: read })],
+        [
+          40,
+          ev('tool_result', {
+            toolUseId: read,
+            toolResult: '私有内容',
+            toolIsError: false,
+            toolResultFacts: { lines: 40, totalLines: 120 },
+          }),
+        ],
+        [50, ev('tool_use_end', { toolUseId: read })],
+      ],
+      100,
+      { mode: 'proactive', projected: true },
+    );
+    expect(steps.map((s) => [s.toolName, s.status])).toEqual([
+      ['Bash', 'error'],
+      ['Read', 'done'],
+    ]);
+    expect(JSON.stringify(steps)).not.toContain('resultFacts');
+    expect(JSON.stringify(steps)).not.toContain('私有内容');
+  });
+
   it('a proactive turn: the speech tool is no step, the rest is the same', () => {
     const read = uid('read');
     const say = uid('say');
@@ -621,8 +765,30 @@ const TOOL_NAMES = ['Bash', 'Read', 'Grep', 'Edit', 'Skill', 'WebFetch'];
 const SUMMARIES = [undefined, 'ls -la', 'file: src/a.ts', 'pattern: foo'];
 const RESULTS = [undefined, 'ok', '第一行\n第二行', '⚠️ exit 2\nfailed'];
 
+const FACTS: readonly ToolResultFacts[] = [
+  { lines: 40, totalLines: 120 },
+  { added: 3, removed: 1 },
+  { created: true, added: 12 },
+  { files: 4, matches: 9, durationMs: 33 },
+  { exitCode: 2 },
+  { httpCode: 200, bytes: 2048, durationMs: 310 },
+  { searches: 1, durationMs: 470 },
+  {
+    agent: {
+      toolUses: 3,
+      reads: 2,
+      commands: 1,
+      tokens: 900,
+      durationMs: 4000,
+    },
+  },
+];
+
 function generate(seed: number, proactive: boolean): Script {
   const rand = rng(seed);
+  // How a tool ended is drawn from a stream of its own, so the shape of the
+  // sequences does not move when it changes.
+  const side = rng((seed ^ 0x5bd1e995) >>> 0);
   const pick = <T>(items: readonly T[]): T =>
     items[Math.floor(rand() * items.length)];
   const script: Script = [];
@@ -634,6 +800,21 @@ function generate(seed: number, proactive: boolean): Script {
   let n = 0;
   const id = (prefix: string) => `${prefix}-${seed}-${(n += 1)}`;
   push(ev('status', { statusText: 'requesting' }), 0);
+
+  /** The SDK's flag and the numbers of a result; a proactive host has no numbers to give. */
+  const ended = (): Partial<StreamEvent> => {
+    const flag = side();
+    const withFacts = side() < 0.5;
+    const facts = FACTS[Math.floor(side() * FACTS.length)];
+    return {
+      ...(flag < 0.3
+        ? { toolIsError: true }
+        : flag < 0.5
+          ? { toolIsError: false }
+          : {}),
+      ...(withFacts && !proactive ? { toolResultFacts: facts } : {}),
+    };
+  };
 
   const tool = () => {
     const toolUseId = id('tool');
@@ -674,7 +855,7 @@ function generate(seed: number, proactive: boolean): Script {
     }
     if (finish < 0.8) {
       const result = pick(RESULTS);
-      push(ev('tool_result', { toolUseId, toolResult: result }));
+      push(ev('tool_result', { toolUseId, toolResult: result, ...ended() }));
     }
     if (rand() < 0.9) push(ev('tool_use_end', { toolUseId }));
   };
@@ -737,6 +918,19 @@ function generate(seed: number, proactive: boolean): Script {
           taskId,
           taskPatch: { status: pick(['completed', 'killed', 'running']) },
         }),
+      );
+    }
+    // The call returns its totals; the task step goes on with its lifecycle.
+    if (!proactive && side() < 0.5) {
+      push(
+        ev('tool_result', {
+          toolUseId: taskId,
+          toolResult: '报告',
+          toolResultFacts: {
+            agent: { toolUses: 2, reads: 1, tokens: 500, durationMs: 1200 },
+          },
+        }),
+        5,
       );
     }
     if (rand() < 0.6) push(ev('tool_use_end', { toolUseId: taskId }));
@@ -840,6 +1034,13 @@ describe('the generated sequences are not vacuous', () => {
           seen.add(`${proactive ? 'p' : 'a'}:${step.kind}:${step.status}`);
           if (step.title) seen.add(`${step.kind}:titled`);
           if (step.resultPreview) seen.add('tool:preview');
+          if (step.resultFacts) seen.add(`${proactive ? 'p' : 'a'}:facts`);
+          if (step.resultFacts?.agent) seen.add('task:agent-facts');
+          if (step.kind === 'tool' && step.status === 'error') {
+            seen.add(
+              step.resultPreview ? 'tool:error-text' : 'tool:error-silent',
+            );
+          }
           if (step.skillName) seen.add('tool:skill');
           if (step.summary) seen.add(`${step.kind}:summary`);
         }
@@ -860,9 +1061,15 @@ describe('the generated sequences are not vacuous', () => {
       'tool:preview',
       'tool:skill',
       'task:summary',
+      'a:facts',
+      'task:agent-facts',
+      'tool:error-text',
+      'tool:error-silent',
     ]) {
       expect(seen, wanted).toContain(wanted);
     }
     expect([...seen].some((key) => key.startsWith('p:text'))).toBe(false);
+    // A proactive host never has the numbers to record.
+    expect(seen).not.toContain('p:facts');
   });
 });
