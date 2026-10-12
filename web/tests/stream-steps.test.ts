@@ -110,6 +110,8 @@ describe('tool steps', () => {
       'done',
     ]);
     expect(list.steps[1].resultPreview).toBe('boom');
+    // a successful result keeps its text, emoji included
+    expect(list.steps[2].resultPreview).toBe('⚠️ just output');
   });
 
   it('keeps what the tool did as facts', () => {

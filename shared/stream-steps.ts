@@ -459,7 +459,11 @@ export function endToolStep(
   const step = list.steps[index];
   const failed =
     extra.isError ?? (!!result && result.startsWith(FAILURE_PREFIX));
-  const text = result ? previewOf(result.replace(/^⚠️\s*/, '')) : '';
+  // The Runner prefixes a failed result's text with the failure mark; a call
+  // the SDK reports as successful keeps its text exactly as it came.
+  const text = result
+    ? previewOf(failed ? result.replace(/^⚠️\s*/, '') : result)
+    : '';
   // A sub-agent ends on its own lifecycle (a background one outlives the call
   // that started it), not when its tool returns. What the call reported about
   // the sub-agent's work (its totals) still lands on the step.
