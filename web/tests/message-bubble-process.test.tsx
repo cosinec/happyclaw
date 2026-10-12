@@ -7,8 +7,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GroupInfo, Message } from '../src/stores/chat';
 import type { StreamingStep } from '../src/lib/stream-steps';
 
+const { apiGetMock, apiPatchMock } = vi.hoisted(() => ({
+  apiGetMock: vi.fn(),
+  apiPatchMock: vi.fn(),
+}));
+
 vi.mock('../src/api/client', () => ({
-  api: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
+  api: {
+    get: apiGetMock,
+    post: vi.fn(),
+    patch: apiPatchMock,
+    delete: vi.fn(),
+  },
   computeUploadTimeoutMs: vi.fn(() => 8000),
 }));
 
@@ -163,6 +173,7 @@ function seed(
   caches: {
     steps?: StreamingStep[];
     dropped?: number;
+    provisional?: boolean;
     thinking?: string;
     duration?: number;
     trace?: typeof TRACE;
@@ -172,7 +183,11 @@ function seed(
     ...(caches.steps
       ? {
           stepsCache: {
-            m1: { steps: caches.steps, dropped: caches.dropped ?? 0 },
+            m1: {
+              steps: caches.steps,
+              dropped: caches.dropped ?? 0,
+              ...(caches.provisional ? { provisional: true } : {}),
+            },
           },
         }
       : {}),
@@ -201,6 +216,8 @@ const timeline = () =>
   container.querySelector('[role="list"][aria-label="处理步骤"]');
 
 beforeEach(() => {
+  apiGetMock.mockReset();
+  apiPatchMock.mockReset();
   memory.clear();
   Object.defineProperty(window, 'localStorage', {
     configurable: true,
@@ -386,7 +403,7 @@ describe('a finished reply that has its steps', () => {
           endedAt: undefined,
           toolName: 'Bash',
           toolUseId: 'a',
-          summary: 'command: ls',
+          summary: 'command: npm run lint',
         }),
       ],
       duration: 9000,
@@ -534,5 +551,336 @@ describe('a reply that is replaced', () => {
     act(() => seed({ steps: STEPS }));
     await act(async () => {});
     expect(card()?.getAttribute('data-mode')).toBe('settled');
+  });
+});
+
+describe('a proactive workspace at the hidden level', () => {
+  beforeEach(() => {
+    useChatStore.setState({
+      groups: {
+        [JID]: group({
+          interaction_mode: 'proactive',
+          process_visibility: 'hidden',
+        }),
+      },
+    });
+  });
+
+  it('shows none of the process it still holds in memory', async () => {
+    seed({
+      steps: STEPS,
+      thinking: '**确认范围**\n\n先看项目结构。',
+      duration: 5000,
+      trace: [
+        ...TRACE,
+        {
+          id: 'p1',
+          timestamp: 2,
+          kind: 'permission' as never,
+          title: '权限被拒：Write',
+          summary: 'a.ts',
+        },
+      ],
+    });
+    await mount(reply({ source_kind: 'sdk_send_message' }));
+    expect(card()).toBeNull();
+    expect(text()).not.toContain('npm test');
+    expect(text()).not.toContain('已思考');
+    expect(text()).not.toContain('执行详情');
+    expect(text()).not.toContain('权限被拒');
+    expect(text()).not.toContain('处理过程');
+    expect(text()).toContain('最终答案在这里。');
+  });
+
+  it('shows the same steps once the level lets them through', async () => {
+    useChatStore.setState({
+      groups: {
+        [JID]: group({
+          interaction_mode: 'proactive',
+          process_visibility: 'activity',
+        }),
+      },
+    });
+    seed({ steps: STEPS });
+    await mount(reply({ source_kind: 'sdk_send_message' }));
+    expect(card()).toBeTruthy();
+  });
+});
+
+describe('when the owner changes the level of the process', () => {
+  const FULL_STEPS = [
+    step({
+      id: 'thinking-0',
+      kind: 'thinking',
+      durationMs: 3000,
+      title: '内部推理标题',
+      text: '**内部推理标题**\n\n不该留下的推理。',
+    }),
+    step({
+      id: 'tool-a',
+      kind: 'tool',
+      at: 1_004_000,
+      endedAt: 1_005_000,
+      toolName: 'Bash',
+      toolUseId: 'a',
+      summary: 'command: npm test',
+      resultPreview: '12 passed',
+    }),
+  ];
+  const at = (level: 'hidden' | 'activity' | 'full') =>
+    useChatStore.setState({
+      groups: {
+        [JID]: group({
+          interaction_mode: 'proactive',
+          process_visibility: level,
+        }),
+      },
+    });
+  const change = (level: 'hidden' | 'activity' | 'full') =>
+    act(async () => {
+      apiPatchMock.mockResolvedValueOnce({
+        success: true,
+        process_visibility: level,
+      });
+      await useChatStore.getState().updateProcessVisibility(JID, level);
+    });
+  const seedFull = () => {
+    at('full');
+    useChatStore.setState({ messages: { [JID]: [reply()] } });
+    seed({
+      steps: FULL_STEPS,
+      thinking: '**内部推理标题**\n\n不该留下的推理。',
+      duration: 3000,
+      trace: TRACE,
+    });
+  };
+
+  it('takes the card away, and what it listed from memory, at the hidden level', async () => {
+    seedFull();
+    await mount();
+    await click(summaryRow());
+    expect(text()).toContain('npm test');
+    expect(text()).toContain('内部推理标题');
+
+    await change('hidden');
+    expect(card()).toBeNull();
+    expect(text()).not.toContain('npm test');
+    expect(text()).not.toContain('内部推理标题');
+    expect(text()).not.toContain('处理过程');
+    const state = useChatStore.getState();
+    expect(state.stepsCache.m1).toBeUndefined();
+    expect(state.thinkingCache.m1).toBeUndefined();
+    expect(state.traceCache.m1).toBeUndefined();
+  });
+
+  it('shows no reasoning text at the activity level that was read at full', async () => {
+    seedFull();
+    await mount();
+    await click(summaryRow());
+    expect(text()).toContain('内部推理标题');
+
+    await change('activity');
+    // What was loaded at full is gone; the reply offers its process again.
+    expect(text()).not.toContain('内部推理标题');
+    expect(useChatStore.getState().stepsCache.m1).toBeUndefined();
+    expect(useChatStore.getState().thinkingCache.m1).toBeUndefined();
+
+    apiGetMock.mockResolvedValueOnce({
+      turn_id: 'turn-1',
+      thinking: '',
+      trace: [],
+      steps: [
+        { ...FULL_STEPS[0], text: undefined, title: undefined },
+        { ...FULL_STEPS[1], resultPreview: undefined },
+      ],
+      steps_dropped: 0,
+    });
+    await click(
+      [...container.querySelectorAll('button')].find((b) =>
+        b.textContent?.includes('处理过程'),
+      ),
+    );
+    expect(card()?.getAttribute('data-mode')).toBe('settled');
+    expect(text()).toContain('npm test');
+    expect(text()).not.toContain('内部推理标题');
+    expect(text()).not.toContain('不该留下的推理');
+    expect(text()).not.toContain('12 passed');
+  });
+
+  it.each(['hidden', 'activity'] as const)(
+    'offers the process to load again once the level goes from %s to full',
+    async (from) => {
+      at(from);
+      useChatStore.setState({
+        messages: { [JID]: [reply()] },
+        // The ask at the lower level found nothing to show.
+        turnTraceStatus: { m1: 'empty' },
+      });
+      await mount();
+      expect(text()).not.toContain('处理过程');
+
+      await change('full');
+      const row = [...container.querySelectorAll('button')].find((b) =>
+        b.textContent?.includes('处理过程'),
+      );
+      expect(row).toBeTruthy();
+
+      apiGetMock.mockResolvedValueOnce({
+        turn_id: 'turn-1',
+        thinking: '**内部推理标题**\n\n推理。',
+        trace: TRACE,
+        steps: FULL_STEPS,
+        steps_dropped: 0,
+      });
+      await click(row);
+      expect(apiGetMock).toHaveBeenCalledTimes(1);
+      expect(card()?.getAttribute('data-mode')).toBe('settled');
+      expect(text()).toContain('内部推理标题');
+    },
+  );
+
+  it('does not touch a reply when the level stays as it was', async () => {
+    seedFull();
+    await mount();
+    await change('full');
+    expect(card()).toBeTruthy();
+    expect(useChatStore.getState().stepsCache.m1).toBeDefined();
+  });
+});
+
+describe('steps this tab rebuilt after joining the run part-way', () => {
+  const REBUILT = [
+    step({
+      id: 'thinking-restored',
+      kind: 'thinking',
+      title: '重建的思考',
+      text: '**重建的思考**\n\n合并成一段。',
+      endedAt: undefined,
+    }),
+    step({
+      id: 'tool-a',
+      kind: 'tool',
+      at: 1_004_000,
+      endedAt: undefined,
+      toolName: 'Bash',
+      toolUseId: 'a',
+      summary: 'command: npm run lint',
+    }),
+  ];
+  const SERVER = [
+    step({
+      id: 'thinking-0',
+      kind: 'thinking',
+      durationMs: 3000,
+      title: '服务端的第一段',
+      text: '**服务端的第一段**\n\n先看。',
+    }),
+    step({
+      id: 'tool-a',
+      kind: 'tool',
+      at: 1_004_000,
+      endedAt: 1_005_000,
+      toolName: 'Bash',
+      toolUseId: 'a',
+      summary: 'command: npm run lint',
+    }),
+    step({
+      id: 'thinking-1',
+      kind: 'thinking',
+      at: 1_005_000,
+      endedAt: 1_007_000,
+      durationMs: 2000,
+      title: '服务端的第二段',
+      text: '**服务端的第二段**\n\n再看。',
+    }),
+  ];
+  const turn = (steps: StreamingStep[]) => ({
+    turn_id: 'turn-1',
+    thinking: '',
+    trace: [],
+    steps,
+    steps_dropped: 0,
+  });
+  const url = `/api/groups/${encodeURIComponent(JID)}/turn-traces/turn-1`;
+
+  it('are shown as they are, and nothing is asked for until the card is opened', async () => {
+    seed({ steps: REBUILT, provisional: true });
+    await mount();
+    expect(summaryRow()?.textContent).toContain('1 个工具');
+    expect(apiGetMock).not.toHaveBeenCalled();
+  });
+
+  it('are replaced by the server version when the reader opens them', async () => {
+    seed({ steps: REBUILT, provisional: true });
+    apiGetMock.mockResolvedValueOnce(turn(SERVER));
+    await mount();
+    await click(summaryRow());
+
+    expect(apiGetMock).toHaveBeenCalledTimes(1);
+    expect(apiGetMock).toHaveBeenCalledWith(url);
+    // Still open, and now the server's: two reasoning blocks, not one.
+    expect(summaryRow()?.getAttribute('aria-expanded')).toBe('true');
+    expect(summaryRow()?.textContent).toContain('2 段思考');
+    expect(text()).toContain('服务端的第二段');
+    expect(text()).not.toContain('重建的思考');
+    expect(useChatStore.getState().stepsCache.m1.provisional).toBeUndefined();
+
+    // Folding and opening it again asks for nothing more.
+    await click(summaryRow());
+    await click(summaryRow());
+    expect(apiGetMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('are kept, without an error, when the server has none', async () => {
+    seed({ steps: REBUILT, provisional: true });
+    apiGetMock.mockResolvedValueOnce(turn([]));
+    await mount();
+    await click(summaryRow());
+    expect(summaryRow()?.getAttribute('aria-expanded')).toBe('true');
+    expect(text()).toContain('npm run lint');
+    expect(text()).not.toContain('处理过程');
+
+    await click(summaryRow());
+    await click(summaryRow());
+    expect(apiGetMock).toHaveBeenCalledTimes(1);
+    expect(card()).toBeTruthy();
+  });
+
+  it('are kept when the server no longer shows the turn', async () => {
+    seed({ steps: REBUILT, provisional: true });
+    apiGetMock.mockRejectedValueOnce({ status: 404, message: 'Not found' });
+    await mount();
+    await click(summaryRow());
+    expect(text()).toContain('npm run lint');
+    await click(summaryRow());
+    await click(summaryRow());
+    expect(apiGetMock).toHaveBeenCalledTimes(1);
+    expect(card()).toBeTruthy();
+  });
+
+  it('are asked for again the next time they are opened after a failure', async () => {
+    seed({ steps: REBUILT, provisional: true });
+    apiGetMock.mockRejectedValueOnce({ status: 0, message: 'Network error' });
+    apiGetMock.mockResolvedValueOnce(turn(SERVER));
+    await mount();
+    await click(summaryRow());
+    expect(apiGetMock).toHaveBeenCalledTimes(1);
+    expect(text()).toContain('npm run lint');
+    expect(text()).not.toContain('服务端的第二段');
+
+    // Folding it asks for nothing; opening it again does.
+    await click(summaryRow());
+    expect(apiGetMock).toHaveBeenCalledTimes(1);
+    await click(summaryRow());
+    expect(apiGetMock).toHaveBeenCalledTimes(2);
+    expect(text()).toContain('服务端的第二段');
+  });
+
+  it('are not asked for when they are exact', async () => {
+    seed({ steps: SERVER });
+    await mount();
+    await click(summaryRow());
+    expect(apiGetMock).not.toHaveBeenCalled();
+    expect(text()).toContain('服务端的第二段');
   });
 });

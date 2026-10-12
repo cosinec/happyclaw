@@ -321,6 +321,12 @@ export interface StreamingState {
   /** Steps dropped from the front of `steps` at its cap. */
   stepsDropped?: number;
   /**
+   * Part of `steps` was rebuilt from a reconnect snapshot (this tab joined the
+   * run part-way): their order is plausible, not exact, and the finished
+   * reply's steps are fetched from the server when the reader opens them.
+   */
+  stepsRebuilt?: boolean;
+  /**
    * Characters cut from the head of `partialText` at its cap, so the offsets
    * text steps hold into the whole text stay valid.
    */
@@ -943,6 +949,11 @@ export interface ReplySteps {
   steps: StreamingStep[];
   /** Steps dropped from the front once the cap was reached. */
   dropped: number;
+  /**
+   * Rebuilt in a tab that joined the run part-way, not the server's record:
+   * the reader who opens the card gets the server's (see `loadTurnTrace`).
+   */
+  provisional?: boolean;
 }
 
 interface ChatState {
@@ -1362,6 +1373,86 @@ const SETTLE_FALLBACK_MS = 1500;
 const MAX_CACHED_TRACE_EVENTS = 60;
 
 /**
+ * A trace cut to what is kept for a finished reply: the newest rows, but never
+ * a denied permission, which the streaming card shows as a banner above its
+ * steps and which would otherwise vanish when the final message replaces it.
+ */
+function capCachedTrace(rows: StreamingTraceEvent[]): StreamingTraceEvent[] {
+  if (rows.length <= MAX_CACHED_TRACE_EVENTS) return rows;
+  const denied = rows.filter((row) => row.kind === 'permission');
+  let room = Math.max(0, MAX_CACHED_TRACE_EVENTS - denied.length);
+  const kept = new Set<StreamingTraceEvent>(denied);
+  for (let i = rows.length - 1; i >= 0 && room > 0; i -= 1) {
+    if (kept.has(rows[i])) continue;
+    kept.add(rows[i]);
+    room -= 1;
+  }
+  return rows.filter((row) => kept.has(row));
+}
+
+/**
+ * How much of a turn's process the Web shows in a workspace: a proactive one
+ * by the level its owner chose, any other all of it.
+ */
+function effectiveProcessLevel(
+  group: GroupInfo | undefined,
+): ProcessVisibility {
+  return normalizeInteractionMode(group?.interaction_mode) === 'proactive'
+    ? normalizeProcessVisibility(group?.process_visibility)
+    : 'full';
+}
+
+/**
+ * The reasoning, trace and steps this tab holds for the replies of a workspace
+ * and its sessions, let go. They were read at the level that was in force: a
+ * lowered level must not leave what it hides in memory or on screen, and a
+ * raised one must not leave the replies without what it now shows (or marked
+ * empty). The replies load again, at the new level, when they are opened.
+ */
+function withoutProcessCaches(s: ChatState, jid: string): Partial<ChatState> {
+  const ids = new Set<string>();
+  for (const message of s.messages[jid] ?? []) ids.add(message.id);
+  const sessionPrefix = `${jid}#agent:`;
+  for (const messages of Object.values(s.agentMessages)) {
+    for (const message of messages) {
+      if (message.chat_jid.startsWith(sessionPrefix)) ids.add(message.id);
+    }
+  }
+  const without = <V>(cache: Record<string, V>): Record<string, V> => {
+    const next: Record<string, V> = {};
+    for (const [id, value] of Object.entries(cache)) {
+      if (!ids.has(id)) next[id] = value;
+    }
+    return next;
+  };
+  return {
+    thinkingCache: without(s.thinkingCache),
+    thinkingDurationCache: without(s.thinkingDurationCache),
+    traceCache: without(s.traceCache),
+    stepsCache: without(s.stepsCache),
+    turnTraceStatus: without(s.turnTraceStatus),
+  };
+}
+
+/** A reply's steps as they stay, whether or not the server had better ones. */
+function notProvisional(held: ReplySteps): ReplySteps {
+  const { provisional: _provisional, ...rest } = held;
+  return rest;
+}
+
+/**
+ * A step without what its tool or sub-agent returned: the preview of the
+ * output and the numbers read from it. A proactive workspace never shows them.
+ */
+function withoutToolResults(step: StreamingStep): StreamingStep {
+  if (step.resultPreview === undefined && step.resultFacts === undefined) {
+    return step;
+  }
+  const { resultPreview: _preview, resultFacts: _facts, ...rest } = step;
+  return rest;
+}
+
+/**
  * Thinking, execution details and ordered steps of a finished reply, keyed by
  * its final message id. Only taken from a projection that belongs to the
  * finished reply: a settled or interrupted card, or a live one with no newer
@@ -1384,7 +1475,11 @@ function finalizedReplyCaches(
       ? {
           stepsCache: capThinkingCache({
             ...s.stepsCache,
-            [messageId]: { steps: steps.steps, dropped: steps.dropped },
+            [messageId]: {
+              steps: steps.steps,
+              dropped: steps.dropped,
+              ...(state?.stepsRebuilt ? { provisional: true } : {}),
+            },
           }),
         }
       : {}),
@@ -1408,7 +1503,7 @@ function finalizedReplyCaches(
       ? {
           traceCache: capThinkingCache({
             ...s.traceCache,
-            [messageId]: trace.slice(-MAX_CACHED_TRACE_EVENTS),
+            [messageId]: capCachedTrace(trace),
           }),
         }
       : {}),
@@ -3675,10 +3770,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
           [jid]: { ...group, interaction_mode: interactionMode },
         };
       };
-      set((state) => ({
-        groups: patchGroups(state.groups),
-        error: null,
-      }));
+      set((state) => {
+        const groups = patchGroups(state.groups);
+        return {
+          groups,
+          // A mode shows more or less of the process than the other.
+          ...(effectiveProcessLevel(state.groups[jid]) !==
+          effectiveProcessLevel(groups[jid])
+            ? withoutProcessCaches(state, jid)
+            : {}),
+          error: null,
+        };
+      });
       useGroupsStore.setState((state) => ({
         groups: patchGroups(state.groups),
       }));
@@ -3731,10 +3834,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
             );
           }
         }
+        const groups = patchGroups(state.groups);
         return {
-          groups: patchGroups(state.groups),
+          groups,
           streaming: nextStreaming,
           agentStreaming: nextAgentStreaming,
+          // What the replies already loaded were read at is no longer the level.
+          ...(effectiveProcessLevel(state.groups[jid]) !==
+          effectiveProcessLevel(groups[jid])
+            ? withoutProcessCaches(state, jid)
+            : {}),
           error: null,
         };
       });
@@ -3891,11 +4000,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!turnId) return false;
     const current = get();
     if (current.turnTraceStatus[id] === 'loading') return false;
+    // Steps a tab rebuilt from a snapshot are asked for again, to be replaced
+    // by the server's; whatever else a cache holds is all there is to load.
+    const upgrading = current.stepsCache[id]?.provisional === true;
     if (
-      current.thinkingCache[id] !== undefined ||
-      current.thinkingDurationCache[id] !== undefined ||
-      current.traceCache[id] !== undefined ||
-      current.stepsCache[id] !== undefined
+      !upgrading &&
+      (current.thinkingCache[id] !== undefined ||
+        current.thinkingDurationCache[id] !== undefined ||
+        current.traceCache[id] !== undefined ||
+        current.stepsCache[id] !== undefined)
     ) {
       return true;
     }
@@ -3906,6 +4019,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const data = await api.get<TurnTraceResponse>(
         `/api/groups/${encodeURIComponent(jid)}/turn-traces/${encodeURIComponent(turnId)}`,
       );
+      const proactive = isProactiveRuntime(get(), jid);
       const thinking = capThinkingText(data.thinking || '');
       const duration = data.thinking_duration_ms ?? undefined;
       const rows = (Array.isArray(data.trace) ? data.trace : []).filter(
@@ -3913,14 +4027,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       );
       // The host keeps the speech tool's rows of a proactive turn; the live
       // view leaves them out, so the reloaded one does too.
-      const trace = (
-        isProactiveRuntime(get(), jid) ? withoutSpeechTool(rows) : rows
-      ).slice(-MAX_CACHED_TRACE_EVENTS);
-      // A proactive turn's speech tool is no step either (the server leaves it
-      // out already; a row a stale server sends is dropped here).
+      const trace = capCachedTrace(proactive ? withoutSpeechTool(rows) : rows);
+      // A proactive turn's speech tool is no step either, and what a tool or a
+      // sub-agent returned is not shown (the server leaves both out already; a
+      // server that sends more cannot put them on screen).
       const sent = Array.isArray(data.steps) ? data.steps : [];
-      const steps = isProactiveRuntime(get(), jid)
-        ? sent.filter((step) => step.toolName !== SPEECH_TOOL_NAME)
+      const steps = proactive
+        ? sent
+            .filter((step) => step.toolName !== SPEECH_TOOL_NAME)
+            .map(withoutToolResults)
         : sent;
       const keepsSteps = hasListedSteps(steps);
       const keepsDuration =
@@ -3930,11 +4045,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
         (!!thinking || duration >= 1000);
       set((s) => {
         const status = { ...s.turnTraceStatus };
-        if (!thinking && !keepsDuration && trace.length === 0 && !keepsSteps) {
+        // A card already shows the steps this tab has: the server having
+        // nothing more is no reason to take it away.
+        if (
+          !upgrading &&
+          !thinking &&
+          !keepsDuration &&
+          trace.length === 0 &&
+          !keepsSteps
+        ) {
           status[id] = 'empty';
         } else {
           delete status[id];
         }
+        const held = s.stepsCache[id];
         return {
           turnTraceStatus: capThinkingCache(status),
           ...(thinking
@@ -3975,7 +4099,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   },
                 }),
               }
-            : {}),
+            : upgrading && held
+              ? { stepsCache: { ...s.stepsCache, [id]: notProvisional(held) } }
+              : {}),
         };
       });
       return true;
@@ -3983,12 +4109,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // A turn the server no longer shows (its owner hid the process) is
       // nothing to load; anything else may work on the next ask.
       const gone = (err as { status?: number } | null)?.status === 404;
-      set((s) => ({
-        turnTraceStatus: {
-          ...s.turnTraceStatus,
-          [id]: gone ? 'empty' : 'failed',
-        },
-      }));
+      set((s) => {
+        const status = { ...s.turnTraceStatus };
+        const held = s.stepsCache[id];
+        if (upgrading) {
+          // The reader keeps the card they have, and nothing is marked on it.
+          delete status[id];
+          return {
+            turnTraceStatus: status,
+            // Gone for good: do not ask again. A failure may work next time.
+            ...(gone && held
+              ? { stepsCache: { ...s.stepsCache, [id]: notProvisional(held) } }
+              : {}),
+          };
+        }
+        return {
+          turnTraceStatus: { ...status, [id]: gone ? 'empty' : 'failed' },
+        };
+      });
       return false;
     }
   },
@@ -5888,6 +6026,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       if (local && sameTurn && local.steps && local.steps.length > 0) {
         restored.steps = local.steps;
         restored.stepsDropped = local.stepsDropped;
+        restored.stepsRebuilt = local.stepsRebuilt;
         restored.partialBase = local.partialBase;
         restored.thinkingGap = local.thinkingGap;
         if (local.thinkingTitle) restored.thinkingTitle = local.thinkingTitle;
@@ -5924,6 +6063,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         });
         restored.steps = rebuilt.steps;
         restored.stepsDropped = rebuilt.dropped;
+        restored.stepsRebuilt = true;
       }
       return level ? scrubForVisibility(restored, level) : restored;
     };

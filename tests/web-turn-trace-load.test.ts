@@ -1,16 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { GroupInfo, Message } from '../web/src/stores/chat';
+import type { AgentInfo, GroupInfo, Message } from '../web/src/stores/chat';
 import type { StreamingStep } from '../web/src/lib/stream-steps';
 import { countTraceTools } from '../web/src/components/chat/ExecutionTrace';
 
-const { apiGetMock } = vi.hoisted(() => ({ apiGetMock: vi.fn() }));
+const { apiGetMock, apiPatchMock } = vi.hoisted(() => ({
+  apiGetMock: vi.fn(),
+  apiPatchMock: vi.fn(),
+}));
 
 vi.mock('../web/src/api/client', () => ({
   api: {
     get: apiGetMock,
     post: vi.fn(),
-    patch: vi.fn(),
+    patch: apiPatchMock,
     delete: vi.fn(),
   },
   computeUploadTimeoutMs: vi.fn(() => 8000),
@@ -464,6 +467,257 @@ describe('the ordered steps the server kept', () => {
     });
   });
 
+  describe('what a tool returned, in a proactive workspace', () => {
+    const turn = () => ({
+      turn_id: 'turn-1',
+      thinking: '',
+      trace: [],
+      steps: [
+        toolStep('t1', 'Bash', {
+          status: 'error',
+          summary: 'command: npm test',
+          resultPreview: 'FAIL tests/a.test.ts: secret output',
+          resultFacts: { exitCode: 1 },
+        }),
+        step({
+          id: 'task-1',
+          kind: 'task',
+          taskId: 'task-1',
+          toolUseId: 'task-1',
+          toolName: 'Task',
+          title: '检查移动端',
+          summary: '已用 Playwright 录制',
+          resultPreview: '子代理的结论',
+          resultFacts: { agent: { toolUses: 3, tokens: 1200 } },
+        }),
+        thinking('t0'),
+      ],
+      steps_dropped: 0,
+    });
+
+    it.each(['activity', 'full'] as const)(
+      'is kept out of the steps at the %s level',
+      async (level) => {
+        proactive(level);
+        apiGetMock.mockResolvedValueOnce(turn());
+        await useChatStore.getState().loadTurnTrace(message('m8'));
+        const cached = useChatStore.getState().stepsCache.m8.steps;
+        for (const step of cached) {
+          expect(step.resultPreview).toBeUndefined();
+          expect(step.resultFacts).toBeUndefined();
+        }
+        // What is only a flag or a name stays, so a failed call reads as failed.
+        expect(cached[0]).toMatchObject({
+          status: 'error',
+          summary: 'command: npm test',
+          toolName: 'Bash',
+        });
+        expect(cached[1]).toMatchObject({
+          title: '检查移动端',
+          summary: '已用 Playwright 录制',
+        });
+        expect(cached[2]).toMatchObject({ kind: 'thinking', text: '想一想。' });
+      },
+    );
+
+    it('is kept in an Assistant workspace', async () => {
+      apiGetMock.mockResolvedValueOnce(turn());
+      await useChatStore.getState().loadTurnTrace(message('m9'));
+      const cached = useChatStore.getState().stepsCache.m9.steps;
+      expect(cached[0].resultPreview).toBe(
+        'FAIL tests/a.test.ts: secret output',
+      );
+      expect(cached[0].resultFacts).toEqual({ exitCode: 1 });
+      expect(cached[1].resultFacts).toEqual({
+        agent: { toolUses: 3, tokens: 1200 },
+      });
+    });
+  });
+
+  describe('a trace longer than the cache keeps its denied permissions', () => {
+    const rows = (count: number, prefix = 'r', from = 0) =>
+      Array.from({ length: count }, (_, i) =>
+        row(`${prefix}${i}`, `工具 Read ${i}`, { timestamp: from + i }),
+      );
+    const denial = (id: string, timestamp: number) =>
+      row(id, '权限被拒：Write', { kind: 'permission', timestamp });
+
+    it('keeps the denial from early on, and fills up with the newest rows', async () => {
+      apiGetMock.mockResolvedValueOnce({
+        turn_id: 'turn-1',
+        trace: [denial('p1', -1), ...rows(100)],
+      });
+      await useChatStore.getState().loadTurnTrace(message());
+      const kept = useChatStore.getState().traceCache.m1;
+      expect(kept).toHaveLength(60);
+      expect(kept[0].id).toBe('p1');
+      expect(kept.at(-1)?.id).toBe('r99');
+      // In the order the run had them.
+      expect(kept.map((r) => r.timestamp)).toEqual(
+        [...kept.map((r) => r.timestamp)].sort((a, b) => a - b),
+      );
+    });
+
+    it('keeps every denial, and the newest of the rest for the room left', async () => {
+      apiGetMock.mockResolvedValueOnce({
+        turn_id: 'turn-1',
+        trace: [
+          denial('p1', -3),
+          ...rows(30),
+          denial('p2', 40),
+          ...rows(70, 's', 50),
+        ],
+      });
+      await useChatStore.getState().loadTurnTrace(message());
+      const kept = useChatStore.getState().traceCache.m1;
+      expect(kept).toHaveLength(60);
+      expect(
+        kept.filter((r) => r.kind === 'permission').map((r) => r.id),
+      ).toEqual(['p1', 'p2']);
+      expect(kept.at(-1)?.id).toBe('s69');
+    });
+
+    it('leaves a trace within the cap as it is', async () => {
+      apiGetMock.mockResolvedValueOnce({
+        turn_id: 'turn-1',
+        trace: [denial('p1', -1), ...rows(10)],
+      });
+      await useChatStore.getState().loadTurnTrace(message());
+      expect(useChatStore.getState().traceCache.m1).toHaveLength(11);
+    });
+  });
+
+  describe('steps a tab rebuilt from a snapshot', () => {
+    const rebuilt = [thinking('thinking-restored'), toolStep('a', 'Bash')];
+    const exact = [
+      thinking('thinking-0'),
+      toolStep('a', 'Bash', {
+        resultPreview: '12 passed',
+        resultFacts: { exitCode: 0 },
+      }),
+      thinking('thinking-1', { title: '整理结论', text: '可以回答了。' }),
+    ];
+    const seedProvisional = () =>
+      useChatStore.setState({
+        stepsCache: { m1: { steps: rebuilt, dropped: 0, provisional: true } },
+        thinkingCache: { m1: '先想一想。' },
+        traceCache: { m1: [row('a', '工具 Bash', { toolUseId: 'a' })] },
+      });
+
+    it('are replaced by the server version when it is asked for', async () => {
+      seedProvisional();
+      apiGetMock.mockResolvedValueOnce({
+        turn_id: 'turn-1',
+        thinking: '先想一想。\n\n可以回答了。',
+        trace: [row('a', '工具 Bash', { toolUseId: 'a' })],
+        steps: exact,
+        steps_dropped: 2,
+      });
+      expect(await useChatStore.getState().loadTurnTrace(message())).toBe(true);
+      expect(apiGetMock).toHaveBeenCalledTimes(1);
+      const state = useChatStore.getState();
+      expect(state.stepsCache.m1).toEqual({ steps: exact, dropped: 2 });
+      expect(state.stepsCache.m1.provisional).toBeUndefined();
+      expect(state.turnTraceStatus.m1).toBeUndefined();
+    });
+
+    it('stay as they are, and are not asked for again, when the server has none', async () => {
+      seedProvisional();
+      apiGetMock.mockResolvedValueOnce({
+        turn_id: 'turn-1',
+        thinking: '',
+        trace: [],
+        steps: [],
+        steps_dropped: 0,
+      });
+      await useChatStore.getState().loadTurnTrace(message());
+      const state = useChatStore.getState();
+      expect(state.stepsCache.m1.steps).toEqual(rebuilt);
+      expect(state.stepsCache.m1.provisional).toBeFalsy();
+      // Nothing is hidden or marked empty for it: the card is still there.
+      expect(state.turnTraceStatus.m1).toBeUndefined();
+
+      expect(await useChatStore.getState().loadTurnTrace(message())).toBe(true);
+      expect(apiGetMock).toHaveBeenCalledTimes(1);
+      expect(useChatStore.getState().stepsCache.m1.steps).toEqual(rebuilt);
+    });
+
+    it('stay as they are when the server no longer shows the turn', async () => {
+      seedProvisional();
+      apiGetMock.mockRejectedValueOnce({ status: 404, message: 'Not found' });
+      expect(await useChatStore.getState().loadTurnTrace(message())).toBe(
+        false,
+      );
+      const state = useChatStore.getState();
+      expect(state.stepsCache.m1.steps).toEqual(rebuilt);
+      expect(state.stepsCache.m1.provisional).toBeFalsy();
+      expect(state.turnTraceStatus.m1).toBeUndefined();
+      expect(state.error).toBeNull();
+    });
+
+    it('stay as they are and are asked for again after a failure', async () => {
+      seedProvisional();
+      apiGetMock.mockRejectedValueOnce({ status: 0, message: 'Network error' });
+      expect(await useChatStore.getState().loadTurnTrace(message())).toBe(
+        false,
+      );
+      let state = useChatStore.getState();
+      expect(state.stepsCache.m1).toEqual({
+        steps: rebuilt,
+        dropped: 0,
+        provisional: true,
+      });
+      expect(state.turnTraceStatus.m1).toBeUndefined();
+      expect(state.error).toBeNull();
+
+      apiGetMock.mockResolvedValueOnce({
+        turn_id: 'turn-1',
+        steps: exact,
+        steps_dropped: 0,
+      });
+      await useChatStore.getState().loadTurnTrace(message());
+      expect(apiGetMock).toHaveBeenCalledTimes(2);
+      state = useChatStore.getState();
+      expect(state.stepsCache.m1.steps).toEqual(exact);
+    });
+
+    it('are asked for once while a load is in flight', async () => {
+      seedProvisional();
+      let resolve!: (value: unknown) => void;
+      apiGetMock.mockReturnValueOnce(new Promise((r) => (resolve = r)));
+      const first = useChatStore.getState().loadTurnTrace(message());
+      expect(await useChatStore.getState().loadTurnTrace(message())).toBe(
+        false,
+      );
+      resolve({ turn_id: 'turn-1', steps: exact, steps_dropped: 0 });
+      await first;
+      expect(apiGetMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('are left out of a proactive workspace the way any server steps are', async () => {
+      proactive();
+      seedProvisional();
+      apiGetMock.mockResolvedValueOnce({
+        turn_id: 'turn-1',
+        steps: [...exact, toolStep('say-1', SAY)],
+        steps_dropped: 0,
+      });
+      await useChatStore.getState().loadTurnTrace(message());
+      const cached = useChatStore.getState().stepsCache.m1.steps;
+      expect(cached.map((s) => s.toolName)).not.toContain(SAY);
+      expect(cached.every((s) => s.resultPreview === undefined)).toBe(true);
+    });
+
+    it('are not asked for when they are exact', async () => {
+      useChatStore.setState({
+        stepsCache: { m1: { steps: exact, dropped: 0 } },
+        thinkingCache: { m1: '先想一想。' },
+      });
+      expect(await useChatStore.getState().loadTurnTrace(message())).toBe(true);
+      expect(apiGetMock).not.toHaveBeenCalled();
+    });
+  });
+
   describe('follow the messages the store holds', () => {
     const cached = { steps: [toolStep('a', 'Read')], dropped: 0 };
     const seed = () =>
@@ -483,6 +737,128 @@ describe('the ordered steps the server kept', () => {
       await useChatStore.getState().deleteFlow(JID);
       expect(Object.keys(useChatStore.getState().stepsCache)).toEqual(['kept']);
     });
+  });
+});
+
+describe('what the caches hold when the level of the process changes', () => {
+  const OTHER = 'web:other';
+  const group = (over: Partial<GroupInfo> = {}): GroupInfo =>
+    ({
+      name: 'w',
+      folder: 'trace',
+      added_at: '2026-01-01T00:00:00.000Z',
+      interaction_mode: 'proactive',
+      process_visibility: 'full',
+      ...over,
+    }) as GroupInfo;
+  const held = { steps: [toolStep('a', 'Read')], dropped: 0 };
+  /** Replies of the workspace, one of its sessions and another workspace. */
+  const seed = (over: Partial<GroupInfo> = {}) =>
+    useChatStore.setState({
+      groups: { [JID]: group(over), [OTHER]: group({ folder: 'other' }) },
+      messages: {
+        [JID]: [message('m1')],
+        [OTHER]: [message('o1', { chat_jid: OTHER })],
+      },
+      agents: {
+        [JID]: [{ id: 's1', kind: 'conversation' } as unknown as AgentInfo],
+      },
+      agentMessages: {
+        s1: [message('a1', { chat_jid: `${JID}#agent:s1` })],
+      },
+      thinkingCache: { m1: '想', a1: '想', o1: '想' },
+      thinkingDurationCache: { m1: 3000, a1: 3000, o1: 3000 },
+      traceCache: {
+        m1: [row('a', '工具 Read')],
+        a1: [row('a', '工具 Read')],
+        o1: [row('a', '工具 Read')],
+      },
+      stepsCache: { m1: held, a1: held, o1: held },
+      turnTraceStatus: { m1: 'empty', a1: 'empty', o1: 'empty' },
+    });
+  const caches = (id: string) => {
+    const s = useChatStore.getState();
+    return [
+      s.thinkingCache[id],
+      s.thinkingDurationCache[id],
+      s.traceCache[id],
+      s.stepsCache[id],
+      s.turnTraceStatus[id],
+    ];
+  };
+  const none = [undefined, undefined, undefined, undefined, undefined];
+  const change = async (level: string) => {
+    apiPatchMock.mockResolvedValueOnce({
+      success: true,
+      process_visibility: level,
+    });
+    await useChatStore.getState().updateProcessVisibility(JID, level as never);
+  };
+
+  it.each([
+    ['full', 'hidden'],
+    ['full', 'activity'],
+    ['activity', 'full'],
+    ['hidden', 'full'],
+    ['activity', 'hidden'],
+  ] as const)(
+    'lets go of what %s showed once the level is %s, for the workspace and its sessions',
+    async (from, to) => {
+      seed({ process_visibility: from });
+      await change(to);
+      expect(caches('m1')).toEqual(none);
+      expect(caches('a1')).toEqual(none);
+      // Another workspace is not this one's business.
+      expect(caches('o1')).toEqual([
+        '想',
+        3000,
+        [expect.objectContaining({ id: 'a' })],
+        held,
+        'empty',
+      ]);
+      expect(useChatStore.getState().groups[JID].process_visibility).toBe(to);
+    },
+  );
+
+  it('keeps them when the level is the one they were read at', async () => {
+    seed({ process_visibility: 'activity' });
+    await change('activity');
+    expect(caches('m1')[3]).toBe(held);
+    expect(caches('m1')[4]).toBe('empty');
+  });
+
+  it('keeps them in an Assistant workspace, which shows everything at any level', async () => {
+    seed({ interaction_mode: 'assistant', process_visibility: 'hidden' });
+    await change('full');
+    expect(caches('m1')[3]).toBe(held);
+  });
+
+  it('lets go of them when the mode itself changes what is shown', async () => {
+    seed({ process_visibility: 'hidden' });
+    apiPatchMock.mockResolvedValueOnce({ success: true });
+    await useChatStore.getState().updateInteractionMode(JID, 'assistant');
+    expect(caches('m1')).toEqual(none);
+
+    seed({ interaction_mode: 'assistant', process_visibility: 'activity' });
+    apiPatchMock.mockResolvedValueOnce({ success: true });
+    await useChatStore.getState().updateInteractionMode(JID, 'proactive');
+    expect(caches('a1')).toEqual(none);
+  });
+
+  it('keeps them when a mode change leaves the level as it was', async () => {
+    seed({ process_visibility: 'full' });
+    apiPatchMock.mockResolvedValueOnce({ success: true });
+    await useChatStore.getState().updateInteractionMode(JID, 'assistant');
+    expect(caches('m1')[3]).toBe(held);
+  });
+
+  it('keeps them when the server refuses the change', async () => {
+    seed({ process_visibility: 'full' });
+    apiPatchMock.mockRejectedValueOnce(new Error('nope'));
+    expect(
+      await useChatStore.getState().updateProcessVisibility(JID, 'hidden'),
+    ).toBe(false);
+    expect(caches('m1')[3]).toBe(held);
   });
 });
 
