@@ -229,8 +229,10 @@ test.describe('the live card', () => {
     await expect(body.locator('strong')).toHaveText('比较两种做法');
     await expect(body).toHaveCSS('border-left-width', '0px');
 
-    // The failed command opens too, and wraps in its place.
-    await rows.filter({ hasText: '运行' }).getByRole('button').click();
+    // The failed command is open already, and wraps in its place.
+    await expect(
+      rows.filter({ hasText: '运行' }).getByRole('button'),
+    ).toHaveAttribute('aria-expanded', 'true');
     await expect(
       rows
         .filter({ hasText: '运行' })
@@ -331,11 +333,178 @@ test.describe('the settled card', () => {
   });
 });
 
+// The calls of the `facts` scenario report what they did and what they
+// printed, as a Runner that reads the SDK's structured results sends them. The
+// card is settled and folded: open it and the rows older than the latest six.
+async function openFacts(page: Page, scenario = 'facts') {
+  await open(page, `scenario=${scenario}`);
+  const summary = page.locator(
+    '[data-hc-stream-card="settled"] [data-hc-process-card] > button',
+  );
+  await summary.click();
+  await expect(win(page)).toBeVisible();
+  await win(page)
+    .getByRole('button', { name: /较早 \d+ 步/ })
+    .click();
+}
+
+const rowOf = (page: Page, text: string | RegExp) =>
+  win(page).getByRole('listitem').filter({ hasText: text }).last();
+
+test.describe('tool rows that say what they did', () => {
+  test('give the facts of a call after what it was given, coloured, within the row', async ({
+    page,
+  }) => {
+    await openFacts(page);
+    const edit = rowOf(page, '编辑');
+    await expect(edit).toContainText('+12 −3');
+    await expect(rowOf(page, '写入')).toContainText('新建 · +24');
+    await expect(rowOf(page, 'HTTP 200')).toContainText('HTTP 200 · 14 KB');
+
+    // Lines added are the success colour, removed the error colour, and the
+    // rest of the row's second-hand words are neither.
+    const colours = await edit.evaluate((row) => {
+      const color = (el: Element) => getComputedStyle(el).color;
+      const spans = [...row.querySelectorAll('span')];
+      const find = (text: string) =>
+        spans.find((span) => span.textContent === text)!;
+      return {
+        added: color(find('+12')),
+        removed: color(find('−3')),
+        facts: color(find('+12').parentElement!),
+      };
+    });
+    expect(colours.added).not.toBe(colours.removed);
+    expect(colours.added).not.toBe(colours.facts);
+    expect(colours.removed).not.toBe(colours.facts);
+
+    // Facts, then time, then the chevron's room: nothing past the window.
+    const box = await edit.getByText('+12 −3').boundingBox();
+    const time = await edit.getByText(/^\d+(\.\d)?s$/).boundingBox();
+    const area = await win(page).boundingBox();
+    expect(box!.x + box!.width).toBeLessThanOrEqual(time!.x + 1);
+    expect(time!.x + time!.width).toBeLessThanOrEqual(area!.x + area!.width);
+    await expectNoSidewaysOverflow(page);
+  });
+
+  test('open a failed call to its output without being asked, in a box of at most 160px', async ({
+    page,
+  }) => {
+    await openFacts(page);
+    const failed = rowOf(page, 'npm run build:web');
+    const button = failed.getByRole('button').first();
+    await expect(button).toHaveAttribute('aria-expanded', 'true');
+    // The exit code and the first line of the output are in the row.
+    await expect(button).toContainText('退出码 1 · src/part0.ts(10,5)');
+    const output = failed.locator('pre');
+    await expect(output).toContainText('src/part13.ts(23,5)');
+    const metrics = await output.evaluate((el) => {
+      const style = getComputedStyle(el);
+      return {
+        height: el.clientHeight,
+        scrollHeight: el.scrollHeight,
+        overflowY: style.overflowY,
+        whiteSpace: style.whiteSpace,
+        mono: style.fontFamily.toLowerCase().includes('mono'),
+      };
+    });
+    expect(metrics.height).toBeLessThanOrEqual(161);
+    expect(metrics.scrollHeight).toBeGreaterThan(metrics.height);
+    expect(metrics.overflowY).toBe('auto');
+    expect(metrics.whiteSpace).toBe('pre-wrap');
+    expect(metrics.mono).toBe(true);
+
+    // It scrolls inside; the window around it does not move with it.
+    const before = (await scrollState(page)).top;
+    await output.evaluate((el) => {
+      el.scrollTop = 60;
+    });
+    expect(await output.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+    expect((await scrollState(page)).top).toBe(before);
+    await expectNoSidewaysOverflow(page);
+  });
+
+  test('open a good call that printed something when it is tapped, 40px high', async ({
+    page,
+  }) => {
+    await openFacts(page);
+    const ok = rowOf(page, 'vitest');
+    const button = ok.getByRole('button').first();
+    await expect(button).toHaveAttribute('aria-expanded', 'false');
+    await expect(ok.locator('pre')).toHaveCount(0);
+    expect((await button.boundingBox())!.height).toBeGreaterThanOrEqual(40);
+    await button.tap();
+    await expect(button).toHaveAttribute('aria-expanded', 'true');
+    await expect(ok.locator('pre')).toContainText('26 passed (26)');
+    await expectNoSidewaysOverflow(page);
+    await button.tap();
+    await expect(ok.locator('pre')).toHaveCount(0);
+  });
+
+  test('leave a call that printed nothing a plain row', async ({ page }) => {
+    await openFacts(page);
+    const fetchRow = rowOf(page, 'HTTP 200');
+    await expect(fetchRow.getByRole('button')).toHaveCount(0);
+    const edit = rowOf(page, '编辑');
+    await expect(edit.getByRole('button')).toHaveCount(0);
+  });
+
+  test('keep the facts of the calls a merged row holds', async ({ page }) => {
+    await openFacts(page);
+    const group = rowOf(page, '已浏览 1 个文件 · 搜索 2 次');
+    await group.getByRole('button').first().click();
+    await expect(group).toContainText('120/430 行');
+    await expect(group).toContainText('24 处匹配 · 8 个文件');
+    await expect(group).toContainText('31 个文件');
+    await expectNoSidewaysOverflow(page);
+  });
+
+  test('say what a sub-agent did when its card is gone, and what it costs while it runs', async ({
+    page,
+  }) => {
+    await openFacts(page);
+    const agent = rowOf(page, '检查移动端滚动性能');
+    await expect(agent).toContainText(
+      '读 3 · 搜 2 · 改 1 · 命令 4 · +12 −3 · 1.2 万 token · 21 秒',
+    );
+    await expect(agent.getByRole('button')).toHaveCount(0);
+    await expectNoSidewaysOverflow(page);
+
+    await open(page, 'scenario=facts-live');
+    const live = win(page)
+      .getByRole('listitem')
+      .filter({ hasText: '检查移动端滚动性能' })
+      .last();
+    await expect(live).toContainText('14 个工具 · 1.2 万 token · 21 秒');
+    await expectNoSidewaysOverflow(page);
+  });
+});
+
 test.describe('on a wide screen', () => {
   test.use({
     viewport: { width: 1280, height: 800 },
     isMobile: false,
     hasTouch: false,
+  });
+
+  test('the facts of a call are read whole, between the path and the time', async ({
+    page,
+  }) => {
+    await openFacts(page);
+    const edit = rowOf(page, '编辑');
+    const facts = edit.getByText('+12 −3');
+    const whole = await facts.evaluate(
+      (el) => el.scrollWidth <= el.clientWidth,
+    );
+    expect(whole).toBe(true);
+    const [path, fact, time] = await Promise.all([
+      edit.getByText(/ProcessRows\.tsx/).boundingBox(),
+      facts.boundingBox(),
+      edit.getByText(/^\d+(\.\d)?s$/).boundingBox(),
+    ]);
+    expect(path!.x).toBeLessThan(fact!.x);
+    expect(fact!.x + fact!.width).toBeLessThanOrEqual(time!.x + 1);
+    expect((await edit.boundingBox())!.height).toBeLessThan(32);
   });
 
   test('the window is taller, and the rows are compact', async ({ page }) => {

@@ -1,6 +1,8 @@
 // Visual harness for the chat canvas: renders ChatView with representative
 // history, streaming and queue states from mocked stores (no backend).
 //   ?scenario=history | streaming | waiting | silent | settled | live | empty
+//            | facts (a settled card whose calls report what they did and
+//              printed) | facts-live (the same, with its sub-agent still running)
 //            | proactive (&visibility=hidden|activity|full)
 //            | thinking-markdown
 //            | lazy-trace (a reply whose reasoning and trace the server kept;
@@ -795,6 +797,181 @@ const settledStreaming: StreamingState = {
   runId: 'run-harness',
 };
 
+/**
+ * Calls that report what they did (`resultFacts`) and what they printed
+ * (`resultPreview`), the way a Runner that reads the SDK's structured results
+ * sends them: edits with their lines, a failed command with its exit code and
+ * a long output, a run of reads merged into one row, a fetch, a sub-agent.
+ */
+const failedBuild = Array.from(
+  { length: 14 },
+  (_, i) => `src/part${i}.ts(${10 + i},5): error TS2322: type mismatch`,
+).join('\n');
+const factsSteps: StreamingStep[] = [
+  {
+    id: 'thinking-0',
+    kind: 'thinking',
+    at: ago(60),
+    endedAt: ago(56),
+    status: 'done',
+    durationMs: 4_000,
+    title: '确认改动范围',
+    text: thinkingA,
+  },
+  {
+    id: 'tool-e1',
+    kind: 'tool',
+    at: ago(55),
+    endedAt: ago(54),
+    status: 'done',
+    toolUseId: 'e1',
+    toolName: 'Edit',
+    summary:
+      '{"file_path":"/workspace/group/happyclaw/web/src/components/chat/ProcessRows.tsx"}',
+    resultFacts: { added: 12, removed: 3 },
+  },
+  {
+    id: 'tool-w1',
+    kind: 'tool',
+    at: ago(53),
+    endedAt: ago(52),
+    status: 'done',
+    toolUseId: 'w1',
+    toolName: 'Write',
+    summary:
+      '{"file_path":"/workspace/group/happyclaw/web/src/lib/process-facts.ts"}',
+    resultFacts: { created: true, added: 24 },
+  },
+  {
+    id: 'tool-b1',
+    kind: 'tool',
+    at: ago(51),
+    endedAt: ago(45),
+    status: 'done',
+    toolUseId: 'b1',
+    toolName: 'Bash',
+    summary: 'command: npx vitest run web/tests/process-tool-rows.test.tsx',
+    resultPreview:
+      ' RUN  v4.1.11\n\n ✓ web/tests/process-tool-rows.test.tsx (26 tests) 242ms\n\n Test Files  1 passed (1)\n      Tests  26 passed (26)',
+  },
+  {
+    id: 'tool-r1',
+    kind: 'tool',
+    at: ago(44),
+    endedAt: ago(43),
+    status: 'done',
+    toolUseId: 'r1',
+    toolName: 'Read',
+    summary: '/workspace/group/happyclaw/web/src/lib/process-steps.ts',
+    resultFacts: { lines: 120, totalLines: 430 },
+    resultPreview:
+      "import { describeToolCall } from '../components/chat/ToolActivityCard';",
+  },
+  {
+    id: 'tool-g1',
+    kind: 'tool',
+    at: ago(42),
+    endedAt: ago(41),
+    status: 'done',
+    toolUseId: 'g1',
+    toolName: 'Grep',
+    summary: 'pattern: useChatStore',
+    resultFacts: { matches: 24, files: 8 },
+  },
+  {
+    id: 'tool-gl1',
+    kind: 'tool',
+    at: ago(40),
+    endedAt: ago(39),
+    status: 'done',
+    toolUseId: 'gl1',
+    toolName: 'Glob',
+    summary: 'web/src/**/*.test.tsx',
+    resultFacts: { files: 31 },
+  },
+  {
+    id: 'tool-b2',
+    kind: 'tool',
+    at: ago(38),
+    endedAt: ago(30),
+    status: 'error',
+    toolUseId: 'b2',
+    toolName: 'Bash',
+    summary: 'command: npm run build:web',
+    resultPreview: failedBuild,
+    resultFacts: { exitCode: 1 },
+  },
+  {
+    id: 'tool-f1',
+    kind: 'tool',
+    at: ago(29),
+    endedAt: ago(27),
+    status: 'done',
+    toolUseId: 'f1',
+    toolName: 'WebFetch',
+    summary: 'https://docs.anthropic.com/en/docs/claude-code/sdk',
+    resultFacts: { httpCode: 200, bytes: 14 * 1024 },
+  },
+  {
+    id: 'task-agent1',
+    kind: 'task',
+    at: ago(26),
+    endedAt: ago(5),
+    status: 'done',
+    taskId: 'agent1',
+    toolUseId: 'agent1',
+    toolName: 'Task',
+    title: '检查移动端滚动性能',
+    resultFacts: {
+      agent: {
+        reads: 3,
+        searches: 2,
+        edits: 1,
+        commands: 4,
+        added: 12,
+        removed: 3,
+        tokens: 12_345,
+        durationMs: 21_000,
+      },
+    },
+  },
+];
+
+const factsSettled: StreamingState = {
+  ...settledStreaming,
+  thinkingDurationMs: 4_000,
+  steps: factsSteps,
+  taskStates: {},
+};
+
+/** The same run with its sub-agent still going, and what it has cost so far. */
+const factsLive: StreamingState = {
+  ...streaming,
+  isThinking: false,
+  thinkingDurationMs: 4_000,
+  steps: factsSteps.map((step) =>
+    step.id === 'task-agent1'
+      ? {
+          ...step,
+          status: 'running',
+          endedAt: undefined,
+          resultFacts: undefined,
+          summary: '已用 Playwright 录制 3 组滚动帧率',
+        }
+      : step,
+  ),
+  activeTools: [],
+  taskStates: {
+    agent1: {
+      ...taskStates.task1,
+      id: 'agent1',
+      lastToolName: 'Bash',
+      usage: { totalTokens: 12_345, toolUses: 14, durationMs: 21_000 },
+    },
+  },
+  todos: undefined,
+};
+
 // A proactive turn's state as the render must treat it. The host sends no
 // reply text and, below `full`, no reasoning text; the state here carries both
 // at every level, so what the page leaves out is the component's doing.
@@ -972,6 +1149,7 @@ useAuthStore.setState({
 
 const isRunning =
   scenario === 'streaming' ||
+  scenario === 'facts-live' ||
   scenario === 'markdown-streaming' ||
   scenario === 'waiting' ||
   scenario === 'silent' ||
@@ -981,17 +1159,23 @@ const isRunning =
 const scenarioStreaming: StreamingState | undefined =
   scenario === 'streaming'
     ? streaming
-    : scenario === 'silent'
-      ? silentStreaming
-      : scenario === 'thinking-markdown'
-        ? thinkingMarkdownStreaming
-        : scenario === 'markdown-streaming'
-          ? markdownStreaming
-          : scenario === 'proactive'
-            ? processVisibility === 'hidden'
-              ? { ...silentStreaming, awaitingModel: false, partialText: draft }
-              : proactiveStreaming
-            : undefined;
+    : scenario === 'facts-live'
+      ? factsLive
+      : scenario === 'silent'
+        ? silentStreaming
+        : scenario === 'thinking-markdown'
+          ? thinkingMarkdownStreaming
+          : scenario === 'markdown-streaming'
+            ? markdownStreaming
+            : scenario === 'proactive'
+              ? processVisibility === 'hidden'
+                ? {
+                    ...silentStreaming,
+                    awaitingModel: false,
+                    partialText: draft,
+                  }
+                : proactiveStreaming
+              : undefined;
 
 useChatStore.setState({
   groups: {
@@ -1027,7 +1211,11 @@ useChatStore.setState({
     : {},
   streaming: scenarioStreaming ? { [groupJid]: scenarioStreaming } : {},
   settledStreaming:
-    scenario === 'settled' ? { [groupJid]: settledStreaming } : {},
+    scenario === 'settled'
+      ? { [groupJid]: settledStreaming }
+      : scenario === 'facts'
+        ? { [groupJid]: factsSettled }
+        : {},
   thinkingCache: {
     m4: '**确认订阅范围**\n\n先看订阅层级，再比较几种方案的复杂度与收益。',
   },
