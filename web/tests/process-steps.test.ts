@@ -20,6 +20,7 @@ import {
   visibleSteps,
 } from '../src/lib/process-steps';
 import { summarizeSteps, type StreamingStep } from '../src/lib/stream-steps';
+import { formatElapsedMs } from '../src/utils/format-elapsed';
 
 const step = (
   over: Partial<StreamingStep> & Pick<StreamingStep, 'id' | 'kind'>,
@@ -203,11 +204,55 @@ describe('formatSpanZh', () => {
     expect(formatSpanZh(120_000)).toBe('2 分');
     expect(formatSpanZh(119_700)).toBe('2 分');
   });
+
+  it('never reads sixty seconds: the minute starts where the seconds would round to it', () => {
+    expect(formatSpanZh(59_499)).toBe('59 秒');
+    expect(formatSpanZh(59_500)).toBe('1 分');
+    expect(formatSpanZh(59_600)).toBe('1 分');
+    expect(formatSpanZh(59_999)).toBe('1 分');
+    expect(formatSpanZh(60_000)).toBe('1 分');
+    expect(formatSpanZh(60_499)).toBe('1 分');
+    expect(formatSpanZh(60_500)).toBe('1 分 1 秒');
+    expect(formatSpanZh(119_499)).toBe('1 分 59 秒');
+    expect(formatSpanZh(119_500)).toBe('2 分');
+    // Nor ten seconds in tenths, nor a second-long span in hundredths.
+    expect(formatSpanZh(9_949)).toBe('9.9 秒');
+    expect(formatSpanZh(9_960)).toBe('10 秒');
+    expect(formatSpanZh(1_000)).toBe('1 秒');
+  });
+
+  it('says the same time as the row beside it, which writes it as 1m 05s', () => {
+    // The summary line and the rows are two spellings of one measure.
+    const seconds = (text: string) => {
+      const minutes = /(\d+)\s*(?:分|m)/.exec(text)?.[1] ?? '0';
+      const rest = /(\d+(?:\.\d)?)\s*(?:秒|s)/.exec(text)?.[1] ?? '0';
+      return Number(minutes) * 60 + Math.round(Number(rest));
+    };
+    for (let ms = 10_000; ms <= 400_000; ms += 137) {
+      expect(seconds(formatSpanZh(ms)), `${ms}ms`).toBe(
+        seconds(formatElapsedMs(ms)),
+      );
+    }
+    for (const ms of [59_500, 59_600, 59_999, 119_500, 179_999]) {
+      expect(formatElapsedMs(ms)).not.toMatch(/^60s|\b60s$/);
+      expect(formatSpanZh(ms)).not.toContain('60 秒');
+    }
+  });
 });
 
 describe('summarizeSettled', () => {
   const thinking = (id: string, at: number, endedAt: number) =>
     step({ id, kind: 'thinking', at, endedAt, durationMs: endedAt - at });
+
+  it('reads a run of 59.6 seconds as a minute, not as sixty seconds', () => {
+    expect(
+      summarizeSettled([
+        thinking('t1', 0, 3000),
+        tool('a', 'Bash', { at: 3000, endedAt: 59_600 }),
+      ]),
+    ).toBe('已处理 1 分 · 1 个工具 · 1 段思考');
+    expect(summarizeSettled([thinking('t1', 0, 59_999)])).toBe('已思考 1 分');
+  });
 
   it('says what the run did, how long it took, and what it used', () => {
     expect(

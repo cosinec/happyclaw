@@ -217,6 +217,10 @@ function ProcessHeader({
  * of it, and lets go of the end when the reader scrolls up or opens a row to
  * read it. Settled, it is taller and still. It is the same element either way:
  * what a reader has opened in it survives the end of the run.
+ *
+ * The end is looked at once a frame, not once a render: a render for each
+ * streamed delta that read the scroll size would force a layout of the whole
+ * page for each one.
  */
 function ProcessWindow({
   id,
@@ -230,27 +234,60 @@ function ProcessWindow({
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const following = useRef(true);
+  // Where the last write of ours left the scroll position: a scroll event that
+  // reports it is ours, however far the content has grown since.
+  const written = useRef<number | null>(null);
   const [faded, setFaded] = useState(false);
 
   const follow = useCallback(() => {
     const el = scrollRef.current;
-    if (el && live && following.current) el.scrollTop = el.scrollHeight;
+    if (!el || !live || !following.current) return;
+    if (el.scrollTop >= el.scrollHeight - el.clientHeight - 0.5) return;
+    el.scrollTop = el.scrollHeight;
+    written.current = el.scrollTop;
   }, [live]);
   const measure = useCallback(() => {
     const el = scrollRef.current;
     if (!el || !live) return;
+    setFaded(el.scrollTop > 1);
+    // The scroll event of a write of ours, delivered a frame later, may find
+    // the content grown again: that is not the reader leaving the end.
+    if (following.current && written.current === el.scrollTop) return;
     following.current =
       el.scrollHeight - el.scrollTop - el.clientHeight < FOLLOW_THRESHOLD_PX;
-    setFaded(el.scrollTop > 1);
   }, [live]);
 
-  // New steps, and a row growing as its text arrives, keep the end in view.
-  useLayoutEffect(follow);
+  // The end is in view when the window opens (and when it becomes the live
+  // one).
+  useLayoutEffect(follow, [follow]);
+  // After that, once a frame at most, and only when something may have moved
+  // it: the browser says the content or the window changed size, or something
+  // was rendered (a step that grew and shrank again within the frame reports no
+  // change of size, yet may have left the end out of reach). A render only asks
+  // for the look; the look itself is the frame's, after its layout.
+  const frame = useRef(0);
+  useLayoutEffect(() => {
+    if (!live || frame.current) return;
+    frame.current = requestAnimationFrame(() => {
+      frame.current = 0;
+      follow();
+    });
+  });
+  useEffect(() => () => cancelAnimationFrame(frame.current), []);
   useEffect(() => {
     const content = contentRef.current;
-    if (!live || !content || typeof ResizeObserver === 'undefined') return;
+    const scroller = scrollRef.current;
+    if (
+      !live ||
+      !content ||
+      !scroller ||
+      typeof ResizeObserver === 'undefined'
+    ) {
+      return;
+    }
     const observer = new ResizeObserver(follow);
     observer.observe(content);
+    observer.observe(scroller);
     return () => observer.disconnect();
   }, [live, follow]);
 
@@ -301,78 +338,74 @@ function scrollParent(el: HTMLElement): HTMLElement | null {
   return null;
 }
 
+/** Where the text below the card, and the card, are on screen. */
+interface Sighting {
+  below: Element;
+  view: HTMLElement;
+  /** Top of the text below the card. */
+  y: number;
+  /** The card is wholly above the top of the view. */
+  cardAbove: boolean;
+}
+
+/** The page as the reader sees it now, or `null` when there is no text below. */
+function sight(
+  card: HTMLElement | null,
+  scroller: { current: HTMLElement | null },
+): Sighting | null {
+  const below = card?.parentElement?.lastElementChild;
+  if (!card || !below || below === card) return null;
+  scroller.current ??= scrollParent(card);
+  const view = scroller.current;
+  if (!view) return null;
+  return {
+    below,
+    view,
+    y: below.getBoundingClientRect().top,
+    cardAbove:
+      card.getBoundingClientRect().bottom <= view.getBoundingClientRect().top,
+  };
+}
+
 /**
  * The card folds by itself when its run ends, and what is below it moves up by
  * what it gave up. A reader who has scrolled past it, into the answer, would
  * see the text jump away from them (Safari has no scroll anchoring to hold it;
- * where there is, the net movement is what counts). So while the card is live
- * this notes where the text below it is on screen, and once it has folded the
- * scroll position takes up the difference. Not for a reader at the end of the
- * chat (the browser clamped the position to the shorter page: nothing moved on
- * screen) nor one who can see the card (what they watch is the card).
+ * where there is, the net movement is what counts). So when the card is about
+ * to fold, this notes where the text below it is on screen, and once it has
+ * folded the scroll position takes up the difference. Not for a reader at the
+ * end of the chat (the browser clamped the position to the shorter page:
+ * nothing moved on screen) nor one who can see the card (what they watch is
+ * the card).
+ *
+ * The page is read at that moment only. The fold shows in the props before it
+ * shows in the page, so the render that is about to commit it still finds the
+ * live card in the document, exactly as the reader sees it.
  */
 function useFoldAnchor(
   ref: RefObject<HTMLElement | null>,
   mode: ProcessCardProps['mode'],
 ) {
   const scroller = useRef<HTMLElement | null>(null);
-  const listening = useRef<HTMLElement | null>(null);
-  // Where the text below the card was last seen on screen, and whether the
-  // card was already above the top of the view.
-  const seen = useRef<{ y: number; cardAbove: boolean } | null>(null);
+  const seen = useRef<Sighting | null>(null);
   const was = useRef(mode);
-
-  const look = useCallback(() => {
-    const el = ref.current;
-    const below = el?.parentElement?.lastElementChild;
-    if (el && !scroller.current) scroller.current = scrollParent(el);
-    if (!el || !below || below === el || !scroller.current) {
-      seen.current = null;
-      return;
-    }
-    seen.current = {
-      y: below.getBoundingClientRect().top,
-      cardAbove:
-        el.getBoundingClientRect().bottom <=
-        scroller.current.getBoundingClientRect().top,
-    };
-  }, [ref]);
-
-  // Every commit, and every scroll the reader makes, while the card is live.
+  if (was.current === 'live' && mode !== 'live') {
+    seen.current = sight(ref.current, scroller);
+  }
   useLayoutEffect(() => {
     const before = was.current;
     was.current = mode;
-    const el = ref.current;
-    if (mode === 'live') {
-      look();
-      if (scroller.current && listening.current !== scroller.current) {
-        listening.current?.removeEventListener('scroll', look);
-        listening.current = scroller.current;
-        listening.current.addEventListener('scroll', look, { passive: true });
-      }
-      return;
-    }
-    listening.current?.removeEventListener('scroll', look);
-    listening.current = null;
     const sighting = seen.current;
-    const below = el?.parentElement?.lastElementChild;
-    const view = scroller.current;
     seen.current = null;
-    if (before !== 'live' || !sighting?.cardAbove || !below || !view) return;
-    if (below === el) return;
+    if (before !== 'live' || mode === 'live' || !sighting) return;
+    if (!sighting.cardAbove || !sighting.below.isConnected) return;
     // Reading the position lays the folded page out; the net movement is what
     // the reader would see, whoever has moved the scroll position already.
-    const drift = below.getBoundingClientRect().top - sighting.y;
+    const { view } = sighting;
+    const drift = sighting.below.getBoundingClientRect().top - sighting.y;
     const gap = view.scrollHeight - view.scrollTop - view.clientHeight;
     if (Math.abs(drift) > 1 && gap > 1) view.scrollTop += drift;
-  });
-  useEffect(
-    () => () => {
-      listening.current?.removeEventListener('scroll', look);
-      listening.current = null;
-    },
-    [look],
-  );
+  }, [mode]);
 }
 
 /**
