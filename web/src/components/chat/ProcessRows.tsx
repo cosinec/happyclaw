@@ -592,6 +592,8 @@ const TaskRow = memo(function TaskRow({
       label={task?.title ?? step.title ?? '子 Agent'}
       detail={detail}
       facts={facts ? <FactsText text={facts} plain={failed} /> : undefined}
+      // The facts are cut short in a narrow row: the whole of them is here.
+      title={facts ?? undefined}
       time={
         running
           ? elapsedLabel(now, step.at)

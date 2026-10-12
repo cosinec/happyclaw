@@ -495,6 +495,10 @@ describe('a sub-agent row says what it cost', () => {
       '读 3 · 搜 2 · 改 1 · 命令 4 · +12 −3 · 1.2 万 token · 46 秒',
     );
     expect(rows()[0].querySelector('.text-success')?.textContent).toBe('+12');
+    // A narrow row cuts the facts short: the whole of them is its tooltip.
+    expect(rows()[0].querySelector('div')?.getAttribute('title')).toBe(
+      '读 3 · 搜 2 · 改 1 · 命令 4 · +12 −3 · 1.2 万 token · 46 秒',
+    );
     // Nothing behind the row to open.
     expect(rowButton(0)).toBeNull();
   });
