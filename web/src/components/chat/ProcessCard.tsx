@@ -79,6 +79,14 @@ const EMPTY_TOOLS: StreamingState['activeTools'] = [];
 const HEADLINE_SETTLE_MS = 300;
 /** Closer to the end than this, the window counts as following it. */
 const FOLLOW_THRESHOLD_PX = 30;
+/**
+ * A scroll event within this long of the reader's own input (or of an event
+ * that was theirs: a fling goes on scrolling long after the finger is off) is
+ * the reader scrolling. Any other is the page: a clamp after the content got
+ * shorter, say, which the browser reports a frame late, when the content may
+ * have grown again.
+ */
+const USER_SCROLL_MS = 200;
 
 const ICON_CLASS = 'size-3.5 shrink-0';
 
@@ -220,7 +228,8 @@ function ProcessHeader({
  *
  * The end is looked at once a frame, not once a render: a render for each
  * streamed delta that read the scroll size would force a layout of the whole
- * page for each one.
+ * page for each one. It is left only by the reader's own scrolling, never by
+ * the page moving the position under it.
  */
 function ProcessWindow({
   id,
@@ -234,9 +243,11 @@ function ProcessWindow({
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const following = useRef(true);
-  // Where the last write of ours left the scroll position: a scroll event that
-  // reports it is ours, however far the content has grown since.
-  const written = useRef<number | null>(null);
+  // When the reader last did something to the window, as far as it knows.
+  const userAt = useRef(Number.NEGATIVE_INFINITY);
+  const noteUser = useCallback(() => {
+    userAt.current = performance.now();
+  }, []);
   const [faded, setFaded] = useState(false);
 
   const follow = useCallback(() => {
@@ -244,36 +255,60 @@ function ProcessWindow({
     if (!el || !live || !following.current) return;
     if (el.scrollTop >= el.scrollHeight - el.clientHeight - 0.5) return;
     el.scrollTop = el.scrollHeight;
-    written.current = el.scrollTop;
-  }, [live]);
-  const measure = useCallback(() => {
-    const el = scrollRef.current;
-    if (!el || !live) return;
-    setFaded(el.scrollTop > 1);
-    // The scroll event of a write of ours, delivered a frame later, may find
-    // the content grown again: that is not the reader leaving the end.
-    if (following.current && written.current === el.scrollTop) return;
-    following.current =
-      el.scrollHeight - el.scrollTop - el.clientHeight < FOLLOW_THRESHOLD_PX;
   }, [live]);
 
-  // The end is in view when the window opens (and when it becomes the live
-  // one).
-  useLayoutEffect(follow, [follow]);
-  // After that, once a frame at most, and only when something may have moved
-  // it: the browser says the content or the window changed size, or something
-  // was rendered (a step that grew and shrank again within the frame reports no
-  // change of size, yet may have left the end out of reach). A render only asks
-  // for the look; the look itself is the frame's, after its layout.
+  // A look at the end, once a frame at most, after that frame's layout. A
+  // render asks for one (a step that grew and shrank again within a frame
+  // reports no change of size, yet may have left the end out of reach), and so
+  // does a scroll the reader did not make; the browser's report of a change of
+  // size comes with its own.
   const frame = useRef(0);
-  useLayoutEffect(() => {
-    if (!live || frame.current) return;
+  const look = useCallback(() => {
+    if (frame.current) return;
     frame.current = requestAnimationFrame(() => {
       frame.current = 0;
       follow();
     });
+  }, [follow]);
+
+  const measure = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el || !live) return;
+    setFaded(el.scrollTop > 1);
+    const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const now = performance.now();
+    const theirs = now - userAt.current < USER_SCROLL_MS;
+    // Their scrolling goes on for as long as its events do (a fling), until it
+    // arrives at the very end: what the page does a moment later (a clamp, say)
+    // is not theirs. Not before: a fling that starts at the end passes through
+    // here on its way up.
+    if (theirs) userAt.current = gap < 1 ? Number.NEGATIVE_INFINITY : now;
+    if (gap < FOLLOW_THRESHOLD_PX) {
+      following.current = true;
+    } else if (theirs) {
+      following.current = false;
+    } else if (following.current) {
+      // Nobody scrolled: the page moved the position (a clamp). The end is
+      // still where it is followed to.
+      look();
+    }
+  }, [live, look]);
+
+  // The end is in view when the window opens (and when it becomes the live
+  // one); after that it is looked at once a frame, when something asks.
+  useLayoutEffect(follow, [follow]);
+  useLayoutEffect(() => {
+    if (live) look();
   });
-  useEffect(() => () => cancelAnimationFrame(frame.current), []);
+  useEffect(
+    () => () => {
+      // A cancelled frame is not a pending one: React's strict mode unmounts
+      // and mounts the effects again, and a stale flag would stop every look.
+      cancelAnimationFrame(frame.current);
+      frame.current = 0;
+    },
+    [],
+  );
   useEffect(() => {
     const content = contentRef.current;
     const scroller = scrollRef.current;
@@ -295,6 +330,7 @@ function ProcessWindow({
   // row has taken its place, a window still at the end follows again.
   const handleClick = () => {
     if (!live) return;
+    noteUser();
     following.current = false;
     requestAnimationFrame(measure);
   };
@@ -304,6 +340,11 @@ function ProcessWindow({
       id={id}
       ref={scrollRef}
       onScroll={measure}
+      onWheel={noteUser}
+      onTouchStart={noteUser}
+      onTouchMove={noteUser}
+      onPointerDown={noteUser}
+      onKeyDown={noteUser}
       onClickCapture={handleClick}
       data-scroll-fade={live && faded ? 'top' : undefined}
       data-hc-process-window=""

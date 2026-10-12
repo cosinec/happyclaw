@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { act } from 'react';
+import { StrictMode, act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -49,8 +49,14 @@ const fireResize = () =>
 
 let rectReads: number;
 let styleReads: number;
+/** The clock the card reads to tell the reader's scrolling from the page's. */
+let clock: number;
+let strict = false;
 
 beforeEach(() => {
+  clock = 10_000;
+  strict = false;
+  vi.spyOn(performance, 'now').mockImplementation(() => clock);
   vi.useFakeTimers({
     toFake: ['requestAnimationFrame', 'cancelAnimationFrame'],
   });
@@ -119,8 +125,62 @@ function Page(p: ProcessCardProps) {
 
 const render = (p: ProcessCardProps) =>
   act(async () => {
-    root.render(<Page {...p} />);
+    root.render(
+      strict ? (
+        <StrictMode>
+          <Page {...p} />
+        </StrictMode>
+      ) : (
+        <Page {...p} />
+      ),
+    );
   });
+
+/** What the reader does to the window, as the browser reports it. */
+const reader = {
+  wheel: () =>
+    act(
+      async () =>
+        void windowEl().dispatchEvent(
+          new WheelEvent('wheel', { bubbles: true }),
+        ),
+    ),
+  touchStart: () =>
+    act(
+      async () =>
+        void windowEl().dispatchEvent(
+          new Event('touchstart', { bubbles: true }),
+        ),
+    ),
+  touchMove: () =>
+    act(
+      async () =>
+        void windowEl().dispatchEvent(
+          new Event('touchmove', { bubbles: true }),
+        ),
+    ),
+  press: () =>
+    act(
+      async () =>
+        void windowEl().dispatchEvent(
+          new Event('pointerdown', { bubbles: true }),
+        ),
+    ),
+  key: () =>
+    act(
+      async () =>
+        void windowEl().dispatchEvent(
+          new KeyboardEvent('keydown', { bubbles: true, key: 'PageUp' }),
+        ),
+    ),
+};
+/** The scroll event of a change of the scroll position, whoever made it. */
+const scrolled = () =>
+  act(async () => void windowEl().dispatchEvent(new Event('scroll')));
+/** Time passes. */
+const wait = (ms: number) => {
+  clock += ms;
+};
 
 const windowEl = () =>
   container.querySelector('[data-hc-process-window]') as HTMLElement;
@@ -135,12 +195,16 @@ function modelScroll(
 ) {
   const writes: number[] = [];
   Object.defineProperty(el, 'scrollHeight', {
+    configurable: true,
     get: () => {
       if (reads) reads.scrollHeight += 1;
       return m.scrollHeight;
     },
   });
-  Object.defineProperty(el, 'clientHeight', { get: () => m.clientHeight });
+  Object.defineProperty(el, 'clientHeight', {
+    configurable: true,
+    get: () => m.clientHeight,
+  });
   Object.defineProperty(el, 'scrollTop', {
     configurable: true,
     get: () => m.top,
@@ -226,19 +290,90 @@ describe('a live card that renders again and again', () => {
     expect(m.top).toBe(740);
   });
 
-  it('finds the end again after a step that was shorter and grew back within a frame', async () => {
+  it('finds the end again after a step that was shorter and grew back within a frame, whose clamp the browser reports late', async () => {
     // The page was laid out while a row was gone, which clamped the scroll
-    // position; the row came back and the size is what it was: the browser
-    // reports no change of size, and the end is out of reach all the same.
+    // position (and queued a scroll event); the row came back before the event
+    // was delivered. The size is what it was at the end of the frame, so no
+    // change of size is reported. Nobody scrolled.
     await render(props());
     await frame();
     const m = { scrollHeight: 900, clientHeight: 160, top: 740 };
     const writes = modelScroll(windowEl(), m);
-    m.top = 698;
+    m.top = 698; // clamped while the content was 858 tall
     await render(props({ steps: [tool('a'), writing('先看，再看')] }));
+    await scrolled(); // delivered now, the content 900 tall again: 42px from the end
     await frame();
     expect(writes).toEqual([900]);
     expect(m.top).toBe(740);
+    // And it is still following what comes next.
+    m.scrollHeight = 1000;
+    await fireResize();
+    expect(writes).toEqual([900, 1000]);
+  });
+
+  it('brings the end back after such a clamp even when nothing is rendered after it', async () => {
+    await render(props());
+    await frame();
+    const m = { scrollHeight: 900, clientHeight: 160, top: 740 };
+    const writes = modelScroll(windowEl(), m);
+    // A scroll event that changes nothing the card shows (it has already faded
+    // its top edge), so that nothing is rendered by what comes after it.
+    await scrolled();
+    await frame();
+    m.top = 698;
+    await scrolled();
+    expect(writes).toEqual([]);
+    await frame();
+    expect(writes).toEqual([900]);
+  });
+
+  it('is not made to let go of the end by a clamp that came a moment after the reader tapped', async () => {
+    await render(props());
+    await frame();
+    const m = { scrollHeight: 900, clientHeight: 160, top: 740 };
+    const writes = modelScroll(windowEl(), m);
+    await reader.press();
+    wait(500);
+    m.top = 698;
+    await scrolled();
+    await frame();
+    expect(writes).toEqual([900]);
+  });
+
+  it('is not made to let go of the end by a clamp that came right after the reader scrolled down to it', async () => {
+    await render(props());
+    await frame();
+    const m = { scrollHeight: 900, clientHeight: 160, top: 300 };
+    const writes = modelScroll(windowEl(), m);
+    // The reader had scrolled up; now they scroll down to the very end.
+    await reader.wheel();
+    await scrolled();
+    expect(writes).toEqual([]);
+    wait(16);
+    await reader.wheel();
+    m.top = 740;
+    await scrolled();
+    // 50ms later the content was shorter for a frame and the page clamped.
+    wait(50);
+    m.top = 698;
+    await scrolled();
+    await frame();
+    expect(writes).toEqual([900]);
+  });
+
+  it('works the same under React strict mode, which mounts its effects twice', async () => {
+    strict = true;
+    await render(props());
+    await frame();
+    const m = { scrollHeight: 900, clientHeight: 160, top: 700 };
+    const writes = modelScroll(windowEl(), m);
+    for (let i = 0; i < 5; i += 1) {
+      await render(props({ steps: [tool('a'), writing(`a${'b'.repeat(i)}`)] }));
+    }
+    await frame();
+    // The look a render asks for is made; the cancelled frame of the simulated
+    // unmount did not leave the card believing one is still to come.
+    expect(writes).toEqual([900]);
   });
 
   it('is measured when its content changes size, once for each time that happens', async () => {
@@ -309,23 +444,111 @@ describe('a live card that renders again and again', () => {
     await fireResize();
     expect(writes).toEqual([]);
 
-    // The reader scrolls up to read.
+    // The reader scrolls up to read, with the wheel.
+    await reader.wheel();
     m.top = 100;
-    await act(async () => {
-      windowEl().dispatchEvent(new Event('scroll'));
-    });
+    await scrolled();
     m.scrollHeight = 1000;
     await fireResize();
+    await frame();
     expect(writes).toEqual([]);
 
     // And back to the end.
+    await reader.wheel();
     m.top = 840;
-    await act(async () => {
-      windowEl().dispatchEvent(new Event('scroll'));
-    });
+    await scrolled();
     m.scrollHeight = 1200;
     await fireResize();
     expect(writes).toEqual([1200]);
+  });
+
+  it('knows the reader by the keyboard and by touch as well as by the wheel', async () => {
+    for (const act_ of [
+      reader.key,
+      reader.touchMove,
+      reader.touchStart,
+      reader.press,
+    ]) {
+      await render(props({ className: `c${Math.random()}` }));
+      await frame();
+      const m = { scrollHeight: 900, clientHeight: 160, top: 740 };
+      const writes = modelScroll(windowEl(), m);
+      await act_();
+      m.top = 300;
+      await scrolled();
+      m.scrollHeight = 1000;
+      await fireResize();
+      await frame();
+      expect(writes).toEqual([]);
+      // Put it back for the next kind.
+      await reader.wheel();
+      m.top = 840;
+      await scrolled();
+      wait(1000);
+    }
+  });
+
+  it('is not made to let go of the end by a scroll the reader did not make', async () => {
+    await render(props());
+    await frame();
+    const m = { scrollHeight: 900, clientHeight: 160, top: 740 };
+    const writes = modelScroll(windowEl(), m);
+    m.top = 100;
+    await scrolled();
+    m.scrollHeight = 1000;
+    await fireResize();
+    expect(writes).toEqual([1000]);
+  });
+
+  it('keeps hold of the reader through a fling, whose scrolling goes on after the finger is off', async () => {
+    await render(props());
+    await frame();
+    const m = { scrollHeight: 900, clientHeight: 160, top: 740 };
+    const writes = modelScroll(windowEl(), m);
+    await reader.touchStart();
+    await reader.touchMove();
+    // A fling upwards: a scroll event every frame for most of a second, the
+    // first of them still near the end, and no input after the first.
+    for (let i = 1; i <= 50; i += 1) {
+      wait(16);
+      m.top = Math.max(0, 740 - i * 14);
+      await scrolled();
+    }
+    expect(m.top).toBe(40);
+    // Content grows while they read; nothing pulls them back.
+    m.scrollHeight = 1100;
+    await fireResize();
+    await frame();
+    expect(writes).toEqual([]);
+
+    // Long after, a scroll the page made does not change what they chose.
+    wait(2000);
+    m.top = 30;
+    await scrolled();
+    m.scrollHeight = 1200;
+    await fireResize();
+    expect(writes).toEqual([]);
+  });
+
+  it('keeps hold of a reader whose fling starts near the end and is slow to leave it', async () => {
+    await render(props());
+    await frame();
+    const m = { scrollHeight: 900, clientHeight: 160, top: 740 };
+    const writes = modelScroll(windowEl(), m);
+    await reader.touchMove();
+    // 20px from the end for most of half a second, an event every 100ms with
+    // nothing from the finger after the first: it is 30px from the end only
+    // when the reader's own input is long past.
+    for (let i = 1; i <= 8; i += 1) {
+      wait(100);
+      m.top = 740 - i * 6;
+      await scrolled();
+    }
+    expect(900 - m.top - 160).toBeGreaterThan(30);
+    m.scrollHeight = 1000;
+    await fireResize();
+    await frame();
+    expect(writes).toEqual([]);
   });
 
   it('does not take the growth of its own content for the reader scrolling away', async () => {
@@ -338,9 +561,7 @@ describe('a live card that renders again and again', () => {
     // The content grew again before the scroll event of that write was
     // delivered: the end is far away, though nobody scrolled.
     m.scrollHeight = 1300;
-    await act(async () => {
-      windowEl().dispatchEvent(new Event('scroll'));
-    });
+    await scrolled();
     await fireResize();
     expect(writes).toEqual([900, 1300]);
   });
