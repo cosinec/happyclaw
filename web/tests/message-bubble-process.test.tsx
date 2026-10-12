@@ -38,6 +38,7 @@ const initialState = useChatStore.getState();
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
 const LAYOUT_KEY = 'happyclaw-stream-layout:guest';
+const DISPLAY_KEY = 'happyclaw-display-mode:guest';
 const memory = new Map<string, string>();
 
 const JID = 'web:bubble-process';
@@ -253,6 +254,39 @@ describe('a finished reply that has its steps', () => {
     expect(text()).not.toContain('执行详情');
     expect(text()).not.toMatch(/已思考 \d/);
     expect(text()).toContain('最终答案在这里。');
+  });
+
+  it('offers no row to load what the cache already holds', async () => {
+    // Only the steps are cached: nothing is left on the server to ask for.
+    seed({ steps: STEPS });
+    await mount();
+    expect(text()).not.toContain('处理过程');
+    expect(card()).toBeTruthy();
+  });
+
+  it('does the same in the compact display mode', async () => {
+    memory.set(DISPLAY_KEY, 'compact');
+    seed({
+      steps: STEPS,
+      thinking: '**确认范围**\n\n先看项目结构。',
+      duration: 5000,
+      trace: TRACE,
+    });
+    await mount();
+    expect(card()?.getAttribute('data-mode')).toBe('settled');
+    expect(summaryRow()?.textContent).toBe(
+      '已处理 11 秒 · 2 个工具 · 2 段思考',
+    );
+    expect(text()).not.toContain('执行详情');
+    expect(text()).not.toMatch(/已思考 \d/);
+  });
+
+  it('keeps the two rows in the compact display mode without steps', async () => {
+    memory.set(DISPLAY_KEY, 'compact');
+    seed({ thinking: '**确认范围**\n\n先看。', duration: 5000, trace: TRACE });
+    await mount();
+    expect(card()).toBeNull();
+    expect(text()).toContain('执行详情');
   });
 
   it('opens to the steps in the order they happened', async () => {

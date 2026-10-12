@@ -588,11 +588,18 @@ test.describe('the reasoning and trace the server kept', () => {
     await expect(page.getByRole('button', { name: '执行详情' })).toHaveCount(0);
     // Nothing is asked for until the row is opened.
     expect(requests).toEqual([]);
-    expect((await row.boundingBox())!.height).toBeGreaterThanOrEqual(39);
+    const rowBox = (await row.boundingBox())!;
+    expect(rowBox.height).toBeGreaterThanOrEqual(39);
 
     await row.click();
     const card = page.locator('[data-hc-process-card]');
     await expect(card).toHaveAttribute('data-mode', 'settled');
+    // The card's summary row is the row that was pressed: same size, same place
+    // across, so nothing shifts but what unfolds below it.
+    const summaryBox = (await card.locator('> button').boundingBox())!;
+    expect(summaryBox.height).toBeCloseTo(rowBox.height, 0);
+    expect(summaryBox.width).toBeCloseTo(rowBox.width, 0);
+    expect(summaryBox.x).toBeCloseTo(rowBox.x, 0);
     await expect(
       card.getByRole('button', { name: /已处理 .* · 1 个工具 · 1 段思考/ }),
     ).toHaveAttribute('aria-expanded', 'true');
