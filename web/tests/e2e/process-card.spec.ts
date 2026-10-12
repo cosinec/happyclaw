@@ -200,9 +200,9 @@ test.describe('the live card', () => {
       .toBeLessThan(4);
 
     // ...until the reader has gone back to read.
-    await win(page).evaluate((el) => {
-      el.scrollTop = 0;
-    });
+    const box = (await win(page).boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.wheel(0, -2000);
     await expect(win(page)).not.toHaveAttribute('data-scroll-fade', 'top');
     await page.waitForTimeout(150);
     await runCommands(page, 1, 15);
@@ -210,9 +210,10 @@ test.describe('the live card', () => {
     expect((await scrollState(page)).top).toBeLessThan(8);
 
     // Back at the end, it follows again.
-    await win(page).evaluate((el) => {
-      el.scrollTop = el.scrollHeight;
-    });
+    await page.mouse.wheel(0, 2000);
+    await expect
+      .poll(async () => (await scrollState(page)).gap)
+      .toBeLessThan(4);
     await page.waitForTimeout(150);
     await runCommands(page, 1, 16);
     await expect(win(page).getByText('echo step-16')).toBeVisible();
@@ -330,6 +331,91 @@ test.describe('the live card', () => {
     await expect(grown).toHaveAttribute('aria-expanded', 'true');
     await expect(win(page).getByText('file-0.ts')).toBeVisible();
     await expect(win(page).getByText('较早')).toHaveCount(0);
+  });
+
+  // A run that streams reasoning faster than the browser draws frames, with a
+  // tool call now and then: the window's content is briefly shorter and then
+  // longer again within a frame, the browser clamps the scroll position and
+  // queues a scroll event for it, and that event reaches the card a frame
+  // later, when the content has grown again. It is not the reader scrolling
+  // away, and the window must go on following the end.
+  for (const delay of [2, 4, 6, 12]) {
+    test(`follows the end of a burst of reasoning, a delta every ${delay}ms with a tool call between`, async ({
+      page,
+    }) => {
+      await open(page, 'scenario=live');
+      const result = await page.evaluate(async (delayMs) => {
+        const { start, emit } = window.renderHarness;
+        start();
+        emit({ eventType: 'thinking_delta', text: '先' });
+        const gapOf = () => {
+          const el = document.querySelector<HTMLElement>(
+            '[data-hc-process-window]',
+          )!;
+          return el.scrollHeight - el.scrollTop - el.clientHeight;
+        };
+        let lostAt = -1;
+        let behindSince = -1;
+        for (let i = 0; i < 150; i += 1) {
+          if (i % 10 === 0) {
+            emit({
+              eventType: 'tool_use_start',
+              toolName: 'Bash',
+              toolUseId: `c${i}`,
+              toolInputSummary: `command: echo ${i}`,
+            });
+          }
+          emit({
+            eventType: 'thinking_delta',
+            text: `第 ${i} 段推理内容，逐条核对。\n\n`,
+          });
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+          // A frame behind is the cost of drawing it; out of reach for a tenth
+          // of a second is lost.
+          if (i > 20 && gapOf() > 40) {
+            if (behindSince < 0) behindSince = performance.now();
+            if (performance.now() - behindSince > 100 && lostAt < 0) lostAt = i;
+          } else {
+            behindSince = -1;
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        return { lostAt, endGap: Math.round(gapOf()) };
+      }, delay);
+      expect(result.lostAt).toBe(-1);
+      expect(result.endGap).toBeLessThan(4);
+    });
+  }
+
+  test('lets a reader who scrolls up with the wheel read, and takes the end again when they come back', async ({
+    page,
+  }) => {
+    await open(page, 'scenario=live');
+    await runCommands(page, 14);
+    await expect
+      .poll(async () => (await scrollState(page)).gap)
+      .toBeLessThan(4);
+
+    // Up with the wheel: not pulled back by what comes next.
+    const box = (await win(page).boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.wheel(0, -200);
+    await expect
+      .poll(async () => (await scrollState(page)).gap)
+      .toBeGreaterThan(60);
+    await runCommands(page, 1, 15);
+    await page.waitForTimeout(300);
+    expect((await scrollState(page)).gap).toBeGreaterThan(60);
+
+    // Back down to the end with the wheel: following again.
+    await page.mouse.wheel(0, 600);
+    await expect
+      .poll(async () => (await scrollState(page)).gap)
+      .toBeLessThan(4);
+    await runCommands(page, 1, 16);
+    await expect
+      .poll(async () => (await scrollState(page)).gap)
+      .toBeLessThan(4);
   });
 
   test('keeps the output a reader opened, and their focus, when the next read makes it a group', async ({
