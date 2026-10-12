@@ -1,4 +1,5 @@
 import {
+  Fragment,
   memo,
   useCallback,
   useId,
@@ -30,6 +31,7 @@ import {
   cleanToolSummary,
   describeGroup,
   describeStepCall,
+  firstOutputLine,
   groupProcessSteps,
   hasListedSteps,
   isQuestionStep,
@@ -37,6 +39,8 @@ import {
   stepDurationMs,
   summarizeGroup,
   toolCategory,
+  toolOpensByDefault,
+  toolOutput,
   visibleSteps,
   type ProcessItem,
   type ToolCategory,
@@ -46,6 +50,11 @@ import {
   summarizeSteps,
   type StreamingStep,
 } from '../../lib/stream-steps';
+import {
+  formatResultFacts,
+  formatTaskUsage,
+  splitResultFacts,
+} from '../../lib/process-facts';
 import { stripInlineMarkdown } from '../../lib/thinking-text';
 import { formatRunElapsed } from '../../lib/run-phase';
 import { useTick } from '../../hooks/useTick';
@@ -102,6 +111,8 @@ interface RowFrameProps {
   detail?: ReactNode;
   /** The detail is a command or a path. */
   mono?: boolean;
+  /** What the call did, between the detail and the time: "+12 −3". */
+  facts?: ReactNode;
   /** How long it took, or has taken so far. */
   time?: string;
   tone?: Tone;
@@ -133,6 +144,7 @@ function RowFrame({
   grow = false,
   detail,
   mono = false,
+  facts,
   time,
   tone = 'quiet',
   running = false,
@@ -179,6 +191,11 @@ function RowFrame({
         ) : (
           <span className="flex-1" />
         ))}
+      {facts && (
+        <span className="min-w-0 truncate text-caption text-faint-foreground tabular-nums">
+          {facts}
+        </span>
+      )}
       {time && (
         <span className="shrink-0 text-caption text-faint-foreground tabular-nums">
           {time}
@@ -330,6 +347,30 @@ const CATEGORY_ICON: Record<ToolCategory, LucideIcon> = {
 /** A summary that is long enough to be cut short in its row opens to be read. */
 const LONG_SUMMARY_CHARS = 80;
 
+/** "+12 −3" with what was added in the success colour and what was removed in the error one. */
+function FactsText({ text, plain }: { text: string; plain?: boolean }) {
+  if (plain) return <>{text}</>;
+  return (
+    <>
+      {splitResultFacts(text).map((segment, index) => (
+        <Fragment key={index}>
+          {segment.tone ? (
+            <span
+              className={
+                segment.tone === 'added' ? 'text-success' : 'text-error'
+              }
+            >
+              {segment.text}
+            </span>
+          ) : (
+            segment.text
+          )}
+        </Fragment>
+      ))}
+    </>
+  );
+}
+
 const ToolStepRow = memo(function ToolStepRow({
   step,
   open,
@@ -344,11 +385,20 @@ const ToolStepRow = memo(function ToolStepRow({
   const summary = cleanToolSummary(step.summary);
   const running = step.status === 'running' && live;
   const failed = step.status === 'error';
-  const failure = failed ? step.resultPreview : undefined;
+  const output = toolOutput(step);
+  const facts =
+    step.status === 'running'
+      ? null
+      : formatResultFacts(name, step.resultFacts, failed);
+  // A failed call says what went wrong where a good one says what it was
+  // given: its facts first ("退出码 1"), then the first line of its output.
+  const failure = failed
+    ? [facts, output && firstOutputLine(output)].filter(Boolean).join(' · ')
+    : '';
   const longSummary =
     !!summary &&
     (summary.length > LONG_SUMMARY_CHARS || summary.includes('\n'));
-  const expandable = !!failure || longSummary;
+  const expandable = !!output || longSummary;
   const icon = running
     ? Loader2
     : failed
@@ -365,6 +415,7 @@ const ToolStepRow = memo(function ToolStepRow({
       label={verb}
       detail={failure || param}
       mono={!failure && name === 'Bash'}
+      facts={!failed && facts ? <FactsText text={facts} /> : undefined}
       time={
         running
           ? elapsedLabel(now, step.at)
@@ -381,7 +432,7 @@ const ToolStepRow = memo(function ToolStepRow({
       panelId={panelId}
     >
       <div className="space-y-1 text-caption break-words">
-        {summary && (
+        {summary && (longSummary || !!failure) && (
           <p
             className={cn(
               'max-h-32 overflow-y-auto overscroll-contain whitespace-pre-wrap text-muted-foreground',
@@ -391,7 +442,17 @@ const ToolStepRow = memo(function ToolStepRow({
             {summary}
           </p>
         )}
-        {failure && <p className="text-error">{failure}</p>}
+        {output && (
+          <pre
+            tabIndex={0}
+            className={cn(
+              'max-h-40 overflow-y-auto overscroll-contain rounded-sm font-mono text-label break-words whitespace-pre-wrap focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none',
+              failed ? 'text-error' : 'text-muted-foreground',
+            )}
+          >
+            {output}
+          </pre>
+        )}
       </div>
     </RowFrame>
   );
@@ -447,7 +508,7 @@ const ReadGroupRow = memo(
             <div role="listitem" key={step.id}>
               <ToolStepRow
                 step={step}
-                open={override[step.id] ?? false}
+                open={override[step.id] ?? toolOpensByDefault(step)}
                 onToggle={onToggle}
                 now={step.status === 'running' ? now : 0}
                 live={live}
@@ -521,11 +582,16 @@ const TaskRow = memo(function TaskRow({
         .filter(Boolean)
         .join(' · ')
     : step.summary;
+  // What it did, once its call returned; until then what it has cost so far.
+  const facts =
+    formatResultFacts('Agent', step.resultFacts, failed) ??
+    formatTaskUsage(task?.usage);
   return (
     <RowFrame
       icon={<RowIcon icon={running ? Loader2 : failed ? X : Bot} tone={tone} />}
       label={task?.title ?? step.title ?? '子 Agent'}
       detail={detail}
+      facts={facts ? <FactsText text={facts} plain={failed} /> : undefined}
       time={
         running
           ? elapsedLabel(now, step.at)
@@ -650,6 +716,7 @@ export const ProcessTimeline = memo(function ProcessTimeline({
   );
 
   const defaultOpen = (step: StreamingStep): boolean => {
+    if (step.kind === 'tool') return toolOpensByDefault(step);
     if (!live || step.status !== 'running') return false;
     return step.kind === 'thinking' && thinkingText && !!step.text?.trim();
   };
