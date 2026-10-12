@@ -438,6 +438,35 @@ describe('bounded text', () => {
     expect(capped.slice(3).startsWith('思考内容')).toBe(true);
     expect(capTailByBytes('short', 1000)).toBe('short');
   });
+
+  test('capTailByBytes leads with the marker it is given, and the marker counts', () => {
+    const marker = '*（已省略较早的思考）*\n\n';
+    const text = Array.from({ length: 8 }, () => '推理内容'.repeat(30)).join(
+      '\n\n',
+    );
+    const capped = capTailByBytes(text, 900, marker);
+    expect(capped.startsWith(marker)).toBe(true);
+    expect(Buffer.byteLength(capped, 'utf8')).toBeLessThanOrEqual(900);
+    expect(text.endsWith(capped.slice(marker.length))).toBe(true);
+    // the default marker is unchanged
+    expect(capTailByBytes(text, 900).startsWith('…\n\n')).toBe(true);
+    expect(capTailByBytes(text, 900, '…\n\n')).toBe(capTailByBytes(text, 900));
+    // a text that fits is returned as it is, whatever the marker
+    expect(capTailByBytes('short', 1000, marker)).toBe('short');
+  });
+
+  test('capTailByBytes never starts on half a surrogate pair, whatever the marker', () => {
+    const emoji = '😀'.repeat(60);
+    for (const marker of ['…\n\n', '*（已省略较早的思考）*\n\n', '']) {
+      for (let budget = 40; budget < 120; budget += 1) {
+        const capped = capTailByBytes(emoji, budget, marker);
+        const tail = capped.slice(marker.length);
+        expect(capped.startsWith(marker)).toBe(true);
+        expect(tail.codePointAt(0)).toBe(0x1f600);
+        expect(Buffer.byteLength(capped, 'utf8')).toBeLessThanOrEqual(budget);
+      }
+    }
+  });
 });
 
 describe('ThinkingTextBuffer', () => {

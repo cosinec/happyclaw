@@ -5,6 +5,7 @@ import type {
   StreamEventType,
 } from '../src/stream-event.types.js';
 import { MAX_STEPS, type StreamingStep } from '../src/stream-steps.js';
+import { capTailByBytes } from '../src/stream-trace.js';
 import { THINKING_OMITTED_MARKER } from '../src/thinking-text.js';
 import {
   capStepsThinkingBytes,
@@ -845,6 +846,73 @@ describe('viewSteps and capStepsThinkingBytes', () => {
     ).toBeLessThanOrEqual(1_500);
     // untouched when it fits
     expect(capStepsThinkingBytes(input, 10_000)).toBe(input);
+  });
+
+  test('cuts a burst where the turn-wide thinking cap cuts the same text', () => {
+    // One byte cap, two places that use it: the whole turn's thinking text
+    // (turn-trace.ts) and the text of a step. A fix to how the cut is placed
+    // (a surrogate pair, a paragraph start) has to reach both.
+    const paragraph = (unit: string, n: number) => unit.repeat(n);
+    const inputs: Record<string, string> = {
+      paragraphs: Array.from({ length: 12 }, (_, i) =>
+        paragraph(`第${i}段推理。`, 40),
+      ).join('\n\n'),
+      'no paragraph break': '推理'.repeat(900),
+      emoji: '😀思考'.repeat(500),
+      'family emoji': '👨‍👩‍👧'.repeat(300),
+      'one long paragraph, then short ones': `${'长'.repeat(1_500)}\n\n短\n\n短短\n\n${'尾'.repeat(200)}`,
+      ascii: 'word '.repeat(700),
+      'break just past the cut': `${'a'.repeat(1_200)}\n\n${'b'.repeat(1_100)}`,
+    };
+    const markerBytes = Buffer.byteLength(THINKING_OMITTED_MARKER, 'utf8') + 2;
+    const ellipsisBytes = Buffer.byteLength('…\n\n', 'utf8');
+    for (const [name, text] of Object.entries(inputs)) {
+      const size = Buffer.byteLength(text, 'utf8');
+      for (const budget of [
+        300,
+        301,
+        302,
+        303,
+        500,
+        777,
+        1_001,
+        Math.floor(size / 2),
+        size - 1,
+      ]) {
+        if (budget >= size) continue;
+        const [capped] = capStepsThinkingBytes(
+          [
+            {
+              id: 'a',
+              kind: 'thinking',
+              at: 0,
+              endedAt: 1,
+              status: 'done',
+              text,
+            },
+          ],
+          budget,
+        );
+        const label = `${name} @ ${budget}`;
+        // within the budget, led by the step's marker
+        expect(capped.text!.startsWith(`${THINKING_OMITTED_MARKER}\n\n`)).toBe(
+          true,
+        );
+        expect(
+          Buffer.byteLength(capped.text!, 'utf8'),
+          label,
+        ).toBeLessThanOrEqual(budget);
+        // and cut exactly where the shared cap cuts it when the room is the same
+        const shared = capTailByBytes(
+          text,
+          budget - (markerBytes - ellipsisBytes),
+        );
+        expect(
+          capped.text!.slice(THINKING_OMITTED_MARKER.length + 2),
+          label,
+        ).toBe(shared.slice('…\n\n'.length));
+      }
+    }
   });
 
   test('a cut burst never reads as empty, and a cut text is not marked twice', () => {

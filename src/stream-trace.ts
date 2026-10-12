@@ -279,13 +279,17 @@ export function capTailAtParagraph(text: string, max: number): string {
 }
 
 /**
- * The tail of `text` that fits in `maxBytes` of UTF-8, led by a "…" paragraph
- * marker so a reader can tell it was cut. Returns `text` itself when it
- * already fits.
+ * The tail of `text` that fits in `maxBytes` of UTF-8, led by `marker` (a "…"
+ * paragraph break unless another is given; it counts towards the budget) so a
+ * reader can tell it was cut. Returns `text` itself when it already fits.
  */
-export function capTailByBytes(text: string, maxBytes: number): string {
+export function capTailByBytes(
+  text: string,
+  maxBytes: number,
+  marker: string = ELLIPSIS_BREAK,
+): string {
   if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
-  const budget = Math.max(0, maxBytes - Buffer.byteLength(ELLIPSIS_BREAK));
+  const budget = Math.max(0, maxBytes - Buffer.byteLength(marker));
   // Smallest start whose tail fits the budget.
   let lo = 0;
   let hi = text.length;
@@ -302,7 +306,7 @@ export function capTailByBytes(text: string, maxBytes: number): string {
     text.length - (boundary + 2) >= (text.length - start) / 2
   )
     start = boundary + 2;
-  return `${ELLIPSIS_BREAK}${text.slice(start)}`;
+  return `${marker}${text.slice(start)}`;
 }
 
 // ── Thinking text ────────────────────────────────────────────────────────
