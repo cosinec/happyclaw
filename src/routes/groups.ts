@@ -98,6 +98,7 @@ import {
 import {
   getContainerEnvConfig,
   getProviders,
+  getUsableDefaultProvider,
   getSystemSettings,
   providerHasCredentials,
   saveContainerEnvConfig,
@@ -2307,8 +2308,17 @@ function buildSessionModelSelectionPayload(
   const canExceedCeiling = hasPermission(chooser, 'manage_system_config');
   const agentEffort = resolveAgentSdkEffort(profile?.runtime_policy);
 
-  let defaultSource: 'agent' | 'single' | 'pool' | 'workspace_env' | 'none';
+  // Mirrors resolvePinnedModelConfigId: the order decides what a conversation
+  // that picked nothing actually runs on.
+  let defaultSource:
+    | 'agent'
+    | 'default'
+    | 'single'
+    | 'pool'
+    | 'workspace_env'
+    | 'none';
   let defaultModelConfigId: string | null = null;
+  const globalDefault = getUsableDefaultProvider();
   if (exists(profile?.model_config_id)) {
     defaultSource = 'agent';
     defaultModelConfigId = profile.model_config_id;
@@ -2318,6 +2328,9 @@ function buildSessionModelSelectionPayload(
     envOverride.anthropicBaseUrl
   ) {
     defaultSource = 'workspace_env';
+  } else if (globalDefault) {
+    defaultSource = 'default';
+    defaultModelConfigId = globalDefault.id;
   } else if (enabled.length === 1) {
     defaultSource = 'single';
     defaultModelConfigId = enabled[0].id;

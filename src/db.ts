@@ -1176,6 +1176,14 @@ export function initDatabase(
       ON turn_traces(created_at);
   `);
 
+  // v81 -> v82: the turn's steps in the order they happened (reasoning bursts,
+  // tool calls, sub-agents, commentary), so a settled reply can show the same
+  // timeline it streamed. `thinking` and `trace_json` keep their shape for the
+  // two-line view of turns stored before this; those rows are not backfilled
+  // and read back as no steps.
+  ensureColumn('turn_traces', 'steps_json', "TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn('turn_traces', 'steps_dropped', 'INTEGER NOT NULL DEFAULT 0');
+
   // Top-level Agent Profiles: runtime identities/personas that own workspaces.
   // Do not confuse this with the legacy `agents` table above, which stores
   // workspace-scoped conversation/task/spawn agents.
@@ -8868,6 +8876,13 @@ export interface TurnTraceRecord {
   thinking_duration_ms: number | null;
   /** JSON array of the trace events the Web renders under the reply. */
   trace_json: string;
+  /**
+   * JSON array of the turn's ordered steps (`StreamingStep`); `'[]'` for a turn
+   * stored before steps were kept.
+   */
+  steps_json: string;
+  /** Steps dropped from the front of `steps_json` at its cap. */
+  steps_dropped: number;
   created_at: string;
 }
 
@@ -8878,20 +8893,27 @@ export function upsertTurnTrace(input: {
   thinking: string;
   thinkingDurationMs?: number | null;
   traceJson: string;
+  stepsJson?: string;
+  stepsDropped?: number;
   createdAt?: string;
 }): void {
   prepareCached(`INSERT INTO turn_traces
-       (chat_jid, turn_id, thinking, thinking_duration_ms, trace_json, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)
+       (chat_jid, turn_id, thinking, thinking_duration_ms, trace_json,
+        steps_json, steps_dropped, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(chat_jid, turn_id) DO UPDATE SET
        thinking = excluded.thinking,
        thinking_duration_ms = excluded.thinking_duration_ms,
-       trace_json = excluded.trace_json`).run(
+       trace_json = excluded.trace_json,
+       steps_json = excluded.steps_json,
+       steps_dropped = excluded.steps_dropped`).run(
     input.chatJid,
     input.turnId,
     input.thinking,
     input.thinkingDurationMs ?? null,
     input.traceJson,
+    input.stepsJson ?? '[]',
+    input.stepsDropped ?? 0,
     input.createdAt ?? new Date().toISOString(),
   );
 }
@@ -8902,7 +8924,8 @@ export function getTurnTrace(
 ): TurnTraceRecord | undefined {
   if (!isDatabaseInitialized()) return undefined;
   return prepareCached(`SELECT chat_jid, turn_id, thinking,
-         thinking_duration_ms, trace_json, created_at
+         thinking_duration_ms, trace_json, steps_json, steps_dropped,
+         created_at
        FROM turn_traces
        WHERE chat_jid = ? AND turn_id = ?`).get(chatJid, turnId) as
     | TurnTraceRecord

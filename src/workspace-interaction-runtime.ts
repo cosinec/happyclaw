@@ -210,6 +210,11 @@ function withoutModelText(event: StreamEvent): StreamEvent {
   drop('toolResult');
   drop('taskResult');
   drop('toolInput');
+  // How much a tool did (lines, files, exit code) is read from the same
+  // structured output as that text, so it is withheld with it until the owner
+  // decides otherwise. `toolIsError` is a flag, not text, and stays: it is what
+  // lets a failed call read as failed.
+  drop('toolResultFacts');
   if (event.eventType === 'tool_result') drop('detail');
   // The prompt handed to a sub-agent rides on task_started.
   if (event.eventType === 'task_start') drop('detail');

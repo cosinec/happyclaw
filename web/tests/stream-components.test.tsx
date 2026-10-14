@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import { ThinkingBlock } from '../src/components/chat/ThinkingBlock';
 import { ToolRow } from '../src/components/chat/ToolActivityCard';
-import { StepTimeline } from '../src/components/chat/StepTimeline';
+import { ProcessSteps } from '../src/components/chat/ProcessRows';
 import { SubAgentCard } from '../src/components/chat/SubAgentCard';
 import { TracePanel } from '../src/components/chat/ExecutionTrace';
 import {
@@ -40,10 +40,10 @@ const task: StreamingTaskRuntimeState = {
 
 const timeline = (
   steps: StreamingStep[],
-  over: Partial<Parameters<typeof StepTimeline>[0]> = {},
+  over: Partial<Parameters<typeof ProcessSteps>[0]> = {},
 ) =>
   renderToStaticMarkup(
-    <StepTimeline
+    <ProcessSteps
       steps={steps}
       taskStates={{ 'task-1': task }}
       activeTools={[]}
@@ -241,7 +241,7 @@ describe('SubAgentCard', () => {
   });
 });
 
-describe('StepTimeline', () => {
+describe('ProcessSteps', () => {
   const steps: StreamingStep[] = [
     step({
       id: 'thinking-0',
@@ -295,7 +295,8 @@ describe('StepTimeline', () => {
   it('lists the steps in order and leaves the answer to the text below', () => {
     const html = timeline(steps);
     const order = [
-      '已思考 5 秒',
+      '确认订阅范围',
+      '读取',
       '我先改渲染循环',
       '运行',
       '检查移动端滚动',
@@ -304,18 +305,34 @@ describe('StepTimeline', () => {
     expect([...order].sort((a, b) => a - b)).toEqual(order);
     expect(html).toContain('role="list"');
     expect(html).toContain('aria-label="处理步骤"');
+    expect(html).toContain('data-hc-step-timeline');
     // The running answer step is the text below, not a row.
     expect(html.match(/role="listitem"/g)).toHaveLength(5);
   });
 
-  it('opens the latest three steps and folds the older ones', () => {
+  it('draws the one line down the left, and no second one inside a row', () => {
+    const html = timeline(steps);
+    expect(html.match(/border-l-2/g)).toHaveLength(1);
+    const open = timeline([
+      step({
+        id: 'thinking-0',
+        kind: 'thinking',
+        status: 'running',
+        title: '核对行高',
+        text: '**核对行高**\n\n估算与实测。',
+      }),
+    ]);
+    expect(open.match(/border-l-2/g)).toHaveLength(1);
+  });
+
+  it('folds the steps before the latest six into one line', () => {
     const many = Array.from({ length: 10 }, (_, i) =>
       step({
         id: `tool-${i}`,
         kind: 'tool',
-        toolName: 'Read',
+        toolName: 'Bash',
         toolUseId: `t${i}`,
-        summary: `file-${i}.ts`,
+        summary: `command: echo file-${i}`,
         at: i * 1000,
         endedAt: i * 1000 + 500,
       }),
@@ -323,19 +340,38 @@ describe('StepTimeline', () => {
     const html = timeline(many);
     expect(html).toContain('较早 4 步');
     expect(html).toContain('4 个工具');
-    expect(html).not.toContain('file-3.ts');
-    expect(html).toContain('file-4.ts');
-    expect(html).toContain('file-9.ts');
+    expect(html).not.toContain('file-3');
+    expect(html).toContain('file-4');
+    expect(html).toContain('file-9');
   });
 
-  it('shows the reasoning of the latest steps and not that of the others', () => {
-    const html = timeline(steps);
-    // The reasoning step is among the five latest rows but not the last three.
-    expect(html).toContain('已思考 5 秒');
-    expect(html).not.toContain('<strong>确认订阅范围</strong>');
+  it('merges a run of read-only calls into one row, and never a command', () => {
+    const calls = (names: string[]) =>
+      names.map((toolName, i) =>
+        step({
+          id: `tool-${i}`,
+          kind: 'tool',
+          toolName,
+          toolUseId: `t${i}`,
+          summary: `target-${i}`,
+          at: i * 1000,
+          endedAt: i * 1000 + 400,
+        }),
+      );
+    const merged = timeline(calls(['Read', 'Read', 'Grep', 'Glob']));
+    expect(merged).toContain('已浏览 2 个文件 · 搜索 2 次');
+    expect(merged.match(/role="listitem"/g)).toHaveLength(1);
+    // The members are there to be opened, not shown.
+    expect(merged).not.toContain('target-0');
+
+    const split = timeline(calls(['Read', 'Bash', 'Read']));
+    expect(split).not.toContain('已浏览');
+    expect(split.match(/role="listitem"/g)).toHaveLength(3);
+    const writes = timeline(calls(['Edit', 'Write', 'Edit']));
+    expect(writes).not.toContain('已浏览');
   });
 
-  it('opens a running thinking step with its text', () => {
+  it('opens only the reasoning being written, with its text', () => {
     const html = timeline([
       step({
         id: 'thinking-0',
@@ -345,15 +381,20 @@ describe('StepTimeline', () => {
         text: '**核对行高**\n\n估算与实测。',
       }),
     ]);
-    expect(html).toContain('思考中…');
     expect(html).toContain('<strong>核对行高</strong>');
+    expect(html).toContain('aria-expanded="true"');
+    // Reasoning that is over is a row until the reader opens it.
+    const done = timeline(steps);
+    expect(done).not.toContain('<strong>确认订阅范围</strong>');
   });
 
   it('leaves the commentary and the reasoning text out of a process panel', () => {
     const html = timeline(steps, { commentary: false, thinkingText: false });
     expect(html).not.toContain('我先改渲染循环');
     expect(html).not.toContain('确认订阅范围');
-    expect(html).toContain('已思考 5 秒');
+    // Only that it reasoned, and for how long, and it cannot be opened.
+    expect(html).toContain('思考');
+    expect(html).toContain('5.0s');
     // The text is withheld here, not missing: no word about the model.
     expect(html).not.toContain('模型未返回思考内容');
   });
@@ -381,24 +422,6 @@ describe('StepTimeline', () => {
     expect(html).toContain('memory.md');
   });
 
-  it('names an open commentary row, so its button is not an empty one', () => {
-    // The latest three rows start open; an open row shows its text below.
-    const html = timeline(
-      [
-        step({
-          id: 'note-0',
-          kind: 'text',
-          text: '先查一下记忆再回答。',
-          commentary: true,
-        }),
-      ],
-      { commentary: true },
-    );
-    expect(html).toContain('aria-expanded="true"');
-    expect(html).toContain('过程说明');
-    expect(html).toContain('先查一下记忆再回答。');
-  });
-
   it('says a reasoning step ended without any text when text is allowed', () => {
     const html = timeline(
       [
@@ -411,11 +434,12 @@ describe('StepTimeline', () => {
       ],
       { thinkingText: true },
     );
-    expect(html).toContain('已思考 23 秒');
+    expect(html).toContain('23s');
     expect(html).toContain('模型未返回思考内容');
+    expect(html).not.toContain('<button');
   });
 
-  it('shows a failed tool with its reason', () => {
+  it('shows a failed tool with its reason, in the error color', () => {
     const html = timeline([
       step({
         id: 'tool-x',
@@ -423,11 +447,12 @@ describe('StepTimeline', () => {
         toolName: 'Bash',
         toolUseId: 'x',
         status: 'error',
-        summary: 'rm -rf x',
+        summary: 'command: rm -rf x',
         resultPreview: '被权限策略拒绝',
       }),
     ]);
     expect(html).toContain('被权限策略拒绝');
+    expect(html).toContain('text-error');
     expect(html).toContain('失败');
   });
 

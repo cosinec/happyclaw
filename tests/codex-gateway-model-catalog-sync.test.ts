@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -113,10 +113,10 @@ describe('Codex model catalog upstream sync', () => {
     ]);
   });
 
-  test('keeps curated label for known slugs, derives label for new models', () => {
+  test('labels every model with its bare name, never a commentary', () => {
     const entries = parseUpstreamModelCatalog(UPSTREAM_PAYLOAD);
-    expect(entries[0].label).toBe('gpt-6-sol（上一代编码）');
-    expect(entries[1].label).toBe('gpt-9-aurora（GPT-9 Aurora）');
+    expect(entries[0].label).toBe('gpt-6-sol');
+    expect(entries[1].label).toBe('gpt-9-aurora');
   });
 
   test('rejects malformed payloads', () => {
@@ -339,6 +339,32 @@ describe('Codex model catalog upstream sync', () => {
         'gpt-9-aurora',
       );
       expect(resolved.fetchedAt).toBeTruthy();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a disk cache written with commentary labels loads with bare names', async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'codex-catalog-'));
+    const cachePath = path.join(dir, 'catalog.json');
+    try {
+      setCodexCatalogDiskCachePathForTests(cachePath);
+      await refreshCodexCatalog({ fetchImpl: mockFetchWith(UPSTREAM_PAYLOAD) });
+      const stored = JSON.parse(readFileSync(cachePath, 'utf8'));
+      for (const entry of stored.models) {
+        entry.label = `${entry.value}（旧版评价）`;
+      }
+      writeFileSync(cachePath, JSON.stringify(stored));
+
+      resetCodexCatalogSyncForTests();
+      setCodexCatalogDiskCachePathForTests(cachePath);
+      initCodexCatalogSync({ fetchImpl: neverSettleFetch });
+      const resolved = getResolvedCodexCatalog();
+      expect(resolved.source).toBe('disk-cache');
+      expect(resolved.models.length).toBeGreaterThan(0);
+      for (const entry of resolved.models) {
+        expect(entry.label).toBe(entry.value);
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

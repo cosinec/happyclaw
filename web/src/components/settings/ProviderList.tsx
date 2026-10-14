@@ -9,6 +9,7 @@ import {
   RotateCcw,
   Server,
   ShieldCheck,
+  Star,
   Trash2,
 } from 'lucide-react';
 
@@ -29,9 +30,13 @@ import { UsageBars } from './UsageBars';
 
 interface ProviderListProps {
   providers: ProviderWithHealth[];
+  /** The configuration unselected conversations run on; null = automatic pool. */
+  defaultModelConfigId: string | null;
   onEdit: (provider: ProviderWithHealth) => void;
   onDelete: (provider: ProviderWithHealth) => void;
   onToggle: (provider: ProviderWithHealth) => void;
+  /** Make the provider the default, or clear it when it already is. */
+  onSetDefault: (provider: ProviderWithHealth) => void;
   onResetHealth: (provider: ProviderWithHealth) => void;
   onDuplicate: (provider: ProviderWithHealth) => void;
   onAdd: () => void;
@@ -156,9 +161,11 @@ function CredentialBadges({ provider }: { provider: ProviderWithHealth }) {
 
 export function ProviderList({
   providers,
+  defaultModelConfigId,
   onEdit,
   onDelete,
   onToggle,
+  onSetDefault,
   onResetHealth,
   onDuplicate,
   onAdd,
@@ -190,6 +197,12 @@ export function ProviderList({
         const canDuplicate =
           provider.type === 'third_party' && !provider.hasCodexOAuthCredentials;
         const canResetHealth = !!health && !health.healthy && provider.enabled;
+        const isDefault = provider.id === defaultModelConfigId;
+        const defaultTitle = isDefault
+          ? '取消默认：未手动选择模型的对话恢复为在已启用配置间自动轮换'
+          : provider.enabled
+            ? '设为默认：未手动选择模型的对话都使用它，不再自动轮换，也不会在账号间故障转移'
+            : '设为默认（将同时启用该配置）：未手动选择模型的对话都使用它，不再自动轮换，也不会在账号间故障转移';
 
         return (
           <div key={provider.id} className="min-w-0">
@@ -211,6 +224,7 @@ export function ProviderList({
                         ? 'ChatGPT 订阅'
                         : '第三方'}
                   </Badge>
+                  {isDefault && <Badge variant="info">默认</Badge>}
                   {health && provider.enabled && !health.healthy && (
                     <Badge variant="error">不健康</Badge>
                   )}
@@ -265,9 +279,26 @@ export function ProviderList({
                       className="max-sm:hidden"
                     />
                   )}
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={isDefault ? 'secondary' : 'ghost'}
+                    aria-pressed={isDefault}
+                    title={defaultTitle}
+                    disabled={rowDisabled}
+                    onClick={() => onSetDefault(provider)}
+                    className="h-7 px-2 text-xs max-sm:hidden"
+                  >
+                    默认
+                  </Button>
                   <Switch
                     checked={provider.enabled}
-                    disabled={rowDisabled}
+                    disabled={rowDisabled || isDefault}
+                    title={
+                      isDefault
+                        ? '默认模型不能禁用，请先取消默认或改选其他默认模型'
+                        : undefined
+                    }
                     onCheckedChange={() => onToggle(provider)}
                     aria-label={
                       provider.enabled ? '禁用模型配置' : '启用模型配置'
@@ -305,6 +336,13 @@ export function ProviderList({
                       >
                         <Pencil />
                         编辑
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        className="sm:hidden"
+                        onSelect={() => onSetDefault(provider)}
+                      >
+                        <Star />
+                        {isDefault ? '取消默认' : '设为默认'}
                       </DropdownMenuItem>
                       {canResetHealth && (
                         <DropdownMenuItem

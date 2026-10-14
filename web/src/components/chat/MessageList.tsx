@@ -172,6 +172,7 @@ export const MessageList = memo(function MessageList({
     (s) => s.thinkingDurationCache ?? {},
   );
   const traceCache = useChatStore((s) => s.traceCache ?? {});
+  const stepsCache = useChatStore((s) => s.stepsCache ?? {});
   const hasWorkflowCard = useChatStore((state) => {
     const current = agentId
       ? state.agentStreaming[agentId]
@@ -1296,6 +1297,7 @@ export const MessageList = memo(function MessageList({
                       thinkingContent={thinkingCache[message.id]}
                       thinkingDurationMs={thinkingDurationCache[message.id]}
                       traceEvents={traceCache[message.id]}
+                      replySteps={stepsCache[message.id]}
                       agentName={agentIdentity.name}
                       agentAvatarUrl={agentAvatarUrl}
                       agentAvatarEmoji={agentAvatarEmoji}

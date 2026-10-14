@@ -49,6 +49,7 @@ export function MainAgentCapabilitiesSection() {
   const modelConfigs = useAgentProfilesStore(
     (state) => state.modelConfigs ?? [],
   );
+  const defaultModel = modelConfigs.find((item) => item.is_default);
   const profilesLoading = useAgentProfilesStore((state) => state.loading);
   const loadProfiles = useAgentProfilesStore((state) => state.loadProfiles);
   const governance = useAgentProfilesStore((state) =>
@@ -279,8 +280,9 @@ export function MainAgentCapabilitiesSection() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="inherit">
-                      自动选择已启用模型
-                      {`（当前 ${modelConfigs.filter((item) => item.enabled).length} 个）`}
+                      {defaultModel
+                        ? `跟随默认模型（${defaultModel.name}）`
+                        : `自动选择已启用模型（当前 ${modelConfigs.filter((item) => item.enabled).length} 个）`}
                     </SelectItem>
                     {modelConfigs.map((model) => (
                       <SelectItem key={model.id} value={model.id}>

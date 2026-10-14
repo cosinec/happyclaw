@@ -93,6 +93,8 @@ export interface ModelConfigOption {
   type: 'official' | 'third_party';
   enabled: boolean;
   anthropic_model: string;
+  /** The global default: what an Agent without a binding follows. */
+  is_default?: boolean;
 }
 
 export type AgentProfilePromptMode = 'append' | 'replace';

@@ -52,7 +52,8 @@ vi.mock('../web/src/utils/messageSnapshotCache', () => ({
   saveAgentMessageSnapshot: vi.fn(async () => undefined),
 }));
 
-const { useChatStore } = await import('../web/src/stores/chat');
+const { useChatStore, MAX_STEPS_CACHE_CHARS } =
+  await import('../web/src/stores/chat');
 const initialState = useChatStore.getState();
 
 const JID = 'web:finalize';
@@ -76,6 +77,7 @@ function reset(): void {
       thinkingCache: {},
       thinkingDurationCache: {},
       traceCache: {},
+      stepsCache: {},
       stopRequests: {},
       settledStreaming: {},
       pendingThinking: {},
@@ -393,6 +395,347 @@ describe('run_finished before the final message', () => {
   });
 });
 
+describe('the steps a finished reply keeps', () => {
+  function streamSteps(runtimeJid: string, agentId?: string) {
+    useChatStore.getState().handleRunStarted(runtimeJid, 'run-a');
+    emit(
+      { eventType: 'thinking_delta', text: '先想一想。', turnId: 'turn-1' },
+      'run-a',
+      agentId,
+    );
+    flushRaf();
+    emit(
+      {
+        eventType: 'tool_use_start',
+        toolName: 'Bash',
+        toolUseId: 'tool-1',
+        toolInputSummary: 'ls',
+        turnId: 'turn-1',
+      },
+      'run-a',
+      agentId,
+    );
+    emit(
+      { eventType: 'tool_use_end', toolUseId: 'tool-1', turnId: 'turn-1' },
+      'run-a',
+      agentId,
+    );
+    emit(
+      { eventType: 'text_delta', text: '最终答案。', turnId: 'turn-1' },
+      'run-a',
+      agentId,
+    );
+  }
+
+  it('moves the steps of the settled card onto the final message', () => {
+    streamSteps(JID);
+    useChatStore.getState().handleRunFinished(JID, 'run-a');
+    const settled = useChatStore.getState().settledStreaming[JID];
+    useChatStore
+      .getState()
+      .handleWsNewMessage(JID, finalMessage('final-1', '最终答案。'));
+
+    const cached = useChatStore.getState().stepsCache['final-1'];
+    // The card and the message list the same steps, in the same order.
+    expect(cached.steps).toEqual(settled?.steps);
+    expect(cached.steps.map((step) => step.kind)).toEqual([
+      'thinking',
+      'tool',
+      'text',
+    ]);
+    expect(cached.steps.every((step) => step.status !== 'running')).toBe(true);
+    expect(cached.dropped).toBe(0);
+  });
+
+  it('carries the count of steps dropped from the front', () => {
+    streamSteps(JID);
+    useChatStore.getState().handleRunFinished(JID, 'run-a');
+    useChatStore.setState((s) => ({
+      settledStreaming: {
+        [JID]: { ...s.settledStreaming[JID]!, stepsDropped: 7 },
+      },
+    }));
+    useChatStore
+      .getState()
+      .handleWsNewMessage(JID, finalMessage('final-1', '最终答案。'));
+    expect(useChatStore.getState().stepsCache['final-1'].dropped).toBe(7);
+  });
+
+  it('moves the steps of a session reply onto its final', () => {
+    useChatStore.setState({ agentWaiting: { [AGENT]: true } });
+    streamSteps(AGENT_JID, AGENT);
+    useChatStore.getState().handleRunFinished(AGENT_JID, 'run-a');
+    useChatStore
+      .getState()
+      .handleWsNewMessage(
+        JID,
+        finalMessage('agent-final', '最终答案。', { chat_jid: AGENT_JID }),
+        AGENT,
+      );
+    expect(
+      useChatStore
+        .getState()
+        .stepsCache['agent-final']?.steps.map((step) => step.kind),
+    ).toEqual(['thinking', 'tool', 'text']);
+  });
+
+  it('keeps the steps of a card a stop froze, its tool marked as stopped', () => {
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    emit(
+      { eventType: 'text_delta', text: '已输出', turnId: 'turn-1' },
+      'run-a',
+    );
+    flushRaf();
+    emit(
+      {
+        eventType: 'tool_use_start',
+        toolName: 'Bash',
+        toolUseId: 'tool-1',
+        toolInputSummary: 'sleep 60',
+        turnId: 'turn-1',
+      },
+      'run-a',
+    );
+    emit(
+      { eventType: 'text_delta', text: '，被打断', turnId: 'turn-1' },
+      'run-a',
+    );
+    flushRaf();
+    useChatStore.getState().handleStreamEvent(
+      JID,
+      {
+        eventType: 'status',
+        statusText: 'interrupted',
+        turnId: 'turn-1',
+      },
+      undefined,
+      'run-a',
+    );
+    expect(useChatStore.getState().streaming[JID]?.interrupted).toBe(true);
+    useChatStore
+      .getState()
+      .handleWsNewMessage(JID, finalMessage('final-1', '已输出，被打断'));
+
+    const bash = useChatStore
+      .getState()
+      .stepsCache['final-1']?.steps.find((step) => step.kind === 'tool');
+    expect(bash?.status).toBe('error');
+  });
+
+  it('closes a step that a never-settled projection still had running', () => {
+    streamSteps(JID);
+    emit(
+      {
+        eventType: 'tool_use_start',
+        toolName: 'Read',
+        toolUseId: 'tool-2',
+        toolInputSummary: 'a.ts',
+        turnId: 'turn-1',
+      },
+      'run-a',
+    );
+    expect(
+      useChatStore
+        .getState()
+        .streaming[JID]?.steps?.some((step) => step.status === 'running'),
+    ).toBe(true);
+    // No run_finished and no active run: the final replaces the live card.
+    useChatStore.setState({ activeRuns: {} });
+    useChatStore
+      .getState()
+      .handleWsNewMessage(JID, finalMessage('final-1', '最终答案。'));
+    const steps = useChatStore.getState().stepsCache['final-1']?.steps ?? [];
+    expect(steps.length).toBeGreaterThan(0);
+    expect(steps.some((step) => step.status === 'running')).toBe(false);
+  });
+
+  it('keeps nothing for a reply that only answered', () => {
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    emit(
+      { eventType: 'text_delta', text: '直接回答。', turnId: 'turn-1' },
+      'run-a',
+    );
+    flushRaf();
+    useChatStore.getState().handleRunFinished(JID, 'run-a');
+    useChatStore
+      .getState()
+      .handleWsNewMessage(JID, finalMessage('final-1', '直接回答。'));
+    expect(useChatStore.getState().stepsCache['final-1']).toBeUndefined();
+  });
+});
+
+describe('the steps of a tab that joined the run part-way', () => {
+  const snapshot = (turnId = 'turn-1') => ({
+    partialText: '最终答案。',
+    thinkingText: '先想一想。',
+    activeTools: [],
+    recentEvents: [],
+    traceEvents: [
+      {
+        id: 'r1',
+        timestamp: Date.now() - 5000,
+        kind: 'tool' as const,
+        title: '工具 Bash',
+        summary: 'ls',
+        toolUseId: 'tool-1',
+      },
+    ],
+    systemStatus: null,
+    turnId,
+  });
+  const finish = () => {
+    useChatStore.getState().handleRunFinished(JID, 'run-a');
+    useChatStore
+      .getState()
+      .handleWsNewMessage(JID, finalMessage('final-1', '最终答案。'));
+  };
+
+  beforeEach(() => {
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+  });
+
+  it('are provisional on the final message: rebuilt, not exact', () => {
+    useChatStore
+      .getState()
+      .handleStreamSnapshot(JID, snapshot(), undefined, 'run-a');
+    // Events that follow the snapshot are exact, but the list is still partly a
+    // rebuilt one.
+    emit(
+      {
+        eventType: 'tool_use_start',
+        toolName: 'Read',
+        toolUseId: 'tool-2',
+        toolInputSummary: 'a.ts',
+        turnId: 'turn-1',
+      },
+      'run-a',
+    );
+    emit(
+      { eventType: 'tool_use_end', toolUseId: 'tool-2', turnId: 'turn-1' },
+      'run-a',
+    );
+    finish();
+    const cached = useChatStore.getState().stepsCache['final-1'];
+    expect(cached?.steps.some((step) => step.toolName === 'Bash')).toBe(true);
+    expect(cached?.steps.some((step) => step.toolName === 'Read')).toBe(true);
+    expect(cached?.provisional).toBe(true);
+  });
+
+  it('are exact when this tab saw the whole run, whatever a snapshot says', () => {
+    emit(
+      {
+        eventType: 'tool_use_start',
+        toolName: 'Bash',
+        toolUseId: 'tool-1',
+        toolInputSummary: 'ls',
+        turnId: 'turn-1',
+      },
+      'run-a',
+    );
+    emit(
+      { eventType: 'tool_use_end', toolUseId: 'tool-1', turnId: 'turn-1' },
+      'run-a',
+    );
+    useChatStore
+      .getState()
+      .handleStreamSnapshot(JID, snapshot(), undefined, 'run-a');
+    finish();
+    const cached = useChatStore.getState().stepsCache['final-1'];
+    expect(cached?.steps.some((step) => step.toolName === 'Bash')).toBe(true);
+    expect(cached?.provisional).toBeUndefined();
+  });
+
+  it('are exact on a reply that streamed here from its first event', () => {
+    emit(
+      { eventType: 'thinking_delta', text: '先想一想。', turnId: 'turn-1' },
+      'run-a',
+    );
+    flushRaf();
+    emit(
+      {
+        eventType: 'tool_use_start',
+        toolName: 'Bash',
+        toolUseId: 'tool-1',
+        toolInputSummary: 'ls',
+        turnId: 'turn-1',
+      },
+      'run-a',
+    );
+    emit(
+      { eventType: 'tool_use_end', toolUseId: 'tool-1', turnId: 'turn-1' },
+      'run-a',
+    );
+    finish();
+    const cached = useChatStore.getState().stepsCache['final-1'];
+    expect(cached?.steps.length).toBeGreaterThan(0);
+    expect(cached?.provisional).toBeUndefined();
+  });
+});
+
+describe('the trace a finished reply keeps', () => {
+  function streamDenialThenTools(tools: number) {
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    emit(
+      {
+        eventType: 'permission_denied',
+        toolName: 'Write',
+        summary: 'a.ts 被拒绝',
+        turnId: 'turn-1',
+      },
+      'run-a',
+    );
+    for (let i = 0; i < tools; i += 1) {
+      emit(
+        {
+          eventType: 'tool_use_start',
+          toolName: 'Read',
+          toolUseId: `tool-${i}`,
+          toolInputSummary: `f${i}.ts`,
+          turnId: 'turn-1',
+        },
+        'run-a',
+      );
+      emit(
+        { eventType: 'tool_use_end', toolUseId: `tool-${i}`, turnId: 'turn-1' },
+        'run-a',
+      );
+    }
+    emit(
+      { eventType: 'text_delta', text: '最终答案。', turnId: 'turn-1' },
+      'run-a',
+    );
+  }
+
+  it('keeps a denied permission from early in a long run', () => {
+    streamDenialThenTools(40);
+    const live = useChatStore.getState().streaming[JID]!.traceEvents;
+    expect(live.length).toBeGreaterThan(60);
+    expect(live[0].kind).toBe('permission');
+
+    useChatStore.getState().handleRunFinished(JID, 'run-a');
+    useChatStore
+      .getState()
+      .handleWsNewMessage(JID, finalMessage('final-1', '最终答案。'));
+    const rows = useChatStore.getState().traceCache['final-1'];
+    // The banner the card showed is still there; the rest is the newest rows.
+    expect(rows.filter((row) => row.kind === 'permission')).toHaveLength(1);
+    expect(rows).toHaveLength(60);
+    expect(rows[0].kind).toBe('permission');
+    expect(rows.at(-1)).toEqual(live.at(-1));
+  });
+
+  it('leaves a trace within the cap as it is', () => {
+    streamDenialThenTools(3);
+    useChatStore.getState().handleRunFinished(JID, 'run-a');
+    useChatStore
+      .getState()
+      .handleWsNewMessage(JID, finalMessage('final-1', '最终答案。'));
+    const rows = useChatStore.getState().traceCache['final-1'];
+    expect(rows[0].kind).toBe('permission');
+    expect(rows.length).toBeLessThan(60);
+  });
+});
+
 describe('reconnect snapshot', () => {
   const snapshot = (partialText: string, turnId = 'turn-1') => ({
     partialText,
@@ -598,5 +941,85 @@ describe('streaming text cap', () => {
     flushRaf();
     const next = useChatStore.getState().streaming[JID]!.partialText;
     expect(next).toBe(`${cut}继续`);
+  });
+});
+
+describe('the steps cache across a finish', () => {
+  const entry = (label: string) => ({
+    steps: [
+      {
+        id: `thinking-${label}`,
+        kind: 'thinking' as const,
+        at: 1,
+        status: 'done' as const,
+        text: 'x'.repeat(1_000_000),
+      },
+    ],
+    dropped: 0,
+  });
+  const room = Math.floor(MAX_STEPS_CACHE_CHARS / 1_000_000);
+
+  function streamAndFinish() {
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    emit(
+      { eventType: 'thinking_delta', text: '先想一想。', turnId: 'turn-1' },
+      'run-a',
+    );
+    flushRaf();
+    emit(
+      {
+        eventType: 'tool_use_start',
+        toolName: 'Bash',
+        toolUseId: 'tool-1',
+        toolInputSummary: 'ls',
+        turnId: 'turn-1',
+      },
+      'run-a',
+    );
+    emit(
+      { eventType: 'tool_use_end', toolUseId: 'tool-1', turnId: 'turn-1' },
+      'run-a',
+    );
+    emit(
+      { eventType: 'text_delta', text: '最终答案。', turnId: 'turn-1' },
+      'run-a',
+    );
+    useChatStore.getState().handleRunFinished(JID, 'run-a');
+    useChatStore
+      .getState()
+      .handleWsNewMessage(JID, finalMessage('final-1', '最终答案。'));
+  }
+
+  it('lets go of the oldest entries once the finished reply takes it past the limit', () => {
+    const ids = Array.from({ length: room }, (_, i) => `old-${i}`);
+    useChatStore.setState({
+      stepsCache: Object.fromEntries(ids.map((id) => [id, entry(id)])),
+    });
+    streamAndFinish();
+    const keys = Object.keys(useChatStore.getState().stepsCache);
+    expect(keys).not.toContain('old-0');
+    expect(keys).toContain('old-1');
+    expect(keys.at(-1)).toBe('final-1');
+  });
+
+  it('keeps what is on screen, and leaves the cache alone within the limit', () => {
+    const ids = Array.from({ length: room }, (_, i) => `old-${i}`);
+    useChatStore.setState({
+      stepsCache: Object.fromEntries(ids.map((id) => [id, entry(id)])),
+      currentGroup: JID,
+      messages: { [JID]: [finalMessage('old-0', '旧的回复')] },
+    });
+    streamAndFinish();
+    const keys = Object.keys(useChatStore.getState().stepsCache);
+    expect(keys).toContain('old-0');
+    expect(keys).not.toContain('old-1');
+
+    reset();
+    useChatStore.setState({ stepsCache: { 'old-0': entry('old-0') } });
+    streamAndFinish();
+    expect(Object.keys(useChatStore.getState().stepsCache)).toEqual([
+      'old-0',
+      'final-1',
+    ]);
   });
 });

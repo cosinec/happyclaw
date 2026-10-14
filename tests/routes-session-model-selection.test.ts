@@ -28,6 +28,9 @@ const mocks = vi.hoisted(() => ({
   refresh: vi.fn(),
   chatgptPlan: null as string | null,
   chatgptRefreshError: null as { kind: string } | null,
+  /** The global default; null leaves the automatic pool in charge. */
+  defaultConfigId: null as string | null,
+  workspaceEnv: {} as Record<string, string>,
 }));
 
 vi.mock('../src/config.js', async (importOriginal) => {
@@ -77,53 +80,61 @@ vi.mock('../src/runtime-config.js', async (importOriginal) => {
   const real = (await importOriginal()) as Record<string, unknown>;
   return {
     ...real,
-    getContainerEnvConfig: () => ({}),
-    getProviders: () => [
-      {
-        id: 'official',
-        name: 'Claude 官方',
-        type: 'official',
-        enabled: true,
-        anthropicModel: 'opus',
-        anthropicApiKey: 'sk-ant-key',
-        codexOAuthCredentials: null,
-      },
-      {
-        id: 'chatgpt',
-        name: 'ChatGPT 订阅',
-        type: 'official',
-        enabled: true,
-        anthropicModel: 'gpt-6-sol',
-        anthropicAuthToken: 'gateway-id',
-        customEnv: { CODEX_REASONING_EFFORT: 'high' },
-        codexOAuthLastRefreshError: mocks.chatgptRefreshError,
-        codexOAuthCredentials: {
-          accessToken: 'secret',
-          accountId: 'acct-1',
-          planType: mocks.chatgptPlan,
-        },
-      },
-      {
-        id: 'glm',
-        name: 'GLM',
-        type: 'third_party',
-        enabled: false,
-        anthropicModel: 'glm-5.3[1m]',
-        anthropicAuthToken: 'glm-token',
-        codexOAuthCredentials: null,
-      },
-      {
-        id: 'copy',
-        name: 'GLM (副本)',
-        type: 'third_party',
-        enabled: false,
-        anthropicModel: 'glm-5.3',
-        anthropicAuthToken: '',
-        codexOAuthCredentials: null,
-      },
-    ],
+    getContainerEnvConfig: () => mocks.workspaceEnv,
+    getUsableDefaultProvider: () =>
+      savedProviders().find(
+        (provider) => provider.id === mocks.defaultConfigId,
+      ) ?? null,
+    getProviders: () => savedProviders(),
   };
 });
+
+function savedProviders() {
+  return [
+    {
+      id: 'official',
+      name: 'Claude 官方',
+      type: 'official',
+      enabled: true,
+      anthropicModel: 'opus',
+      anthropicApiKey: 'sk-ant-key',
+      codexOAuthCredentials: null,
+    },
+    {
+      id: 'chatgpt',
+      name: 'ChatGPT 订阅',
+      type: 'official',
+      enabled: true,
+      anthropicModel: 'gpt-6-sol',
+      anthropicAuthToken: 'gateway-id',
+      customEnv: { CODEX_REASONING_EFFORT: 'high' },
+      codexOAuthLastRefreshError: mocks.chatgptRefreshError,
+      codexOAuthCredentials: {
+        accessToken: 'secret',
+        accountId: 'acct-1',
+        planType: mocks.chatgptPlan,
+      },
+    },
+    {
+      id: 'glm',
+      name: 'GLM',
+      type: 'third_party',
+      enabled: false,
+      anthropicModel: 'glm-5.3[1m]',
+      anthropicAuthToken: 'glm-token',
+      codexOAuthCredentials: null,
+    },
+    {
+      id: 'copy',
+      name: 'GLM (副本)',
+      type: 'third_party',
+      enabled: false,
+      anthropicModel: 'glm-5.3',
+      anthropicAuthToken: '',
+      codexOAuthCredentials: null,
+    },
+  ];
+}
 
 const groupRoutes = (await import('../src/routes/groups.js')).default;
 const db = await import('../src/db.js');
@@ -201,6 +212,8 @@ beforeEach(() => {
   mocks.permissions = [];
   mocks.chatgptPlan = null;
   mocks.chatgptRefreshError = null;
+  mocks.defaultConfigId = null;
+  mocks.workspaceEnv = {};
   mocks.drainCalls = [];
   mocks.refresh.mockClear();
   db.setSessionModelSelection(GROUP_FOLDER, null, null);
@@ -263,6 +276,38 @@ describe('GET /:jid/model-selection', () => {
         .map((o: any) => o.id),
     ).toEqual(['chatgpt']);
     expect(JSON.stringify(body)).not.toContain('secret');
+  });
+
+  test('reports the global default as what an unselected conversation runs on', async () => {
+    mocks.defaultConfigId = 'glm';
+    const { body } = await call('GET');
+    expect(body.default).toEqual({
+      source: 'default',
+      modelConfigId: 'glm',
+      enabledCount: 2,
+    });
+    expect(body.selectedModelConfigId).toBeNull();
+  });
+
+  test('a Workspace that brings its own provider environment keeps it over the global default', async () => {
+    mocks.defaultConfigId = 'glm';
+    mocks.workspaceEnv = { anthropicBaseUrl: 'https://own.example.test' };
+    const { body } = await call('GET');
+    expect(body.default).toMatchObject({
+      source: 'workspace_env',
+      modelConfigId: null,
+    });
+  });
+
+  test('a conversation pick is reported next to, not instead of, the default', async () => {
+    mocks.defaultConfigId = 'glm';
+    await call('PUT', '', { modelConfigId: 'official' });
+    const { body } = await call('GET');
+    expect(body.selectedModelConfigId).toBe('official');
+    expect(body.default).toMatchObject({
+      source: 'default',
+      modelConfigId: 'glm',
+    });
   });
 
   test('offers a ChatGPT account its models, each with the efforts this user may pick', async () => {

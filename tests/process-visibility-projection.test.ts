@@ -127,6 +127,45 @@ describe('process visibility projection for the Web', () => {
     expect(result.toolResult).toBe('secret output');
   });
 
+  test('a proactive tool result keeps its failure flag but not the numbers read from its output', () => {
+    const result = event('tool_result', {
+      toolUseId: 't1',
+      toolResult: '⚠️ Exit code 3',
+      detail: '⚠️ Exit code 3',
+      toolIsError: true,
+      toolResultFacts: {
+        exitCode: 3,
+        added: 4,
+        files: 2,
+        agent: { tokens: 9 },
+      },
+    });
+    for (const level of ['activity', 'full'] as const) {
+      const projected = proactive(level, result)!;
+      expect(projected.toolIsError).toBe(true);
+      expect(projected.toolResultFacts).toBeUndefined();
+      expect(projected).not.toHaveProperty('toolResultFacts');
+    }
+    // A failure that printed nothing still reads as one.
+    const silent = event('tool_result', { toolUseId: 't1', toolIsError: true });
+    expect(proactive('activity', silent)).toBe(silent);
+    // The input event is not mutated: the host still feeds it to the trace.
+    expect(result.toolResultFacts).toEqual({
+      exitCode: 3,
+      added: 4,
+      files: 2,
+      agent: { tokens: 9 },
+    });
+    // An assistant Workspace shows its whole process, facts included.
+    for (const level of LEVELS) {
+      expect(projectSdkStreamEventForWeb('assistant', level, result)).toBe(
+        result,
+      );
+    }
+    // Hidden shows no tool at all.
+    expect(proactive('hidden', result)).toBeNull();
+  });
+
   test('the words a tool, a sub-agent or a workflow carries are stripped', () => {
     const progress = event('tool_progress', {
       toolUseId: 't1',

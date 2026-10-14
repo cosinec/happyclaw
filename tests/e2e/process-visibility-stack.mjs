@@ -156,7 +156,15 @@ function roundOf(messages) {
 }
 
 function startStub() {
-  const state = { mode: 'assistant', calls: 0, agentRequests: 0 };
+  const state = {
+    mode: 'assistant',
+    // 'demo': thinking -> Bash. 'facts': three tools at once (Glob, a Bash that
+    // fails, Read), to see what the Runner reads out of their results.
+    script: 'demo',
+    factsFile: '',
+    calls: 0,
+    agentRequests: 0,
+  };
   const server = http.createServer((req, res) => {
     let raw = '';
     req.on('data', (c) => (raw += c));
@@ -183,7 +191,29 @@ function startStub() {
       } else {
         state.agentRequests += 1;
         const round = roundOf(body.messages || []);
-        if (round === 0) {
+        if (round === 0 && state.script === 'facts') {
+          blocks = [
+            {
+              type: 'tool_use',
+              id: `toolu_glob_${n}`,
+              name: 'Glob',
+              input: { pattern: '*' },
+            },
+            {
+              type: 'tool_use',
+              id: `toolu_fail_${n}`,
+              name: 'Bash',
+              input: { command: 'echo partial-out; exit 3' },
+            },
+            {
+              type: 'tool_use',
+              id: `toolu_read_${n}`,
+              name: 'Read',
+              input: { file_path: state.factsFile },
+            },
+          ];
+          stop = 'tool_use';
+        } else if (round === 0) {
           blocks = [
             { type: 'thinking', text: THINK1 },
             { type: 'text', text: NARRATION },
@@ -236,6 +266,7 @@ function startStub() {
         server,
         port: server.address().port,
         setMode: (m) => (state.mode = m),
+        setScript: (name) => (state.script = name),
         state,
       }),
     ),
@@ -260,6 +291,10 @@ fs.mkdirSync(home, { recursive: true });
 fs.symlinkSync(path.join(REPO, 'container'), path.join(scratch, 'container'));
 
 const stub = await startStub();
+const FACTS_TEXT = `alpha-${NONCE}\nbeta\ngamma\n`;
+const factsFile = path.join(scratch, 'facts.txt');
+fs.writeFileSync(factsFile, FACTS_TEXT);
+stub.state.factsFile = factsFile;
 const port = await freePort();
 const base = `http://127.0.0.1:${port}`;
 
@@ -696,6 +731,7 @@ async function runScenario(ctx, { label, interaction, visibility, expect }) {
       `got ${traceNotices.length}`,
     );
   }
+  let storedTurnId;
   if (expect.trace === 'none') {
     check(
       label,
@@ -724,6 +760,7 @@ async function runScenario(ctx, { label, interaction, visibility, expect }) {
       `flagged ${flagged.length}`,
     );
     const turnId = (flagged[flagged.length - 1] || finalMsg)?.turn_id;
+    storedTurnId = turnId;
     const r = await http_(
       'GET',
       `/api/groups/${enc(jid)}/turn-traces/${enc(turnId)}`,
@@ -802,11 +839,309 @@ async function runScenario(ctx, { label, interaction, visibility, expect }) {
         !t.trace.some((x) => /thinking_(start|end)/.test(JSON.stringify(x))),
         '',
       );
+      checkStoredSteps(label, interaction, expect, t);
     }
   }
 
   for (const c of [conn, conn2, conn3]) c.ws.close();
-  return { jid, counts };
+  return { jid, counts, turnId: storedTurnId };
+}
+
+/** Every leaf of a value: facts must hold numbers and booleans only. */
+function leaves(value) {
+  if (value === null || typeof value !== 'object') return [value];
+  return Object.values(value).flatMap(leaves);
+}
+
+/**
+ * What the Runner reads out of the SDK's structured tool results (Glob, a Bash
+ * that fails, Read), and what a Workspace lets through: an Assistant Workspace
+ * shows the numbers (`toolResultFacts`, and `toolIsError`), a proactive one
+ * shows only that a call failed. Either way no path, file text or command
+ * output rides in the facts, live or stored.
+ */
+async function runFactsScenario(ctx, { label, interaction, visibility }) {
+  console.log(`\n== ${label}`);
+  stub.setMode(interaction);
+  stub.setScript('facts');
+  const created = await http_('POST', '/api/groups', {
+    cookie: ctx.cookie,
+    body: {
+      name: `${label}-${NONCE}`,
+      execution_mode: 'host',
+      agent_profile_id: ctx.profileId,
+      interaction_mode: interaction,
+      ...(visibility ? { process_visibility: visibility } : {}),
+    },
+  });
+  if (created.status >= 300)
+    throw new Error(
+      `create workspace: HTTP ${created.status} ${JSON.stringify(created.json).slice(0, 300)}`,
+    );
+  const jid = created.json.jid;
+  const conn = openWs(ctx.cookie);
+  await conn.ready;
+  conn.ws.send(
+    JSON.stringify({ type: 'send_message', chatJid: jid, content: 'look' }),
+  );
+  await waitUntil(
+    () =>
+      conn.events.some((e) => e.chatJid === jid && e.type === 'run_finished'),
+    150_000,
+    'run_finished',
+  );
+  await sleep(1500);
+  const live = conn.events.filter((e) => e.chatJid === jid);
+  const streamEvents = live
+    .filter((e) => e.type === 'stream_event')
+    .map((e) => e.event);
+  stub.setScript('demo');
+
+  const nameOf = new Map(
+    streamEvents
+      .filter((e) => e.eventType === 'tool_use_start')
+      .map((e) => [e.toolUseId, e.toolName]),
+  );
+  const resultOf = (tool) =>
+    streamEvents.find(
+      (e) => e.eventType === 'tool_result' && nameOf.get(e.toolUseId) === tool,
+    );
+  const glob = resultOf('Glob');
+  const bash = resultOf('Bash');
+  const read = resultOf('Read');
+  check(
+    label,
+    'a tool_result reaches the Web for each of the three tools',
+    !!glob && !!bash && !!read,
+    JSON.stringify(streamEvents.filter((e) => e.eventType === 'tool_result')),
+  );
+  const rawLive = JSON.stringify(streamEvents);
+  const summaryOf = (tool) =>
+    streamEvents.find(
+      (e) =>
+        (e.eventType === 'tool_use_start' || e.eventType === 'tool_progress') &&
+        nameOf.get(e.toolUseId) === tool &&
+        e.toolInputSummary,
+    )?.toolInputSummary;
+  check(
+    label,
+    'each call is summarized by its file, pattern or command',
+    summaryOf('Read') === `file_path: ${factsFile}` &&
+      summaryOf('Glob') === 'pattern: *' &&
+      /^command: echo partial-out/.test(summaryOf('Bash') || ''),
+    JSON.stringify([summaryOf('Read'), summaryOf('Glob'), summaryOf('Bash')]),
+  );
+
+  const history = await http_('GET', `/api/groups/${enc(jid)}/messages`, {
+    cookie: ctx.cookie,
+  });
+  const flagged = (history.json.messages || []).filter(
+    (m) => m.is_from_me && m.has_trace === true,
+  );
+  const turnId = flagged[flagged.length - 1]?.turn_id;
+  const trace = await http_(
+    'GET',
+    `/api/groups/${enc(jid)}/turn-traces/${enc(turnId)}`,
+    { cookie: ctx.cookie },
+  );
+  check(
+    label,
+    'the stored turn is readable',
+    trace.status === 200,
+    `HTTP ${trace.status}`,
+  );
+  const steps = trace.json?.steps || [];
+  const stepOf = (id) => steps.find((s) => s.toolUseId === id);
+
+  if (interaction === 'assistant') {
+    check(
+      label,
+      'Glob reports the files it found',
+      glob?.toolResultFacts?.files >= 1 && glob.toolIsError === false,
+      JSON.stringify(glob),
+    );
+    check(
+      label,
+      'Read reports the lines it returned',
+      read?.toolResultFacts?.lines >= 3 &&
+        read.toolResultFacts.totalLines >= 3 &&
+        read.toolIsError === false,
+      JSON.stringify(read),
+    );
+    check(
+      label,
+      'a failed Bash reports toolIsError and its exit code',
+      bash?.toolIsError === true && bash.toolResultFacts?.exitCode === 3,
+      JSON.stringify(bash),
+    );
+    check(
+      label,
+      'the facts hold numbers and booleans only',
+      [glob, bash, read].every((e) =>
+        leaves(e?.toolResultFacts ?? {}).every(
+          (v) => typeof v === 'number' || typeof v === 'boolean',
+        ),
+      ) && Object.keys(read?.toolResultFacts ?? {}).length > 0,
+      JSON.stringify([
+        glob?.toolResultFacts,
+        bash?.toolResultFacts,
+        read?.toolResultFacts,
+      ]),
+    );
+    check(
+      label,
+      'the stored steps carry the same facts, and the failed call is an error',
+      JSON.stringify(stepOf(glob?.toolUseId)?.resultFacts) ===
+        JSON.stringify(glob?.toolResultFacts) &&
+        JSON.stringify(stepOf(read?.toolUseId)?.resultFacts) ===
+          JSON.stringify(read?.toolResultFacts) &&
+        stepOf(bash?.toolUseId)?.resultFacts?.exitCode === 3 &&
+        stepOf(bash?.toolUseId)?.status === 'error' &&
+        stepOf(read?.toolUseId)?.status === 'done',
+      JSON.stringify(steps.filter((s) => s.kind === 'tool')).slice(0, 400),
+    );
+    check(
+      label,
+      'stored facts never hold the file text',
+      !JSON.stringify(steps.map((s) => s.resultFacts)).includes('alpha'),
+      '',
+    );
+  } else {
+    check(
+      label,
+      'no tool_result carries facts or output text; the failure flag stays',
+      [glob, bash, read].every(
+        (e) =>
+          e &&
+          !('toolResultFacts' in e) &&
+          e.toolResult === undefined &&
+          e.detail === undefined,
+      ) &&
+        bash?.toolIsError === true &&
+        glob.toolIsError === false &&
+        read.toolIsError === false,
+      JSON.stringify([glob, bash, read]),
+    );
+    check(
+      label,
+      'nothing the files held reaches the Web',
+      !rawLive.includes(`alpha-${NONCE}`),
+      '',
+    );
+    check(
+      label,
+      'the stored steps keep the failure but hold no facts and no output',
+      stepOf(bash?.toolUseId)?.status === 'error' &&
+        !JSON.stringify(steps).includes('resultFacts') &&
+        !JSON.stringify(steps).includes(`alpha-${NONCE}`) &&
+        steps.every((s) => s.resultPreview === undefined),
+      JSON.stringify(steps.filter((s) => s.kind === 'tool')).slice(0, 400),
+    );
+  }
+  conn.ws.close();
+}
+
+/**
+ * The settled turn as an ordered timeline: reasoning -> Bash -> reasoning, with
+ * the model's note before the tool in an Assistant workspace, and never the
+ * answer, the speech tool or (proactive) any model text but the reasoning.
+ */
+function checkStoredSteps(label, interaction, expect, t) {
+  const steps = Array.isArray(t.steps) ? t.steps : [];
+  const describe = (s) => (s.kind === 'tool' ? `tool:${s.toolName}` : s.kind);
+  const timeline = steps.filter((s) => s.kind !== 'text').map(describe);
+  check(
+    label,
+    'stored steps run reasoning -> Bash -> reasoning, in the order they happened',
+    JSON.stringify(timeline) ===
+      JSON.stringify(['thinking', 'tool:Bash', 'thinking']),
+    JSON.stringify(steps.map(describe)),
+  );
+  check(
+    label,
+    'no step is left running and none was dropped',
+    steps.length > 0 &&
+      steps.every(
+        (s) => s.status === 'done' && typeof s.endedAt === 'number',
+      ) &&
+      t.steps_dropped === 0,
+    JSON.stringify(steps.map((s) => [s.kind, s.status, s.endedAt])),
+  );
+  check(
+    label,
+    'steps are in time order and each ends no earlier than it began',
+    steps.every(
+      (s, i) => s.endedAt >= s.at && (i === 0 || s.at >= steps[i - 1].at),
+    ),
+    JSON.stringify(steps.map((s) => [s.at, s.endedAt])),
+  );
+  const thinking = steps.filter((s) => s.kind === 'thinking');
+  check(
+    label,
+    'every reasoning step has a duration',
+    thinking.length === 2 &&
+      thinking.every(
+        (s) => typeof s.durationMs === 'number' && s.durationMs > 0,
+      ),
+    JSON.stringify(thinking.map((s) => s.durationMs)),
+  );
+  if (expect.trace === 'with-thinking') {
+    check(
+      label,
+      'reasoning steps hold their text and title',
+      /Planning the demo/.test(thinking[0]?.text || '') &&
+        thinking[0]?.title === 'Planning the demo' &&
+        /Wrapping up/.test(thinking[1]?.text || '') &&
+        thinking[1]?.title === 'Wrapping up',
+      JSON.stringify(thinking.map((s) => [s.title, s.text?.slice(0, 30)])),
+    );
+  } else {
+    check(
+      label,
+      'reasoning steps keep their status and times but no text or title at the activity level',
+      thinking.every((s) => s.text === undefined && s.title === undefined) &&
+        !JSON.stringify(steps).includes('Planning the demo') &&
+        !JSON.stringify(steps).includes('Wrapping up'),
+      JSON.stringify(thinking),
+    );
+  }
+  const raw = JSON.stringify(steps);
+  const bash = steps.find((s) => s.kind === 'tool');
+  check(
+    label,
+    'the Bash step names its call',
+    typeof bash?.toolUseId === 'string' && bash.toolUseId.length > 0,
+    JSON.stringify(bash),
+  );
+  check(
+    label,
+    'steps never hold the answer text',
+    !raw.includes(ANSWER) && !raw.includes(SENTINEL),
+    raw.slice(0, 300),
+  );
+  if (interaction === 'assistant') {
+    const texts = steps.filter((s) => s.kind === 'text');
+    check(
+      label,
+      'the note written before the tool is a step between the reasoning and the call',
+      texts.length === 1 &&
+        texts[0].text === NARRATION &&
+        steps.indexOf(texts[0]) ===
+          steps.findIndex((s) => s.kind === 'tool') - 1,
+      JSON.stringify(texts),
+    );
+  } else {
+    check(
+      label,
+      'a proactive turn has no text step, its speech tool is no step and no tool output is kept',
+      !steps.some((s) => s.kind === 'text') &&
+        !raw.includes(NARRATION) &&
+        !raw.includes(PROACTIVE_TEXT) &&
+        !raw.includes('send_message') &&
+        bash?.resultPreview === undefined,
+      raw.slice(0, 300),
+    );
+  }
 }
 
 async function main() {
@@ -952,6 +1287,76 @@ async function main() {
   const outcomes = [];
   for (const s of scenarios) outcomes.push(await runScenario(ctx, s));
 
+  // The stored steps follow the *current* level, not the one the turn ran at.
+  console.log(
+    '\n== steps-level (full -> activity -> hidden -> full, stored turn)',
+  );
+  const fullRun = outcomes[3];
+  const stepsUrl = `/api/groups/${enc(fullRun.jid)}/turn-traces/${enc(fullRun.turnId)}`;
+  const setLevel = (process_visibility) =>
+    http_('PATCH', `/api/groups/${enc(fullRun.jid)}`, {
+      cookie,
+      body: { process_visibility },
+    });
+  const reasoningOf = (r) =>
+    (r.json?.steps || []).filter((s) => s.kind === 'thinking');
+  const atFull = await http_('GET', stepsUrl, { cookie });
+  check(
+    'steps-level',
+    'at full the reasoning steps hold their text',
+    atFull.status === 200 &&
+      reasoningOf(atFull).length === 2 &&
+      reasoningOf(atFull).every((s) => !!s.text && !!s.title),
+    `HTTP ${atFull.status} ${JSON.stringify(reasoningOf(atFull)).slice(0, 200)}`,
+  );
+  check(
+    'steps-level',
+    'lowered to activity',
+    (await setLevel('activity')).status === 200,
+  );
+  const atActivity = await http_('GET', stepsUrl, { cookie });
+  check(
+    'steps-level',
+    'at activity the same steps lose their text and titles but keep their times',
+    atActivity.status === 200 &&
+      atActivity.json.steps.length === atFull.json.steps.length &&
+      reasoningOf(atActivity).every(
+        (s) =>
+          s.text === undefined &&
+          s.title === undefined &&
+          typeof s.durationMs === 'number',
+      ) &&
+      !JSON.stringify(atActivity.json).includes('Planning the demo') &&
+      atActivity.json.thinking === '',
+    JSON.stringify(atActivity.json?.steps)?.slice(0, 240),
+  );
+  check(
+    'steps-level',
+    'lowered to hidden',
+    (await setLevel('hidden')).status === 200,
+  );
+  const atHidden = await http_('GET', stepsUrl, { cookie });
+  check(
+    'steps-level',
+    'at hidden the turn is a 404 that carries no step',
+    atHidden.status === 404 &&
+      !JSON.stringify(atHidden.json).includes('thinking'),
+    `HTTP ${atHidden.status} ${JSON.stringify(atHidden.json)?.slice(0, 120)}`,
+  );
+  check(
+    'steps-level',
+    'raised to full again',
+    (await setLevel('full')).status === 200,
+  );
+  const backAtFull = await http_('GET', stepsUrl, { cookie });
+  check(
+    'steps-level',
+    'and the reasoning text is back',
+    backAtFull.status === 200 &&
+      reasoningOf(backAtFull).every((s) => !!s.text && !!s.title),
+    `HTTP ${backAtFull.status}`,
+  );
+
   // Live change without a restart: hidden -> full on the same workspace.
   console.log(
     '\n== proactive-switch (hidden -> full on a live workspace, no restart)',
@@ -1011,6 +1416,16 @@ async function main() {
     '',
   );
   conn.ws.close();
+
+  await runFactsScenario(ctx, {
+    label: 'tool-facts-assistant',
+    interaction: 'assistant',
+  });
+  await runFactsScenario(ctx, {
+    label: 'tool-facts-proactive-activity',
+    interaction: 'proactive',
+    visibility: 'activity',
+  });
 
   // Access control on the new read endpoint.
   console.log('\n== access control');

@@ -181,6 +181,10 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
   内置、依赖 CLI 进程常驻的会话级工具（`CronCreate`/`CronDelete`/`CronList`、
   `ScheduleWakeup`、`EnterWorktree`/`ExitWorktree`）：Runner 每轮结束会关闭 CLI，
   这些承诺会静默丢失，因此默认禁用，定时需求走 HappyClaw 的 `schedule_task`。
+- 一次运行绑定的模型配置按固定顺序解析（`container-runner.ts` 的
+  `resolvePinnedModelConfigId`）：会话手选 → 智能体绑定 → 全局默认
+  （`defaultModelConfigId`，工作区自带 Provider 环境变量时让位）→ 唯一启用的配置 →
+  自动池。绑定即权威，没有跨账号故障转移；Web 的选择器与这一顺序必须一致。
 - 宿主机 Skills 由 `runtime_policy.skills.host` 独立选择，不能通过
   `host_claude` 开关隐式获得。
 - 工作区 `CLAUDE.md`、项目 `.claude/skills` 和项目 MCP 属于项目上下文层。
@@ -362,8 +366,8 @@ data/
 - 渠道：`channel_accounts`、`channel_mounts`、`agent_channel_mounts`、
   `im_context_bindings`
 - 消息与调度：`chats`、`messages`、`scheduled_tasks`、`task_runs`、
-  `task_run_logs`、`subagent_checkpoints`、`turn_traces`（回合的思考摘要与执行
-  轨迹，按 `(chat_jid, turn_id)` 存放，随消息一起清理）
+  `task_run_logs`、`subagent_checkpoints`、`turn_traces`（回合的思考摘要、执行
+  轨迹与有序步骤，按 `(chat_jid, turn_id)` 存放，随消息一起清理）
 - 用量与计费：`usage_records`、`usage_events`、`usage_daily_summary` 及
   `billing_*`、订阅、余额和兑换码相关表
 
@@ -426,7 +430,9 @@ npm run self-test
 - 只使用 Node.js/npm，不使用 Bun。
 - 三个 Node 项目分别位于根目录、`web/`、`container/agent-runner/`，均使用
   `npm ci` 和已提交 lockfile。
-- 修改共享类型后运行 `make sync-types`；`make typecheck` 会检查副本一致性。
+- 修改共享类型后运行 `make sync-types`；`make typecheck` 会检查副本一致性。回复步骤归并器
+  （`shared/stream-steps.ts`、`shared/thinking-text.ts`）同步到后端和 Web：后端用同一套
+  纯函数记录已结算回合的有序步骤，与 Web 流式时渲染的步骤不会漂移。
 - 修改 Prompt 后确保 `scripts/check-agent-runner-prompts.sh` 通过。
 - 修改文档后运行 `npm run docs:check`。
 - SDK/CLI 升级必须显式执行 `make update-sdk`，验证后提交 package.json 与 lockfile。

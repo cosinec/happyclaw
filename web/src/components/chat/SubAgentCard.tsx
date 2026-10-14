@@ -11,12 +11,86 @@ import { ToolRow } from './ToolActivityCard';
 /** Sub-agent progress panels preview only the end of their streamed text. */
 const PROGRESS_TAIL_CHARS = 2000;
 
-const STATUS_LABELS: Record<StreamingTaskRuntimeState['status'], string> = {
+export const STATUS_LABELS: Record<
+  StreamingTaskRuntimeState['status'],
+  string
+> = {
   running: '执行中',
   backgrounded: '后台执行',
   completed: '已完成',
   error: '出错',
 };
+
+/** A sub-agent with nothing to show under its title has nothing to open. */
+export function subAgentHasBody(task: StreamingTaskRuntimeState): boolean {
+  return (
+    task.activeTools.length > 0 ||
+    task.recentTools.length > 0 ||
+    !!task.thinkingTail ||
+    !!task.textTail
+  );
+}
+
+/** What a sub-agent shows when opened: its tools, and the tail of its words. */
+export function SubAgentBody({
+  task,
+  groupJid,
+  inline = false,
+}: {
+  task: StreamingTaskRuntimeState;
+  groupJid: string;
+  /** Inside a row of the process timeline, which has the line on its left. */
+  inline?: boolean;
+}) {
+  const isRunning = task.status === 'running' || task.status === 'backgrounded';
+  const textTailMarkdown = useThrottledValue(
+    markdownTail(task.textTail, PROGRESS_TAIL_CHARS),
+    STREAMING_MARKDOWN_INTERVAL_MS,
+  );
+  return (
+    <>
+      {task.activeTools.length > 0 && (
+        <div className="space-y-1.5">
+          {task.activeTools.map((tool) => (
+            <ToolRow
+              key={tool.toolUseId}
+              toolName={tool.toolName}
+              skillName={tool.skillName}
+              summary={tool.toolInputSummary}
+              elapsedSeconds={tool.elapsedSeconds}
+            />
+          ))}
+        </div>
+      )}
+      {task.recentTools.length > 0 && (
+        <div className="space-y-0.5 text-caption text-muted-foreground">
+          {task.recentTools.slice(-5).map((item) => (
+            <div key={item.id}>{item.text}</div>
+          ))}
+        </div>
+      )}
+      {task.thinkingTail && (
+        <ThinkingBody
+          text={task.thinkingTail}
+          live={isRunning}
+          groupJid={groupJid}
+          variant={inline ? 'row' : 'block'}
+          className="mt-0 mb-0 max-h-32"
+        />
+      )}
+      {task.textTail && (
+        <div className="max-w-none overflow-hidden [&>div>*:first-child]:!mt-0">
+          <MarkdownRenderer
+            content={textTailMarkdown}
+            groupJid={groupJid}
+            variant="docs"
+            streaming
+          />
+        </div>
+      )}
+    </>
+  );
+}
 
 /**
  * One sub-agent (an SDK Task) as a collapsible card. Its title row carries what
@@ -38,18 +112,10 @@ export const SubAgentCard = memo(function SubAgentCard({
   );
   const bodyId = useId();
   const isRunning = task.status === 'running' || task.status === 'backgrounded';
-  const textTailMarkdown = useThrottledValue(
-    markdownTail(task.textTail, PROGRESS_TAIL_CHARS),
-    STREAMING_MARKDOWN_INTERVAL_MS,
-  );
 
   // A card with nothing under its title (no tool yet, none of its text shown)
   // has nothing to open: its title row is a plain row, not a button.
-  const hasBody =
-    task.activeTools.length > 0 ||
-    task.recentTools.length > 0 ||
-    !!task.thinkingTail ||
-    !!task.textTail;
+  const hasBody = subAgentHasBody(task);
   const titleRow = (
     <>
       <span
@@ -115,44 +181,7 @@ export const SubAgentCard = memo(function SubAgentCard({
           id={bodyId}
           className="space-y-2 border-t border-surface-border px-3 py-2"
         >
-          {task.activeTools.length > 0 && (
-            <div className="space-y-1.5">
-              {task.activeTools.map((tool) => (
-                <ToolRow
-                  key={tool.toolUseId}
-                  toolName={tool.toolName}
-                  skillName={tool.skillName}
-                  summary={tool.toolInputSummary}
-                  elapsedSeconds={tool.elapsedSeconds}
-                />
-              ))}
-            </div>
-          )}
-          {task.recentTools.length > 0 && (
-            <div className="space-y-0.5 text-caption text-muted-foreground">
-              {task.recentTools.slice(-5).map((item) => (
-                <div key={item.id}>{item.text}</div>
-              ))}
-            </div>
-          )}
-          {task.thinkingTail && (
-            <ThinkingBody
-              text={task.thinkingTail}
-              live={isRunning}
-              groupJid={groupJid}
-              className="mt-0 mb-0 max-h-32"
-            />
-          )}
-          {task.textTail && (
-            <div className="max-w-none overflow-hidden [&>div>*:first-child]:!mt-0">
-              <MarkdownRenderer
-                content={textTailMarkdown}
-                groupJid={groupJid}
-                variant="docs"
-                streaming
-              />
-            </div>
-          )}
+          <SubAgentBody task={task} groupJid={groupJid} />
         </div>
       )}
     </div>

@@ -88,6 +88,10 @@ import {
   appendClaudeConfigAudit,
   getProviders,
   getEnabledProviders,
+  getDefaultModelConfigId,
+  getUsableDefaultProvider,
+  setDefaultModelConfig,
+  DEFAULT_MODEL_DISABLE_ERROR,
   getBalancingConfig,
   saveBalancingConfig,
   createProvider,
@@ -1417,10 +1421,94 @@ configRoutes.get(
         })),
         balancing,
         enabledCount: enabledProviders.length,
+        // The default that actually applies: one that lost its credential
+        // pins nothing, so the page must not present it as the default.
+        defaultModelConfigId: getUsableDefaultProvider()?.id ?? null,
       });
     } catch (err) {
       logger.error({ err }, 'Failed to list providers');
       return c.json({ error: 'Failed to list providers' }, 500);
+    }
+  },
+);
+
+// ─── PUT /claude/default — 设置或取消默认模型配置 ─────
+// providerId=null 取消默认，回到已启用配置的自动轮换。
+configRoutes.put(
+  '/claude/default',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const raw = (body as { modelConfigId?: unknown }).modelConfigId;
+    if (raw !== null && (typeof raw !== 'string' || !raw.trim())) {
+      return c.json(
+        { error: 'modelConfigId must be a non-empty string or null' },
+        400,
+      );
+    }
+    const modelConfigId = raw === null ? null : (raw as string).trim();
+    const actor = (c.get('user') as AuthUser).username;
+
+    try {
+      return await withClaudeConfigMutationLock(async () => {
+        const previousId = getDefaultModelConfigId();
+        const target = modelConfigId
+          ? getProviders().find((provider) => provider.id === modelConfigId)
+          : null;
+        // Refuse before any runner is stopped.
+        if (modelConfigId) {
+          if (!target) throw new Error('未找到指定模型配置');
+          if (!providerHasCredentials(target)) {
+            throw new Error(
+              '该模型配置还没有可用的凭据，请先填写密钥或完成授权',
+            );
+          }
+        }
+        if (previousId === modelConfigId && (!target || target.enabled)) {
+          return c.json({
+            defaultModelConfigId: previousId,
+            provider: target ? toPublicProvider(target) : null,
+            applied: {
+              success: true,
+              stoppedCount: 0,
+              failedCount: 0,
+              persisted: true,
+            },
+          });
+        }
+        const mutation = await mutateClaudeConfigForAllGroups(
+          actor,
+          {
+            trigger: 'default_model_update',
+            previousModelConfigId: previousId,
+            modelConfigId,
+          },
+          () => {
+            const provider = setDefaultModelConfig(modelConfigId);
+            appendClaudeConfigAuditBestEffort(
+              actor,
+              modelConfigId ? 'set_default_model' : 'clear_default_model',
+              modelConfigId ? [`id:${modelConfigId}`] : [],
+            );
+            return provider;
+          },
+        );
+        const provider = mutation.value ?? null;
+        const payload = {
+          defaultModelConfigId: getUsableDefaultProvider()?.id ?? null,
+          provider: provider ? toPublicProvider(provider) : null,
+          applied: mutation.applied,
+        };
+        return mutation.applied.success
+          ? c.json(payload)
+          : c.json({ error: mutation.applied.error, ...payload }, 503);
+      });
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Failed to set default model';
+      logger.warn({ err, modelConfigId }, 'Failed to set default model');
+      return c.json({ error: message }, 400);
     }
   },
 );
@@ -1803,9 +1891,12 @@ configRoutes.delete(
           modelChanged: true,
           baseUrlChanged: true,
         };
+        // Deleting the default returns unselected conversations to the
+        // automatic pool; the operator is told, and the audit says so.
+        const wasDefault = !!previous && getDefaultModelConfigId() === id;
         const mutation = await mutateClaudeConfigForAllGroups(
           actor,
-          { trigger: 'provider_delete', providerId: id },
+          { trigger: 'provider_delete', providerId: id, wasDefault },
           () => {
             if (previous) {
               deleteProvider(id);
@@ -1813,6 +1904,7 @@ configRoutes.delete(
               invalidateProviderUsageCache(id);
               appendClaudeConfigAuditBestEffort(actor, 'delete_provider', [
                 `id:${id}`,
+                ...(wasDefault ? ['default_cleared'] : []),
               ]);
             }
             return { id };
@@ -1844,7 +1936,11 @@ configRoutes.delete(
             503,
           );
         }
-        return c.json({ ok: true, applied: mutation.applied });
+        return c.json({
+          ok: true,
+          applied: mutation.applied,
+          defaultCleared: wasDefault,
+        });
       });
     } catch (err) {
       const message =
@@ -1876,6 +1972,9 @@ configRoutes.post(
         if (!target) throw new Error('未找到指定供应商');
         if (body.enabled && !providerHasCredentials(target)) {
           throw new Error('该模型配置还没有可用的凭据，请先填写密钥或完成授权');
+        }
+        if (!body.enabled && getDefaultModelConfigId() === id) {
+          throw new Error(DEFAULT_MODEL_DISABLE_ERROR);
         }
         const mutation = await mutateClaudeConfigForAllGroups(
           actor,
