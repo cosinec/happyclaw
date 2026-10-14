@@ -263,7 +263,7 @@ export function SetupProvidersPage() {
       }
 
       await checkAuth();
-      // 确认 setupStatus 已更新后再跳转，避免 AuthGuard 检测到 needsSetup 仍为 true 导致重定向循环
+      // 保存后确认初始化状态已生效，再进入后台
       const { setupStatus: latestStatus } = useAuthStore.getState();
       if (latestStatus?.needsSetup) {
         setError('配置已保存但验证未通过，请检查填写的配置是否正确');
@@ -653,12 +653,7 @@ export function SetupProvidersPage() {
               <SkipForward />
               暂不配置，进入后台
             </Button>
-            <Button
-              type="button"
-              onClick={handleFinish}
-              disabled={saving}
-              className="shrink-0"
-            >
+            <Button type="button" onClick={handleFinish} disabled={saving}>
               {saving && <Loader2 className="animate-spin" />}
               保存全局默认并进入后台
               <ArrowRight />

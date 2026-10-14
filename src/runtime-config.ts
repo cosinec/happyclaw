@@ -1680,12 +1680,23 @@ function normalizeDefaultModelConfigId(
 }
 
 /**
+ * Identifiers assigned but not yet saved, by provider id. While the disk
+ * refuses the save, every read re-derives the state from the same file, so a
+ * fresh random identifier per read would make a grant minted from one read
+ * unresolvable through the next. Emptied by the next successful save.
+ */
+const unsavedGatewayIdentifiers = new Map<string, string>();
+/** Reason of the last unsaved-repair warning; null once a save succeeds. */
+let unsavedRepairWarning: string | null = null;
+
+/**
  * Legacy subscriptions can predate the internal identifier used to mint grants,
  * and the secrets route can clear it. Fills the gap in place, so callers that
  * pass a provider list to be saved get the identifier saved with it.
  */
 function ensureCodexGatewayIdentifiers(providers: UnifiedProvider[]): boolean {
-  const repaired: string[] = [];
+  const created: string[] = [];
+  let filled = false;
   for (const provider of providers) {
     if (
       provider.codexOAuthCredentials &&
@@ -1694,17 +1705,23 @@ function ensureCodexGatewayIdentifiers(providers: UnifiedProvider[]): boolean {
     ) {
       // This stays encrypted with the provider. Only per-runner grants, never
       // this identifier, authenticate requests to the embedded gateway.
-      provider.anthropicAuthToken = crypto.randomBytes(32).toString('hex');
-      repaired.push(provider.id);
+      let identifier = unsavedGatewayIdentifiers.get(provider.id);
+      if (!identifier) {
+        identifier = crypto.randomBytes(32).toString('hex');
+        unsavedGatewayIdentifiers.set(provider.id, identifier);
+        created.push(provider.id);
+      }
+      provider.anthropicAuthToken = identifier;
+      filled = true;
     }
   }
-  if (repaired.length > 0) {
+  if (created.length > 0) {
     logger.info(
-      { providerIds: repaired },
+      { providerIds: created },
       'Assigned missing ChatGPT gateway identifiers',
     );
   }
-  return repaired.length > 0;
+  return filled;
 }
 
 /**
@@ -1803,10 +1820,16 @@ function readStoredStateV4FromDisk(): StoredStateV5 | null {
             state.defaultModelConfigId,
           );
         } catch (err) {
-          logger.warn(
-            { err, file: CLAUDE_CONFIG_FILE },
-            'Could not persist the repaired Claude model configuration; using it unsaved',
-          );
+          // Reads are frequent: say so once per distinct failure, not once
+          // per read, until a save goes through.
+          const reason = err instanceof Error ? err.message : String(err);
+          if (reason !== unsavedRepairWarning) {
+            unsavedRepairWarning = reason;
+            logger.warn(
+              { err, file: CLAUDE_CONFIG_FILE },
+              'Could not persist the repaired Claude model configuration; using it unsaved',
+            );
+          }
           return state;
         }
       }
@@ -1891,6 +1914,8 @@ function writeStoredStateV4(
 
   fs.mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true });
   writeSecretFile(CLAUDE_CONFIG_FILE, JSON.stringify(payload, null, 2) + '\n');
+  unsavedGatewayIdentifiers.clear();
+  unsavedRepairWarning = null;
 }
 
 // ─── V5 公开 API ─────────────────────────────────────────────
