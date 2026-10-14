@@ -32,6 +32,8 @@ import {
   getUserById,
   getDailyUsage,
   getWeeklyUsageSummary,
+  toLocalDateString,
+  toLocalMonthString,
 } from '../db.js';
 import {
   isBillingEnabled,
@@ -178,7 +180,10 @@ billingRoutes.get('/my/balance', authMiddleware, async (c) => {
 // GET /my/usage — current month usage + quota progress
 billingRoutes.get('/my/usage', authMiddleware, async (c) => {
   const user = c.get('user') as AuthUser;
-  const month = new Date().toISOString().slice(0, 7);
+  // monthly_usage is keyed by the local calendar month (see incrementUsageBoth's
+  // caller). Reading the UTC month made quota progress fall back to zero between
+  // local midnight and UTC midnight.
+  const month = toLocalMonthString();
   const usage = getMonthlyUsage(user.id, month);
   const effective = getUserEffectivePlan(user.id);
   const history = getUserMonthlyUsageHistory(user.id, 6);
@@ -437,8 +442,10 @@ billingRoutes.get(
     const effective = getUserEffectivePlan(userId);
     const realSubscription = getUserActiveSubscription(userId);
     const balance = getUserBalance(userId);
-    const month = new Date().toISOString().slice(0, 7);
-    const today = new Date().toISOString().slice(0, 10);
+    // Same local-calendar keys as /my/usage; the admin panel previously showed
+    // the wrong month/day for non-UTC deployments.
+    const month = toLocalMonthString();
+    const today = toLocalDateString();
     const usage = getMonthlyUsage(userId, month);
     const dailyUsage = getDailyUsage(userId, today);
     const weeklySummary = getWeeklyUsageSummary(userId);
