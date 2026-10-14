@@ -181,8 +181,8 @@ billingRoutes.get('/my/balance', authMiddleware, async (c) => {
 billingRoutes.get('/my/usage', authMiddleware, async (c) => {
   const user = c.get('user') as AuthUser;
   // monthly_usage is keyed by the local calendar month (see incrementUsageBoth's
-  // caller). Reading the UTC month made quota progress fall back to zero between
-  // local midnight and UTC midnight.
+  // caller); the key read must be the key written, or the first hours of a
+  // local month read the previous month's row.
   const month = toLocalMonthString();
   const usage = getMonthlyUsage(user.id, month);
   const effective = getUserEffectivePlan(user.id);
@@ -442,8 +442,8 @@ billingRoutes.get(
     const effective = getUserEffectivePlan(userId);
     const realSubscription = getUserActiveSubscription(userId);
     const balance = getUserBalance(userId);
-    // Same local-calendar keys as /my/usage; the admin panel previously showed
-    // the wrong month/day for non-UTC deployments.
+    // Same local-calendar keys as /my/usage, matching the keys the ledger is
+    // written with.
     const month = toLocalMonthString();
     const today = toLocalDateString();
     const usage = getMonthlyUsage(userId, month);

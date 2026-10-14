@@ -6,9 +6,9 @@ import Database from 'better-sqlite3';
 import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
 
 // The usage ledger is keyed by LOCAL calendar units, not UTC ones, and every
-// reader has to use the same keys. Rather than freeze the clock, the fixture
-// derives an instant that is guaranteed to sit in the current LOCAL month while
-// its UTC month differs, so the two conventions cannot agree by accident.
+// reader has to use the same keys. The clock is frozen at a local instant whose
+// UTC day and month both differ (see FROZEN_UTC), so the two conventions cannot
+// agree by accident.
 process.env.TZ = 'Asia/Shanghai';
 
 const tmp = fs.mkdtempSync(

@@ -8339,9 +8339,10 @@ export function cleanupOldTaskRunLogs(retentionDays = 30): number {
 }
 
 export function cleanupOldDailyUsage(retentionDays = 90): number {
-  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000)
-    .toISOString()
-    .slice(0, 10);
+  // daily_usage.date is a local calendar day, so the cutoff is one too.
+  const cutoff = toLocalDateString(
+    new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000),
+  );
   const result = prepareCached('DELETE FROM daily_usage WHERE date < ?').run(
     cutoff,
   );
@@ -15798,7 +15799,7 @@ export function getAllUserBillingOverview(): Array<{
   current_month_cost: number;
 }> {
   // Joins monthly_usage on its local-calendar `month` key; a UTC month here
-  // reports 0 / the wrong month for every non-UTC deployment.
+  // would join the previous month's row for the first hours of a local month.
   const month = toLocalMonthString();
   return prepareCached(`SELECT u.id as user_id, u.username, u.display_name, u.role,
               s.plan_id, p.name as plan_name,
