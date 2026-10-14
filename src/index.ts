@@ -264,6 +264,7 @@ import {
   releaseQueuedFollowUpBatch,
   restorePromotingFollowUpBatch,
   setMessageFollowUp,
+  toLocalMonthString,
   updateQueuedFollowUpContent,
 } from './db.js';
 import {
@@ -24269,7 +24270,10 @@ async function main(): Promise<void> {
     () => {
       if (!isBillingEnabled()) return;
       try {
-        const month = new Date().toISOString().slice(0, 7);
+        // monthly_usage/daily_usage are keyed by local calendar units. A UTC
+        // month here would reconcile the previous month, and skip the current
+        // one, during the first hours of a local month.
+        const month = toLocalMonthString();
         // Reconcile all non-admin users with pagination
         let page = 1;
         const pageSize = 200;

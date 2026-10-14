@@ -8339,9 +8339,10 @@ export function cleanupOldTaskRunLogs(retentionDays = 30): number {
 }
 
 export function cleanupOldDailyUsage(retentionDays = 90): number {
-  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000)
-    .toISOString()
-    .slice(0, 10);
+  // daily_usage.date is a local calendar day, so the cutoff is one too.
+  const cutoff = toLocalDateString(
+    new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000),
+  );
   const result = prepareCached('DELETE FROM daily_usage WHERE date < ?').run(
     cutoff,
   );
@@ -15797,7 +15798,9 @@ export function getAllUserBillingOverview(): Array<{
   balance_usd: number;
   current_month_cost: number;
 }> {
-  const month = new Date().toISOString().slice(0, 7);
+  // Joins monthly_usage on its local-calendar `month` key; a UTC month here
+  // would join the previous month's row for the first hours of a local month.
+  const month = toLocalMonthString();
   return prepareCached(`SELECT u.id as user_id, u.username, u.display_name, u.role,
               s.plan_id, p.name as plan_name,
               COALESCE(b.balance_usd, 0) as balance_usd,
@@ -15826,7 +15829,9 @@ export function getRevenueStats(): {
   activeSubscriptions: number;
   currentMonthRevenue: number;
 } {
-  const month = new Date().toISOString().slice(0, 7);
+  // monthly_usage.month is a local calendar month (see incrementUsageBoth's
+  // caller), so summing "this month" must use the local month too.
+  const month = toLocalMonthString();
   const deposited = (
     prepareCached(
       'SELECT COALESCE(SUM(total_deposited_usd), 0) as total FROM user_balances',
@@ -16033,8 +16038,11 @@ export function getDashboardStats(): {
   monthCost: number;
   activeSubscriptions: number;
 } {
-  const today = new Date().toISOString().slice(0, 10);
-  const month = new Date().toISOString().slice(0, 7);
+  // daily_usage is keyed by the local calendar day (see incrementUsageBoth's
+  // caller, which passes `toLocalDateString(createdAt)`), so the read window
+  // must use the same local day rather than the UTC one.
+  const today = toLocalDateString();
+  const month = toLocalMonthString();
 
   const totalUsers = (
     prepareCached(
