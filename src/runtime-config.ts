@@ -1679,9 +1679,24 @@ function normalizeDefaultModelConfigId(
   return named && providerHasCredentials(named) ? candidate : null;
 }
 
-/** Legacy subscriptions can predate the internal identifier used to mint grants. */
+/**
+ * Identifiers assigned but not yet saved, by provider id. While the disk
+ * refuses the save, every read re-derives the state from the same file, so a
+ * fresh random identifier per read would make a grant minted from one read
+ * unresolvable through the next. Emptied by the next successful save.
+ */
+const unsavedGatewayIdentifiers = new Map<string, string>();
+/** Reason of the last unsaved-repair warning; null once a save succeeds. */
+let unsavedRepairWarning: string | null = null;
+
+/**
+ * Legacy subscriptions can predate the internal identifier used to mint grants,
+ * and the secrets route can clear it. Fills the gap in place, so callers that
+ * pass a provider list to be saved get the identifier saved with it.
+ */
 function ensureCodexGatewayIdentifiers(providers: UnifiedProvider[]): boolean {
-  let changed = false;
+  const created: string[] = [];
+  let filled = false;
   for (const provider of providers) {
     if (
       provider.codexOAuthCredentials &&
@@ -1690,11 +1705,23 @@ function ensureCodexGatewayIdentifiers(providers: UnifiedProvider[]): boolean {
     ) {
       // This stays encrypted with the provider. Only per-runner grants, never
       // this identifier, authenticate requests to the embedded gateway.
-      provider.anthropicAuthToken = crypto.randomBytes(32).toString('hex');
-      changed = true;
+      let identifier = unsavedGatewayIdentifiers.get(provider.id);
+      if (!identifier) {
+        identifier = crypto.randomBytes(32).toString('hex');
+        unsavedGatewayIdentifiers.set(provider.id, identifier);
+        created.push(provider.id);
+      }
+      provider.anthropicAuthToken = identifier;
+      filled = true;
     }
   }
-  return changed;
+  if (created.length > 0) {
+    logger.info(
+      { providerIds: created },
+      'Assigned missing ChatGPT gateway identifiers',
+    );
+  }
+  return filled;
 }
 
 /**
@@ -1783,11 +1810,28 @@ function readStoredStateV4FromDisk(): StoredStateV5 | null {
         repairedGatewayIdentifiers ||
         Object.hasOwn(v5, 'defaultProviderId')
       ) {
-        writeStoredStateV4(
-          state.providers,
-          state.balancing,
-          state.defaultModelConfigId,
-        );
+        // Tidying a readable file must not make the whole configuration
+        // unreadable: if the disk refuses the write, serve what was read and
+        // retry on the next read.
+        try {
+          writeStoredStateV4(
+            state.providers,
+            state.balancing,
+            state.defaultModelConfigId,
+          );
+        } catch (err) {
+          // Reads are frequent: say so once per distinct failure, not once
+          // per read, until a save goes through.
+          const reason = err instanceof Error ? err.message : String(err);
+          if (reason !== unsavedRepairWarning) {
+            unsavedRepairWarning = reason;
+            logger.warn(
+              { err, file: CLAUDE_CONFIG_FILE },
+              'Could not persist the repaired Claude model configuration; using it unsaved',
+            );
+          }
+          return state;
+        }
       }
       if (Object.hasOwn(v5, 'defaultProviderId')) {
         logger.info(
@@ -1849,7 +1893,8 @@ function writeStoredStateV4(
   balancing: BalancingConfig,
   defaultModelConfigId: string | null,
 ): void {
-  // Cover V3/V4 migration and newly imported subscriptions as well as V5 reads.
+  // Fills in place: a subscription created without an identifier, or one whose
+  // identifier the secrets route cleared, is saved with a fresh one.
   ensureCodexGatewayIdentifiers(providers);
   // Every save goes through here: drop the decrypted cache first, so the next
   // read decrypts what was actually persisted.
@@ -1869,6 +1914,8 @@ function writeStoredStateV4(
 
   fs.mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true });
   writeSecretFile(CLAUDE_CONFIG_FILE, JSON.stringify(payload, null, 2) + '\n');
+  unsavedGatewayIdentifiers.clear();
+  unsavedRepairWarning = null;
 }
 
 // ─── V5 公开 API ─────────────────────────────────────────────

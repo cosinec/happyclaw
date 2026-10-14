@@ -131,11 +131,6 @@ export function LoginPage() {
         payload.invite_code = regInviteCode;
       }
       await register(payload);
-      const state = useAuthStore.getState();
-      if (state.user?.role === 'admin' && state.setupStatus?.needsSetup) {
-        navigate('/setup/providers');
-        return;
-      }
       const mustChange = useAuthStore.getState().user?.must_change_password;
       navigate(mustChange ? '/settings' : '/setup/channels');
     } catch (err) {
