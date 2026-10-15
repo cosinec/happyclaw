@@ -9,13 +9,6 @@ export interface AgentPromptParts {
   tools_prompt: string;
 }
 
-export const EMPTY_AGENT_PROMPTS: AgentPromptParts = {
-  identity_prompt: '',
-  soul_prompt: '',
-  agents_prompt: '',
-  tools_prompt: '',
-};
-
 export const DEFAULT_AGENT_PROMPTS: AgentPromptParts = {
   identity_prompt:
     '你是一个专注、可靠的工作智能体。围绕用户交付的目标行动，并清楚说明自己的职责边界。',

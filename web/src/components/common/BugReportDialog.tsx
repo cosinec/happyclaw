@@ -12,6 +12,7 @@ import {
   DialogTitle,
   DialogFooter,
 } from '@/components/ui/dialog';
+import { copyToClipboard } from '@/utils/clipboard';
 import { showToast } from '@/utils/toast';
 import { planImageClipboardPaste } from '@/lib/mixed-paste';
 import { cn } from '@/lib/utils';
@@ -331,7 +332,7 @@ export function BugReportDialog({ open, onClose }: BugReportDialogProps) {
   const handleCopy = useCallback(async () => {
     const text = `# ${title}\n\n${body}`;
     try {
-      await navigator.clipboard.writeText(text);
+      await copyToClipboard(text);
       setCopied(true);
       showToast('已复制到剪贴板');
       setTimeout(() => setCopied(false), 2000);

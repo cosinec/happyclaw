@@ -123,7 +123,10 @@ export async function pollIpcResult(
   fs.mkdirSync(resultDir, { recursive: true });
   writeIpcFile(dir, data);
 
-  const pollInterval = 500;
+  // The host answers within ~100-200ms (IPC debounce is 100ms), so poll early
+  // and back off to the steady 500ms cadence for slow requests.
+  const maxPollInterval = 500;
+  let pollInterval = 25;
   const deadline = Date.now() + timeoutMs;
 
   const readResult = (): Record<string, unknown> | undefined => {
@@ -147,6 +150,7 @@ export async function pollIpcResult(
     await new Promise((resolve) =>
       setTimeout(resolve, Math.min(pollInterval, remainingMs)),
     );
+    pollInterval = Math.min(Math.round(pollInterval * 1.5), maxPollInterval);
   }
 
   // A Host result can land during the final sleep (especially when its own

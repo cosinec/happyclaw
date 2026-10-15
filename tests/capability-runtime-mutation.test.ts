@@ -40,6 +40,10 @@ vi.mock('../src/agent-profile-runtime.js', () => ({
   getWorkspaceRuntimeJids: (_deps: unknown, folder: string) => [
     `web:${folder}`,
   ],
+  collectWorkspaceRuntimeJids: (
+    _deps: unknown,
+    targets: Array<{ folder: string }>,
+  ) => Array.from(new Set(targets.map((target) => `web:${target.folder}`))),
   quiesceWorkspaceRunnersAroundCommit: async (
     _deps: unknown,
     targets: Array<{ folder: string }>,

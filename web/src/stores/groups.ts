@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { api } from '../api/client';
+import { extractErrorMessage } from '../utils/error';
 import type { GroupInfo } from '../types';
 import { normalizeGroupInteractionMode } from '../lib/interaction-mode';
 
@@ -44,7 +45,7 @@ export const useGroupsStore = create<GroupsState>((set) => ({
     } catch (err) {
       set({
         loading: false,
-        error: err instanceof Error ? err.message : String(err),
+        error: extractErrorMessage(err),
       });
     }
   },

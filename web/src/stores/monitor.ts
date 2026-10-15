@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { api } from '../api/client';
+import { extractErrorMessage } from '../utils/error';
 
 export interface SystemStatus {
   activeContainers: number;
@@ -91,7 +92,7 @@ export const useMonitorStore = create<MonitorState>((set) => ({
     } catch (err) {
       set({
         loading: false,
-        error: err instanceof Error ? err.message : String(err),
+        error: extractErrorMessage(err),
       });
     }
   },
@@ -106,7 +107,7 @@ export const useMonitorStore = create<MonitorState>((set) => ({
         pulling: false,
         pullResult: {
           success: false,
-          error: err instanceof Error ? err.message : String(err),
+          error: extractErrorMessage(err),
         },
       });
     }

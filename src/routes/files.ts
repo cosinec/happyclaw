@@ -1,4 +1,4 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import type { Variables } from '../web-context.js';
 import { authMiddleware } from '../middleware/auth.js';
 import {
@@ -278,13 +278,11 @@ async function openDirectoryInFileManager(targetDir: string): Promise<void> {
   throw err;
 }
 
-const fileRoutes = new Hono<{ Variables: Variables }>();
-
-// GET /api/groups/:jid/files?path= - 列出文件
-fileRoutes.get('/:jid/files', authMiddleware, (c) => {
-  const jid = c.req.param('jid');
-  const subPath = c.req.query('path') || '';
-
+/** Resolve the group for a file route, or the error response to return. */
+function authorizeFileGroup(
+  c: Context<{ Variables: Variables }>,
+  jid: string,
+): { group: RegisteredGroup; authUser: AuthUser } | Response {
   const group = getRegisteredGroup(jid);
   if (!group) {
     return c.json({ error: 'Group not found' }, 404);
@@ -300,6 +298,19 @@ fileRoutes.get('/:jid/files', authMiddleware, (c) => {
       403,
     );
   }
+  return { group, authUser };
+}
+
+const fileRoutes = new Hono<{ Variables: Variables }>();
+
+// GET /api/groups/:jid/files?path= - 列出文件
+fileRoutes.get('/:jid/files', authMiddleware, (c) => {
+  const jid = c.req.param('jid');
+  const subPath = c.req.query('path') || '';
+
+  const access = authorizeFileGroup(c, jid);
+  if (access instanceof Response) return access;
+  const { group } = access;
 
   try {
     const result = listFiles(group.folder, subPath, getFileRootOverride(group));
@@ -322,21 +333,9 @@ const uploadBodyLimit = createUploadBodyLimit(MAX_FILE_SIZE);
 fileRoutes.post('/:jid/files', authMiddleware, uploadBodyLimit, async (c) => {
   const jid = c.req.param('jid');
 
-  const group = getRegisteredGroup(jid);
-  if (!group) {
-    return c.json({ error: 'Group not found' }, 404);
-  }
-
-  const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
-    return c.json({ error: 'Group not found' }, 404);
-  }
-  if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
-    return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
-      403,
-    );
-  }
+  const access = authorizeFileGroup(c, jid);
+  if (access instanceof Response) return access;
+  const { group, authUser } = access;
 
   const rootOverride = getFileRootOverride(group);
 
@@ -546,21 +545,9 @@ fileRoutes.get('/:jid/files/download/:path', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
-  const group = getRegisteredGroup(jid);
-  if (!group) {
-    return c.json({ error: 'Group not found' }, 404);
-  }
-
-  const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
-    return c.json({ error: 'Group not found' }, 404);
-  }
-  if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
-    return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
-      403,
-    );
-  }
+  const access = authorizeFileGroup(c, jid);
+  if (access instanceof Response) return access;
+  const { group } = access;
 
   try {
     // 解码 base64url 路径
@@ -647,21 +634,9 @@ fileRoutes.get('/:jid/files/preview/:path', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
-  const group = getRegisteredGroup(jid);
-  if (!group) {
-    return c.json({ error: 'Group not found' }, 404);
-  }
-
-  const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
-    return c.json({ error: 'Group not found' }, 404);
-  }
-  if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
-    return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
-      403,
-    );
-  }
+  const access = authorizeFileGroup(c, jid);
+  if (access instanceof Response) return access;
+  const { group } = access;
 
   try {
     // 解码 base64url 路径
@@ -788,21 +763,9 @@ fileRoutes.get('/:jid/files/content/:path', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
-  const group = getRegisteredGroup(jid);
-  if (!group) {
-    return c.json({ error: 'Group not found' }, 404);
-  }
-
-  const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
-    return c.json({ error: 'Group not found' }, 404);
-  }
-  if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
-    return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
-      403,
-    );
-  }
+  const access = authorizeFileGroup(c, jid);
+  if (access instanceof Response) return access;
+  const { group } = access;
 
   try {
     const rootOverride = getFileRootOverride(group);
@@ -851,21 +814,9 @@ fileRoutes.put('/:jid/files/content/:path', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
-  const group = getRegisteredGroup(jid);
-  if (!group) {
-    return c.json({ error: 'Group not found' }, 404);
-  }
-
-  const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
-    return c.json({ error: 'Group not found' }, 404);
-  }
-  if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
-    return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
-      403,
-    );
-  }
+  const access = authorizeFileGroup(c, jid);
+  if (access instanceof Response) return access;
+  const { group, authUser } = access;
 
   try {
     const rootOverride = getFileRootOverride(group);
@@ -950,21 +901,9 @@ fileRoutes.delete('/:jid/files/:path', authMiddleware, (c) => {
   const jid = c.req.param('jid');
   const encodedPath = c.req.param('path');
 
-  const group = getRegisteredGroup(jid);
-  if (!group) {
-    return c.json({ error: 'Group not found' }, 404);
-  }
-
-  const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
-    return c.json({ error: 'Group not found' }, 404);
-  }
-  if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
-    return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
-      403,
-    );
-  }
+  const access = authorizeFileGroup(c, jid);
+  if (access instanceof Response) return access;
+  const { group } = access;
 
   try {
     const rootOverride = getFileRootOverride(group);
@@ -998,21 +937,9 @@ fileRoutes.delete('/:jid/files/:path', authMiddleware, (c) => {
 fileRoutes.post('/:jid/directories', authMiddleware, async (c) => {
   const jid = c.req.param('jid');
 
-  const group = getRegisteredGroup(jid);
-  if (!group) {
-    return c.json({ error: 'Group not found' }, 404);
-  }
-
-  const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
-    return c.json({ error: 'Group not found' }, 404);
-  }
-  if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
-    return c.json(
-      { error: 'Insufficient permissions for host execution mode' },
-      403,
-    );
-  }
+  const access = authorizeFileGroup(c, jid);
+  if (access instanceof Response) return access;
+  const { group } = access;
 
   try {
     const body = await c.req.json();

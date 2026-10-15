@@ -55,7 +55,7 @@ describe('WeCom full-stack provider registration', () => {
       'web/src/utils/channel-accounts.ts',
       'web/src/stores/channel-accounts.ts',
       'web/src/utils/task-utils.ts',
-      'src/task-scheduler.ts',
+      'src/channel-prefixes.ts',
       'src/schemas.ts',
     ]) {
       expect(read(file), file).toContain('wecom');

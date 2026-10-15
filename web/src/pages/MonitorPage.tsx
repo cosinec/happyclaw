@@ -9,10 +9,7 @@ import {
   GroupStatusCard,
   type MonitorGroupStatus,
 } from '../components/monitor/GroupStatusCard';
-import {
-  ProviderSwitcher,
-  type SimpleProvider,
-} from '../components/monitor/ProviderSwitcher';
+import { ProviderSwitcher } from '../components/monitor/ProviderSwitcher';
 import {
   RefreshCw,
   AlertTriangle,
@@ -38,7 +35,6 @@ import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { cn } from '@/lib/utils';
 import { wsManager } from '../api/ws';
-import { api } from '@/api/client';
 import { useVisibleInterval } from '../hooks/useVisibleInterval';
 
 type ClaudeStatusIndicator = 'none' | 'minor' | 'major' | 'critical';
@@ -85,7 +81,6 @@ export function MonitorPage({ embedded = false }: MonitorPageProps) {
     s.hasPermission('manage_system_config'),
   );
   const logEndRef = useRef<HTMLDivElement>(null);
-  const [providers, setProviders] = useState<SimpleProvider[]>([]);
   const [claudeStatus, setClaudeStatus] = useState<{
     description: string;
     indicator: ClaudeStatusIndicator | null;
@@ -161,22 +156,6 @@ export function MonitorPage({ embedded = false }: MonitorPageProps) {
     };
   }, [loadStatus]);
 
-  // Fetch providers once for all ProviderSwitcher instances
-  useEffect(() => {
-    api
-      .get<{
-        providers: Array<{ id: string; name: string; enabled: boolean }>;
-      }>('/api/config/claude/providers')
-      .then((data) =>
-        setProviders(
-          data.providers
-            .filter((p) => p.enabled)
-            .map(({ id, name }) => ({ id, name })),
-        ),
-      )
-      .catch(() => {});
-  }, []);
-
   // Auto-scroll pull logs to bottom
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -232,7 +211,6 @@ export function MonitorPage({ embedded = false }: MonitorPageProps) {
             groupFolder={group.groupFolder}
             currentProviderId={group.selectedProviderId}
             currentProviderName={group.selectedProviderName}
-            providers={providers}
           />
         ) : (
           <span className="text-muted-foreground">-</span>
@@ -417,11 +395,7 @@ export function MonitorPage({ embedded = false }: MonitorPageProps) {
               {/* 移动端：列表 */}
               <ListGroup className="lg:hidden">
                 {status.groups.map((group) => (
-                  <GroupStatusCard
-                    key={group.jid}
-                    group={group}
-                    providers={providers}
-                  />
+                  <GroupStatusCard key={group.jid} group={group} />
                 ))}
               </ListGroup>
 

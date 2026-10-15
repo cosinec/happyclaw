@@ -7,7 +7,7 @@ import { downloadHttpsBuffer } from './im-media-download.js';
 import { Agent as HttpsAgent } from 'node:https';
 import { ProxyAgent } from 'proxy-agent';
 import { storeChatMetadata, storeMessageDirect, updateChatName } from './db.js';
-import { createDedupCache } from './im-utils.js';
+import { createDedupCache, splitTextChunks } from './im-utils.js';
 import { notifyNewImMessage } from './message-notifier.js';
 import { logger } from './logger.js';
 import {
@@ -688,43 +688,6 @@ function markdownToTelegramHtml(md: string): string {
   text = text.replace(/\x00IC(\d+)\x00/g, (_, i) => inlineCodes[Number(i)]);
 
   return text;
-}
-
-/**
- * Split markdown text into chunks at safe boundaries (paragraphs, lines, words).
- */
-function splitMarkdownChunks(text: string, limit: number): string[] {
-  if (text.length <= limit) return [text];
-
-  const chunks: string[] = [];
-  let remaining = text;
-
-  while (remaining.length > 0) {
-    if (remaining.length <= limit) {
-      chunks.push(remaining);
-      break;
-    }
-
-    // Try to split at paragraph boundary
-    let splitIdx = remaining.lastIndexOf('\n\n', limit);
-    if (splitIdx < limit * 0.3) {
-      // Try single newline
-      splitIdx = remaining.lastIndexOf('\n', limit);
-    }
-    if (splitIdx < limit * 0.3) {
-      // Try space
-      splitIdx = remaining.lastIndexOf(' ', limit);
-    }
-    if (splitIdx < limit * 0.3) {
-      // Hard split
-      splitIdx = limit;
-    }
-
-    chunks.push(remaining.slice(0, splitIdx));
-    remaining = remaining.slice(splitIdx).trimStart();
-  }
-
-  return chunks;
 }
 
 // ─── Factory Function ──────────────────────────────────────────
@@ -2135,7 +2098,7 @@ export function createTelegramConnection(
 
       try {
         // Split original markdown into chunks (leave room for HTML tag overhead)
-        const mdChunks = splitMarkdownChunks(text, 3800);
+        const mdChunks = splitTextChunks(text, 3800);
         const tracker = new PhysicalDeliveryTracker(
           mdChunks.length + (localImagePaths?.length ?? 0),
         );

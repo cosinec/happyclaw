@@ -66,6 +66,7 @@ vi.mock('../src/agent-profile-runtime.js', () => {
       { jid: 'web:workspace', group: { folder: 'workspace-folder' } },
     ],
     getWorkspaceRuntimeJids: () => ['web:workspace'],
+    collectWorkspaceRuntimeJids: () => ['web:workspace'],
     quiesceWorkspaceRunnersAroundCommit: async (
       _deps: unknown,
       _targets: unknown,

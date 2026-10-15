@@ -15,6 +15,7 @@ import {
   SettingsGroup,
   SettingsSection,
 } from '@/components/settings/SettingsLayout';
+import { extractErrorMessage } from '@/utils/error';
 import {
   Callout,
   CapabilityListSkeleton,
@@ -92,9 +93,7 @@ export function PluginsPage() {
         toast.success(`已禁用 ${plugin.fullId}。下次新会话生效。`);
       }
     } catch (err) {
-      toast.error(
-        `切换失败：${err instanceof Error ? err.message : String(err)}`,
-      );
+      toast.error(`切换失败：${extractErrorMessage(err)}`);
     }
   };
 
@@ -108,9 +107,7 @@ export function PluginsPage() {
         toast.warning(`扫描告警:\n${report.warnings.join('\n')}`);
       }
     } catch (err) {
-      toast.error(
-        `扫描失败：${err instanceof Error ? err.message : String(err)}`,
-      );
+      toast.error(`扫描失败：${extractErrorMessage(err)}`);
     }
   };
 
@@ -123,9 +120,7 @@ export function PluginsPage() {
       );
       setDeleteTarget(null);
     } catch (err) {
-      toast.error(
-        `删除失败：${err instanceof Error ? err.message : String(err)}`,
-      );
+      toast.error(`删除失败：${extractErrorMessage(err)}`);
     }
   };
 

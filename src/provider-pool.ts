@@ -283,11 +283,6 @@ export class ProviderPool {
     return JSON.stringify({ accountWalls, modelWalls });
   }
 
-  /** How many enabled members are currently configured */
-  getEnabledCount(): number {
-    return this.members.filter((m) => m.enabled).length;
-  }
-
   // ─── 选择算法 ────────────────────────────────────────────
 
   /**

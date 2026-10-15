@@ -10,10 +10,6 @@ import { logger } from './logger.js';
 const _storageCache = new Map<string, { bytes: number; expires: number }>();
 const STORAGE_CACHE_TTL = 5 * 60 * 1000;
 
-function getStorageCacheKey(folder: string, rootOverride?: string): string {
-  return getFileRoot(folder, rootOverride);
-}
-
 // 类型
 export interface FileEntry {
   name: string;
@@ -480,7 +476,7 @@ export function getGroupStorageUsage(
   folder: string,
   rootOverride?: string,
 ): number {
-  const cacheKey = getStorageCacheKey(folder, rootOverride);
+  const cacheKey = getFileRoot(folder, rootOverride);
   const cached = _storageCache.get(cacheKey);
   if (cached && cached.expires > Date.now()) {
     return cached.bytes;
@@ -507,7 +503,7 @@ export function invalidateGroupStorageUsage(
   folder: string,
   rootOverride?: string,
 ): void {
-  _storageCache.delete(getStorageCacheKey(folder, rootOverride));
+  _storageCache.delete(getFileRoot(folder, rootOverride));
 }
 
 const MAX_DIR_DEPTH = 20;

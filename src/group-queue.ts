@@ -240,7 +240,6 @@ export class GroupQueue {
   private nextMutationPauseTokenId = 1;
   private mutationPreserveStopJids = new Set<string>();
   private mutationStoppedFolders = new Set<string>();
-  private contextOverflowGroups = new Set<string>(); // 跟踪发生上下文溢出的 group
   // 记录最近一次 stopGroup 的时间戳（毫秒）。runForGroup finally 块会用它来
   // 决定是否跳过自动 drainGroup —— stopGroup 中清空 pendingMessages 之后，
   // hasIpcInjectedMessages 重新置 pendingMessages=true，会让用户的 'stop' 之后
@@ -621,7 +620,6 @@ export class GroupQueue {
 
   /** 本轮失败后队列是否还会再次重试（决定错误提示发本轮还是等最终失败）。 */
   willRetryAfterFailure(groupJid: string): boolean {
-    if (this.contextOverflowGroups.has(groupJid)) return false;
     return (this.groups.get(groupJid)?.retryCount ?? 0) < MAX_RETRIES;
   }
 
@@ -839,17 +837,6 @@ export class GroupQueue {
     fn: (receipt: IpcDeliveryReceipt) => boolean,
   ): void {
     this.isIpcDeliveryCommitEligibleFn = fn;
-  }
-
-  /**
-   * 标记 group 发生了上下文溢出错误，跳过指数退避重试
-   */
-  markContextOverflow(groupJid: string): void {
-    this.contextOverflowGroups.add(groupJid);
-    logger.warn(
-      { groupJid },
-      'Marked group as context overflow - will skip retry backoff',
-    );
   }
 
   /**
@@ -1076,16 +1063,6 @@ export class GroupQueue {
       }
     }
     return result;
-  }
-
-  /**
-   * Returns true if the active runner for this group (or its serialization
-   * sibling) is currently executing a scheduled task rather than user messages.
-   * Used by the message loop to avoid prematurely interrupting task containers.
-   */
-  isActiveRunnerTask(groupJid: string): boolean {
-    const state = this.resolveActiveState(groupJid);
-    return state?.activeRunnerIsTask === true;
   }
 
   markRunnerActivity(groupJid: string): void {
@@ -1421,15 +1398,6 @@ export class GroupQueue {
       return null;
     }
     return current;
-  }
-
-  /**
-   * Get the PID of the active runner process for a group.
-   * Returns undefined if no active process or running in container mode.
-   */
-  getRunnerPid(groupJid: string): number | undefined {
-    const state = this.groups.get(groupJid);
-    return state?.process?.pid;
   }
 
   /**
@@ -2253,27 +2221,6 @@ export class GroupQueue {
   }
 
   /**
-   * Signal a specific group's active container to gracefully exit.
-   * Used by provider switch: after the container exits, processGroupMessages
-   * will automatically restart it (picking up the new provider via override).
-   * Uses _drain (not _close) so the current query finishes before exit.
-   */
-  requestGracefulRestart(groupJid: string): boolean {
-    const state = this.groups.get(groupJid);
-    if (!state?.active || !state.groupFolder) return false;
-    const written = this.writeDrainSentinel(state as ActiveGroupState);
-    if (written) {
-      // Ensure close handler triggers a new run even if no messages are pending
-      state.pendingMessages = true;
-      logger.info(
-        { groupJid, groupFolder: state.groupFolder },
-        'Sent drain signal for provider switch',
-      );
-    }
-    return written;
-  }
-
-  /**
    * Close all active containers/processes so they restart with fresh credentials.
    * Called after OAuth token refresh to ensure running agents pick up new tokens.
    */
@@ -2595,10 +2542,7 @@ export class GroupQueue {
       // generous enough for the agent to finish its current operation and
       // emit the final session ID.
       if (state.groupFolder && !state.containerName) {
-        const graceStart = Date.now();
-        while (state.active && Date.now() - graceStart < 2000) {
-          await new Promise((r) => setTimeout(r, 200));
-        }
+        await this.waitForRunnerTeardown(state, 2000);
       }
 
       // Stop docker container / host process
@@ -2614,11 +2558,7 @@ export class GroupQueue {
       }
 
       // Wait for runForGroup to finish and reset state
-      const maxWait = 20000;
-      const start = Date.now();
-      while (state.active && Date.now() - start < maxWait) {
-        await new Promise((r) => setTimeout(r, 200));
-      }
+      await this.waitForRunnerTeardown(state, 20000);
 
       if (state.active) {
         logger.warn(
@@ -2634,16 +2574,10 @@ export class GroupQueue {
             );
           });
           // Brief wait for process cleanup after force-kill
-          const killStart = Date.now();
-          while (state.active && Date.now() - killStart < 5000) {
-            await new Promise((r) => setTimeout(r, 200));
-          }
+          await this.waitForRunnerTeardown(state, 5000);
         } else if (state.process) {
           killProcessTree(state.process, 'SIGKILL');
-          const killStart = Date.now();
-          while (state.active && Date.now() - killStart < 5000) {
-            await new Promise((r) => setTimeout(r, 200));
-          }
+          await this.waitForRunnerTeardown(state, 5000);
         }
       }
 
@@ -3083,18 +3017,6 @@ export class GroupQueue {
     }
     state.retryTask = null;
 
-    // 检查是否为上下文溢出错误，如果是则跳过重试
-    if (this.contextOverflowGroups.has(groupJid)) {
-      logger.warn(
-        { groupJid },
-        'Skipping retry for context overflow error (agent already retried 3 times)',
-      );
-      state.retryCount = 0;
-      state.retryTask = null;
-      this.contextOverflowGroups.delete(groupJid); // 清除标记
-      return;
-    }
-
     state.retryCount++;
     if (state.retryCount > MAX_RETRIES) {
       logger.error(
@@ -3227,7 +3149,6 @@ export class GroupQueue {
         !this.waitingGroups.has(groupJid)
       ) {
         this.groups.delete(groupJid);
-        this.contextOverflowGroups.delete(groupJid);
         // fall through to drainWaiting so other waiting groups still get a slot
       }
     }

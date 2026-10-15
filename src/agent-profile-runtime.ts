@@ -9,6 +9,7 @@ import {
   getUserById,
   getWorkspaceAgentProfileId,
 } from './db.js';
+import { KeyedLockPool } from './capability-lock.js';
 import { getSystemSettings } from './runtime-config.js';
 import type { AgentProfile, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
@@ -120,63 +121,18 @@ export class WorkspaceRuntimeQuiesceError<T = unknown> extends Error {
   }
 }
 
-type AgentProfileLockState = {
-  tail: Promise<void>;
-  references: number;
-};
-
-const agentProfileLocks = new Map<string, AgentProfileLockState>();
-
-async function acquireAgentProfileLock(profileId: string): Promise<() => void> {
-  let state = agentProfileLocks.get(profileId);
-  if (!state) {
-    state = { tail: Promise.resolve(), references: 0 };
-    agentProfileLocks.set(profileId, state);
-  }
-  state.references += 1;
-
-  const previous = state.tail;
-  let releaseGate!: () => void;
-  const gate = new Promise<void>((resolve) => {
-    releaseGate = resolve;
-  });
-  state.tail = previous.then(() => gate);
-  await previous;
-
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    releaseGate();
-    state!.references -= 1;
-    if (state!.references === 0 && agentProfileLocks.get(profileId) === state) {
-      agentProfileLocks.delete(profileId);
-    }
-  };
-}
+const agentProfileLocks = new KeyedLockPool();
 
 /**
  * Serialize membership/config mutations by top-level AgentProfile. Multiple
  * keys are always acquired in lexical order, so opposite A→B/B→A migrations
- * cannot deadlock. References include queued holders and are removed in the
- * exceptional path as well as success.
+ * cannot deadlock.
  */
-export async function withAgentProfileLocks<T>(
+export function withAgentProfileLocks<T>(
   profileIds: string[],
   operation: () => Promise<T> | T,
 ): Promise<T> {
-  const orderedIds = Array.from(new Set(profileIds)).sort();
-  const releases: Array<() => void> = [];
-  try {
-    for (const profileId of orderedIds) {
-      releases.push(await acquireAgentProfileLock(profileId));
-    }
-    return await operation();
-  } finally {
-    for (let index = releases.length - 1; index >= 0; index -= 1) {
-      releases[index]();
-    }
-  }
+  return agentProfileLocks.withLocks(profileIds, operation);
 }
 
 export function listWorkspaceGroupsForAgentProfile(
@@ -211,7 +167,7 @@ export function getWorkspaceRuntimeJids(
   return Array.from(new Set([...siblingJids, ...descendantJids]));
 }
 
-function collectWorkspaceRuntimeJids(
+export function collectWorkspaceRuntimeJids(
   deps: WebDeps,
   targets: WorkspaceRuntimeQuiesceTarget[],
 ): string[] {

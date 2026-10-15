@@ -52,13 +52,6 @@ function conversationAliases(jid: string): Set<string> {
   return new Set([jid, channelConversationJid(jid)]);
 }
 
-function sourceMatchesConversation(
-  sourceJid: string,
-  conversationJid: string,
-): boolean {
-  return sourceMatchesChannelConversation(sourceJid, conversationJid);
-}
-
 function resolveMountedWorkspace(
   targetMainJid: string | undefined,
 ): { workspaceJid: string; workspace: RegisteredGroup } | null {
@@ -77,7 +70,7 @@ function countRecoverableInboundFromChat(
   channelJid: string,
 ): number {
   const knownSources = listRecoverableInboundSourceJids(workspaceJid).filter(
-    (sourceJid) => sourceMatchesConversation(sourceJid, channelJid),
+    (sourceJid) => sourceMatchesChannelConversation(sourceJid, channelJid),
   );
   return countRecoverableInboundMessagesFromSources(workspaceJid, [
     ...conversationAliases(channelJid),
@@ -92,7 +85,7 @@ function countRecoverableInboundFromChats(
   const knownSources = listRecoverableInboundSourceJids(workspaceJid).filter(
     (sourceJid) =>
       channelJids.some((channelJid) =>
-        sourceMatchesConversation(sourceJid, channelJid),
+        sourceMatchesChannelConversation(sourceJid, channelJid),
       ),
   );
   return countRecoverableInboundMessagesFromSources(workspaceJid, [
@@ -125,7 +118,7 @@ export function findLeftoverClassifiableDirectWorkspaceMounts(): LeftoverDirectW
       channelAccountId: group.channel_account_id,
       mainOwnerJid,
       mainOwnerIsThisChat: Boolean(
-        mainOwnerJid && sourceMatchesConversation(mainOwnerJid, jid),
+        mainOwnerJid && sourceMatchesChannelConversation(mainOwnerJid, jid),
       ),
       mainSessionId: getSession(mounted.workspace.folder),
       existingIsolationMarker: getConversationHistoryIsolationMarker(

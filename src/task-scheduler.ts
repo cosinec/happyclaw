@@ -118,6 +118,7 @@ import {
 import { resolveScheduledGroupDeliveryContract } from './reply-delivery.js';
 import { resolveRuntimeInteractionMode } from './workspace-interaction-runtime.js';
 import { explicitImDeliveryPhase } from './im-send-retry-policy.js';
+import { CHANNEL_PREFIXES } from './channel-prefixes.js';
 
 export function shouldFinalizeScheduledRunOutput(
   output: Pick<
@@ -3213,16 +3214,7 @@ function retryPayloadForReceipt(
   ) {
     return payload;
   }
-  const knownChannelTypes = new Set([
-    'feishu',
-    'telegram',
-    'qq',
-    'wechat',
-    'wecom',
-    'dingtalk',
-    'discord',
-    'whatsapp',
-  ]);
+  const knownChannelTypes = new Set(Object.keys(CHANNEL_PREFIXES));
   let failedChannels = receipt.summary.failed_channels.filter(
     (channel) =>
       knownChannelTypes.has(channel) && !uncertainChannels.has(channel),

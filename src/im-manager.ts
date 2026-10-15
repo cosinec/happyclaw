@@ -1159,8 +1159,8 @@ export class IMConnectionManager {
   }
 
   /**
-   * Create a streaming card session for an IM chat (Feishu or DingTalk).
-   * Returns undefined for unsupported channels.
+   * Create a streaming card session for an IM chat.
+   * Returns undefined for channels whose adapter has no streaming support.
    */
   async createStreamingSession(
     jid: string,
@@ -1169,14 +1169,7 @@ export class IMConnectionManager {
     inputMessageId?: string,
   ): Promise<StreamingSession | undefined> {
     const channelType = getChannelType(jid);
-    if (
-      channelType !== 'feishu' &&
-      channelType !== 'dingtalk' &&
-      channelType !== 'discord' &&
-      channelType !== 'qq' &&
-      channelType !== 'wecom'
-    )
-      return undefined;
+    if (!channelType) return undefined;
 
     // Check DingTalk streaming mode: if text mode, skip streaming session creation
     if (channelType === 'dingtalk') {
@@ -1774,10 +1767,6 @@ export class IMConnectionManager {
     );
   }
 
-  async disconnectUserWeCom(userId: string): Promise<void> {
-    await this.disconnectChannel(userId, 'wecom');
-  }
-
   /**
    * Connect a WhatsApp instance for a specific user.
    *
@@ -2116,74 +2105,6 @@ export class IMConnectionManager {
   }
 
   /**
-   * Send a message to a Feishu chat.
-   * @deprecated Use sendMessage(jid, text) which auto-routes.
-   */
-  async sendFeishuMessage(
-    chatJid: string,
-    text: string,
-    localImagePaths?: string[],
-  ): Promise<void> {
-    const chatId = extractProviderTarget(chatJid);
-    const channel = this.findChannelForJid(chatJid, 'feishu');
-    if (channel) {
-      await channel.sendMessage(chatId, text, localImagePaths);
-      return;
-    }
-    logger.warn({ chatJid }, 'No Feishu connection available to send message');
-  }
-
-  /**
-   * Send a message to a Telegram chat.
-   * @deprecated Use sendMessage(jid, text) which auto-routes.
-   */
-  async sendTelegramMessage(
-    chatJid: string,
-    text: string,
-    localImagePaths?: string[],
-  ): Promise<void> {
-    const chatId = extractProviderTarget(chatJid);
-    const channel = this.findChannelForJid(chatJid, 'telegram');
-    if (channel) {
-      await channel.sendMessage(chatId, text, localImagePaths);
-      return;
-    }
-    logger.warn(
-      { chatJid },
-      'No Telegram connection available to send message',
-    );
-  }
-
-  /**
-   * Set Telegram typing chat action for a chat.
-   * @deprecated Use setTyping(jid, isTyping) which auto-routes.
-   */
-  async setTelegramTyping(chatJid: string, isTyping: boolean): Promise<void> {
-    const chatId = extractProviderTarget(chatJid);
-    const channel = this.findChannelForJid(chatJid, 'telegram');
-    if (channel) {
-      await channel.setTyping(chatId, isTyping);
-    }
-  }
-
-  /**
-   * Sync Feishu groups via a specific user's connection.
-   */
-  async syncFeishuGroups(userId: string, accountId?: string): Promise<void> {
-    const conn = this.connections.get(userId);
-    const effectiveId =
-      accountId ?? getDefaultChannelAccount(userId, 'feishu')?.id ?? null;
-    const channel =
-      conn?.channels.get(this.channelKey('feishu', accountId)) ??
-      (effectiveId
-        ? conn?.channels.get(this.channelKey('feishu', effectiveId))
-        : undefined);
-    if (channel?.isConnected() && channel.syncGroups) {
-      await channel.syncGroups();
-    }
-  }
-
-  /**
    * Sync every connected Feishu bot owned by one HappyClaw user.
    *
    * The binding UI uses this instead of guessing a default account: every bot
@@ -2330,30 +2251,6 @@ export class IMConnectionManager {
               getDefaultChannelAccount(userId, 'feishu')!.id,
             ),
           )
-        : undefined)
-    );
-  }
-
-  /** Get the Telegram channel for a user */
-  getTelegramConnection(userId: string): IMChannel | undefined {
-    const conn = this.connections.get(userId);
-    const account = getDefaultChannelAccount(userId, 'telegram');
-    return (
-      conn?.channels.get('telegram') ??
-      (account
-        ? conn?.channels.get(this.channelKey('telegram', account.id))
-        : undefined)
-    );
-  }
-
-  /** Get the QQ channel for a user */
-  getQQConnection(userId: string): IMChannel | undefined {
-    const conn = this.connections.get(userId);
-    const account = getDefaultChannelAccount(userId, 'qq');
-    return (
-      conn?.channels.get('qq') ??
-      (account
-        ? conn?.channels.get(this.channelKey('qq', account.id))
         : undefined)
     );
   }

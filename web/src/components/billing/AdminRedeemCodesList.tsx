@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useBillingStore, type RedeemCode } from '../../stores/billing';
+import { copyToClipboard } from '../../utils/clipboard';
 import { useCurrency } from './utils';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -78,7 +79,7 @@ export default function AdminRedeemCodesList() {
   }, [redeemCodes, typeFilter, search]);
 
   const handleCopy = (code: string) => {
-    navigator.clipboard.writeText(code);
+    copyToClipboard(code);
     setCopiedCode(code);
     setTimeout(() => setCopiedCode(null), 2000);
   };

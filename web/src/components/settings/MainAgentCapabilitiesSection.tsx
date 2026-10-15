@@ -7,10 +7,7 @@ import { useAgentProfilesStore } from '../../stores/agent-profiles';
 import { useMcpServersStore } from '../../stores/mcp-servers';
 import { useSkillsStore } from '../../stores/skills';
 import type { AgentEffortLevel, AgentProfileRuntimePolicy } from '../../types';
-import {
-  buildMcpPolicyOptions,
-  normalizeMcpPolicyReferences,
-} from '../../utils/mcp-servers';
+import { normalizeMcpPolicyReferences } from '../../utils/mcp-servers';
 import { PolicyResourcePicker } from '../agents/PolicyResourcePicker';
 import { AgentSkillsPolicyEditor } from '../agents/AgentSkillsPolicyEditor';
 import { EffectiveCapabilitiesPreview } from '../agents/EffectiveCapabilitiesPreview';
@@ -24,6 +21,10 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import {
+  AGENT_EFFORT_OPTIONS,
+  buildHostSkillOptions,
+  buildManagedSkillOptions,
+  buildMcpSelectionOptions,
   getHostSkillPolicy,
   skillSelectionError,
 } from '../../utils/agent-runtime-policy';
@@ -31,18 +32,6 @@ import { SettingsGroup, SettingsRow, SettingsSection } from './SettingsLayout';
 import { SettingsFormFooter } from './SettingsFormControls';
 
 type CapabilityMode = 'inherit' | 'custom' | 'disabled';
-
-const AGENT_EFFORT_OPTIONS: Array<{
-  value: AgentEffortLevel;
-  label: string;
-}> = [
-  { value: 'inherit', label: '跟随模型配置' },
-  { value: 'low', label: 'Low' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'high', label: 'High' },
-  { value: 'xhigh', label: 'XHigh' },
-  { value: 'max', label: 'Max' },
-];
 
 export function MainAgentCapabilitiesSection() {
   const profiles = useAgentProfilesStore((state) => state.profiles);
@@ -101,56 +90,18 @@ export function MainAgentCapabilitiesSection() {
     void loadProfileGovernance(profile.id).catch(() => undefined);
   }, [loadProfileGovernance, profile?.id]);
 
-  const skillOptions = useMemo(() => {
-    const available = skills
-      .filter((skill) => skill.source === 'user' && skill.enabled)
-      .map((skill) => ({
-        id: skill.id,
-        name: skill.name || skill.id,
-        description: skill.description,
-      }));
-    const known = new Set(available.map((item) => item.id));
-    return [
-      ...available,
-      ...skillIds
-        .filter((id) => !known.has(id))
-        .map((id) => ({ id, name: id, unavailable: true })),
-    ];
-  }, [skillIds, skills]);
-
-  const hostSkillOptions = useMemo(() => {
-    const available = skills
-      .filter((skill) => skill.source === 'external' && skill.enabled)
-      .map((skill) => ({
-        id: skill.id,
-        name: skill.name || skill.id,
-        description: skill.description,
-        sourceLabel: '宿主机',
-      }));
-    const known = new Set(available.map((item) => item.id));
-    return [
-      ...available,
-      ...hostSkillIds
-        .filter((id) => !known.has(id))
-        .map((id) => ({
-          id,
-          name: id,
-          sourceLabel: '宿主机',
-          unavailable: true,
-        })),
-    ];
-  }, [hostSkillIds, skills]);
-
-  const mcpOptions = useMemo(() => {
-    const available = buildMcpPolicyOptions(mcpServers);
-    const known = new Set(available.map((item) => item.id));
-    return [
-      ...available,
-      ...mcpIds
-        .filter((id) => !known.has(id))
-        .map((id) => ({ id, name: id, unavailable: true })),
-    ];
-  }, [mcpIds, mcpServers]);
+  const skillOptions = useMemo(
+    () => buildManagedSkillOptions(skills, skillIds),
+    [skillIds, skills],
+  );
+  const hostSkillOptions = useMemo(
+    () => buildHostSkillOptions(skills, hostSkillIds),
+    [hostSkillIds, skills],
+  );
+  const mcpOptions = useMemo(
+    () => buildMcpSelectionOptions(mcpServers, mcpIds),
+    [mcpIds, mcpServers],
+  );
 
   const persistedHostPolicy = profile
     ? getHostSkillPolicy(profile.runtime_policy)

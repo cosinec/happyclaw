@@ -765,7 +765,7 @@ billingRoutes.get(
   '/admin/redeem-codes/export',
   authMiddleware,
   billingManageMiddleware,
-  async (c) => {
+  () => {
     const codes = getAllRedeemCodes();
     const header =
       'code,type,value_usd,plan_id,duration_days,max_uses,used_count,expires_at,notes,batch_id,created_at\n';

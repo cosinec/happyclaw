@@ -1,4 +1,11 @@
-import { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from 'react';
 import type { ComponentProps, ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { History, Pencil, RefreshCw, ShieldAlert } from 'lucide-react';
@@ -206,6 +213,21 @@ function PropertyGroup({
   );
 }
 
+function formFromTask(task: ScheduledTask) {
+  return {
+    prompt: task.prompt,
+    script_command: task.script_command || '',
+    schedule_type: task.schedule_type,
+    schedule_value: task.schedule_value,
+    notify_channels: task.notify_channels ?? null,
+    chat_jid: task.chat_jid,
+    execution_mode: (task.execution_type === 'script'
+      ? 'host'
+      : (task.execution_mode ?? 'container')) as TaskExecutionMode,
+    context_mode: task.context_mode,
+  };
+}
+
 export function TaskDetail({ task, initialEditing = false }: TaskDetailProps) {
   const { updateTask, loadLogs, logs } = useTasksStore();
 
@@ -249,18 +271,7 @@ export function TaskDetail({ task, initialEditing = false }: TaskDetailProps) {
   const canEdit = !(task.deleted_at || task.permissions?.can_edit === false);
   const [editing, setEditing] = useState(initialEditing && canEdit);
   const [saving, setSaving] = useState(false);
-  const [editForm, setEditForm] = useState({
-    prompt: task.prompt,
-    script_command: task.script_command || '',
-    schedule_type: task.schedule_type,
-    schedule_value: task.schedule_value,
-    notify_channels: task.notify_channels ?? null,
-    chat_jid: task.chat_jid,
-    execution_mode: (task.execution_type === 'script'
-      ? 'host'
-      : (task.execution_mode ?? 'container')) as TaskExecutionMode,
-    context_mode: task.context_mode,
-  });
+  const [editForm, setEditForm] = useState(() => formFromTask(task));
 
   // Interval editing: decompose ms into number + unit
   const initialInterval = useMemo(
@@ -270,26 +281,17 @@ export function TaskDetail({ task, initialEditing = false }: TaskDetailProps) {
   const [intervalNum, setIntervalNum] = useState(initialInterval.num);
   const [intervalUnit, setIntervalUnit] = useState(initialInterval.unitMs);
 
+  const resetEditState = useCallback(() => {
+    setEditForm(formFromTask(task));
+    const decomposed = decomposeInterval(task.schedule_value);
+    setIntervalNum(decomposed.num);
+    setIntervalUnit(decomposed.unitMs);
+  }, [task]);
+
   // Sync form when task prop changes (e.g. after save)
   useEffect(() => {
-    if (!editing) {
-      setEditForm({
-        prompt: task.prompt,
-        script_command: task.script_command || '',
-        schedule_type: task.schedule_type,
-        schedule_value: task.schedule_value,
-        notify_channels: task.notify_channels ?? null,
-        chat_jid: task.chat_jid,
-        execution_mode: (task.execution_type === 'script'
-          ? 'host'
-          : (task.execution_mode ?? 'container')) as TaskExecutionMode,
-        context_mode: task.context_mode,
-      });
-      const decomposed = decomposeInterval(task.schedule_value);
-      setIntervalNum(decomposed.num);
-      setIntervalUnit(decomposed.unitMs);
-    }
-  }, [task, editing]);
+    if (!editing) resetEditState();
+  }, [resetEditState, editing]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -347,21 +349,7 @@ export function TaskDetail({ task, initialEditing = false }: TaskDetailProps) {
   };
 
   const handleCancel = () => {
-    setEditForm({
-      prompt: task.prompt,
-      script_command: task.script_command || '',
-      schedule_type: task.schedule_type,
-      schedule_value: task.schedule_value,
-      notify_channels: task.notify_channels ?? null,
-      chat_jid: task.chat_jid,
-      execution_mode: (task.execution_type === 'script'
-        ? 'host'
-        : (task.execution_mode ?? 'container')) as TaskExecutionMode,
-      context_mode: task.context_mode,
-    });
-    const decomposed = decomposeInterval(task.schedule_value);
-    setIntervalNum(decomposed.num);
-    setIntervalUnit(decomposed.unitMs);
+    resetEditState();
     setEditing(false);
   };
 

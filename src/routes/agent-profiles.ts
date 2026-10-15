@@ -14,6 +14,7 @@ import {
 } from '../schemas.js';
 import type { AuthUser } from '../types.js';
 import {
+  ClaudeProviderNotConfiguredError,
   generateAgentProfileDraft,
   refineAgentProfilePrompt,
 } from '../agent-profile-generator.js';
@@ -25,6 +26,7 @@ import {
   AVATAR_MAX_FILE_BYTES,
 } from '../http-upload-policy.js';
 import {
+  collectWorkspaceRuntimeJids,
   getWorkspaceRuntimeJids,
   listWorkspaceGroupsForAgentProfile,
   quiesceWorkspaceRunnersAroundCommit,
@@ -226,7 +228,10 @@ agentProfileRoutes.post('/generate', authMiddleware, async (c) => {
       { err, descriptionLen: parsed.data.description.length },
       'Failed to generate Agent profile draft',
     );
-    return c.json({ error: message }, message.includes('未配置') ? 503 : 502);
+    return c.json(
+      { error: message },
+      err instanceof ClaudeProviderNotConfiguredError ? 503 : 502,
+    );
   }
 });
 
@@ -439,7 +444,10 @@ agentProfileRoutes.post('/:id/refine-prompt', authMiddleware, async (c) => {
       },
       'Failed to refine Agent profile prompt',
     );
-    return c.json({ error: message }, message.includes('未配置') ? 503 : 502);
+    return c.json(
+      { error: message },
+      err instanceof ClaudeProviderNotConfiguredError ? 503 : 502,
+    );
   }
 });
 
@@ -823,13 +831,7 @@ agentProfileRoutes.post('/:id/runtime-cleanup', authMiddleware, async (c) => {
           folder: workspace.group.folder,
           primaryJid: workspace.jid,
         }));
-        const runtimeJids = Array.from(
-          new Set(
-            targets.flatMap((target) =>
-              getWorkspaceRuntimeJids(deps, target.folder, target.primaryJid),
-            ),
-          ),
-        );
+        const runtimeJids = collectWorkspaceRuntimeJids(deps, targets);
         try {
           const result = await quiesceWorkspaceRunnersAroundCommit(
             deps,

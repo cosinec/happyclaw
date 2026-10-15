@@ -113,6 +113,7 @@ function fixture(surface: Surface) {
         { baseSettings: { env: { BASE: 'selected' } } },
       );
   } else {
+    harness.install('writeAtomicFile');
     harness.install('clearSessionClaudeOAuthFiles');
     target = path.join(session, '.claude.json');
     write = () => globals.clearSessionClaudeOAuthFiles(session);
