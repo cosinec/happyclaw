@@ -1,7 +1,10 @@
+import type { Skill } from '../stores/skills';
 import {
   getAgentContextSource,
+  type AgentEffortLevel,
   type AgentProfileRuntimePolicy,
 } from '../types';
+import { buildMcpPolicyOptions } from './mcp-servers';
 
 export type RuntimePolicyMode = 'inherit' | 'custom' | 'disabled';
 
@@ -64,4 +67,79 @@ export function skillPolicySummary(
   if (policy.mode === 'disabled') return '不使用';
   if (policy.mode === 'inherit') return allLabel;
   return `选择 ${policy.ids.length} 项`;
+}
+
+export const AGENT_EFFORT_OPTIONS: Array<{
+  value: AgentEffortLevel;
+  label: string;
+}> = [
+  { value: 'inherit', label: '跟随模型配置' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'xhigh', label: 'XHigh' },
+  { value: 'max', label: 'Max' },
+];
+
+const HOST_SKILL_SOURCE_LABEL = '宿主机';
+
+/** Keep selected ids that no longer resolve visible so they can be removed. */
+function withUnavailableSelections<T extends { id: string }, U>(
+  available: T[],
+  selectedIds: string[],
+  unavailable: (id: string) => U,
+): Array<T | U> {
+  const known = new Set(available.map((item) => item.id));
+  return [
+    ...available,
+    ...selectedIds.filter((id) => !known.has(id)).map(unavailable),
+  ];
+}
+
+export function buildManagedSkillOptions(
+  skills: Skill[],
+  selectedIds: string[],
+) {
+  return withUnavailableSelections(
+    skills
+      .filter((skill) => skill.source === 'user' && skill.enabled)
+      .map((skill) => ({
+        id: skill.id,
+        name: skill.name || skill.id,
+        description: skill.description,
+      })),
+    selectedIds,
+    (id) => ({ id, name: id, unavailable: true }),
+  );
+}
+
+export function buildHostSkillOptions(skills: Skill[], selectedIds: string[]) {
+  return withUnavailableSelections(
+    skills
+      .filter((skill) => skill.source === 'external' && skill.enabled)
+      .map((skill) => ({
+        id: skill.id,
+        name: skill.name || skill.id,
+        description: skill.description,
+        sourceLabel: HOST_SKILL_SOURCE_LABEL,
+      })),
+    selectedIds,
+    (id) => ({
+      id,
+      name: id,
+      sourceLabel: HOST_SKILL_SOURCE_LABEL,
+      unavailable: true,
+    }),
+  );
+}
+
+export function buildMcpSelectionOptions(
+  servers: Parameters<typeof buildMcpPolicyOptions>[0],
+  selectedIds: string[],
+) {
+  return withUnavailableSelections(
+    buildMcpPolicyOptions(servers),
+    selectedIds,
+    (id) => ({ id, name: id, unavailable: true }),
+  );
 }

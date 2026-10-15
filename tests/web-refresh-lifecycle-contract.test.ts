@@ -87,21 +87,15 @@ describe('Web logical-run refresh contract', () => {
     expect(lastInterrupted).toBeGreaterThan(firstInterrupted);
   });
 
-  test('exact terminal and explicit stop clear duration and run ownership', () => {
+  test('exact terminal clears duration and run ownership', () => {
     const store = read('web/src/stores/chat.ts');
     const finished = store.slice(
       store.indexOf('handleRunFinished: (chatJid, runId)'),
       store.indexOf('handleActiveRunSnapshot: (runs)'),
     );
-    const stopped = store.slice(
-      store.indexOf('stopGroup: async (jid: string)'),
-      store.indexOf('interruptQuery: async (jid: string)'),
-    );
 
     expect(finished).toMatch(/delete nextPendingThinkingDuration\[chatJid\]/);
     expect(finished).toMatch(/cancelPendingDeltaForRuntime\(chatJid\)/);
-    expect(stopped).toMatch(/delete activeRuns\[jid\]/);
-    expect(stopped).toMatch(/preserveThinking: false/);
   });
 
   test('runner process state no longer owns query snapshot cleanup', () => {

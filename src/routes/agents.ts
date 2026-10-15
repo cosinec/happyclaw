@@ -26,7 +26,6 @@ import {
   getGroupsByTargetAgents,
   setRegisteredGroup,
   getJidsByFolder,
-  updateAgentLastImJid,
   updateAgentInfo,
   updateAgentContextInfo,
   updateChatName,
@@ -36,7 +35,6 @@ import {
   listChannelMountsBySessions,
   getRegisteredGroupNames,
   getChannelAccount,
-  VALID_ACTIVATION_MODES,
 } from '../db.js';
 import { DATA_DIR } from '../config.js';
 import type {
@@ -60,95 +58,23 @@ import {
   matchesWorkspaceMount,
   unbindChannelMount,
   resolveWorkspaceJid,
-  type NativeContextMetadata,
 } from '../channel-mount-service.js';
 import {
-  channelConversationJid,
-  parseChannelAddress,
-} from '../channel-address.js';
-import { isMentionActivationMode } from '../feishu-conversation-policy.js';
-import { normalizeLegacyOwnerMention } from '../im-audience-policy.js';
-import {
   conversationBindingPolicyError,
-  resolveChannelConversationKind,
   type ChannelConversationKind,
 } from '../channel-conversation-kind.js';
+import {
+  FEISHU_P2P_MENTION_ACTIVATION_ERROR,
+  feishuP2pRejectsMentionActivation,
+  fetchLiveChatInfo,
+  getConversationKind,
+  hasConsistentChannelAccount,
+  parseBindingResponsePolicy,
+  refreshAgentLastImJid,
+  type ChannelChatInfo,
+} from '../channel-binding-helpers.js';
 
 const router = new Hono<{ Variables: Variables }>();
-
-type ChannelChatInfo = NativeContextMetadata & {
-  avatar?: string;
-  name?: string;
-  user_count?: string;
-};
-
-/** Preserve omitted policies and normalize legacy Feishu owner-only mentions. */
-function parseBindingResponsePolicy(
-  imJid: string,
-  body: Record<string, unknown>,
-): {
-  activationMode?: RegisteredGroup['activation_mode'];
-  audienceMode?: AudienceMode;
-} {
-  const rawActivationMode = body.activation_mode;
-  const activationMode =
-    typeof rawActivationMode === 'string' &&
-    VALID_ACTIVATION_MODES.has(rawActivationMode)
-      ? (rawActivationMode as RegisteredGroup['activation_mode'])
-      : undefined;
-  const audienceMode: AudienceMode | undefined =
-    body.audience_mode === 'everyone' || body.audience_mode === 'owner_only'
-      ? body.audience_mode
-      : undefined;
-  const policy = { activationMode, audienceMode };
-  return getChannelType(imJid) === 'feishu'
-    ? normalizeLegacyOwnerMention(policy)
-    : policy;
-}
-
-function getConversationKind(
-  imJid: string,
-  group: Pick<
-    RegisteredGroup,
-    'feishu_chat_mode' | 'feishu_group_message_type' | 'native_context_type'
-  >,
-  chatInfo?: ChannelChatInfo | null,
-): ChannelConversationKind {
-  return resolveChannelConversationKind(imJid, {
-    feishu_chat_mode: group.feishu_chat_mode,
-    feishu_group_message_type: group.feishu_group_message_type,
-    native_context_type:
-      chatInfo?.native_context_type ?? group.native_context_type,
-    chat_mode: chatInfo?.chat_mode,
-    group_message_type: chatInfo?.group_message_type,
-    thread_capable: chatInfo?.thread_capable,
-  });
-}
-
-// Only fetches live chat metadata — does NOT compute threadCapable. That
-// decision must be (re-)computed by the caller against a freshly re-read
-// imGroup taken AFTER this await, never against the pre-await snapshot:
-// getChannelChatInfo/getFeishuChatInfo is a real network call that yields
-// the event loop, during which the message router can upgrade
-// native_context_type from 'none' to 'thread' for this exact imJid. Using a
-// stale imGroup here would compute threadCapable from outdated persisted
-// state and could bind a now-native-thread-capable container as a fixed
-// single_session, breaking that thread's session isolation from its
-// siblings. See callers for the fresh-read + recompute pattern.
-async function fetchLiveChatInfo(
-  userId: string,
-  imJid: string,
-): Promise<{ chatInfo?: ChannelChatInfo | null }> {
-  const channelType = getChannelType(imJid);
-  if (!channelType) return {};
-  const deps = getWebDeps();
-  const chatInfo = deps?.getChannelChatInfo
-    ? ((await deps.getChannelChatInfo(imJid)) as ChannelChatInfo | null)
-    : channelType === 'feishu' && deps?.getFeishuChatInfo
-      ? await deps.getFeishuChatInfo(userId, extractChatId(imJid))
-      : null;
-  return { chatInfo };
-}
 
 /** Update workspace RegisteredGroup in DB + in-memory cache. */
 function updateWorkspaceGroup(jid: string, workspace: RegisteredGroup): void {
@@ -160,28 +86,6 @@ function updateWorkspaceGroup(jid: string, workspace: RegisteredGroup): void {
   }
 }
 
-function hasConsistentChannelAccount(
-  userId: string,
-  imJid: string,
-  group: RegisteredGroup,
-): boolean {
-  const encodedAccountId = parseChannelAddress(imJid)?.channelAccountId ?? null;
-  const storedAccountId = group.channel_account_id ?? null;
-  if (encodedAccountId !== storedAccountId) {
-    // Legacy/default account chats intentionally retain their historical
-    // unscoped JID while the normalized account id is stored on the row.
-    if (!encodedAccountId && storedAccountId) {
-      const account = getChannelAccount(storedAccountId);
-      return (
-        account?.is_legacy_default === true && account.owner_user_id === userId
-      );
-    }
-    return false;
-  }
-  if (!storedAccountId) return true;
-  return getChannelAccount(storedAccountId)?.owner_user_id === userId;
-}
-
 function markNativeContextWorkspace(jid: string): void {
   const freshWorkspace = getRegisteredGroup(jid);
   if (!freshWorkspace) return;
@@ -190,25 +94,6 @@ function markNativeContextWorkspace(jid: string): void {
     conversation_source: 'native_thread',
     conversation_nav_mode: 'vertical_threads',
   });
-}
-
-/** Keep the agent's fallback reply route when another bound chat remains. */
-function refreshAgentLastImJid(agentId: string): void {
-  const agent = getAgent(agentId);
-  if (!agent) return;
-  const remaining = getGroupsByTargetAgent(agentId);
-  const current = agent.last_im_jid
-    ? channelConversationJid(agent.last_im_jid)
-    : null;
-  if (current && remaining.some(({ jid }) => jid === current)) return;
-
-  remaining.sort((a, b) => {
-    const dateDiff =
-      Date.parse(b.group.added_at) - Date.parse(a.group.added_at);
-    if (Number.isFinite(dateDiff) && dateDiff !== 0) return dateDiff;
-    return a.jid.localeCompare(b.jid);
-  });
-  updateAgentLastImJid(agentId, remaining[0]?.jid ?? null);
 }
 
 /**
@@ -1358,14 +1243,13 @@ router.put(
         body,
       );
       if (
-        getChannelType(imJid) === 'feishu' &&
-        (chatInfo?.chat_mode ?? freshImGroup.feishu_chat_mode) === 'p2p' &&
-        isMentionActivationMode(activationMode)
+        feishuP2pRejectsMentionActivation(
+          imJid,
+          chatInfo?.chat_mode ?? freshImGroup.feishu_chat_mode,
+          activationMode,
+        )
       ) {
-        return c.json(
-          { error: 'Feishu private chats do not support mention activation' },
-          400,
-        );
+        return c.json({ error: FEISHU_P2P_MENTION_ACTIVATION_ERROR }, 400);
       }
 
       const updated = buildSessionMountUpdate(freshImGroup, sessionId, {
@@ -1435,14 +1319,13 @@ router.put(
       body,
     );
     if (
-      getChannelType(imJid) === 'feishu' &&
-      (chatInfo?.chat_mode ?? freshImGroup.feishu_chat_mode) === 'p2p' &&
-      isMentionActivationMode(activationMode)
+      feishuP2pRejectsMentionActivation(
+        imJid,
+        chatInfo?.chat_mode ?? freshImGroup.feishu_chat_mode,
+        activationMode,
+      )
     ) {
-      return c.json(
-        { error: 'Feishu private chats do not support mention activation' },
-        400,
-      );
+      return c.json({ error: FEISHU_P2P_MENTION_ACTIVATION_ERROR }, 400);
     }
     threadCapable = isNativeContextContainer(imJid, freshImGroup, {
       ...(chatInfo ?? {}),
@@ -1679,14 +1562,13 @@ router.put('/:jid/agents/:agentId/im-binding', authMiddleware, async (c) => {
     body,
   );
   if (
-    getChannelType(imJid) === 'feishu' &&
-    (chatInfo?.chat_mode ?? freshImGroup.feishu_chat_mode) === 'p2p' &&
-    isMentionActivationMode(activationMode)
+    feishuP2pRejectsMentionActivation(
+      imJid,
+      chatInfo?.chat_mode ?? freshImGroup.feishu_chat_mode,
+      activationMode,
+    )
   ) {
-    return c.json(
-      { error: 'Feishu private chats do not support mention activation' },
-      400,
-    );
+    return c.json({ error: FEISHU_P2P_MENTION_ACTIVATION_ERROR }, 400);
   }
 
   // Update DB + in-memory cache — clear target_main_jid to avoid conflicts
@@ -1865,14 +1747,13 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
     body,
   );
   if (
-    getChannelType(imJid) === 'feishu' &&
-    (chatInfo?.chat_mode ?? freshImGroup.feishu_chat_mode) === 'p2p' &&
-    isMentionActivationMode(activationMode)
+    feishuP2pRejectsMentionActivation(
+      imJid,
+      chatInfo?.chat_mode ?? freshImGroup.feishu_chat_mode,
+      activationMode,
+    )
   ) {
-    return c.json(
-      { error: 'Feishu private chats do not support mention activation' },
-      400,
-    );
+    return c.json({ error: FEISHU_P2P_MENTION_ACTIVATION_ERROR }, 400);
   }
   threadCapable = isNativeContextContainer(imJid, freshImGroup, {
     ...(chatInfo ?? {}),

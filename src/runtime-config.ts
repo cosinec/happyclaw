@@ -3,6 +3,12 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
+import {
+  fileSignatureSettled,
+  sameFileSignature,
+  statFileSignature,
+  type FileSignature,
+} from './file-signature.js';
 import { ASSISTANT_NAME, DATA_DIR } from './config.js';
 import { logger } from './logger.js';
 import { clearProviderQuotaObservation } from './provider-quota-observation.js';
@@ -886,60 +892,6 @@ function buildConfig(
     ...normalizeConfig(input),
     updatedAt,
   };
-}
-
-/**
- * What stat can tell about a file's contents. Atomic rewrites (tmp + rename)
- * change `ino`; in-place rewrites change mtime/ctime and usually size.
- */
-interface FileSignature {
-  ino: number;
-  size: number;
-  mtimeMs: number;
-  ctimeMs: number;
-}
-
-function statFileSignature(filePath: string): FileSignature | null {
-  try {
-    const st = fs.statSync(filePath);
-    return {
-      ino: st.ino,
-      size: st.size,
-      mtimeMs: st.mtimeMs,
-      ctimeMs: st.ctimeMs,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function sameFileSignature(
-  a: FileSignature | null,
-  b: FileSignature | null,
-): boolean {
-  if (a === null || b === null) return a === b;
-  return (
-    a.ino === b.ino &&
-    a.size === b.size &&
-    a.mtimeMs === b.mtimeMs &&
-    a.ctimeMs === b.ctimeMs
-  );
-}
-
-/**
- * File timestamps are coarse (a kernel tick, or a whole second on some
- * filesystems), so a same-size in-place rewrite right after the observed one
- * can keep its signature. As with git's "racily clean" index entries, a
- * signature only proves the contents unchanged once it was observed at least
- * this long after the file's mtime; until then readers re-read the file.
- */
-const RACY_SIGNATURE_WINDOW_MS = 2_000;
-
-function fileSignatureSettled(
-  sig: FileSignature | null,
-  observedAt: number,
-): boolean {
-  return sig === null || observedAt - sig.mtimeMs >= RACY_SIGNATURE_WINDOW_MS;
 }
 
 // The key never rotates in-process, but channel-account-secrets or another
@@ -3015,21 +2967,22 @@ function selectGlobalProvider(
   );
 }
 
+class NoEnabledModelConfigError extends Error {
+  constructor() {
+    super('没有启用的模型配置，请先在模型配置页面打开一个模型');
+  }
+}
+
 export function getClaudeProviderConfig(): ClaudeProviderConfig {
   try {
     const state = readStoredStateV4();
     if (state) {
       const selected = selectGlobalProvider(state);
       if (selected) return providerToConfig(selected);
-      throw new Error('没有启用的模型配置，请先在模型配置页面打开一个模型');
+      throw new NoEnabledModelConfigError();
     }
   } catch (err) {
-    if (
-      err instanceof Error &&
-      err.message === '没有启用的模型配置，请先在模型配置页面打开一个模型'
-    ) {
-      throw err;
-    }
+    if (err instanceof NoEnabledModelConfigError) throw err;
     // Ignore corrupted files and use the legacy environment fallback.
   }
   return defaultsFromEnv();

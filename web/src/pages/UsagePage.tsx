@@ -28,6 +28,7 @@ import { formatTokens } from '../components/billing/utils';
 import {
   TOKEN_SERIES,
   UsageTrendChart,
+  formatCost,
   type DailyUsagePoint,
   type UsageTrendMetric,
 } from '../components/usage/UsageTrendChart';
@@ -112,13 +113,6 @@ function parseQuery(params: URLSearchParams, isAdmin: boolean): UsageQuery {
     groupFolder: read('groupFolder'),
     source: read('source'),
   };
-}
-
-function formatCost(value: number): string {
-  if (value >= 1) return `$${value.toFixed(2)}`;
-  if (value >= 0.01) return `$${value.toFixed(3)}`;
-  if (value > 0) return `$${value.toFixed(4)}`;
-  return '$0.00';
 }
 
 function formatInteger(value: number): string {

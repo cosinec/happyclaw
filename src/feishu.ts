@@ -104,7 +104,9 @@ import { createFeishuSenderNameResolver } from './feishu-sender-name.js';
 import {
   FeishuForwardBundleResolver,
   type FeishuForwardCandidate,
+  toEpochMs,
 } from './feishu-forward-bundle.js';
+import { withTimeout } from './with-timeout.js';
 import {
   advanceChannelCursor,
   claimChannelInboxById,
@@ -639,35 +641,6 @@ function parseFeishuSlashCommandCheckpoint(
     : undefined;
 }
 
-function withFeishuHardTimeout<T>(
-  operation: Promise<T>,
-  timeoutMs: number,
-  label: string,
-  onTimeout?: () => void,
-): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      const error = new Error(`${label} timed out after ${timeoutMs}ms`);
-      try {
-        onTimeout?.();
-      } finally {
-        reject(error);
-      }
-    }, timeoutMs);
-    timer.unref?.();
-    operation.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (error) => {
-        clearTimeout(timer);
-        reject(error);
-      },
-    );
-  });
-}
-
 /** Read one SDK resource stream under a hard wall-clock and byte budget. */
 export async function readFeishuResourceBuffer(
   stream: FeishuResourceStream,
@@ -693,7 +666,7 @@ export async function readFeishuResourceBuffer(
     }
     return Buffer.concat(chunks);
   })();
-  return withFeishuHardTimeout(
+  return withTimeout(
     reading,
     options.timeoutMs ?? FEISHU_RESOURCE_STREAM_TIMEOUT_MS,
     label,
@@ -876,12 +849,6 @@ interface WsConnectionState {
   connected: boolean;
   isConnecting: boolean;
   nextConnectTime: number;
-}
-
-function toEpochMs(value: string | number | undefined): number {
-  const numeric = typeof value === 'number' ? value : Number(value ?? 0);
-  if (!Number.isFinite(numeric) || numeric <= 0) return 0;
-  return numeric < 1e12 ? Math.trunc(numeric * 1000) : Math.trunc(numeric);
 }
 
 /** Real Feishu message ids are `om_…`; synthetic host ids are not. */
@@ -2124,7 +2091,7 @@ export function createFeishuConnection(
     const activeClient = client;
     if (!activeClient) return null;
     try {
-      const res = await withFeishuHardTimeout(
+      const res = await withTimeout(
         activeClient.im.messageResource.get({
           path: {
             message_id: messageId,
@@ -2178,7 +2145,7 @@ export function createFeishuConnection(
     const activeClient = client;
     if (!activeClient) return null;
     try {
-      const res = await withFeishuHardTimeout(
+      const res = await withTimeout(
         activeClient.im.messageResource.get({
           path: {
             message_id: messageId,
@@ -2520,7 +2487,7 @@ export function createFeishuConnection(
         },
       });
       const response = physical.requestTimeoutMs
-        ? await withFeishuHardTimeout(
+        ? await withTimeout(
             request,
             physical.requestTimeoutMs,
             physical.requestLabel ?? 'Feishu message.reply',
@@ -2701,7 +2668,7 @@ export function createFeishuConnection(
         },
       });
       const response = physical.requestTimeoutMs
-        ? await withFeishuHardTimeout(
+        ? await withTimeout(
             request,
             physical.requestTimeoutMs,
             physical.requestLabel ?? 'Feishu message.create',

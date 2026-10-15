@@ -83,7 +83,7 @@ function errorChainHasCode(error: unknown, expectedCode: string): boolean {
   return false;
 }
 
-function errorChain(error: unknown): Array<Record<string, unknown>> {
+export function errorChain(error: unknown): Array<Record<string, unknown>> {
   const chain: Array<Record<string, unknown>> = [];
   let current = error;
   const seen = new Set<unknown>();

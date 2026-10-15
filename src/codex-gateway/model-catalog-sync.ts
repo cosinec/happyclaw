@@ -726,11 +726,6 @@ export function noteCodexModelsEtag(
   maybeRefreshCodexProviderCatalog(providerId);
 }
 
-/** Provider 删除或重新登录后丢弃其账号目录。 */
-export function forgetCodexProviderCatalog(providerId: string): void {
-  liveCatalogs.delete(providerId);
-}
-
 /** 测试专用：重置内存状态与磁盘缓存路径覆写。 */
 export function resetCodexCatalogSyncForTests(): void {
   applyResolved({

@@ -242,15 +242,7 @@ export const MessageBubble = memo(
       avatarUrl: agentAvatarUrl,
       avatarEmoji: agentAvatarEmoji,
       avatarColor: agentAvatarColor,
-      mainAvatarUrl: appearance?.aiAvatarUrl,
-      mainAvatarEmoji:
-        appearance?.aiAvatarMode === 'emoji'
-          ? appearance.aiAvatarEmoji
-          : undefined,
-      mainAvatarColor:
-        appearance?.aiAvatarMode === 'emoji'
-          ? appearance.aiAvatarColor
-          : undefined,
+      appearance,
     });
     const { mode: displayMode } = useDisplayMode();
     const thinkingTitle = useMemo(

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { api, apiFetch } from '../api/client';
+import { extractErrorMessage } from '../utils/error';
 import type {
   AgentProfile,
   AgentProfileGovernance,
@@ -130,7 +131,7 @@ export const useAgentProfilesStore = create<AgentProfilesState>((set, get) => ({
         error: null,
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = extractErrorMessage(err);
       set({
         loading: false,
         profilesError: message,
@@ -178,7 +179,7 @@ export const useAgentProfilesStore = create<AgentProfilesState>((set, get) => ({
       }));
       return data;
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = extractErrorMessage(err);
       set((state) => ({
         governanceLoading: { ...state.governanceLoading, [id]: false },
         governanceErrors: { ...state.governanceErrors, [id]: message },
@@ -251,7 +252,7 @@ export const useAgentProfilesStore = create<AgentProfilesState>((set, get) => ({
       set({ error: null });
       return res.draft;
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
+      set({ error: extractErrorMessage(err) });
       throw err;
     }
   },
@@ -266,7 +267,7 @@ export const useAgentProfilesStore = create<AgentProfilesState>((set, get) => ({
       set({ error: null });
       return res.refinement;
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
+      set({ error: extractErrorMessage(err) });
       throw err;
     }
   },
@@ -287,7 +288,7 @@ export const useAgentProfilesStore = create<AgentProfilesState>((set, get) => ({
       await get().loadProfiles();
       return res.profile;
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
+      set({ error: extractErrorMessage(err) });
       throw err;
     }
   },
@@ -351,7 +352,7 @@ export const useAgentProfilesStore = create<AgentProfilesState>((set, get) => ({
         }));
         throw err;
       }
-      set({ error: err instanceof Error ? err.message : String(err) });
+      set({ error: extractErrorMessage(err) });
       throw err;
     }
   },
@@ -404,7 +405,7 @@ export const useAgentProfilesStore = create<AgentProfilesState>((set, get) => ({
         error: null,
       }));
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
+      set({ error: extractErrorMessage(err) });
       throw err;
     }
   },
@@ -441,7 +442,7 @@ export const useAgentProfilesStore = create<AgentProfilesState>((set, get) => ({
       });
       set({ error: null });
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
+      set({ error: extractErrorMessage(err) });
       throw err;
     }
   },

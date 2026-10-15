@@ -2,8 +2,6 @@ import type { StreamEvent, WorkflowRunSnapshot } from '../stream-event.types';
 import type { StreamingTaskRuntimeState } from '../stores/chat';
 import type { ProcessVisibility } from '../types';
 
-export const DEFAULT_PROCESS_VISIBILITY: ProcessVisibility = 'hidden';
-
 /** Anything but a known level reads as hidden: older servers send nothing. */
 export function normalizeProcessVisibility(value: unknown): ProcessVisibility {
   return value === 'activity' || value === 'full' ? value : 'hidden';

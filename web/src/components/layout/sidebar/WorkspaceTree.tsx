@@ -95,15 +95,7 @@ function sectionIdentity(
     avatarUrl: lead?.agent_profile_avatar_url,
     avatarEmoji: lead?.agent_profile_avatar_emoji,
     avatarColor: lead?.agent_profile_avatar_color,
-    mainAvatarUrl: primary ? appearance?.aiAvatarUrl : undefined,
-    mainAvatarEmoji:
-      primary && appearance?.aiAvatarMode === 'emoji'
-        ? appearance.aiAvatarEmoji
-        : undefined,
-    mainAvatarColor:
-      primary && appearance?.aiAvatarMode === 'emoji'
-        ? appearance.aiAvatarColor
-        : undefined,
+    appearance: primary ? appearance : null,
   });
   const ownAvatar = !!(
     lead?.agent_profile_avatar_url || lead?.agent_profile_avatar_emoji

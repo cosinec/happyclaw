@@ -135,6 +135,16 @@ export class DingTalkPartialDeliveryError extends Error {
   }
 }
 
+/** A DingTalk REST call answered with an HTTP error; `status` is its code. */
+class DingTalkApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
 export function dingtalkHttpsRequest(
   options: https.RequestOptions & { timeoutMs?: number },
   body?: string | Buffer,
@@ -1417,16 +1427,18 @@ export function createDingTalkConnection(
       const data = JSON.parse(text);
       if (statusCode && statusCode >= 400) {
         const errMsg = data.message || data.msg || text;
-        throw new Error(
+        throw new DingTalkApiError(
           `DingTalk API ${method} ${path} failed (${statusCode}): ${errMsg}`,
+          statusCode,
         );
       }
       return data as T;
     } catch (err) {
       if (err instanceof SyntaxError) {
         if (statusCode && statusCode >= 400) {
-          throw new Error(
+          throw new DingTalkApiError(
             `DingTalk API ${method} ${path} failed (${statusCode}): ${text}`,
+            statusCode,
           );
         }
         return {} as T;
@@ -1530,10 +1542,7 @@ export function createDingTalkConnection(
         logger.debug({ msgId, chatId }, 'DingTalk ack reaction attached');
         return { msgId, conversationId };
       } catch (err: any) {
-        // apiRequest throws plain Error objects (no .response property),
-        // so parse the status code from the error message string.
-        const match = err?.message?.match(/\((\d{3})\)/);
-        const status = match ? parseInt(match[1], 10) : 0;
+        const status = err instanceof DingTalkApiError ? err.status : 0;
         const isRetryable = status === 0 || (status >= 500 && status < 600);
         if (!isRetryable || i === ACK_REACTION_ATTACH_DELAYS.length - 1) {
           logger.debug(

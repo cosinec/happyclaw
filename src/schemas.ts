@@ -90,21 +90,7 @@ export const TaskPatchSchema = z.object({
     .string()
     .refine((v) => !isNaN(Date.parse(v)), 'next_run must be ISO 8601')
     .optional(),
-  notify_channels: z
-    .array(
-      z.enum([
-        'feishu',
-        'telegram',
-        'qq',
-        'wechat',
-        'wecom',
-        'dingtalk',
-        'discord',
-        'whatsapp',
-      ]),
-    )
-    .nullable()
-    .optional(),
+  notify_channels: z.array(ChannelProviderSchema).nullable().optional(),
 });
 
 export const TaskPurgeSchema = z.object({
@@ -145,21 +131,7 @@ export const TaskCreateSchema = z
     execution_type: z.enum(['agent', 'script']).optional(),
     execution_mode: z.enum(['host', 'container']).optional(),
     script_command: z.string().max(MAX_TASK_SCRIPT_COMMAND_LENGTH).optional(),
-    notify_channels: z
-      .array(
-        z.enum([
-          'feishu',
-          'telegram',
-          'qq',
-          'wechat',
-          'wecom',
-          'dingtalk',
-          'discord',
-          'whatsapp',
-        ]),
-      )
-      .nullable()
-      .optional(),
+    notify_channels: z.array(ChannelProviderSchema).nullable().optional(),
   })
   .superRefine((data, ctx) => {
     const execType = data.execution_type || 'agent';

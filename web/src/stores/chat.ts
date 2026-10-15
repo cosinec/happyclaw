@@ -1049,7 +1049,6 @@ interface ChatState {
     expectedRunId?: string | null,
     content?: string,
   ) => Promise<boolean>;
-  stopGroup: (jid: string) => Promise<boolean>;
   interruptQuery: (jid: string) => Promise<boolean>;
   resetSession: (jid: string, agentId?: string) => Promise<boolean>;
   clearHistory: (jid: string) => Promise<boolean>;
@@ -1129,7 +1128,6 @@ interface ChatState {
   deleteAgentAction: (jid: string, agentId: string) => Promise<boolean>;
   setActiveAgentTab: (jid: string, agentId: string | null) => void;
   // Conversation agent actions
-  reorderConversations: (jid: string, orderedIds: string[]) => void;
   createConversation: (
     jid: string,
     name?: string,
@@ -1167,34 +1165,12 @@ interface ChatState {
   syncAvailableImGroups: (
     jid: string,
   ) => Promise<{ success: boolean; feishuAccounts: number }>;
-  bindImGroup: (
-    jid: string,
-    agentId: string,
-    imJid: string,
-    force?: boolean,
-  ) => Promise<boolean>;
   unbindImGroup: (
     jid: string,
     agentId: string,
     imJid: string,
   ) => Promise<boolean>;
-  bindMainImGroup: (
-    jid: string,
-    imJid: string,
-    force?: boolean,
-    activationMode?: string,
-    ownerImId?: string,
-    audienceMode?: 'everyone' | 'owner_only',
-  ) => Promise<boolean>;
   unbindMainImGroup: (jid: string, imJid: string) => Promise<boolean>;
-  bindWorkspaceImGroup: (
-    jid: string,
-    imJid: string,
-    force?: boolean,
-    activationMode?: string,
-    ownerImId?: string,
-    audienceMode?: 'everyone' | 'owner_only',
-  ) => Promise<boolean>;
   unbindWorkspaceImGroup: (jid: string, imJid: string) => Promise<boolean>;
   // Draft persistence across route navigation
   drafts: Record<string, string>;
@@ -3035,7 +3011,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       } catch (err) {
         set({
           loading: false,
-          error: err instanceof Error ? err.message : String(err),
+          error: extractErrorMessage(err),
         });
       }
     })().finally(() => {
@@ -3107,7 +3083,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           };
         });
       } catch (err) {
-        set({ error: err instanceof Error ? err.message : String(err) });
+        set({ error: extractErrorMessage(err) });
       }
     })().finally(() => {
       loadMessagesInFlight.delete(inFlightKey);
@@ -3237,7 +3213,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         });
       }
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
+      set({ error: extractErrorMessage(err) });
     }
   },
 
@@ -3366,7 +3342,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch (err) {
       // 弱网/断网/后端 500 等场景：记录错误并给用户可见的 toast，
       // 返回 false 让调用方（MessageInput）保留输入不清空。
-      const message = err instanceof Error ? err.message : String(err);
+      const message = extractErrorMessage(err);
       set({ error: message });
       showToast('发送失败', '消息未发送，输入已保留，请检查网络后重试');
       return false;
@@ -3419,27 +3395,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  stopGroup: async (jid: string) => {
-    try {
-      await api.post<{ success: boolean }>(
-        `/api/groups/${encodeURIComponent(jid)}/stop`,
-      );
-      cancelPendingDeltaForRuntime(jid);
-      get().clearStreaming(jid, { preserveThinking: false });
-      set((s) => {
-        const next = { ...s.waiting };
-        delete next[jid];
-        const activeRuns = { ...s.activeRuns };
-        delete activeRuns[jid];
-        return { waiting: next, activeRuns };
-      });
-      return true;
-    } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
-      return false;
-    }
-  },
-
   interruptQuery: async (jid: string) => {
     // Answer the click at once: the run shows "正在停止…" with its timer
     // frozen while the interrupt travels; text already in flight still lands.
@@ -3481,7 +3436,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 中断已发出，后端 status:interrupted 事件会驱动 UI 冻结。
       return true;
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = extractErrorMessage(err);
       clearStopRequest();
       set({ error: message });
       // The run keeps going; say so instead of silently restoring the button.
@@ -3527,7 +3482,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       succeeded = true;
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
+      set({ error: extractErrorMessage(err) });
     } finally {
       if (useLock) {
         set((s) => {
@@ -3656,7 +3611,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const { [jid]: _, ...nextClearing } = s.clearing;
         return {
           clearing: nextClearing,
-          error: err instanceof Error ? err.message : String(err),
+          error: extractErrorMessage(err),
         };
       });
       return false;
@@ -3854,7 +3809,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         };
       });
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
+      set({ error: extractErrorMessage(err) });
     }
   },
 
@@ -3883,7 +3838,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }));
       return true;
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
+      set({ error: extractErrorMessage(err) });
       return false;
     }
   },
@@ -3942,7 +3897,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }));
       return true;
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
+      set({ error: extractErrorMessage(err) });
       return false;
     }
   },
@@ -3972,7 +3927,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         };
       });
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
+      set({ error: extractErrorMessage(err) });
     }
   },
 
@@ -4077,8 +4032,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         e.boundThreadContexts = apiErr.body.bound_thread_contexts;
         throw e;
       }
-      const message =
-        apiErr.message || (err instanceof Error ? err.message : String(err));
+      const message = apiErr.message || extractErrorMessage(err);
       set({ error: message });
       throw err;
     }
@@ -5550,25 +5504,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   // -- Conversation agent actions --
 
-  reorderConversations: (jid, orderedIds) => {
-    set((s) => {
-      const current = s.agents[jid] || [];
-      const conversations = current.filter((a) => a.kind === 'conversation');
-      const others = current.filter((a) => a.kind !== 'conversation');
-      const sorted = [...sortByIdOrder(conversations, orderedIds), ...others];
-      return { agents: { ...s.agents, [jid]: sorted } };
-    });
-    // Persist to localStorage
-    try {
-      localStorage.setItem(
-        `happyclaw-agent-order-${jid}`,
-        JSON.stringify(orderedIds),
-      );
-    } catch {
-      /* ignore */
-    }
-  },
-
   createConversation: async (jid, name, description?) => {
     try {
       const data = await api.post<{ session?: AgentInfo; agent?: AgentInfo }>(
@@ -5585,7 +5520,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
       return created;
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
+      set({ error: extractErrorMessage(err) });
       return null;
     }
   },
@@ -5664,7 +5599,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         );
       }
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
+      set({ error: extractErrorMessage(err) });
     }
   },
 
@@ -5836,7 +5771,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
       }
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
+      set({ error: extractErrorMessage(err) });
     }
   },
 
@@ -5860,20 +5795,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
     );
   },
 
-  bindImGroup: async (jid, agentId, imJid, force) => {
-    try {
-      await api.put(
-        `/api/groups/${encodeURIComponent(jid)}/sessions/${agentId}/im-binding`,
-        { im_jid: imJid, ...(force ? { force: true } : {}) },
-      );
-      // Refresh agents to get updated linked_im_groups
-      get().loadAgents(jid, { force: true });
-      return true;
-    } catch {
-      return false;
-    }
-  },
-
   unbindImGroup: async (jid, agentId, imJid) => {
     try {
       await api.delete(
@@ -5886,60 +5807,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  bindMainImGroup: async (
-    jid,
-    imJid,
-    force,
-    activationMode,
-    ownerImId,
-    audienceMode,
-  ) => {
-    try {
-      await api.put(
-        `/api/groups/${encodeURIComponent(jid)}/sessions/main/im-binding`,
-        {
-          im_jid: imJid,
-          ...(force ? { force: true } : {}),
-          ...(activationMode ? { activation_mode: activationMode } : {}),
-          ...(ownerImId ? { owner_im_id: ownerImId } : {}),
-          ...(audienceMode ? { audience_mode: audienceMode } : {}),
-        },
-      );
-      await get().loadGroups();
-      return true;
-    } catch {
-      return false;
-    }
-  },
-
   unbindMainImGroup: async (jid, imJid) => {
     try {
       await api.delete(
         `/api/groups/${encodeURIComponent(jid)}/sessions/main/im-binding/${encodeURIComponent(imJid)}`,
       );
-      await get().loadGroups();
-      return true;
-    } catch {
-      return false;
-    }
-  },
-
-  bindWorkspaceImGroup: async (
-    jid,
-    imJid,
-    force,
-    activationMode,
-    ownerImId,
-    audienceMode,
-  ) => {
-    try {
-      await api.put(`/api/groups/${encodeURIComponent(jid)}/im-binding`, {
-        im_jid: imJid,
-        ...(force ? { force: true } : {}),
-        ...(activationMode ? { activation_mode: activationMode } : {}),
-        ...(ownerImId ? { owner_im_id: ownerImId } : {}),
-        ...(audienceMode ? { audience_mode: audienceMode } : {}),
-      });
       await get().loadGroups();
       return true;
     } catch {

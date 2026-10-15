@@ -77,30 +77,6 @@ export interface ProvidersListResponse {
   defaultModelConfigId: string | null;
 }
 
-export interface ClaudeApplyResult {
-  success: boolean;
-  stoppedCount: number;
-  failedCount?: number;
-  error?: string;
-}
-
-// ─── 兼容旧类型（仍被 GET /claude 返回） ────────────────────
-
-export interface ClaudeConfigPublic {
-  anthropicBaseUrl: string;
-  anthropicModel: string;
-  updatedAt: string | null;
-  hasAnthropicAuthToken: boolean;
-  hasAnthropicApiKey: boolean;
-  hasClaudeCodeOauthToken: boolean;
-  anthropicAuthTokenMasked: string | null;
-  anthropicApiKeyMasked: string | null;
-  claudeCodeOauthTokenMasked: string | null;
-  hasClaudeOAuthCredentials: boolean;
-  claudeOAuthCredentialsExpiresAt: number | null;
-  claudeOAuthCredentialsAccessTokenMasked: string | null;
-}
-
 // ─── 通用类型 ────────────────────────────────────────────────
 
 export interface EnvRow {

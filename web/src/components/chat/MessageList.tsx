@@ -200,15 +200,7 @@ export const MessageList = memo(function MessageList({
     avatarUrl: agentAvatarUrl,
     avatarEmoji: agentAvatarEmoji,
     avatarColor: agentAvatarColor,
-    mainAvatarUrl: appearance?.aiAvatarUrl,
-    mainAvatarEmoji:
-      appearance?.aiAvatarMode === 'emoji'
-        ? appearance.aiAvatarEmoji
-        : undefined,
-    mainAvatarColor:
-      appearance?.aiAvatarMode === 'emoji'
-        ? appearance.aiAvatarColor
-        : undefined,
+    appearance,
   });
   const timelineMessages = useMemo(
     () => orderMessagesForTimeline(messages),

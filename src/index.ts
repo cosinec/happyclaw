@@ -243,7 +243,6 @@ import {
   upsertImContextBinding,
   touchImContextBindingActivity,
   updateAgentContextInfo,
-  backfillEmptyAllowlistsForUser,
   backfillEmptyAllowlistsForChannelAccount,
   getChannelMount,
   migrateAgentProfileAutoCompactWindow,
@@ -4191,24 +4190,26 @@ async function sendTaskFileWithRetry(
     return false;
   }
   if (!imManager.isChannelAvailableForJid(targetJid)) return false;
-  const scoped = await deliverScopedChannelOutput(targetJid, outbox, {
-    kind: 'file',
-    payload: {
-      fileName,
-      contentHash: crypto
-        .createHash('sha256')
-        .update(fs.readFileSync(filePath))
-        .digest('hex'),
-    },
-    send: (item) =>
-      imManager.sendFile(targetJid, filePath, fileName, {
-        ...turnInputAnchorOptions(item),
-        deliveryId: item.id,
-        chunkIndex: 0,
-        physicalOutput: getChannelType(targetJid) === 'wechat',
-      }),
-  });
-  if (scoped !== null) return scoped;
+  if (outbox) {
+    const scoped = await deliverScopedChannelOutput(targetJid, outbox, {
+      kind: 'file',
+      payload: {
+        fileName,
+        contentHash: crypto
+          .createHash('sha256')
+          .update(fs.readFileSync(filePath))
+          .digest('hex'),
+      },
+      send: (item) =>
+        imManager.sendFile(targetJid, filePath, fileName, {
+          ...turnInputAnchorOptions(item),
+          deliveryId: item.id,
+          chunkIndex: 0,
+          physicalOutput: getChannelType(targetJid) === 'wechat',
+        }),
+    });
+    if (scoped !== null) return scoped;
+  }
   return retryImOperation(
     'send_task_file',
     targetJid,
@@ -11620,13 +11621,8 @@ async function runAgent(
   );
 
   // Update available groups snapshot (admin home only can see all groups)
-  const availableGroups = getAvailableGroups();
-  writeGroupsSnapshot(
-    group.folder,
-    isAdminHome,
-    availableGroups,
-    new Set(Object.keys(registeredGroups)),
-  );
+  const availableGroups = isAdminHome ? getAvailableGroups() : [];
+  writeGroupsSnapshot(group.folder, isAdminHome, availableGroups);
 
   // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = async (output: ContainerOutput) => {
@@ -15775,13 +15771,7 @@ async function processTaskIpc(
         );
         await syncGroupMetadata(true);
         // Write updated snapshot immediately
-        const availableGroups = getAvailableGroups();
-        writeGroupsSnapshot(
-          sourceGroup,
-          true,
-          availableGroups,
-          new Set(Object.keys(registeredGroups)),
-        );
+        writeGroupsSnapshot(sourceGroup, true, getAvailableGroups());
       } else {
         logger.warn(
           { sourceGroup },
@@ -19358,13 +19348,8 @@ async function processAgentConversation(
         next_run: t.next_run,
       })),
     );
-    const availableGroups = getAvailableGroups();
-    writeGroupsSnapshot(
-      effectiveGroup.folder,
-      isAdminHome,
-      availableGroups,
-      new Set(Object.keys(registeredGroups)),
-    );
+    const availableGroups = isAdminHome ? getAvailableGroups() : [];
+    writeGroupsSnapshot(effectiveGroup.folder, isAdminHome, availableGroups);
 
     const ownerHomeFolder = resolveOwnerHomeFolder(effectiveGroup);
 
@@ -20787,63 +20772,71 @@ async function ensureDockerRunning(): Promise<void> {
   logger.debug('Docker daemon is running');
 
   // Kill orphaned host agent-runner processes from previous runs
-  try {
-    const { stdout: psOut } = await execFileAsync(
-      'pgrep',
-      ['-f', 'node.*container/agent-runner/dist/index\\.js'],
-      { timeout: 5000 },
-    );
-    const pids = (typeof psOut === 'string' ? psOut : String(psOut))
-      .trim()
-      .split('\n')
-      .filter(Boolean)
-      .map(Number)
-      .filter((pid) => pid !== process.pid && !isNaN(pid));
-    for (const pid of pids) {
-      try {
-        process.kill(pid, 'SIGKILL');
-      } catch {
-        /* already dead */
+  const killOrphanedHostRunners = async () => {
+    try {
+      const { stdout: psOut } = await execFileAsync(
+        'pgrep',
+        ['-f', 'node.*container/agent-runner/dist/index\\.js'],
+        { timeout: 5000 },
+      );
+      const pids = (typeof psOut === 'string' ? psOut : String(psOut))
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .map(Number)
+        .filter((pid) => pid !== process.pid && !isNaN(pid));
+      for (const pid of pids) {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          /* already dead */
+        }
+      }
+      if (pids.length > 0) {
+        logger.info(
+          { count: pids.length, pids },
+          'Killed orphaned host agent-runner processes',
+        );
+      }
+    } catch (err: any) {
+      // pgrep exits 1 when no matches — that's fine
+      if (err?.code !== 1) {
+        logger.warn({ err }, 'Failed to clean up orphaned host processes');
       }
     }
-    if (pids.length > 0) {
-      logger.info(
-        { count: pids.length, pids },
-        'Killed orphaned host agent-runner processes',
-      );
-    }
-  } catch (err: any) {
-    // pgrep exits 1 when no matches — that's fine
-    if (err?.code !== 1) {
-      logger.warn({ err }, 'Failed to clean up orphaned host processes');
-    }
-  }
+  };
 
   // Kill and clean up orphaned happyclaw containers from previous runs
-  try {
-    const { stdout } = await execFileAsync(
-      'docker',
-      ['ps', '--filter', 'name=happyclaw-', '--format', '{{.Names}}'],
-      { timeout: 10000 },
-    );
-    const output = typeof stdout === 'string' ? stdout : String(stdout);
-    const orphans = output.trim().split('\n').filter(Boolean);
-    for (const name of orphans) {
-      try {
-        await execFileAsync('docker', ['stop', name], { timeout: 10000 });
-      } catch {
-        /* already stopped */
-      }
-    }
-    if (orphans.length > 0) {
-      logger.info(
-        { count: orphans.length, names: orphans },
-        'Stopped orphaned containers',
+  const stopOrphanedContainers = async () => {
+    try {
+      const { stdout } = await execFileAsync(
+        'docker',
+        ['ps', '--filter', 'name=happyclaw-', '--format', '{{.Names}}'],
+        { timeout: 10000 },
       );
+      const output = typeof stdout === 'string' ? stdout : String(stdout);
+      const orphans = output.trim().split('\n').filter(Boolean);
+      await Promise.all(
+        orphans.map((name) =>
+          execFileAsync('docker', ['stop', name], { timeout: 10000 }).catch(
+            () => {
+              /* already stopped */
+            },
+          ),
+        ),
+      );
+      if (orphans.length > 0) {
+        logger.info(
+          { count: orphans.length, names: orphans },
+          'Stopped orphaned containers',
+        );
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Failed to clean up orphaned containers');
     }
-  } catch (err) {
-    logger.warn({ err }, 'Failed to clean up orphaned containers');
-  }
+  };
+
+  await Promise.all([killOrphanedHostRunners(), stopOrphanedContainers()]);
 }
 
 /**
@@ -21095,33 +21088,6 @@ function createAutoImConversationAgent(input: {
 function applyAutoIsolateContext(_userId: string, _enable: boolean): number {
   // Compatibility callback for older clients. Discovery never creates bindings.
   return 0;
-}
-
-/**
- * Record the Feishu owner's open_id (auto-detected from a P2P DM) and
- * unstick any of this user's groups whose `sender_allowlist=[]` —
- * the "owner-locked trap" that buildOnNewChat creates when a group is
- * registered before the owner has DM'd the bot.
- */
-function learnFeishuOwner(
-  userId: string,
-  senderOpenId: string,
-  ownerRef: { value: string | undefined },
-): void {
-  const ownerOpenId = ownerRef.value ?? senderOpenId;
-  if (!ownerRef.value) {
-    ownerRef.value = senderOpenId;
-    saveFeishuOwnerOpenId(userId, senderOpenId);
-  }
-  const backfilled = backfillEmptyAllowlistsForUser(userId, ownerOpenId);
-  for (const jid of backfilled) {
-    const fresh = getRegisteredGroup(jid);
-    if (fresh) registeredGroups[jid] = fresh;
-  }
-  logger.info(
-    { userId, senderOpenId, ownerOpenId, backfilledCount: backfilled.length },
-    'Feishu owner open_id auto-detected from P2P message',
-  );
 }
 
 /**
@@ -21726,13 +21692,8 @@ function buildOnAgentMessage(): (baseChatJid: string, agentId: string) => void {
 /**
  * Mention gating callback: when bot is NOT @mentioned in a group chat,
  * return true to process the message anyway, false to drop it.
- *
- * @param senderImId - 发送者的 IM 标识符（如飞书 open_id），用于 owner_mentioned 模式
  */
-function shouldProcessGroupMessage(
-  chatJid: string,
-  senderImId?: string,
-): boolean {
+function shouldProcessGroupMessage(chatJid: string): boolean {
   const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
   if (!group) return false;
 
@@ -21743,12 +21704,10 @@ function shouldProcessGroupMessage(
   switch (mode) {
     case 'always':
       return true; // 群聊不需要 @bot
-    case 'when_mentioned':
-      return false; // 必须 @bot
-    case 'owner_mentioned':
-      return false; // 需要 @bot，且后续还需检查 sender 是否为 owner
-    case 'disabled':
-      return false; // 忽略所有消息（在调用方处理 disabled 的 DM 忽略）
+    case 'when_mentioned': // 必须 @bot
+    case 'owner_mentioned': // 需要 @bot，且后续还需检查 sender 是否为 owner
+    case 'disabled': // 忽略所有消息（在调用方处理 disabled 的 DM 忽略）
+      return false;
     case 'auto':
     default:
       // 兼容旧行为：require_mention defaults to false; if true → only process @mentions
@@ -23708,10 +23667,6 @@ async function main(): Promise<void> {
       );
       return false;
     }
-    const homeFolder = homeGroup.folder;
-    const ignoreMessagesBefore = Date.now();
-    const onNewChat = buildOnNewChat(userId, homeFolder);
-
     // Old per-provider config routes are a compatibility facade over the
     // default first-class account. Never start a second legacy connector.
     const projectedAccount = syncLegacyConfigToDefaultChannelAccount(
@@ -23726,297 +23681,11 @@ async function main(): Promise<void> {
       return reloadChannelAccountById(projectedAccount.id);
     }
 
-    if (channel === 'feishu') {
-      await imManager.disconnectUserFeishu(userId);
-      const config = getUserFeishuConfig(userId);
-      if (
-        config &&
-        config.enabled !== false &&
-        config.appId &&
-        config.appSecret
-      ) {
-        const reloadOwnerRef = { value: config.ownerOpenId ?? undefined };
-        const getReloadOwnerOpenId = () => reloadOwnerRef.value;
-        const onReloadP2pSender = (senderOpenId: string) =>
-          learnFeishuOwner(userId, senderOpenId, reloadOwnerRef);
-        const onNewChat = buildOnNewChat(
-          userId,
-          homeFolder,
-          getReloadOwnerOpenId,
-        );
-        const connected = await imManager.connectUserFeishu(
-          userId,
-          config,
-          onNewChat,
-          {
-            onMessagePersisted: broadcastNewMessage,
-            onFollowUpsChanged: broadcastFollowUpUpdate,
-            ignoreMessagesBefore,
-            onCommand: handleCommand,
-            resolveGroupFolder: (chatJid: string) =>
-              resolveEffectiveFolder(chatJid),
-            resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
-            onAgentMessage: buildOnAgentMessage(),
-            onBotAddedToGroup: buildOnNewChat(
-              userId,
-              homeFolder,
-              getReloadOwnerOpenId,
-            ),
-            onBotRemovedFromGroup: buildOnBotRemovedFromGroup(),
-            isChatBound: hasExplicitChannelBinding,
-            shouldProcessGroupMessage,
-            resolveFeishuConversationPlan:
-              resolveFeishuConversationPlanForMessage,
-            isGroupOwnerMessage,
-            isSenderAllowedInGroup: (jid: string, sender?: string) =>
-              isSenderAllowedInGroup(jid, sender, getReloadOwnerOpenId),
-            onFollowUpMessage: handleIncomingFollowUp,
-            onSessionBreak: handleSessionBreak,
-            onSessionClear: handleFeishuSessionClear,
-            onSessionFresh: handleFeishuSessionFresh,
-            onMessageRecalled: handleChannelMessageRecalled,
-            onFollowUpCardAction: handleFollowUpCardAction,
-            onCardInterrupt: handleCardInterrupt,
-            onP2pSender: onReloadP2pSender,
-          },
-        );
-        logger.info(
-          { userId, connected },
-          'User Feishu connection hot-reloaded',
-        );
-        return connected;
-      }
-      logger.info({ userId }, 'User Feishu channel disabled via hot-reload');
-      return false;
-    } else if (channel === 'telegram') {
-      await imManager.disconnectUserTelegram(userId);
-      const config = getUserTelegramConfig(userId);
-      const globalTelegramConfig = getTelegramProviderConfig();
-      if (config && config.enabled !== false && config.botToken) {
-        const connected = await imManager.connectUserTelegram(
-          userId,
-          {
-            ...config,
-            proxyUrl: config.proxyUrl || globalTelegramConfig.proxyUrl,
-          },
-          onNewChat,
-          buildIsChatAuthorized(userId),
-          buildOnPairAttempt(userId),
-          {
-            onMessagePersisted: broadcastNewMessage,
-            onCommand: handleCommand,
-            ignoreMessagesBefore,
-            resolveGroupFolder: (chatJid: string) =>
-              resolveEffectiveFolder(chatJid),
-            resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
-            onAgentMessage: buildOnAgentMessage(),
-            onNativeContextDetected: buildOnNativeContextDetected(),
-            onBotAddedToGroup: buildOnNewChat(userId, homeFolder),
-            onBotRemovedFromGroup: buildOnBotRemovedFromGroup(),
-          },
-        );
-        logger.info(
-          { userId, connected },
-          'User Telegram connection hot-reloaded',
-        );
-        return connected;
-      }
-      logger.info({ userId }, 'User Telegram channel disabled via hot-reload');
-      return false;
-    } else if (channel === 'qq') {
-      await imManager.disconnectUserQQ(userId);
-      const config = getUserQQConfig(userId);
-      if (
-        config &&
-        config.enabled !== false &&
-        config.appId &&
-        config.appSecret
-      ) {
-        const connected = await imManager.connectUserQQ(
-          userId,
-          config,
-          onNewChat,
-          buildIsChatAuthorized(userId),
-          buildOnPairAttempt(userId),
-          {
-            onMessagePersisted: broadcastNewMessage,
-            onFollowUpsChanged: broadcastFollowUpUpdate,
-            onFollowUpMessage: handleIncomingFollowUp,
-            onSessionBreak: handleSessionBreak,
-            onCommand: handleCommand,
-            resolveGroupFolder: (chatJid: string) =>
-              resolveEffectiveFolder(chatJid),
-            resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
-            onAgentMessage: buildOnAgentMessage(),
-          },
-        );
-        logger.info({ userId, connected }, 'User QQ connection hot-reloaded');
-        return connected;
-      }
-      logger.info({ userId }, 'User QQ channel disabled via hot-reload');
-      return false;
-    } else if (channel === 'dingtalk') {
-      await imManager.disconnectUserDingTalk(userId);
-      const config = getUserDingTalkConfig(userId);
-      if (
-        config &&
-        config.enabled !== false &&
-        config.clientId &&
-        config.clientSecret
-      ) {
-        const connected = await imManager.connectUserDingTalk(
-          userId,
-          config,
-          onNewChat,
-          {
-            onMessagePersisted: broadcastNewMessage,
-            isChatAuthorized: buildIsChatAuthorized(userId),
-            onPairAttempt: buildOnPairAttempt(userId),
-            ignoreMessagesBefore,
-            onCommand: handleCommand,
-            resolveGroupFolder: (chatJid: string) =>
-              resolveEffectiveFolder(chatJid),
-            resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
-            onAgentMessage: buildOnAgentMessage(),
-            onBotAddedToGroup: buildOnNewChat(userId, homeFolder),
-            onBotRemovedFromGroup: buildOnBotRemovedFromGroup(),
-            shouldProcessGroupMessage,
-            isGroupOwnerMessage,
-            resolveRegisteredGroup: getRegisteredGroup,
-          },
-        );
-        logger.info(
-          { userId, connected },
-          'User DingTalk connection hot-reloaded',
-        );
-        return connected;
-      }
-      logger.info({ userId }, 'User DingTalk channel disabled via hot-reload');
-      return false;
-    } else if (channel === 'discord') {
-      await imManager.disconnectUserDiscord(userId);
-      const config = getUserDiscordConfig(userId);
-      if (config && config.enabled !== false && config.botToken) {
-        const connected = await imManager.connectUserDiscord(
-          userId,
-          config,
-          onNewChat,
-          {
-            onMessagePersisted: broadcastNewMessage,
-            isChatAuthorized: buildIsChatAuthorized(userId),
-            onPairAttempt: buildOnPairAttempt(userId),
-            ignoreMessagesBefore,
-            onCommand: handleCommand,
-            resolveGroupFolder: (chatJid: string) =>
-              resolveEffectiveFolder(chatJid),
-            resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
-            onAgentMessage: buildOnAgentMessage(),
-            onBotAddedToGroup: buildOnNewChat(userId, homeFolder),
-            onBotRemovedFromGroup: buildOnBotRemovedFromGroup(),
-            shouldProcessGroupMessage,
-            isGroupOwnerMessage,
-          },
-        );
-        logger.info(
-          { userId, connected },
-          'User Discord connection hot-reloaded',
-        );
-        return connected;
-      }
-      logger.info({ userId }, 'User Discord channel disabled via hot-reload');
-      return false;
-    } else if (channel === 'wechat') {
-      await imManager.disconnectUserWeChat(userId);
-      const config = getUserWeChatConfig(userId);
-      if (
-        config &&
-        config.enabled !== false &&
-        config.botToken &&
-        config.ilinkBotId
-      ) {
-        const connected = await imManager.connectUserWeChat(
-          userId,
-          {
-            botToken: config.botToken,
-            ilinkBotId: config.ilinkBotId,
-            baseUrl: config.baseUrl,
-            cdnBaseUrl: config.cdnBaseUrl,
-            getUpdatesBuf: config.getUpdatesBuf,
-            bypassProxy: config.bypassProxy,
-          },
-          onNewChat,
-          {
-            onMessagePersisted: broadcastNewMessage,
-            isChatAuthorized: buildIsChatAuthorized(userId),
-            onPairAttempt: buildOnPairAttempt(userId),
-            // With a durable cursor, replay is intentional recovery and must
-            // not be filtered by a new-process timestamp.
-            ignoreMessagesBefore: config.getUpdatesBuf ? undefined : Date.now(),
-            onCommand: handleCommand,
-            resolveGroupFolder: (chatJid: string) =>
-              resolveEffectiveFolder(chatJid),
-            resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
-            onAgentMessage: buildOnAgentMessage(),
-            onUpdatesBuf: (cursor: string) => {
-              if (!cursor) return;
-              const latest = getUserWeChatConfig(userId);
-              if (!latest || latest.getUpdatesBuf === cursor) return;
-              saveUserWeChatConfig(userId, {
-                ...latest,
-                getUpdatesBuf: cursor,
-              });
-            },
-          },
-        );
-        logger.info(
-          { userId, connected },
-          'User WeChat connection hot-reloaded',
-        );
-        return connected;
-      }
-      logger.info({ userId }, 'User WeChat channel disabled via hot-reload');
-      return false;
-    } else {
-      // WhatsApp (Baileys)
-      await imManager.disconnectUserWhatsApp(userId);
-      const config = getUserWhatsAppConfig(userId);
-      if (config && config.enabled !== false) {
-        const connected = await imManager.connectUserWhatsApp(
-          userId,
-          {
-            accountId: config.accountId,
-            phoneNumber: config.phoneNumber,
-            enabled: config.enabled,
-          },
-          onNewChat,
-          {
-            onMessagePersisted: broadcastNewMessage,
-            isChatAuthorized: buildIsChatAuthorized(userId),
-            onPairAttempt: buildOnPairAttempt(userId),
-            ignoreMessagesBefore: Date.now(),
-            onCommand: handleCommand,
-            resolveGroupFolder: (chatJid: string) =>
-              resolveEffectiveFolder(chatJid),
-            resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
-            onAgentMessage: buildOnAgentMessage(),
-            onBotAddedToGroup: buildOnNewChat(userId, homeFolder),
-            onBotRemovedFromGroup: buildOnBotRemovedFromGroup(),
-            shouldProcessGroupMessage,
-            isGroupOwnerMessage,
-            onConnectionUpdate: (uid, accountId, state) => {
-              broadcastWhatsAppStatus(uid, accountId, state);
-            },
-          },
-        );
-        logger.info(
-          { userId, connected },
-          'User WhatsApp connection hot-reloaded',
-        );
-        return connected;
-      }
-      logger.info({ userId }, 'User WhatsApp channel disabled via hot-reload');
-      return false;
-    }
+    logger.info(
+      { userId, channel },
+      'No legacy IM config to hot-reload; channel stays disconnected',
+    );
+    return false;
   };
 
   // Reconnect all of a user's IM channels from persisted config — symmetric

@@ -15,6 +15,12 @@ import path from 'path';
 import { randomUUID } from 'node:crypto';
 
 import {
+  fileSignatureSettled,
+  sameFileSignature,
+  statFileSignature,
+  type FileSignature,
+} from './file-signature.js';
+import {
   CONTAINER_HTTP_PROXY,
   CONTAINER_HTTPS_PROXY,
   CONTAINER_IMAGE,
@@ -226,55 +232,6 @@ function deriveContainerClaudeJson(hostJsonPath: string): string {
   }
 }
 
-/** What stat can tell about a file's contents. */
-interface FileSignature {
-  ino: number;
-  size: number;
-  mtimeMs: number;
-  ctimeMs: number;
-}
-
-function statFileSignature(filePath: string): FileSignature | null {
-  try {
-    const st = fs.statSync(filePath);
-    return {
-      ino: st.ino,
-      size: st.size,
-      mtimeMs: st.mtimeMs,
-      ctimeMs: st.ctimeMs,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function sameFileSignature(
-  a: FileSignature | null,
-  b: FileSignature | null,
-): boolean {
-  if (a === null || b === null) return a === b;
-  return (
-    a.ino === b.ino &&
-    a.size === b.size &&
-    a.mtimeMs === b.mtimeMs &&
-    a.ctimeMs === b.ctimeMs
-  );
-}
-
-/**
- * File timestamps are coarse, so a same-size in-place rewrite in the same
- * tick keeps the signature. Like git's "racily clean" rule, a signature only
- * vouches for the contents once observed this long after the file's mtime.
- */
-const RACY_SIGNATURE_WINDOW_MS = 2_000;
-
-function fileSignatureSettled(
-  sig: FileSignature | null,
-  observedAt: number,
-): boolean {
-  return sig === null || observedAt - sig.mtimeMs >= RACY_SIGNATURE_WINDOW_MS;
-}
-
 let containerClaudeJsonSource: {
   path: string;
   sig: FileSignature | null;
@@ -326,14 +283,7 @@ function writeContainerClaudeJsonIfChanged(
 
   // Running containers bind-mount this file read-only. Replacing it by rename
   // leaves them a whole snapshot instead of a truncated, half-written file.
-  const tmp = `${targetPath}.${process.pid}.${randomUUID()}.tmp`;
-  try {
-    fs.writeFileSync(tmp, content, { mode: 0o644, flag: 'wx' });
-    fs.renameSync(tmp, targetPath);
-  } catch (err) {
-    fs.rmSync(tmp, { force: true });
-    throw err;
-  }
+  writeAtomicFile(targetPath, content, 0o644);
   const writtenSig = statFileSignature(targetPath);
   if (writtenSig) {
     containerClaudeJsonTarget = {
@@ -475,20 +425,11 @@ export function clearSessionClaudeOAuthFiles(
     const hadOauthAccount = 'oauthAccount' in claudeJson;
     delete claudeJson.oauthAccount;
     if (claudeJsonTemplatePath || sourceExists || hadOauthAccount) {
-      const tmpPath = `${sessionClaudeJson}.${process.pid}.${randomUUID()}.tmp`;
-      try {
-        fs.writeFileSync(tmpPath, JSON.stringify(claudeJson, null, 2) + '\n', {
-          flag: 'wx',
-          mode: 0o600,
-        });
-        fs.renameSync(tmpPath, sessionClaudeJson);
-      } finally {
-        try {
-          fs.unlinkSync(tmpPath);
-        } catch {
-          /* already renamed or never created */
-        }
-      }
+      writeAtomicFile(
+        sessionClaudeJson,
+        JSON.stringify(claudeJson, null, 2) + '\n',
+        0o600,
+      );
     }
   }
 
@@ -1234,7 +1175,7 @@ function resolveRuntimeMcpServers(
 }
 
 function buildRuntimeMcpManifest(
-  group: RegisteredGroup,
+  servers: Record<string, Record<string, unknown>>,
   agentProfile: RunnerAgentProfile | undefined,
   plugins: SdkPluginConfig[],
 ) {
@@ -1243,7 +1184,7 @@ function buildRuntimeMcpManifest(
       ? loadPluginMcpDefinitions(plugins)
       : {};
   return buildEffectiveMcpManifest({
-    ...resolveRuntimeMcpServers(group, agentProfile),
+    ...servers,
     ...pluginServers,
   });
 }
@@ -3727,7 +3668,6 @@ export function writeGroupsSnapshot(
   groupFolder: string,
   isAdminHome: boolean,
   groups: AvailableGroup[],
-  registeredJids: Set<string>,
 ): void {
   const groupIpcDir = path.join(DATA_DIR, 'ipc', groupFolder);
   fs.mkdirSync(groupIpcDir, { recursive: true });
@@ -4253,16 +4193,13 @@ export async function runHostAgent(
     hostClaudeContextSync.claudeMdStatus;
   hostClaudeContextPlan.audit.warnings = hostClaudeContextSync.warnings;
   const settingsFile = path.join(groupSessionsDir, 'settings.json');
-  ensureSettingsJson(
-    settingsFile,
-    resolveRuntimeMcpServers(group, input.agentProfile),
-    {
-      replaceMcpServers: true,
-      baseSettings: loadHostClaudeSettings(hostClaudeContextPlan),
-    },
-  );
+  const hostMcpServers = resolveRuntimeMcpServers(group, input.agentProfile);
+  ensureSettingsJson(settingsFile, hostMcpServers, {
+    replaceMcpServers: true,
+    baseSettings: loadHostClaudeSettings(hostClaudeContextPlan),
+  });
   const hostMcpManifest = buildRuntimeMcpManifest(
-    group,
+    hostMcpServers,
     input.agentProfile,
     preparedHostPlugins,
   );

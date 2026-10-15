@@ -6,7 +6,7 @@
  * strict); colors are always v2 enum tokens (never hex).
  */
 
-import type { AgentCardInput, CardMeta, ToolCallStat } from './types.js';
+import type { AgentCardInput, CardMeta } from './types.js';
 import { resolveStatusTheme } from './status-theme.js';
 import { splitIntoBodySections } from './length.js';
 import { isMarkdownTableDelimiter, markdownFenceOpener } from './pagination.js';
@@ -60,9 +60,6 @@ export const CARD_ELEMENT_IDS = {
 
   // Static terminal card extras
   META_ROW: 'meta_row',
-  THINKING_PANEL_FINAL: 'thinking_final',
-  THINKING_CONTENT_FINAL: 'thinking_fin_md',
-  TOOLS_PANEL_FINAL: 'tools_final',
   FOOTER: 'footer',
 } as const;
 
@@ -71,21 +68,6 @@ const PANEL_PADDING = '6px 10px 6px 10px';
 const PANEL_ICON = {
   tag: 'standard_icon',
   token: 'down-small-ccm_outlined',
-} as const;
-
-/**
- * Per-panel header tints. collapsible_panel header.background_color must be an
- * ENUM colour token — the API rejects rgba()/rgb()/hex here with
- * `code=11310 collapsible panel header background color is invalid`, which
- * silently fails card.create and forces the whole streaming card to degrade
- * from the L0 typewriter path down to L1 CardKit full-update on every reply.
- * Use the light `-50` gradient tokens: near-white fills that keep the dark
- * title legible while still differentiating the panels, and that the API
- * actually accepts.
- */
-const PANEL_TINT = {
-  thinking: 'blue-50', // light blue
-  tools: 'wathet-50', // light cyan/sky
 } as const;
 
 type El = Record<string, unknown>;
@@ -304,62 +286,6 @@ export function buildBodyChunks(bodyText: string): El[] {
     element_id: i === 0 ? CARD_ELEMENT_IDS.MAIN_CONTENT : `body_${i}`,
   }));
   return els;
-}
-
-export function buildThinkingPanel(thinking: string | undefined): El[] {
-  const trimmed = thinking?.trim();
-  if (!trimmed) return [];
-  return [
-    collapsiblePanel({
-      title: '**💭 思考过程**',
-      expanded: false,
-      elementId: CARD_ELEMENT_IDS.THINKING_PANEL_FINAL,
-      backgroundColor: PANEL_TINT.thinking,
-      elements: [
-        {
-          tag: 'markdown',
-          content: neutralizeFeishuMentions(trimmed, 'card'),
-          element_id: CARD_ELEMENT_IDS.THINKING_CONTENT_FINAL,
-        },
-      ],
-    }),
-  ];
-}
-
-export function buildToolsPanel(toolCalls: ToolCallStat[] | undefined): El[] {
-  if (!toolCalls || toolCalls.length === 0) return [];
-  const total = toolCalls.reduce((s, t) => s + t.count, 0);
-  const sorted = [...toolCalls].sort((a, b) => b.count - a.count);
-  const MAX_VISIBLE = 10;
-  const top = sorted.slice(0, MAX_VISIBLE);
-  const rest = sorted.slice(MAX_VISIBLE);
-  // Use <number_tag> for per-tool counts — cleaner than inline text counters.
-  const lines = top.map(
-    (t) =>
-      `- \`${codeSpanText(t.name)}\` <number_tag background_color='grey' font_color='white'>${clampNumberTag(t.count)}</number_tag>`,
-  );
-  if (rest.length > 0) {
-    const restTotal = rest.reduce((s, t) => s + t.count, 0);
-    lines.push(`- _… 其余 ${rest.length} 种共 ${restTotal} 次_`);
-  }
-  // Title uses a number_tag badge so the total glows as a pill, not plain text.
-  const totalBadge = `<number_tag background_color='violet' font_color='white'>${clampNumberTag(total)}</number_tag>`;
-  return [
-    collapsiblePanel({
-      title: `**🛠 工具调用** ${totalBadge}`,
-      expanded: false,
-      elementId: CARD_ELEMENT_IDS.TOOLS_PANEL_FINAL,
-      backgroundColor: PANEL_TINT.tools,
-      elements: [{ tag: 'markdown', content: lines.join('\n') }],
-    }),
-  ];
-}
-
-/** number_tag accepts integers 1-99 only; clamp to stay in-range. */
-function clampNumberTag(n: number): number {
-  if (!Number.isFinite(n) || n <= 0) return 1;
-  if (n > 99) return 99;
-  return Math.floor(n);
 }
 
 export function buildFooter(
@@ -757,30 +683,6 @@ export function buildFinalDetails(input: AgentCardInput): El[] {
   });
 }
 
-/** One runtime panel (collapsible wrapping a single patchable markdown). */
-export function buildRuntimePanel(opts: {
-  elementId: string;
-  contentElementId: string;
-  title: string;
-  expanded: boolean;
-  content: string;
-  backgroundColor?: string;
-}): El {
-  return collapsiblePanel({
-    title: opts.title,
-    expanded: opts.expanded,
-    elementId: opts.elementId,
-    backgroundColor: opts.backgroundColor,
-    elements: [
-      {
-        tag: 'markdown',
-        element_id: opts.contentElementId,
-        content: opts.content,
-      },
-    ],
-  });
-}
-
 interface CollapsibleOpts {
   title: string;
   expanded: boolean;
@@ -791,6 +693,11 @@ interface CollapsibleOpts {
    * accent (thinking→wathet, tools→turquoise, ask→orange) so the eye can tell
    * them apart at a glance without the card turning into a colour soup — keep
    * the palette to ≤3 accents plus grey.
+   * Must be an ENUM colour token (e.g. the light `-50` gradients): the API
+   * rejects rgba()/rgb()/hex with `code=11310 collapsible panel header
+   * background color is invalid`, which silently fails card.create and forces
+   * the streaming card to degrade from the L0 typewriter path to L1 CardKit
+   * full-update on every reply.
    */
   backgroundColor?: string;
   /** Header leading icon. Defaults to the shared fold chevron. */

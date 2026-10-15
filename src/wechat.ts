@@ -41,6 +41,7 @@ import {
   weChatClientIdForChunk,
 } from './wechat-outbound.js';
 import { PhysicalDeliveryTracker } from './im-delivery-progress.js';
+import { errorChain } from './im-send-retry-policy.js';
 
 // ─── Constants ──────────────────────────────────────────────────
 
@@ -610,18 +611,6 @@ function providerGenerationSequence(msg: WeixinMessage): number | undefined {
     if (Number.isSafeInteger(parsed)) return parsed;
   }
   return undefined;
-}
-
-function errorChain(error: unknown): Array<Record<string, unknown>> {
-  const chain: Array<Record<string, unknown>> = [];
-  let current = error;
-  const seen = new Set<unknown>();
-  while (current && typeof current === 'object' && !seen.has(current)) {
-    seen.add(current);
-    chain.push(current as Record<string, unknown>);
-    current = (current as { cause?: unknown }).cause;
-  }
-  return chain;
 }
 
 export function classifyWeChatConnectionError(

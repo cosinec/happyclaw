@@ -4,9 +4,11 @@ import {
   listAgentProfilesForUser,
 } from './db.js';
 import {
+  collectWorkspaceRuntimeJids,
   getWorkspaceRuntimeJids,
   listWorkspaceGroupsForAgentProfile,
   quiesceWorkspaceRunnersAroundCommit,
+  WorkspaceRuntimeQuiesceError,
   type WorkspaceRuntimeQuiesceTarget,
 } from './agent-profile-runtime.js';
 import { getWebDeps } from './web-context.js';
@@ -36,6 +38,30 @@ export class CapabilityRuntimeCommitError extends Error {
     );
     this.name = 'CapabilityRuntimeCommitError';
   }
+}
+
+/** Response body for a runtime-quiesce or uncertain-commit failure, else null. */
+export function capabilityRuntimeMutationFailure(
+  error: unknown,
+  action: string,
+) {
+  if (error instanceof WorkspaceRuntimeQuiesceError) {
+    return {
+      error: error.persisted
+        ? `${action} was saved, but runtime cleanup failed; retry the request`
+        : `Failed to stop affected workspaces; ${action} was not saved`,
+      persisted: error.persisted,
+      retryable: true,
+    };
+  }
+  if (error instanceof CapabilityRuntimeCommitError) {
+    return {
+      error: `${action} has an uncertain commit outcome; retry the request to finish fail-closed cleanup`,
+      persisted: 'unknown',
+      retryable: true,
+    };
+  }
+  return null;
 }
 
 function profileUsesCapability(
@@ -129,13 +155,7 @@ export async function mutateCapabilityAroundRuntimeQuiesce<T>(
     return { value, invalidatedRuntimeJids: 0 };
   }
 
-  const knownRuntimeJids = Array.from(
-    new Set(
-      targets.flatMap((target) =>
-        getWorkspaceRuntimeJids(deps, target.folder, target.primaryJid),
-      ),
-    ),
-  );
+  const knownRuntimeJids = collectWorkspaceRuntimeJids(deps, targets);
   try {
     const result = await quiesceWorkspaceRunnersAroundCommit(
       deps,

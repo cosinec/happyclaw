@@ -493,15 +493,7 @@ export function StreamingDisplay({
     avatarUrl: agentAvatarUrl,
     avatarEmoji: agentAvatarEmoji,
     avatarColor: agentAvatarColor,
-    mainAvatarUrl: appearance?.aiAvatarUrl,
-    mainAvatarEmoji:
-      appearance?.aiAvatarMode === 'emoji'
-        ? appearance.aiAvatarEmoji
-        : undefined,
-    mainAvatarColor:
-      appearance?.aiAvatarMode === 'emoji'
-        ? appearance.aiAvatarColor
-        : undefined,
+    appearance,
   });
   const senderName = agentIdentity.name;
   const { mode: displayMode } = useDisplayMode();

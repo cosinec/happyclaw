@@ -20,7 +20,7 @@ export interface AgentTurnAnchor {
   };
 }
 
-function escapeAttribute(value: string): string {
+export function escapeAttribute(value: string): string {
   return value
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')

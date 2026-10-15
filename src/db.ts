@@ -8374,23 +8374,6 @@ export function setRouterState(key: string, value: string): void {
   ).run(key, value);
 }
 
-/**
- * Persist several router_state keys in one transaction. The cursor save path
- * runs on every processed message batch; four independent auto-committed
- * writes meant four WAL syncs where one suffices.
- */
-export function setRouterStateBatch(
-  entries: ReadonlyArray<readonly [key: string, value: string]>,
-): void {
-  if (entries.length === 0) return;
-  const stmt = prepareCached(
-    'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
-  );
-  db.transaction(() => {
-    for (const [key, value] of entries) stmt.run(key, value);
-  })();
-}
-
 /** All chat JIDs currently present, for cursor-map pruning. */
 export function getAllChatJids(): string[] {
   return (

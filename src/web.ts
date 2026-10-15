@@ -508,9 +508,7 @@ app.get('/api/follow-ups', authMiddleware, async (c) => {
   if (!deps) return c.json({ error: 'Server not initialized' }, 500);
   const chatJid = c.req.query('chatJid')?.trim();
   if (!chatJid) return c.json({ error: 'chatJid is required' }, 400);
-  const baseJid = chatJid.includes('#agent:')
-    ? chatJid.slice(0, chatJid.indexOf('#agent:'))
-    : chatJid;
+  const baseJid = stripRuntimeJidSuffix(chatJid);
   const group = getRegisteredGroup(baseJid);
   if (!group) return c.json({ error: 'Group not found' }, 404);
   const authUser = c.get('user') as AuthUser;
@@ -539,9 +537,7 @@ app.post('/api/follow-ups/:messageId/action', authMiddleware, async (c) => {
   if (!chatJid || !body.action) {
     return c.json({ error: 'chatJid and action are required' }, 400);
   }
-  const baseJid = chatJid.includes('#agent:')
-    ? chatJid.slice(0, chatJid.indexOf('#agent:'))
-    : chatJid;
+  const baseJid = stripRuntimeJidSuffix(chatJid);
   const group = getRegisteredGroup(baseJid);
   if (!group) return c.json({ error: 'Group not found' }, 404);
   const authUser = c.get('user') as AuthUser;
@@ -1679,6 +1675,8 @@ function setupWebSocket(server: any): WebSocketServer {
       }> = [];
       const queuedChatJids: string[] = [];
       for (const g of queueStatus.groups) {
+        // Idle groups emit nothing below; skip them before the ACL lookup.
+        if (!(g.queryInFlight && g.queryId) && !g.pendingMessages) continue;
         const baseJid = stripRuntimeJidSuffix(g.jid);
         const jid = normalizeRuntimeJid(g.jid);
         const allowed = getGroupAllowedUserIds(baseJid);
@@ -1730,7 +1728,7 @@ function setupWebSocket(server: any): WebSocketServer {
         const restorable = buildStreamSnapshot(jid);
         if (!restorable) continue;
         // Strip #agent: suffix for ACL lookup (virtual JIDs not in registered_groups)
-        const baseJid = jid.includes('#agent:') ? jid.split('#agent:')[0] : jid;
+        const baseJid = stripRuntimeJidSuffix(jid);
         const allowed = getGroupAllowedUserIds(baseJid);
         if (allowed === null || !allowed.has(userId)) continue;
         try {

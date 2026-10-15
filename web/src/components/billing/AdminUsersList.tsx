@@ -4,6 +4,7 @@ import {
   useBillingStore,
   type UserBillingOverview,
 } from '../../stores/billing';
+import { extractErrorMessage } from '../../utils/error';
 import { useCurrency } from './utils';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -89,7 +90,7 @@ export default function AdminUsersList({ onSelectUser }: AdminUsersListProps) {
     } catch (err) {
       setBatchResult({
         type: 'error',
-        msg: `批量分配失败: ${err instanceof Error ? err.message : String(err)}`,
+        msg: `批量分配失败: ${extractErrorMessage(err)}`,
       });
     } finally {
       setBatching(false);

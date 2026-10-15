@@ -98,16 +98,19 @@ describe('Agent prompt and capability frontend contract', () => {
     const system = read(
       'web/src/components/settings/SystemSettingsSection.tsx',
     );
+    const policy = read('web/src/utils/agent-runtime-policy.ts');
 
     expect(profiles).toMatch(
       /HappyClaw MCP[\s\S]*宿主机 Skills[\s\S]*“能力配置”独立控制/,
     );
-    expect(profiles).toContain("skill.source === 'external' && skill.enabled");
+    expect(profiles).toContain('buildHostSkillOptions(skills, hostSkillIds)');
     expect(skillEditor).toMatch(/不使用[\s\S]*选择部分[\s\S]*全部使用/);
     expect(skillEditor).toContain('来自 ~/.claude/skills，可单独启用');
     expect(main).toContain('<AgentSkillsPolicyEditor');
-    expect(main).toContain("skill.source === 'user' && skill.enabled");
-    expect(main).toContain("skill.source === 'external' && skill.enabled");
+    expect(main).toContain('buildManagedSkillOptions(skills, skillIds)');
+    expect(main).toContain('buildHostSkillOptions(skills, hostSkillIds)');
+    expect(policy).toContain("skill.source === 'user' && skill.enabled");
+    expect(policy).toContain("skill.source === 'external' && skill.enabled");
     expect(system).toContain('宿主机');
   });
 
@@ -209,8 +212,10 @@ describe('Agent prompt and capability frontend contract', () => {
     expect(main).toMatch(
       /runtime_policy:\s*\{[\s\S]*reasoning: \{ effort \}[\s\S]*skills:/,
     );
+    expect(main).toContain('AGENT_EFFORT_OPTIONS.map');
+    const policy = read('web/src/utils/agent-runtime-policy.ts');
     for (const effort of ['inherit', 'low', 'medium', 'high', 'xhigh', 'max']) {
-      expect(main).toContain(`value: '${effort}'`);
+      expect(policy).toContain(`value: '${effort}'`);
     }
   });
 });

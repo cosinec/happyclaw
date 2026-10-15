@@ -211,7 +211,7 @@ describe('inbound wiring', () => {
   test('Feishu connections receive the recall callback', () => {
     expect(
       main.match(/onMessageRecalled: handleChannelMessageRecalled/g),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
   });
 
   test('IM downloads resolve from the Agent working directory', () => {

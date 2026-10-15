@@ -17,6 +17,7 @@ import {
   SettingsSection,
 } from '@/components/settings/SettingsLayout';
 import { useBillingStore, type BillingPlan } from '../../stores/billing';
+import { extractErrorMessage } from '../../utils/error';
 
 interface PlanFormDialogProps {
   open: boolean;
@@ -220,7 +221,7 @@ export default function PlanFormDialog({
       }
       onOpenChange(false);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : String(err));
+      toast.error(extractErrorMessage(err));
     } finally {
       setSubmitting(false);
     }

@@ -47,6 +47,7 @@ import {
   type InviteCode,
   type PermissionTemplateKey,
 } from '../../stores/users';
+import { copyToClipboard as writeToClipboard } from '../../utils/clipboard';
 import {
   formatDateTime,
   getErrorMessage,
@@ -147,7 +148,7 @@ export function InviteCodesTab({
   };
 
   const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text).then(() => setNotice('已复制到剪贴板'));
+    writeToClipboard(text).then(() => setNotice('已复制到剪贴板'));
   };
 
   const handleDelete = async (invite: InviteCode) => {

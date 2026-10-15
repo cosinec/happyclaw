@@ -2676,26 +2676,6 @@ export function claimStreamingCardRecovery(
   return changed.changes === 1 ? getStreamingCardRecord(id) : undefined;
 }
 
-/** Release a failed recovery claim so an account-ready pass can retry now. */
-export function releaseStreamingCardRecovery(
-  id: string,
-  expectedRevision: number,
-  error: string,
-  nowInput?: Date | string,
-): StreamingCardRecord | undefined {
-  const connection = requireDatabase();
-  const now = isoNow(nowInput);
-  const changed = connection
-    .prepare(
-      `UPDATE streaming_cards
-       SET status = 'streaming', error = ?, revision = revision + 1,
-           updated_at = ?
-       WHERE id = ? AND revision = ? AND status = 'recovering'`,
-    )
-    .run(error, now, id, expectedRevision);
-  return changed.changes === 1 ? getStreamingCardRecord(id) : undefined;
-}
-
 /** Read all non-terminal cards in deterministic pages without a hard cap. */
 export function listAllNonterminalStreamingCards(
   pageSize = 1_000,

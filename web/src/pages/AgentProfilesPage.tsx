@@ -79,10 +79,7 @@ import { useAuthStore, type AppearanceConfig } from '../stores/auth';
 import { useSkillsStore } from '../stores/skills';
 import { useMcpServersStore } from '../stores/mcp-servers';
 import type { ApiError } from '../api/client';
-import {
-  buildMcpPolicyOptions,
-  normalizeMcpPolicyReferences,
-} from '../utils/mcp-servers';
+import { normalizeMcpPolicyReferences } from '../utils/mcp-servers';
 import {
   getAgentContextSource,
   type AgentEffortLevel,
@@ -98,6 +95,10 @@ import {
 } from '../utils/agent-prompts';
 import { createUnsavedNavigationGuard } from '../utils/unsaved-navigation';
 import {
+  AGENT_EFFORT_OPTIONS,
+  buildHostSkillOptions,
+  buildManagedSkillOptions,
+  buildMcpSelectionOptions,
   getHostSkillPolicy,
   hostSkillPolicyForMode,
   skillPolicySummary,
@@ -119,18 +120,6 @@ const DEFAULT_RUNTIME_POLICY: AgentProfileRuntimePolicy = {
   },
   mcp: { mode: 'inherit', ids: [] },
 };
-
-const AGENT_EFFORT_OPTIONS: Array<{
-  value: AgentEffortLevel;
-  label: string;
-}> = [
-  { value: 'inherit', label: '跟随模型配置' },
-  { value: 'low', label: 'Low' },
-  { value: 'medium', label: 'Medium' },
-  { value: 'high', label: 'High' },
-  { value: 'xhigh', label: 'XHigh' },
-  { value: 'max', label: 'Max' },
-];
 
 const AGENT_EFFORT_VALUES = new Set<AgentEffortLevel>(
   AGENT_EFFORT_OPTIONS.map((option) => option.value),
@@ -715,56 +704,18 @@ export function AgentProfilesPage() {
     };
     setHostSkillsSaveStatus('warning');
   }, [draftMode, governance, selected]);
-  const skillOptions = useMemo(() => {
-    const available = skills
-      .filter((skill) => skill.source === 'user' && skill.enabled)
-      .map((skill) => ({
-        id: skill.id,
-        name: skill.name || skill.id,
-        description: skill.description,
-      }));
-    const known = new Set(available.map((option) => option.id));
-    return [
-      ...available,
-      ...skillIds
-        .filter((id) => !known.has(id))
-        .map((id) => ({ id, name: id, unavailable: true })),
-    ];
-  }, [skillIds, skills]);
-
-  const hostSkillOptions = useMemo(() => {
-    const available = skills
-      .filter((skill) => skill.source === 'external' && skill.enabled)
-      .map((skill) => ({
-        id: skill.id,
-        name: skill.name || skill.id,
-        description: skill.description,
-        sourceLabel: '宿主机',
-      }));
-    const known = new Set(available.map((option) => option.id));
-    return [
-      ...available,
-      ...hostSkillIds
-        .filter((id) => !known.has(id))
-        .map((id) => ({
-          id,
-          name: id,
-          sourceLabel: '宿主机',
-          unavailable: true,
-        })),
-    ];
-  }, [hostSkillIds, skills]);
-
-  const mcpOptions = useMemo(() => {
-    const available = buildMcpPolicyOptions(mcpServers);
-    const known = new Set(available.map((option) => option.id));
-    return [
-      ...available,
-      ...mcpIds
-        .filter((id) => !known.has(id))
-        .map((id) => ({ id, name: id, unavailable: true })),
-    ];
-  }, [mcpIds, mcpServers]);
+  const skillOptions = useMemo(
+    () => buildManagedSkillOptions(skills, skillIds),
+    [skillIds, skills],
+  );
+  const hostSkillOptions = useMemo(
+    () => buildHostSkillOptions(skills, hostSkillIds),
+    [hostSkillIds, skills],
+  );
+  const mcpOptions = useMemo(
+    () => buildMcpSelectionOptions(mcpServers, mcpIds),
+    [mcpIds, mcpServers],
+  );
 
   const confirmDiscardUnsavedChanges = () =>
     !hasUnsavedChanges ||
