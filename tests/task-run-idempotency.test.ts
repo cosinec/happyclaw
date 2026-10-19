@@ -10,6 +10,7 @@ afterEach(() => {
   clearTaskRunKeysForTest();
   delete (globalThis as any).localStorage;
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe('Run Now idempotency key lifecycle', () => {
@@ -157,44 +158,22 @@ describe('Run Now idempotency key lifecycle', () => {
     });
   });
 
-  test('mints and reuses a valid v4 UUID in an insecure context without crypto.randomUUID', () => {
+  test('mints and reuses a v4 key in an insecure context without crypto.randomUUID', () => {
     const values = new Map<string, string>();
     (globalThis as any).localStorage = {
       getItem: (key: string) => values.get(key) ?? null,
       setItem: (key: string, value: string) => values.set(key, value),
     };
+    const nodeCrypto = globalThis.crypto;
+    vi.stubGlobal('crypto', {
+      getRandomValues: <T extends ArrayBufferView | null>(array: T): T =>
+        nodeCrypto.getRandomValues(array),
+    });
 
-    const originalDescriptor = Object.getOwnPropertyDescriptor(
-      globalThis,
-      'crypto',
+    const first = getPendingTaskRunKey('user-1', 'task-1');
+    expect(first).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     );
-    const originalCrypto = globalThis.crypto;
-
-    try {
-      Object.defineProperty(globalThis, 'crypto', {
-        value: {
-          getRandomValues: <T extends ArrayBufferView | null>(array: T): T =>
-            originalCrypto.getRandomValues(array),
-        },
-        configurable: true,
-        writable: true,
-      });
-
-      const first = getPendingTaskRunKey('user-1', 'task-1');
-      expect(first).toMatch(
-        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
-      );
-      expect(getPendingTaskRunKey('user-1', 'task-1')).toBe(first);
-    } finally {
-      if (originalDescriptor) {
-        Object.defineProperty(globalThis, 'crypto', originalDescriptor);
-      } else {
-        Object.defineProperty(globalThis, 'crypto', {
-          value: originalCrypto,
-          configurable: true,
-          writable: true,
-        });
-      }
-    }
+    expect(getPendingTaskRunKey('user-1', 'task-1')).toBe(first);
   });
 });
