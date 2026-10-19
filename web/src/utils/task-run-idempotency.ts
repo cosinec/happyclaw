@@ -1,3 +1,5 @@
+import { randomUuid } from './random-uuid';
+
 const STORAGE_PREFIX = 'happyclaw:task-run-idempotency:';
 const PENDING_KEY_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -112,7 +114,7 @@ export function getPendingTaskRunKey(
     writeEntries(userId, entries);
     return existing.key;
   }
-  const key = crypto.randomUUID();
+  const key = randomUuid();
   entries[taskId] = { key, createdAt: now };
   writeEntries(userId, entries);
   return key;

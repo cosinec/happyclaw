@@ -27,6 +27,7 @@ import { toast } from 'sonner';
 import { api, apiFetch } from '../api/client';
 import { useMediaQuery } from '@/hooks/useMediaQuery';
 import { cn } from '@/lib/utils';
+import { randomUuid } from '@/utils/random-uuid';
 import { createUnsavedNavigationGuard } from '@/utils/unsaved-navigation';
 import {
   ConfirmDialog,
@@ -746,9 +747,7 @@ export function MemoryPage() {
   };
 
   const openCreate = () => {
-    createIdempotencyKey.current =
-      globalThis.crypto?.randomUUID?.() ||
-      `memory-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    createIdempotencyKey.current = randomUuid();
     setCreateDraft(EMPTY_DRAFT);
     setCreateOpen(true);
   };
