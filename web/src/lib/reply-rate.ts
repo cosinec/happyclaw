@@ -1,5 +1,5 @@
 import type { StreamingState } from '../stores/chat';
-import { describeRunPhase } from './run-phase';
+import { runPhaseKind } from './run-phase';
 
 /*
  * The reply's output speed, estimated in the browser from how fast its text
@@ -23,8 +23,6 @@ const MIN_SPAN_MS = 500;
  */
 const MAX_TOKENS_PER_MS = 1;
 const MIN_STEP_MS = 100;
-/** The phase the status line shows while the reply's text streams. */
-const REPLYING_PHASE = '正在回复';
 
 // Every non-space character is a token, except that a run of ASCII letters,
 // digits and underscores is one: a CJK character counts one, a word one.
@@ -122,5 +120,5 @@ export function replyRate(
 export function isWritingReply(
   streaming: StreamingState | undefined,
 ): streaming is StreamingState {
-  return !!streaming && describeRunPhase(streaming, false) === REPLYING_PHASE;
+  return !!streaming && runPhaseKind(streaming, false) === 'replying';
 }
