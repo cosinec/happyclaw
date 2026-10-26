@@ -16,6 +16,7 @@ const silentStop: SilentStopCheck = {
   laterInputs: 0,
   finalText: null,
   reason: 'thinking_only',
+  stopReason: 'end_turn',
   attempts: 0,
 };
 
@@ -44,6 +45,27 @@ describe('silent-stop continuation decision', () => {
     ['a later input is already queued', { laterInputs: 1 }, null],
     // An ineligible Result is not reported as exhausted either.
     ['exhausted but interrupted', { attempts: 1, stopping: true }, null],
+    // Only a turn the model ended itself is a silent stop.
+    ['an endpoint without a stop reason', { stopReason: null }, 'continue'],
+    ['a missing stop reason', { stopReason: undefined }, 'continue'],
+    [
+      'thinking used up the output budget',
+      { stopReason: 'max_tokens' },
+      'stop_reason',
+    ],
+    ['a refusal', { stopReason: 'refusal' }, 'stop_reason'],
+    ['a paused server tool', { stopReason: 'pause_turn' }, 'stop_reason'],
+    ['a stop sequence', { stopReason: 'stop_sequence' }, 'stop_reason'],
+    [
+      'a refusal after the continuation',
+      { stopReason: 'refusal', attempts: 1 },
+      'stop_reason',
+    ],
+    [
+      'a refusal that is not a silent stop at all',
+      { stopReason: 'refusal', reason: 'tool_only' },
+      null,
+    ],
   ])('%s', (_name, overrides, decision) => {
     expect(decideSilentStop({ ...silentStop, ...overrides })).toBe(decision);
   });

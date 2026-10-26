@@ -34,16 +34,33 @@ export interface SilentStopCheck {
   laterInputs: number;
   finalText: string | null | undefined;
   reason: EmptyReplyReason;
+  /**
+   * The Result's stop_reason: streamed AssistantMessages carry null, the
+   * turn's stop reason arrives on the Result.
+   */
+  stopReason: string | null | undefined;
   attempts: number;
 }
 
 /**
+ * Only a turn the model ended itself is a silent stop. Thinking that used up
+ * the output budget (max_tokens), a refusal, a paused server tool or a stop
+ * sequence ended for a reason a "reply now" prompt would talk over. A
+ * compatible endpoint that reports no stop reason is taken as end_turn.
+ */
+function endedByModel(stopReason: string | null | undefined): boolean {
+  return stopReason == null || stopReason === 'end_turn';
+}
+
+/**
  * `continue` when the runner should ask for the reply, `exhausted` when it
- * is a silent stop but the continuations are used up, otherwise null.
+ * is a silent stop but the continuations are used up, `stop_reason` when
+ * the response only thought but the turn ended for another reason (see
+ * endedByModel), otherwise null.
  */
 export function decideSilentStop(
   check: SilentStopCheck,
-): 'continue' | 'exhausted' | null {
+): 'continue' | 'exhausted' | 'stop_reason' | null {
   if (
     !check.emitOutput ||
     check.isError ||
@@ -57,6 +74,7 @@ export function decideSilentStop(
   ) {
     return null;
   }
+  if (!endedByModel(check.stopReason)) return 'stop_reason';
   return check.attempts < MAX_SILENT_STOP_CONTINUES ? 'continue' : 'exhausted';
 }
 

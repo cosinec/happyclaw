@@ -2705,6 +2705,7 @@ async function runQueryAttempt(
       clearBackgroundProtocolDebtWatchdog();
       if (!candidate.suspectTruncated) compactionAwaitingCompletion = false;
       silentStopContinues = 0;
+      toolLoops.reset();
     }
     const ipcReceipts = inputTurnCompleted
       ? ipcDeliveryTracker.completeAnsweredTurns()
@@ -4104,6 +4105,7 @@ async function runQueryAttempt(
             nonNegativeNumber(resultMsg.queued_turn_count),
           finalText,
           reason: resultShape.reason,
+          stopReason: resultMsg.stop_reason as string | null | undefined,
           attempts: silentStopContinues,
         });
         if (silentStop === 'continue') {
@@ -4126,6 +4128,10 @@ async function runQueryAttempt(
         } else if (silentStop === 'exhausted') {
           logWarn(
             `[silent-stop] result #${resultCount} ended after thinking again; continuations used up (${silentStopContinues}/${MAX_SILENT_STOP_CONTINUES}), publishing the empty reply ${logCorrelation()}`,
+          );
+        } else if (silentStop === 'stop_reason') {
+          logWarn(
+            `[silent-stop] result #${resultCount} ended after thinking with stop_reason=${String(resultMsg.stop_reason)}; skipped, publishing the empty reply ${logCorrelation()}`,
           );
         }
         if (suspectTruncated && finalText) {

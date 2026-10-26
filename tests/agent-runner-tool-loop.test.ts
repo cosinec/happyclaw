@@ -140,13 +140,14 @@ describe('tool loop rules', () => {
       [],
     ],
     [
-      'a long repeat reports each rule once',
+      'a long repeat is reported once, by the first rule it trips',
       cycle([bash('ls')], 40),
-      [
-        [4, { rule: 'repeat', count: 4 }],
-        [12, { rule: 'pingpong', distinct: 1 }],
-        [16, { rule: 'rotation', distinct: 1 }],
-      ],
+      [[4, { rule: 'repeat', count: 4 }]],
+    ],
+    [
+      'after one report the scope stays quiet for the input',
+      [...cycle([bash('ls')], 4), ...cycle([read('/a.ts'), grep('foo')], 6)],
+      [[4, { rule: 'repeat' }]],
     ],
   ])('%s', (_name, calls, expected) => {
     const hits = run(calls);
@@ -194,5 +195,19 @@ describe('tool loop rules', () => {
     expect(
       detector.observeAssistantMessage(assistant('toolu_parent_b', 'b0', 'ls')),
     ).toEqual([]);
+  });
+
+  test('reset() starts the next input afresh', () => {
+    const detector = new ToolLoopDetector();
+    const trips = () =>
+      cycle([bash('ls')], 4).flatMap((call) =>
+        detector.observeCall('main', call),
+      );
+    expect(trips()).toHaveLength(1);
+    expect(trips()).toEqual([]);
+    detector.reset();
+    expect(trips()).toEqual([
+      expect.objectContaining({ rule: 'repeat', scope: 'main' }),
+    ]);
   });
 });

@@ -114,12 +114,21 @@ export interface ToolLoopHit {
 
 interface ScopeState {
   recent: Array<{ fingerprint: string; name: string }>;
-  reported: Set<ToolLoopRule>;
+  reported: boolean;
 }
 
-/** One per query: each rule is reported at most once per scope. */
+/**
+ * Reset for every input. A scope reports only the first rule it trips; one
+ * line per suspected loop is enough, and the same loop would trip the wider
+ * rules again as it goes on.
+ */
 export class ToolLoopDetector {
   private readonly scopes = new Map<string, ScopeState>();
+
+  /** Start afresh for the next input. */
+  reset(): void {
+    this.scopes.clear();
+  }
 
   /** Record the tool calls of one SDK AssistantMessage. */
   observeAssistantMessage(message: {
@@ -142,7 +151,7 @@ export class ToolLoopDetector {
     return hits;
   }
 
-  /** Record one tool call; returns the rules it newly trips in its scope. */
+  /** Record one tool call; returns the rule it trips, if its scope has none yet. */
   observeCall(
     scope: string,
     call: { name: string; input: unknown },
@@ -150,32 +159,32 @@ export class ToolLoopDetector {
     if (isPollingToolCall(call.name, call.input)) return [];
     let state = this.scopes.get(scope);
     if (!state) {
-      state = { recent: [], reported: new Set() };
+      state = { recent: [], reported: false };
       this.scopes.set(scope, state);
     }
-    // Every rule already reported: nothing more to log for this scope.
-    if (state.reported.size === RULES.length) return [];
+    if (state.reported) return [];
     state.recent.push({
       fingerprint: toolCallFingerprint(call.name, call.input),
       name: call.name,
     });
     if (state.recent.length > RECENT_CALLS) state.recent.shift();
 
-    const hits: ToolLoopHit[] = [];
     for (const { rule, size, distinct } of RULES) {
-      if (state.reported.has(rule) || state.recent.length < size) continue;
+      if (state.recent.length < size) continue;
       const window = state.recent.slice(-size);
       const fingerprints = new Set(window.map((entry) => entry.fingerprint));
       if (fingerprints.size > distinct) continue;
-      state.reported.add(rule);
-      hits.push({
-        scope,
-        rule,
-        tool: [...new Set(window.map((entry) => entry.name))].join(','),
-        count: size,
-        distinct: fingerprints.size,
-      });
+      state.reported = true;
+      return [
+        {
+          scope,
+          rule,
+          tool: [...new Set(window.map((entry) => entry.name))].join(','),
+          count: size,
+          distinct: fingerprints.size,
+        },
+      ];
     }
-    return hits;
+    return [];
   }
 }
