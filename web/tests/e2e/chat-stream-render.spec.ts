@@ -21,6 +21,8 @@ declare global {
     __words: Record<string, WordSeen>;
     /** Each text the answer showed, and when (`recordAnswer`). */
     __answer: { at: number; text: string }[];
+    /** Fading words of the first block when the second appeared. */
+    __fadingWhenClosed: number[];
   }
 }
 
@@ -1113,6 +1115,41 @@ test.describe('the streamed answer', () => {
     }
   });
 
+  test('a paragraph that closes mid-fade finishes fading in', async ({
+    page,
+  }) => {
+    await open(page, 'scenario=live');
+    await watchWords(page);
+    await page.evaluate((answer) => {
+      window.__fadingWhenClosed = [];
+      new MutationObserver(() => {
+        const roots = document.querySelectorAll(answer);
+        if (roots.length === 2 && window.__fadingWhenClosed.length === 0) {
+          window.__fadingWhenClosed.push(
+            roots[0].querySelectorAll('.hc-stream-word').length,
+          );
+        }
+      }).observe(document.body, { childList: true, subtree: true });
+      window.renderHarness.start();
+    }, ANSWER);
+    await emitText(page, 'First paragraph closes soon');
+    await page.waitForTimeout(20);
+    await emitText(page, '\n\nSecond one');
+    await expect(block(page).getByText('Second one')).toBeVisible();
+    await page.waitForTimeout(400);
+    // When the second block appeared, the first was still fading in.
+    const [fading] = await page.evaluate(() => window.__fadingWhenClosed);
+    expect(fading).toBeGreaterThan(0);
+    const words = await watched(page);
+    for (const word of ['First', 'closes', 'soon']) {
+      expectNeverFadesAgain(words[word].frames, word);
+    }
+    // Faded in, the closed paragraph renders as final again.
+    const closed = page.locator(ANSWER).first();
+    await expect(closed).toHaveText('First paragraph closes soon');
+    await expect(closed.locator('span')).toHaveCount(0);
+  });
+
   test('does not fade when less motion is asked for', async ({ page }) => {
     await page.emulateMedia({ reducedMotion: 'reduce' });
     await open(page, 'scenario=live');
@@ -1127,7 +1164,7 @@ test.describe('the streamed answer', () => {
   }) => {
     await open(page, 'scenario=live');
     const reply =
-      '这是**重点内容**，然后是*斜体*，参见[文档](https://example.com/doc)。';
+      '这是**重点内容**，然后是~~删除线~~，参见[文档](https://example.com/doc)。';
     await recordAnswer(page);
     // One character every 30ms: renders land mid-syntax.
     await page.evaluate(async (text) => {
@@ -1139,13 +1176,15 @@ test.describe('the streamed answer', () => {
     }, reply);
     const answer = page.locator(ANSWER).first();
     await expect(answer.locator('strong')).toHaveText('重点内容');
-    await expect(answer.locator('em')).toHaveText('斜体');
+    await expect(answer.locator('del')).toHaveText('删除线');
     await expect(answer.locator('a')).toHaveText('文档');
     const shown = (await page.evaluate(() => window.__answer)).map(
       ({ text }) => text,
     );
     expect(shown.length).toBeGreaterThan(5);
-    expect(shown.filter((text) => /\*|\]\(|\(https/.test(text))).toEqual([]);
+    expect(shown.filter((text) => /\*\*|~~|\]\(|\(https/.test(text))).toEqual(
+      [],
+    );
 
     // The final message is the plain rendering, with no word spans left.
     await page.evaluate(

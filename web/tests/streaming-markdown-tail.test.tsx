@@ -36,10 +36,19 @@ const fadingWords = () =>
     (word) => word.textContent,
   );
 
+/** Words still fading, by text and start (one that finished has none). */
+const starts = (scope: Element = container) =>
+  Object.fromEntries(
+    [...scope.querySelectorAll<HTMLElement>('.hc-stream-word')].map((word) => [
+      word.textContent!.trim(),
+      word.dataset.fadeAt,
+    ]),
+  );
+
 describe('the open block of a stream', () => {
   it.each([
     ['正文 **粗体', 'strong', '粗体'],
-    ['正文 *斜体', 'em', '斜体'],
+    ['正文 __强调', 'strong', '强调'],
     ['正文 ~~删除', 'del', '删除'],
     ['参见[文档](https://exa', 'p', '参见文档'],
   ])('shows %j without its half-written syntax', async (text, tag, shown) => {
@@ -48,28 +57,28 @@ describe('the open block of a stream', () => {
     expect(container.textContent).not.toMatch(/[*~[\]()]/);
   });
 
-  it('fades in only the words of the open block', async () => {
+  it('lets a block that closed finish fading in, then shows it as final', async () => {
+    const jid = 'web:fade-closed';
+    await show(<StreamingMarkdown content="first words" groupJid={jid} />);
+    expect(fadingWords()).toEqual(['first ', 'words']);
     await show(
       <StreamingMarkdown
-        content={'第一段写完了。\n\nsecond block words'}
-        groupJid="web:fade-open"
+        content={'first words\n\nsecond block'}
+        groupJid={jid}
       />,
     );
-    expect(fadingWords()).toEqual(['second ', 'block ', 'words']);
+    // The closed block's words keep fading rather than jump to opaque.
+    expect(fadingWords()).toEqual(['first ', 'words', 'second ', 'block']);
     // The text reads the same with the words wrapped.
-    expect(container.textContent).toBe('第一段写完了。second block words');
+    expect(container.textContent).toBe('first wordssecond block');
+    await act(() => new Promise((resolve) => setTimeout(resolve, 450)));
+    const [closed] = container.querySelectorAll('[data-markdown-root]');
+    expect(closed.querySelector('span')).toBeNull();
   });
 
   it('keeps word timings when the stream grows and remounts', async () => {
     const jid = 'web:fade-remount';
     await show(<StreamingMarkdown content="alpha beta" groupJid={jid} />);
-    // Words still fading, by text and start (one that finished has none).
-    const starts = () =>
-      Object.fromEntries(
-        [...container.querySelectorAll<HTMLElement>('.hc-stream-word')].map(
-          (word) => [word.textContent!.trim(), word.dataset.fadeAt],
-        ),
-      );
     const first = starts();
     expect(Object.keys(first)).toEqual(['alpha', 'beta']);
     await show(<StreamingMarkdown content="alpha beta gamma" groupJid={jid} />);
@@ -84,6 +93,50 @@ describe('the open block of a stream', () => {
     for (const [word, start] of Object.entries(starts())) {
       expect(start).toBe(grown[word]);
     }
+  });
+
+  it('keeps word timings when the store drops the start of the reply', async () => {
+    const jid = 'web:fade-truncated';
+    const stream = (content: string) =>
+      show(<StreamingMarkdown content={content} groupJid={jid} />);
+    await stream('intro');
+    await stream('intro words\n\nalpha');
+    await stream('intro words\n\nalpha beta');
+    const grown = starts();
+    expect(grown.beta).toBeDefined();
+    // A long reply keeps only its end: the open block now starts earlier.
+    await stream('ro words\n\nalpha beta gamma');
+    const later = starts();
+    expect(later.gamma).toBeDefined();
+    if ('beta' in later) expect(later.beta).toBe(grown.beta);
+  });
+
+  it('picks up its own timeline on a remount after another stream', async () => {
+    const jid = 'web:fade-other';
+    const mine = 'alpha beta gamma delta epsilon zeta';
+    const theirs = 'another stream in the same chat goes on';
+    // Two streams of one chat at once (a sub-agent beside the reply).
+    await show(
+      <>
+        <StreamingMarkdown content={mine} groupJid={jid} />
+        <StreamingMarkdown content={theirs} groupJid={jid} />
+      </>,
+    );
+    const first = starts(container.firstElementChild!);
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await show(<StreamingMarkdown content={`${mine} eta`} groupJid={jid} />);
+    const back = starts();
+    expect(back.eta).toBeDefined();
+    if ('alpha' in back) expect(back.alpha).toBe(first.alpha);
+  });
+
+  it('does not fade text a remount finds without a timeline', async () => {
+    const text = `${'已经显示过的长段落。'.repeat(50)}继续`;
+    await show(
+      <StreamingMarkdown content={text} groupJid="web:fade-unknown" />,
+    );
+    expect(fadingWords()).toEqual([]);
   });
 
   it('does not fade in text rewritten rather than extended', async () => {
