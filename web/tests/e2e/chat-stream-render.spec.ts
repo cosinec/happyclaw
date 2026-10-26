@@ -1048,9 +1048,8 @@ test.describe('the streamed answer', () => {
 
   const watched = (page: Page) => page.evaluate(() => window.__words);
 
-  /** Once opaque, a word never loses any of it: nothing fades in twice. */
+  /** A word never loses any opacity it showed: nothing fades in twice. */
   function expectNeverFadesAgain(frames: number[], word: string) {
-    expect(frames.at(-1), word).toBe(1);
     frames.forEach((opacity, i) => {
       if (i > 0) {
         expect(opacity, word).toBeGreaterThanOrEqual(frames[i - 1] - 0.01);
@@ -1082,7 +1081,9 @@ test.describe('the streamed answer', () => {
       // It entered transparent and fading...
       expect(words[word].fading[0], word).toBe(true);
       expect(words[word].inserted[0], word).toBeLessThan(0.5);
-      // ...and once opaque stayed so through the renders that followed.
+      // ...became opaque, and never lost any of it through the renders
+      // that followed.
+      expect(words[word].frames.at(-1), word).toBe(1);
       expectNeverFadesAgain(words[word].frames, word);
     }
     // A copy of the words reads exactly as the text.
@@ -1111,6 +1112,7 @@ test.describe('the streamed answer', () => {
     expect(words.arrive.fading).toEqual([true, true]);
     expect(words.arrive.inserted[1]).toBeGreaterThan(0.05);
     for (const word of ['Heading', 'words', 'arrive']) {
+      expect(words[word].frames.at(-1), word).toBe(1);
       expectNeverFadesAgain(words[word].frames, word);
     }
   });
@@ -1120,34 +1122,64 @@ test.describe('the streamed answer', () => {
   }) => {
     await open(page, 'scenario=live');
     await watchWords(page);
-    await page.evaluate((answer) => {
-      window.__fadingWhenClosed = [];
-      new MutationObserver(() => {
-        const roots = document.querySelectorAll(answer);
-        if (roots.length === 2 && window.__fadingWhenClosed.length === 0) {
-          window.__fadingWhenClosed.push(
-            roots[0].querySelectorAll('.hc-stream-word').length,
-          );
-        }
-      }).observe(document.body, { childList: true, subtree: true });
-      window.renderHarness.start();
-    }, ANSWER);
-    await emitText(page, 'First paragraph closes soon');
-    await page.waitForTimeout(20);
-    await emitText(page, '\n\nSecond one');
-    await expect(block(page).getByText('Second one')).toBeVisible();
-    await page.waitForTimeout(400);
-    // When the second block appeared, the first was still fading in.
+    // Enough words that they are still fading when the next block opens.
+    const first =
+      'One two three four five six seven eight nine ten eleven twelve.';
+    await page.evaluate(
+      async ({ answer, first }) => {
+        window.__fadingWhenClosed = [];
+        new MutationObserver(() => {
+          const roots = document.querySelectorAll(answer);
+          if (roots.length === 2 && window.__fadingWhenClosed.length === 0) {
+            window.__fadingWhenClosed.push(
+              roots[0].querySelectorAll('.hc-stream-word').length,
+            );
+          }
+        }).observe(document.body, { childList: true, subtree: true });
+        const { start, emit } = window.renderHarness;
+        start();
+        emit({ eventType: 'text_delta', text: first });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        emit({ eventType: 'text_delta', text: '\n\nSecond one' });
+      },
+      { answer: ANSWER, first },
+    );
+    // Once its words are in, the closed paragraph shows as final again.
+    const closed = page.locator(ANSWER).first();
+    await expect(page.locator(ANSWER)).toHaveCount(2);
+    await expect(closed.locator('span')).toHaveCount(0);
+    await expect(closed).toHaveText(first);
+    // When the second block appeared, the first was still fading in...
     const [fading] = await page.evaluate(() => window.__fadingWhenClosed);
     expect(fading).toBeGreaterThan(0);
-    const words = await watched(page);
-    for (const word of ['First', 'closes', 'soon']) {
-      expectNeverFadesAgain(words[word].frames, word);
+    // ...and none of its words (a burst fades in a few at a time) lost any
+    // of what they showed on the way.
+    const words = Object.entries(await watched(page)).filter(([word]) =>
+      first.includes(word),
+    );
+    expect(words.length).toBeGreaterThan(5);
+    for (const [word, { frames }] of words) {
+      expectNeverFadesAgain(frames, word);
     }
-    // Faded in, the closed paragraph renders as final again.
-    const closed = page.locator(ANSWER).first();
-    await expect(closed).toHaveText('First paragraph closes soon');
-    await expect(closed.locator('span')).toHaveCount(0);
+  });
+
+  test('a block after a paragraph break sent on its own fades in', async ({
+    page,
+  }) => {
+    await open(page, 'scenario=live');
+    await watchWords(page);
+    await page.evaluate(() => window.renderHarness.start());
+    await emitText(page, 'Opening words');
+    await expect(block(page).getByText('Opening words')).toBeVisible();
+    // A render that ends in the blank lines of the break.
+    await emitText(page, '\n\n');
+    await page.waitForTimeout(150);
+    await emitText(page, 'Following block');
+    await expect(block(page).getByText('Following block')).toBeVisible();
+    const words = await watched(page);
+    for (const word of ['Following', 'block']) {
+      expect(words[word].fading[0], word).toBe(true);
+    }
   });
 
   test('does not fade when less motion is asked for', async ({ page }) => {

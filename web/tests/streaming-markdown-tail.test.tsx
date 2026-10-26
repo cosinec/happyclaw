@@ -76,6 +76,17 @@ describe('the open block of a stream', () => {
     expect(closed.querySelector('span')).toBeNull();
   });
 
+  it('fades in a new block after a render that ended in blank lines', async () => {
+    const jid = 'web:fade-blank';
+    const stream = (content: string) =>
+      show(<StreamingMarkdown content={content} groupJid={jid} />);
+    await stream('first words');
+    // Models often send the paragraph break first, on its own.
+    await stream('first words\n\n');
+    await stream('first words\n\nsecond block');
+    expect(fadingWords()).toEqual(['first ', 'words', 'second ', 'block']);
+  });
+
   it('keeps word timings when the stream grows and remounts', async () => {
     const jid = 'web:fade-remount';
     await show(<StreamingMarkdown content="alpha beta" groupJid={jid} />);
