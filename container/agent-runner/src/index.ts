@@ -189,6 +189,14 @@ import {
   shouldFailIncompleteQueryExit,
 } from './background-task-drain.js';
 import { IpcInputClaimStore } from './ipc-input-claims.js';
+import { QueryStartupTiming } from './query-timing.js';
+import { ReplyShapeTracker } from './reply-shape.js';
+import {
+  buildSilentStopContinuationPrompt,
+  decideSilentStop,
+  MAX_SILENT_STOP_CONTINUES,
+} from './silent-stop.js';
+import { ToolLoopDetector } from './tool-loop-detector.js';
 
 // 路径解析：优先读取环境变量，降级到容器内默认路径（保持向后兼容）
 const WORKSPACE_GROUP =
@@ -919,6 +927,14 @@ function log(message: string): void {
  */
 function logWarn(message: string): void {
   console.error(`[agent-runner:warn] ${message}`);
+}
+
+/**
+ * Routine lines kept for production diagnosis (such as per-query timing).
+ * The host logs this prefix at info level instead of debug.
+ */
+function logInfo(message: string): void {
+  console.error(`[agent-runner:info] ${message}`);
 }
 
 const CLAUDE_CLI_STDERR_LINE_LIMIT = 2_000;
@@ -1893,6 +1909,8 @@ async function runQueryAttempt(
   let lastAssistantUuid: string | undefined;
   const durableInputCompletion = new DurableInputTurnCompletion();
   const assistantTextTracker = new AssistantTextTracker();
+  const replyShape = new ReplyShapeTracker();
+  const toolLoops = new ToolLoopDetector();
   let canonicalAssistantUuid: string | undefined;
   const agentTurnAnchor = resolveAgentTurnAnchor(
     containerInput.agentProfile,
@@ -1932,6 +1950,9 @@ async function runQueryAttempt(
     turnId: containerInput.turnId,
     sessionId: newSessionId || sessionId,
   });
+  /** Correlation fields ending each diagnostic log line of this query. */
+  const logCorrelation = (): string =>
+    `turnId=${containerInput.turnId ?? '-'} inputTurnId=${outputCorrelation.currentInputTurnId} queryRunId=${containerInput.queryRunId ?? '-'}`;
   const emit = (output: ContainerOutput): void => {
     if (output.streamEvent) {
       output = outputCorrelation.correlate({
@@ -2054,6 +2075,7 @@ async function runQueryAttempt(
     });
   };
   let firstResponseWatchdog: SdkFirstResponseWatchdog | undefined;
+  let queryTiming: QueryStartupTiming | undefined;
 
   // 如果有图片被拒绝，立即通知用户
   for (const reason of initialRejected) {
@@ -2132,6 +2154,8 @@ async function runQueryAttempt(
   let sawPendingBackgroundTasks = false;
   let backgroundSummaryForceAttempts = 0;
   const MAX_BACKGROUND_SUMMARY_FORCE_ATTEMPTS = 2;
+  // Silent-stop continuations spent on the current input (see silent-stop.ts).
+  let silentStopContinues = 0;
   // Per-message assistant usage is the primary Kaboo-compatible ledger. The
   // reconciler differences each result's cumulative modelUsage against a
   // per-session baseline (persisted next to the transcript, so a resumed
@@ -2303,6 +2327,25 @@ async function runQueryAttempt(
     postResultInterruptRequested = true;
     log(`${reason}, interrupting current query before closing stream`);
     stopActiveTurn(activeQuery, `${reason} (shutdown)`);
+  };
+
+  /**
+   * Ask the model for more in the same SDK stream instead of publishing the
+   * Result just received: the input keeps its receipt, card and turn until
+   * the Result that answers this prompt settles them.
+   */
+  const continueInStream = (prompt: string, label: string): boolean => {
+    assistantTextTracker.reset();
+    canonicalAssistantUuid = undefined;
+    suspectTruncatedTail = undefined;
+    const rejected = stream.push(prompt);
+    if (rejected.length > 0) {
+      log(`${label} prompt was rejected: ${rejected.join('; ')}`);
+      return false;
+    }
+    containerInput.turnId = generateTurnId();
+    resultReceivedAt = null;
+    return true;
   };
 
   const pollIpcDuringQuery = async (): Promise<void> => {
@@ -2661,6 +2704,7 @@ async function runQueryAttempt(
     if (inputTurnCompleted) {
       clearBackgroundProtocolDebtWatchdog();
       if (!candidate.suspectTruncated) compactionAwaitingCompletion = false;
+      silentStopContinues = 0;
     }
     const ipcReceipts = inputTurnCompleted
       ? ipcDeliveryTracker.completeAnsweredTurns()
@@ -3041,6 +3085,11 @@ async function runQueryAttempt(
     log(
       `Subagent runtime contract: ${sdkCompat.audit.enabled ? 'enabled' : 'disabled'} (${sdkCompat.audit.hash.slice(0, 12)})`,
     );
+    queryTiming = new QueryStartupTiming({
+      mode: sessionId ? 'resume' : 'fresh',
+      source: sourceKindOverride ?? 'input',
+      queryRunId: containerInput.queryRunId,
+    });
     const q = query({
       prompt: stream,
       options: sdkCompat.options,
@@ -3194,6 +3243,8 @@ async function runQueryAttempt(
     };
     for await (const message of q) {
       firstResponseWatchdog.observe(message.type);
+      const timingLine = queryTiming.observe(message);
+      if (timingLine) logInfo(timingLine);
       if (message.type === 'system') {
         const frame = message as {
           subtype?: string;
@@ -3677,6 +3728,14 @@ async function runQueryAttempt(
         }
       }
 
+      if (message.type === 'assistant') {
+        for (const hit of toolLoops.observeAssistantMessage(message)) {
+          logWarn(
+            `[tool-loop] suspected rule=${hit.rule} tool=${hit.tool} count=${hit.count} distinct=${hit.distinct} scope=${hit.scope} ${logCorrelation()}`,
+          );
+        }
+      }
+
       // ── 子 Agent 消息转 StreamEvent ──
       if (processor.processSubAgentMessage(message as any)) {
         continue;
@@ -3716,9 +3775,11 @@ async function runQueryAttempt(
             processor.observeBackgroundNotificationActivity();
             clearBackgroundProtocolDebtWatchdog();
           }
-          const msgContent = (
-            assistantMsg.message as Record<string, unknown> | undefined
-          )?.content;
+          const assistantBody = assistantMsg.message as
+            | Record<string, unknown>
+            | undefined;
+          replyShape.observe(assistantBody);
+          const msgContent = assistantBody?.content;
           if (Array.isArray(msgContent)) {
             // 以整条 AssistantMessage 为原子分类：只要含 top-level
             // tool_use，该消息全部 text 都是过程旁白；完全不含工具的消息
@@ -3757,6 +3818,7 @@ async function runQueryAttempt(
 
       if (message.type === 'result') {
         resultCount++;
+        const resultShape = replyShape.take();
         const textResult =
           'result' in message ? (message as { result?: string }).result : null;
         const resultSubtype = message.subtype;
@@ -3956,6 +4018,11 @@ async function runQueryAttempt(
         // 完全不含 top-level tool_use 的 AssistantMessage；旁白绝不兜底。
         processor.processResult(textResult);
         const pickedFinalText = assistantTextTracker.pickFinalText(textResult);
+        if (emitOutput && !pickedFinalText?.trim()) {
+          logWarn(
+            `[reply-shape] empty final reply reason=${resultShape.reason} ${resultShape.summary} stop_reason=${String(resultMsg.stop_reason ?? '-')} terminal_reason=${String(resultMsg.terminal_reason ?? '-')} num_turns=${String(resultMsg.num_turns ?? '-')} ${logCorrelation()}`,
+          );
+        }
         const finalText =
           proactiveInteractiveContract &&
           isProactiveFinalDeliveredSentinel(pickedFinalText) &&
@@ -3993,7 +4060,6 @@ async function runQueryAttempt(
           })
         ) {
           backgroundSummaryForceAttempts++;
-          const forcePrompt = buildBackgroundTaskSummaryPrompt();
           log(
             `Result #${resultCount} looked like a stale background-task wait reply after all tasks settled; forcing final summary (${backgroundSummaryForceAttempts}/${MAX_BACKGROUND_SUMMARY_FORCE_ATTEMPTS})`,
           );
@@ -4008,17 +4074,55 @@ async function runQueryAttempt(
               displayLevel: 'primary',
             },
           });
-          assistantTextTracker.reset();
-          canonicalAssistantUuid = undefined;
-          suspectTruncatedTail = undefined;
-          const rejected = stream.push(forcePrompt);
-          if (rejected.length === 0) {
-            containerInput.turnId = generateTurnId();
-            resultReceivedAt = null;
+          if (
+            continueInStream(
+              buildBackgroundTaskSummaryPrompt(),
+              'Forced background summary',
+            )
+          ) {
             continue;
           }
-          log(
-            `Forced background summary prompt was rejected: ${rejected.join('; ')}`,
+        }
+        // Silent stop: the model ended after thinking without a reply.
+        const silentStop = decideSilentStop({
+          emitOutput,
+          isError: resultMsg.is_error === true,
+          stopping:
+            closedDuringQuery ||
+            interruptedDuringQuery ||
+            postResultInterruptRequested ||
+            stream.ended,
+          continuationPrevented,
+          proactive: proactiveInteractiveContract,
+          blockingBackgroundWork:
+            processor.getBlockingBackgroundProtocolCount(),
+          laterInputs:
+            ipcDeliveryTracker.laterTurnMessages.length +
+            nonNegativeNumber(resultMsg.queued_turn_count),
+          finalText,
+          reason: resultShape.reason,
+          attempts: silentStopContinues,
+        });
+        if (silentStop === 'continue') {
+          const correlation = logCorrelation();
+          // Bill the empty call with its own Result; the continuation's
+          // Result then covers only what follows it.
+          emitResultUsage(resultMsg, containerInput.turnId || generateTurnId());
+          if (
+            continueInStream(
+              buildSilentStopContinuationPrompt(),
+              'Silent-stop continuation',
+            )
+          ) {
+            silentStopContinues++;
+            logWarn(
+              `[silent-stop] result #${resultCount} ended after thinking without a reply; asking for the reply (${silentStopContinues}/${MAX_SILENT_STOP_CONTINUES}) ${correlation}`,
+            );
+            continue;
+          }
+        } else if (silentStop === 'exhausted') {
+          logWarn(
+            `[silent-stop] result #${resultCount} ended after thinking again; continuations used up (${silentStopContinues}/${MAX_SILENT_STOP_CONTINUES}), publishing the empty reply ${logCorrelation()}`,
           );
         }
         if (suspectTruncated && finalText) {
@@ -4324,6 +4428,8 @@ async function runQueryAttempt(
     throw err;
   } finally {
     queryFinished = true;
+    const timingLine = queryTiming?.finish();
+    if (timingLine) logInfo(timingLine);
     firstResponseWatchdog?.clear();
     clearBackgroundProtocolDebtWatchdog();
     backgroundResultGate.dispose();
