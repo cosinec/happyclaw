@@ -113,7 +113,9 @@ Web UI 约定：
   设置类页面使用 `components/settings/SettingsLayout`。
 - 破坏性确认使用 `confirmDialog()`；未保存离开守卫保持同步的原生 `confirm()`。
 - 快捷键在 `lib/shortcuts.ts` 注册并用 `Shortcut` 渲染键帽；动画用 `motion` 的 `m.*`，
-  经 `MotionProvider` 懒加载并遵循减少动态效果设置。
+  经 `MotionProvider` 懒加载并遵循减少动态效果设置。流式回复的贴底跟随（每批一次的
+  WAAPI 位移补偿）和逐词淡入（CSS keyframes）是逐帧、逐词的热路径，不走 `m.*`，
+  同样在减少动态效果时关闭。
 
 ### 3.3 Agent Runner
 
