@@ -418,6 +418,43 @@ describe('Agent Runner process against a fake Anthropic endpoint', () => {
     expect(runnerLines(run.stderr, '[reply-shape]')).toHaveLength(1);
   }, 60_000);
 
+  test('narration before a tool call never becomes the reply when the turn then only thinks', async () => {
+    const run = await runRunner({
+      name: 'silent-stop-after-tool',
+      // Claude Code delivers call 1 as a text frame and a tool_use frame
+      // sharing one message id; calls 2-3 only think (3 is the CLI's own
+      // retry), and the runner's continuation is call 4.
+      reply: (call) =>
+        call === 1
+          ? [
+              { type: 'text', text: 'NARRATION_BEFORE_TOOL' },
+              {
+                type: 'tool_use',
+                id: 'toolu_check',
+                name: 'Bash',
+                input: { command: 'echo checked', description: 'check' },
+              },
+            ]
+          : call <= 3
+            ? [{ type: 'thinking', thinking: `Thinking ${call}.` }]
+            : [{ type: 'text', text: 'ANSWER_AFTER_TOOL' }],
+      settled: isFinalResult,
+    });
+
+    expect(run.exitCode).toBe(0);
+    expect(run.mainRequests).toHaveLength(4);
+    const finals = run.frames.filter(
+      (frame) => frame.status === 'success' && frame.sourceKind === 'sdk_final',
+    );
+    expect(finals.map((frame) => frame.result)).toEqual(['ANSWER_AFTER_TOOL']);
+    expect(runnerLines(run.stderr, '[silent-stop]')).toHaveLength(1);
+    expect(runnerLines(run.stderr, '[reply-shape]')).toEqual([
+      expect.stringContaining(
+        'reason=thinking_only assistant_responses=3 tool_uses=1 last_blocks=thinking',
+      ),
+    ]);
+  }, 60_000);
+
   test('a reply that keeps stopping after thinking is asked for only once, then published empty as before', async () => {
     const run = await runRunner({
       name: 'silent-stop-exhausted',

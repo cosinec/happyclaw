@@ -3781,11 +3781,14 @@ async function runQueryAttempt(
           replyShape.observe(assistantBody);
           const msgContent = assistantBody?.content;
           if (Array.isArray(msgContent)) {
-            // 以整条 AssistantMessage 为原子分类：只要含 top-level
-            // tool_use，该消息全部 text 都是过程旁白；完全不含工具的消息
+            // 以整次模型响应（message.id）为原子分类：只要含 top-level
+            // tool_use，该响应全部 text 都是过程旁白；完全不含工具的响应
             // 才能在 SDK Result 缺失时作为候选正文。
             const sawText = assistantTextTracker.addContentBlocks(
               msgContent as Array<{ type: string; text?: string }>,
+              typeof assistantBody?.id === 'string'
+                ? assistantBody.id
+                : undefined,
             );
             if (sawText) {
               canonicalAssistantUuid = assistantMsg.uuid as string;
