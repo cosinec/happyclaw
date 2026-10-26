@@ -1,0 +1,334 @@
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+
+import { afterAll, describe, expect, test } from 'vitest';
+
+import { OutputFrameScanner } from '../src/output-frame-scanner.js';
+
+/**
+ * Drives the real Agent Runner process (tsx, bundled Claude Code CLI, real
+ * SDK) against a local fake Anthropic SSE endpoint, the way the Host does:
+ * ContainerInput on stdin, an IPC input with a delivery receipt, framed
+ * stdout and a `_close` sentinel once the input has settled.
+ */
+
+const repoRoot = process.cwd();
+const tsxBin = path.join(repoRoot, 'node_modules', '.bin', 'tsx');
+const runnerEntry = path.join(
+  repoRoot,
+  'container',
+  'agent-runner',
+  'src',
+  'index.ts',
+);
+const OUTPUT_START = '---HAPPYCLAW_OUTPUT_START---';
+const OUTPUT_END = '---HAPPYCLAW_OUTPUT_END---';
+const MODEL = 'claude-sonnet-4-5-20250929';
+const scratchRoot = fs.mkdtempSync(
+  path.join(os.tmpdir(), 'happyclaw-runner-process-'),
+);
+
+afterAll(() => {
+  fs.rmSync(scratchRoot, { recursive: true, force: true });
+});
+
+type ReplyBlock =
+  | { type: 'thinking'; thinking: string }
+  | { type: 'text'; text: string };
+
+type Frame = Record<string, any>;
+
+interface RunnerRun {
+  frames: Frame[];
+  stderr: string;
+  /** Request bodies of main-loop model calls (those that offer tools). */
+  mainRequests: Array<{ messages?: unknown[] }>;
+  exitCode: number | null;
+}
+
+function writeEvent(
+  response: http.ServerResponse,
+  event: string,
+  data: unknown,
+): void {
+  response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+function sendMessage(
+  response: http.ServerResponse,
+  id: string,
+  blocks: ReplyBlock[],
+): void {
+  response.writeHead(200, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-cache',
+  });
+  writeEvent(response, 'message_start', {
+    type: 'message_start',
+    message: {
+      id,
+      type: 'message',
+      role: 'assistant',
+      model: MODEL,
+      content: [],
+      stop_reason: null,
+      stop_sequence: null,
+      usage: { input_tokens: 8, output_tokens: 1 },
+    },
+  });
+  blocks.forEach((block, index) => {
+    writeEvent(response, 'content_block_start', {
+      type: 'content_block_start',
+      index,
+      content_block:
+        block.type === 'text'
+          ? { type: 'text', text: '' }
+          : { type: 'thinking', thinking: '', signature: '' },
+    });
+    if (block.type === 'text') {
+      writeEvent(response, 'content_block_delta', {
+        type: 'content_block_delta',
+        index,
+        delta: { type: 'text_delta', text: block.text },
+      });
+    } else {
+      writeEvent(response, 'content_block_delta', {
+        type: 'content_block_delta',
+        index,
+        delta: { type: 'thinking_delta', thinking: block.thinking },
+      });
+      writeEvent(response, 'content_block_delta', {
+        type: 'content_block_delta',
+        index,
+        delta: { type: 'signature_delta', signature: `sig-${id}-${index}` },
+      });
+    }
+    writeEvent(response, 'content_block_stop', {
+      type: 'content_block_stop',
+      index,
+    });
+  });
+  writeEvent(response, 'message_delta', {
+    type: 'message_delta',
+    delta: { stop_reason: 'end_turn', stop_sequence: null },
+    usage: { output_tokens: 8 },
+  });
+  writeEvent(response, 'message_stop', { type: 'message_stop' });
+  response.end();
+}
+
+function runnerEnv(
+  baseUrl: string,
+  dirs: { group: string; ipc: string; config: string; home: string },
+): Record<string, string> {
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(
+      (entry): entry is [string, string] =>
+        typeof entry[1] === 'string' &&
+        !entry[0].startsWith('HAPPYCLAW_') &&
+        ![
+          'CLAUDE_CODE_OAUTH_TOKEN',
+          'ANTHROPIC_BASE_URL',
+          'ANTHROPIC_AUTH_TOKEN',
+          'ANTHROPIC_API_KEY',
+          'ANTHROPIC_MODEL',
+          'ANTHROPIC_CUSTOM_HEADERS',
+          'CLAUDE_CONFIG_DIR',
+        ].includes(entry[0]),
+    ),
+  );
+  return {
+    ...env,
+    HAPPYCLAW_WORKSPACE_GROUP: dirs.group,
+    HAPPYCLAW_WORKSPACE_IPC: dirs.ipc,
+    HAPPYCLAW_REQUIRE_BUNDLED_CLAUDE: '1',
+    ANTHROPIC_BASE_URL: baseUrl,
+    ANTHROPIC_AUTH_TOKEN: 'fake-local-runner-token',
+    ANTHROPIC_API_KEY: '',
+    ANTHROPIC_MODEL: MODEL,
+    CLAUDE_CONFIG_DIR: dirs.config,
+    // Keep the developer's own ~/.claude (hooks, skills, CLAUDE.md) out.
+    HOME: dirs.home,
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+  };
+}
+
+/**
+ * Answer the runner's Workspace Memory snapshot requests at once, as a Host
+ * without a memory store would, so a turn does not wait for the 8 s timeout.
+ */
+function answerMemoryRequests(tasksDir: string): void {
+  let names: string[];
+  try {
+    names = fs.readdirSync(tasksDir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!name.endsWith('.json') || name.includes('_result_')) continue;
+    const file = path.join(tasksDir, name);
+    let request: { type?: string; requestId?: string };
+    try {
+      request = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch {
+      continue;
+    }
+    fs.rmSync(file, { force: true });
+    if (request.type !== 'workspace_memory' || !request.requestId) continue;
+    fs.writeFileSync(
+      path.join(tasksDir, `workspace_memory_result_${request.requestId}.json`),
+      JSON.stringify({ success: false, error: 'no memory store in test' }),
+    );
+  }
+}
+
+async function runRunner(options: {
+  name: string;
+  reply: (call: number) => ReplyBlock[];
+  /** Close the runner once this frame arrives. */
+  settled: (frame: Frame) => boolean;
+}): Promise<RunnerRun> {
+  const scratch = path.join(scratchRoot, options.name);
+  const dirs = {
+    group: path.join(scratch, 'group'),
+    ipc: path.join(scratch, 'ipc'),
+    config: path.join(scratch, 'claude-config'),
+    home: path.join(scratch, 'home'),
+  };
+  const inputDir = path.join(dirs.ipc, 'input');
+  const tasksDir = path.join(dirs.ipc, 'tasks');
+  for (const dir of [dirs.group, inputDir, tasksDir, dirs.config, dirs.home]) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  // The Host's durable input: its receipt must come back exactly once.
+  fs.writeFileSync(
+    path.join(inputDir, '0001-input.json'),
+    JSON.stringify({
+      type: 'message',
+      text: 'Please answer the question.',
+      queryRunId: 'query-run-1',
+      receipt: {
+        deliveryId: 'delivery-1',
+        chatJid: 'web:runner-process',
+        cursor: { timestamp: '2026-10-26T00:00:00.000Z', id: 'message-1' },
+      },
+    }),
+  );
+
+  const mainRequests: RunnerRun['mainRequests'] = [];
+  const server = http.createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+    request.on('end', () => {
+      const url = request.url ?? '';
+      if (!url.includes('/v1/messages') || url.includes('count_tokens')) {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ input_tokens: 1 }));
+        return;
+      }
+      let body: { tools?: unknown[]; messages?: unknown[] } = {};
+      try {
+        body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      } catch {
+        // Answered below as an auxiliary call.
+      }
+      if (!Array.isArray(body.tools) || body.tools.length === 0) {
+        sendMessage(response, 'msg_aux', [{ type: 'text', text: 'aux' }]);
+        return;
+      }
+      mainRequests.push(body);
+      const call = mainRequests.length;
+      sendMessage(response, `msg_main_${call}`, options.reply(call));
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve());
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    throw new Error('fake Anthropic server did not expose a TCP port');
+  }
+
+  const child = spawn(tsxBin, [runnerEntry], {
+    cwd: repoRoot,
+    env: runnerEnv(`http://127.0.0.1:${address.port}`, dirs),
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const memoryResponder = setInterval(() => answerMemoryRequests(tasksDir), 20);
+  const frames: Frame[] = [];
+  const scanner = new OutputFrameScanner(OUTPUT_START, OUTPUT_END);
+  let stderr = '';
+  let closeRequested = false;
+  const requestClose = () => {
+    if (closeRequested) return;
+    closeRequested = true;
+    fs.writeFileSync(path.join(inputDir, '_close'), '');
+  };
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk.toString();
+  });
+  child.stdout.on('data', (chunk) => {
+    for (const event of scanner.push(chunk.toString())) {
+      if (event.kind !== 'frame') throw new Error(`runner frame ${event.kind}`);
+      const frame = JSON.parse(event.json) as Frame;
+      frames.push(frame);
+      if (options.settled(frame)) requestClose();
+    }
+  });
+  const guard = setTimeout(() => requestClose(), 45_000);
+  const killGuard = setTimeout(() => child.kill('SIGKILL'), 55_000);
+  child.stdin.end(
+    JSON.stringify({
+      prompt: 'Cold start.',
+      groupFolder: 'runner-process',
+      chatJid: 'web:runner-process',
+      turnId: 'cold-turn-1',
+      queryRunId: 'query-run-1',
+      isHome: false,
+      isAdminHome: false,
+    }),
+  );
+  const exitCode = await new Promise<number | null>((resolve) =>
+    child.once('exit', (code) => resolve(code)),
+  );
+  clearTimeout(guard);
+  clearTimeout(killGuard);
+  clearInterval(memoryResponder);
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return { frames, stderr, mainRequests, exitCode };
+}
+
+const isFinalResult = (frame: Frame): boolean =>
+  frame.status === 'success' && frame.inputTurnCompleted === true;
+
+const runnerLines = (stderr: string, prefix: string): string[] =>
+  stderr.split('\n').filter((line) => line.includes(prefix));
+
+describe('Agent Runner process against a fake Anthropic endpoint', () => {
+  test('each query logs its startup timing once at info level', async () => {
+    const run = await runRunner({
+      name: 'timing',
+      reply: () => [{ type: 'text', text: 'TIMED_ANSWER' }],
+      settled: isFinalResult,
+    });
+
+    expect(run.exitCode).toBe(0);
+    expect(run.frames.filter(isFinalResult).map((f) => f.result)).toEqual([
+      'TIMED_ANSWER',
+    ]);
+    const timing = runnerLines(run.stderr, '[query-timing]');
+    expect(timing).toHaveLength(1);
+    expect(timing[0]).toMatch(
+      /^\[agent-runner:info\] \[query-timing\] mode=fresh source=input init_ms=\d+ first_event_ms=\d+ first_output_ms=\d+ first_output=text queryRunId=query-run-1$/,
+    );
+    const [, init, event, output] = timing[0]!
+      .match(/init_ms=(\d+) first_event_ms=(\d+) first_output_ms=(\d+)/)!
+      .map(Number);
+    expect(init).toBeLessThanOrEqual(event!);
+    expect(event).toBeLessThanOrEqual(output!);
+  }, 60_000);
+});

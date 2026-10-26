@@ -189,6 +189,7 @@ import {
   shouldFailIncompleteQueryExit,
 } from './background-task-drain.js';
 import { IpcInputClaimStore } from './ipc-input-claims.js';
+import { QueryStartupTiming } from './query-timing.js';
 
 // 路径解析：优先读取环境变量，降级到容器内默认路径（保持向后兼容）
 const WORKSPACE_GROUP =
@@ -919,6 +920,14 @@ function log(message: string): void {
  */
 function logWarn(message: string): void {
   console.error(`[agent-runner:warn] ${message}`);
+}
+
+/**
+ * Routine lines kept for production diagnosis (such as per-query timing).
+ * The host logs this prefix at info level instead of debug.
+ */
+function logInfo(message: string): void {
+  console.error(`[agent-runner:info] ${message}`);
 }
 
 const CLAUDE_CLI_STDERR_LINE_LIMIT = 2_000;
@@ -2054,6 +2063,7 @@ async function runQueryAttempt(
     });
   };
   let firstResponseWatchdog: SdkFirstResponseWatchdog | undefined;
+  let queryTiming: QueryStartupTiming | undefined;
 
   // 如果有图片被拒绝，立即通知用户
   for (const reason of initialRejected) {
@@ -3041,6 +3051,11 @@ async function runQueryAttempt(
     log(
       `Subagent runtime contract: ${sdkCompat.audit.enabled ? 'enabled' : 'disabled'} (${sdkCompat.audit.hash.slice(0, 12)})`,
     );
+    queryTiming = new QueryStartupTiming({
+      mode: sessionId ? 'resume' : 'fresh',
+      source: sourceKindOverride ?? 'input',
+      queryRunId: containerInput.queryRunId,
+    });
     const q = query({
       prompt: stream,
       options: sdkCompat.options,
@@ -3194,6 +3209,8 @@ async function runQueryAttempt(
     };
     for await (const message of q) {
       firstResponseWatchdog.observe(message.type);
+      const timingLine = queryTiming.observe(message);
+      if (timingLine) logInfo(timingLine);
       if (message.type === 'system') {
         const frame = message as {
           subtype?: string;
@@ -4324,6 +4341,8 @@ async function runQueryAttempt(
     throw err;
   } finally {
     queryFinished = true;
+    const timingLine = queryTiming?.finish();
+    if (timingLine) logInfo(timingLine);
     firstResponseWatchdog?.clear();
     clearBackgroundProtocolDebtWatchdog();
     backgroundResultGate.dispose();
