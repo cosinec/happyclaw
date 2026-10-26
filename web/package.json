@@ -25,6 +25,7 @@
     "html-to-image": "^1.11.13",
     "lucide-react": "^0.400.0",
     "mermaid": "^11.12.3",
+    "micromark-extension-cjk-friendly-util": "^3.0.1",
     "motion": "^12.43.0",
     "radix-ui": "^1.4.3",
     "react": "^19.0.0",
