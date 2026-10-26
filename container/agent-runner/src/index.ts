@@ -190,6 +190,7 @@ import {
 } from './background-task-drain.js';
 import { IpcInputClaimStore } from './ipc-input-claims.js';
 import { QueryStartupTiming } from './query-timing.js';
+import { ReplyShapeTracker } from './reply-shape.js';
 
 // 路径解析：优先读取环境变量，降级到容器内默认路径（保持向后兼容）
 const WORKSPACE_GROUP =
@@ -1902,6 +1903,7 @@ async function runQueryAttempt(
   let lastAssistantUuid: string | undefined;
   const durableInputCompletion = new DurableInputTurnCompletion();
   const assistantTextTracker = new AssistantTextTracker();
+  const replyShape = new ReplyShapeTracker();
   let canonicalAssistantUuid: string | undefined;
   const agentTurnAnchor = resolveAgentTurnAnchor(
     containerInput.agentProfile,
@@ -1941,6 +1943,9 @@ async function runQueryAttempt(
     turnId: containerInput.turnId,
     sessionId: newSessionId || sessionId,
   });
+  /** Correlation fields ending each diagnostic log line of this query. */
+  const logCorrelation = (): string =>
+    `turnId=${containerInput.turnId ?? '-'} inputTurnId=${outputCorrelation.currentInputTurnId} queryRunId=${containerInput.queryRunId ?? '-'}`;
   const emit = (output: ContainerOutput): void => {
     if (output.streamEvent) {
       output = outputCorrelation.correlate({
@@ -3733,9 +3738,11 @@ async function runQueryAttempt(
             processor.observeBackgroundNotificationActivity();
             clearBackgroundProtocolDebtWatchdog();
           }
-          const msgContent = (
-            assistantMsg.message as Record<string, unknown> | undefined
-          )?.content;
+          const assistantBody = assistantMsg.message as
+            | Record<string, unknown>
+            | undefined;
+          replyShape.observe(assistantBody);
+          const msgContent = assistantBody?.content;
           if (Array.isArray(msgContent)) {
             // 以整条 AssistantMessage 为原子分类：只要含 top-level
             // tool_use，该消息全部 text 都是过程旁白；完全不含工具的消息
@@ -3774,6 +3781,7 @@ async function runQueryAttempt(
 
       if (message.type === 'result') {
         resultCount++;
+        const resultShape = replyShape.take();
         const textResult =
           'result' in message ? (message as { result?: string }).result : null;
         const resultSubtype = message.subtype;
@@ -3973,6 +3981,11 @@ async function runQueryAttempt(
         // 完全不含 top-level tool_use 的 AssistantMessage；旁白绝不兜底。
         processor.processResult(textResult);
         const pickedFinalText = assistantTextTracker.pickFinalText(textResult);
+        if (emitOutput && !pickedFinalText?.trim()) {
+          logWarn(
+            `[reply-shape] empty final reply reason=${resultShape.reason} ${resultShape.summary} stop_reason=${String(resultMsg.stop_reason ?? '-')} terminal_reason=${String(resultMsg.terminal_reason ?? '-')} num_turns=${String(resultMsg.num_turns ?? '-')} ${logCorrelation()}`,
+          );
+        }
         const finalText =
           proactiveInteractiveContract &&
           isProactiveFinalDeliveredSentinel(pickedFinalText) &&

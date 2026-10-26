@@ -331,4 +331,26 @@ describe('Agent Runner process against a fake Anthropic endpoint', () => {
     expect(init).toBeLessThanOrEqual(event!);
     expect(event).toBeLessThanOrEqual(output!);
   }, 60_000);
+
+  test('an empty final reply logs its shape without content', async () => {
+    const run = await runRunner({
+      name: 'reply-shape',
+      reply: () => [{ type: 'thinking', thinking: 'PRIVATE_THOUGHT' }],
+      settled: isFinalResult,
+    });
+
+    expect(run.exitCode).toBe(0);
+    // Claude Code 2.1.296 itself retries a response without visible output
+    // once, so the empty Result follows two thinking-only responses.
+    expect(run.mainRequests).toHaveLength(2);
+    const shapes = runnerLines(run.stderr, '[reply-shape]');
+    expect(shapes).toHaveLength(1);
+    for (const line of shapes) {
+      expect(line).toMatch(
+        /^\[agent-runner:warn\] \[reply-shape\] empty final reply reason=thinking_only assistant_responses=2 tool_uses=0 last_blocks=thinking stop_reason=end_turn .*inputTurnId=delivery-1 queryRunId=query-run-1$/,
+      );
+      expect(line).not.toContain('PRIVATE_THOUGHT');
+      expect(line).not.toContain('Please answer');
+    }
+  }, 60_000);
 });
