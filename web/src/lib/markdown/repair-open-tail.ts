@@ -20,8 +20,6 @@ const BACKTICKS = /`+/g;
 /** A literal URL, without the punctuation that ends a sentence after it. */
 const LITERAL_URL = /(?:https?:\/\/|www\.)\S*?(?=[*_~.,:;!?'")\]]*(?:\s|$))/g;
 const LINK_DESTINATION = /\]\([^()\s]*\)/g;
-/** `$$…$$`, or `$…$` on one line: `$x^*$`, `$\hat{x}_{t}$`. */
-const MATH = /\$\$[\s\S]*?\$\$|\$[^\s$](?:[^$\n]*[^\s$])?\$/g;
 const ASCII_WORD = /[A-Za-z0-9]/;
 
 const ASTERISK = 0x2a;
@@ -30,8 +28,8 @@ const TILDE = 0x7e;
 
 /**
  * Positions of `text` that cannot hold an emphasis delimiter (escaped
- * characters, code spans, URLs, link destinations, math), or null when a
- * code span or display math is still open.
+ * characters, code spans, display math, URLs, link destinations), or null
+ * when a code span is still open.
  */
 function literalPositions(text: string): Uint8Array | null {
   const literal = new Uint8Array(text.length);
@@ -48,15 +46,27 @@ function literalPositions(text: string): Uint8Array | null {
     literal.fill(1, open.index, ticks[close].index + ticks[close][0].length);
     i = close;
   }
-  for (const pattern of [LITERAL_URL, LINK_DESTINATION, MATH]) {
+  // Display math between `$$` pairs outside code (a single `$` is text, as
+  // the renderers read it); one still being written runs to the end.
+  let math = -1;
+  for (
+    let at = unescaped.indexOf('$$');
+    at >= 0;
+    at = unescaped.indexOf('$$', at + 2)
+  ) {
+    if (literal[at]) continue;
+    if (math < 0) {
+      math = at;
+    } else {
+      literal.fill(1, math, at + 2);
+      math = -1;
+    }
+  }
+  if (math >= 0) literal.fill(1, math);
+  for (const pattern of [LITERAL_URL, LINK_DESTINATION]) {
     for (const match of unescaped.matchAll(pattern)) {
       literal.fill(1, match.index, match.index + match[0].length);
     }
-  }
-  // Inside display math still being written, everything is math.
-  for (let at = unescaped.indexOf('$$'); at >= 0; ) {
-    if (!literal[at]) return null;
-    at = unescaped.indexOf('$$', at + 2);
   }
   return literal;
 }
@@ -78,7 +88,11 @@ interface DelimiterRun {
   end: number;
   canOpen: boolean;
   canClose: boolean;
-  /** A single tilde: as often a range (3~5 天) as a strikethrough. */
+  /**
+   * A single `*`, `_` or `~`: as often a footnote mark (`注*：`), `(*)`,
+   * `*args` or a range (3~5 天) as emphasis. Never opened or closed here;
+   * it only completes a `**` closer still being written.
+   */
   loose: boolean;
   /** What precedes the run, as remark-cjk-friendly classifies it. */
   before: ReturnType<typeof classifyCharacter>;
@@ -174,7 +188,7 @@ function delimiterRuns(
     let end = start + 1;
     while (text[end] === char && !literal[end]) end += 1;
     if (end - start >= 3) return null;
-    const loose = char === '~' && end - start === 1;
+    const loose = end - start === 1;
     runs.push({ char, start, end, loose, ...flanking(char, text, start, end) });
     start = end;
   }
@@ -208,32 +222,36 @@ function closeEmphasis(
   const runs = delimiterRuns(paragraph, literal);
   if (runs === null) return paragraph;
   let text = paragraph;
+  /** Unclosed `**`, `__` and `~~`, innermost last. */
   const open: DelimiterRun[] = [];
+  /** Single delimiters that may still open. */
+  const singles: DelimiterRun[] = [];
   for (const run of runs) {
     const top = open[open.length - 1];
-    if (run.canClose && open.some((entry) => entry.char === run.char)) {
-      const length = run.end - run.start;
-      const topLength = top.end - top.start;
-      if (top.char === run.char && topLength === length) {
-        open.pop();
-        continue;
-      }
+    if (run.loose) {
       // A closer still being written: `**粗体*`. Not `_`, which closes or
       // opens by what follows (`.__` before a letter opens).
       if (
-        top.char === run.char &&
+        top?.char === run.char &&
         run.char !== '_' &&
-        length < topLength &&
+        run.canClose &&
         run.end === paragraph.length
       ) {
-        text += run.char.repeat(topLength - length);
+        text += run.char;
         open.pop();
         continue;
       }
-      if (run.loose) continue;
-      return paragraph;
+      let pair = singles.length - 1;
+      while (pair >= 0 && singles[pair].char !== run.char) pair -= 1;
+      if (run.canClose && pair >= 0) singles.splice(pair, 1);
+      else if (run.canOpen) singles.push(run);
+      continue;
     }
-    if (run.loose) continue;
+    if (run.canClose && open.some((entry) => entry.char === run.char)) {
+      if (top.char !== run.char) return paragraph;
+      open.pop();
+      continue;
+    }
     if (run.canOpen) open.push(run);
     else if (isDanglingOpener(run, paragraph.length)) {
       text = text.slice(0, run.start);
@@ -241,9 +259,14 @@ function closeEmphasis(
   }
   if (open.length === 0) return text;
   if (open[0].start < lineStart) return paragraph;
-  // Only `**`, `__` and `~~` are closed: a single `*` or `_` is as often a
-  // footnote mark (`注*：`), `(*)`, `*args` or math as emphasis.
-  if (open.some((run) => run.end - run.start === 1)) return paragraph;
+  // A single `*` opening inside a `**` would take half its closer.
+  if (
+    singles.some((single) =>
+      open.some((run) => run.char === single.char && run.start < single.start),
+    )
+  ) {
+    return paragraph;
+  }
   // The opener must have text after it already: `**` alone stays.
   if (!/[^\s*_~]/.test(text.slice(open[open.length - 1].end))) {
     return paragraph;
@@ -253,6 +276,8 @@ function closeEmphasis(
     .map((run) => run.char.repeat(run.end - run.start))
     .reverse()
     .join('');
+  // A closer must not run into a delimiter the text ends with (`__强调_`).
+  if (body.endsWith(closers[0])) return paragraph;
   return body + closers + text.slice(body.length);
 }
 

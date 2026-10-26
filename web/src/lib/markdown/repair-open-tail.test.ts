@@ -20,8 +20,15 @@ describe('repairOpenTail', () => {
     ['精密绝伦的**“微观光学实验', '精密绝伦的**“微观光学实验**'],
     ['的**“引号”', '的**“引号”**'],
     ['的**“引号”**，再**“另一', '的**“引号”**，再**“另一**'],
-    // Math holds no delimiters.
-    ['the dual $x^{**}$ and **粗', 'the dual $x^{**}$ and **粗**'],
+    // Display math holds no delimiters; a single `$` is text.
+    ['$$x^{**}$$ and **粗', '$$x^{**}$$ and **粗**'],
+    ['原价$20，**限时$10', '原价$20，**限时$10**'],
+    ['`a$b` 文本 **粗体$c', '`a$b` 文本 **粗体$c**'],
+    ['收费 $$ 很贵，参见[文档](htt', '收费 $$ 很贵，参见文档'],
+    // A single `*` or `_` is passed over, not closed.
+    ['a *b **粗体', 'a *b **粗体**'],
+    ['**a _b', '**a _b**'],
+    ['**粗*斜*体', '**粗*斜*体**'],
     // A closer being written is completed, not doubled.
     ['**粗体*', '**粗体**'],
     ['~~删除~', '~~删除~~'],
@@ -74,11 +81,12 @@ describe('repairOpenTail', () => {
     '$\\hat{x}_{t}$ is the estimate',
     'see *it',
     'see _it',
-    '**a _b',
     '**a *b',
+    '**粗 *斜',
     '这是*',
-    // Display math still being written is all math.
+    // Display math still being written runs to the end.
     '$$\nx^{**} 和 **粗',
+    '收费 $$ 很贵，**注意',
     // Not emphasis at all.
     'snake_case_name',
     'foo_',
