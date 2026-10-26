@@ -1,4 +1,5 @@
 import { memo, useMemo, useRef } from 'react';
+import { useReducedMotionConfig } from 'motion/react';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import {
   canRenderBlockwise,
@@ -8,15 +9,21 @@ import {
   splitMarkdownBlocks,
 } from '../../lib/markdown-blocks';
 import { repairOpenTail } from '../../lib/markdown/repair-open-tail';
+import {
+  createStreamFade,
+  type StreamFade,
+} from '../../lib/markdown/rehype-stream-fade';
 
 const MarkdownBlock = memo(function MarkdownBlock({
   content,
   open,
+  fade,
   groupJid,
   variant,
 }: {
   content: string;
   open: boolean;
+  fade?: StreamFade;
   groupJid?: string;
   variant: 'chat' | 'docs';
 }) {
@@ -26,11 +33,54 @@ const MarkdownBlock = memo(function MarkdownBlock({
       groupJid={groupJid}
       variant={variant}
       streaming={open}
+      fade={fade}
       // Margins between blocks must collapse as in one document.
       trimEdges={false}
     />
   );
 });
+
+/** The open block of a stream: where it starts, its text, its timeline. */
+interface OpenBlockFade {
+  start: number;
+  source: string;
+  fade: StreamFade;
+}
+
+const FADE_CACHE_LIMIT = 16;
+/** The latest open block of each stream (group and variant), for remounts. */
+const fadeCache = new Map<string, OpenBlockFade>();
+
+/**
+ * The fade timeline of the open block at `start`, given the one this stream
+ * showed before (`previous`, none on mount). It stays with the block while
+ * the block's text extends; a remount (switching workspaces, the card
+ * scrolling out of a virtual list and back) picks it up from the cache; and
+ * text rewritten rather than extended (a sliding tail) counts as already
+ * shown. No word fades in twice.
+ */
+function openBlockFade(
+  previous: OpenBlockFade | null,
+  key: string,
+  start: number,
+  source: string,
+): OpenBlockFade {
+  const known = previous ?? fadeCache.get(key);
+  const block = {
+    start,
+    source,
+    fade:
+      known?.start === start && source.startsWith(known.source)
+        ? known.fade
+        : createStreamFade({ shown: previous?.start === start }),
+  };
+  fadeCache.delete(key);
+  fadeCache.set(key, block);
+  if (fadeCache.size > FADE_CACHE_LIMIT) {
+    fadeCache.delete(fadeCache.keys().next().value!);
+  }
+  return block;
+}
 
 /**
  * Only the reply's first element loses its top margin and its last element
@@ -105,19 +155,38 @@ function MarkdownBlocks({
   // Streamed text only grows: extend the previous split instead of
   // re-scanning a long reply on every render.
   const splitRef = useRef<{ text: string; blocks: string[] } | null>(null);
-  const blocks = useMemo(() => {
+  const { blocks, openSource } = useMemo(() => {
     const split = streaming
       ? extendMarkdownBlocks(splitRef.current, content)
       : splitMarkdownBlocks(content);
     if (streaming) splitRef.current = { text: content, blocks: split.slice() };
-    if (!streaming) return split;
-    if (split.length > 0) {
-      const last = split.length - 1;
-      split[last] = repairOpenTail(stableOpenTable(split[last]));
+    if (!streaming || split.length === 0) {
+      return { blocks: split, openSource: null };
     }
+    const last = split.length - 1;
+    const source = split[last];
+    split[last] = repairOpenTail(stableOpenTable(source));
     const { links, footnotes } = findMarkdownDefinitions(content);
-    return withStreamingDefinitions(split, links, footnotes);
+    return {
+      blocks: withStreamingDefinitions(split, links, footnotes),
+      openSource: source,
+    };
   }, [content, streaming]);
+  // Words of the open block fade in as they arrive, unless less motion is
+  // asked for (static markup has nothing to animate).
+  const reduceMotion = useReducedMotionConfig();
+  const fadeRef = useRef<OpenBlockFade | null>(null);
+  let fade: StreamFade | undefined;
+  if (openSource !== null && !reduceMotion && typeof document !== 'undefined') {
+    fadeRef.current = openBlockFade(
+      fadeRef.current,
+      `${groupJid ?? ''}\0${variant}`,
+      // The blocks join back into the text, so this is where it starts.
+      content.length - openSource.length,
+      openSource,
+    );
+    fade = fadeRef.current.fade;
+  }
   return (
     <div
       className={BLOCKS_CLASS}
@@ -129,6 +198,7 @@ function MarkdownBlocks({
           key={index}
           content={block}
           open={streaming && index === blocks.length - 1}
+          fade={index === blocks.length - 1 ? fade : undefined}
           groupJid={groupJid}
           variant={variant}
         />
