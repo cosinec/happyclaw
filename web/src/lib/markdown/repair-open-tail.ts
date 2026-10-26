@@ -1,3 +1,13 @@
+import {
+  classifyCharacter,
+  classifyPrecedingCharacter,
+  isCjk,
+  isCjkOrIvs,
+  isIvs,
+  isNonCjkPunctuation,
+  isSpaceOrPunctuation,
+  isUnicodeWhitespace,
+} from 'micromark-extension-cjk-friendly-util';
 import { endsInOpenFence, FENCE_PATTERN } from '../markdown-blocks';
 
 /** `![alt`, `![alt]` or `![alt](partial-url` at the end of the line. */
@@ -10,32 +20,22 @@ const BACKTICKS = /`+/g;
 /** A literal URL, without the punctuation that ends a sentence after it. */
 const LITERAL_URL = /(?:https?:\/\/|www\.)\S*?(?=[*_~.,:;!?'")\]]*(?:\s|$))/g;
 const LINK_DESTINATION = /\]\([^()\s]*\)/g;
-
-const SPACE = /\s/;
-/**
- * Full-width punctuation counts as a letter, as remark-cjk-friendly reads it:
- * `**注意：**正文` is bold.
- */
-const CJK =
-  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u3000-\u303f\uff00-\uffef]/u;
-const PUNCTUATION = /[\p{P}\p{S}]/u;
 const ASCII_WORD = /[A-Za-z0-9]/;
 
-const isSpace = (char: string) => SPACE.test(char);
-const isPunctuation = (char: string) =>
-  PUNCTUATION.test(char) && !CJK.test(char);
+const ASTERISK = 0x2a;
+const UNDERSCORE = 0x5f;
+const TILDE = 0x7e;
 
 /**
- * `text` with what cannot hold emphasis delimiters (code spans, escapes,
- * URLs, link destinations) masked by letters of the same length, or null
- * when a code span is still open.
+ * Positions of `text` that cannot hold an emphasis delimiter (escaped
+ * characters, code spans, URLs, link destinations), or null when a code span
+ * is still open.
  */
-function maskLiterals(text: string): string | null {
-  const mask = (match: string) => 'a'.repeat(match.length);
-  const unescaped = text.replace(ESCAPE, mask);
+function literalPositions(text: string): Uint8Array | null {
+  const literal = new Uint8Array(text.length);
+  const unescaped = text.replace(ESCAPE, (escape) => 'a'.repeat(escape.length));
+  for (const escape of text.matchAll(ESCAPE)) literal[escape.index + 1] = 1;
   const ticks = [...unescaped.matchAll(BACKTICKS)];
-  let masked = '';
-  let from = 0;
   for (let i = 0; i < ticks.length; i += 1) {
     const open = ticks[i];
     let close = i + 1;
@@ -43,13 +43,26 @@ function maskLiterals(text: string): string | null {
       close += 1;
     }
     if (close === ticks.length) return null;
-    const end = ticks[close].index + ticks[close][0].length;
-    masked += unescaped.slice(from, open.index) + 'a'.repeat(end - open.index);
-    from = end;
+    literal.fill(1, open.index, ticks[close].index + ticks[close][0].length);
     i = close;
   }
-  masked += unescaped.slice(from);
-  return masked.replace(LITERAL_URL, mask).replace(LINK_DESTINATION, mask);
+  for (const pattern of [LITERAL_URL, LINK_DESTINATION]) {
+    for (const match of unescaped.matchAll(pattern)) {
+      literal.fill(1, match.index, match.index + match[0].length);
+    }
+  }
+  return literal;
+}
+
+/** The code point that ends right before `index`; null at the start. */
+function codeBefore(text: string, index: number): number | null {
+  if (index <= 0) return null;
+  const code = text.charCodeAt(index - 1);
+  if (code >= 0xdc00 && code <= 0xdfff && index >= 2) {
+    const pair = text.codePointAt(index - 2)!;
+    if (pair > 0xffff) return pair;
+  }
+  return code;
 }
 
 interface DelimiterRun {
@@ -60,42 +73,102 @@ interface DelimiterRun {
   canClose: boolean;
   /** A single tilde: as often a range (3~5 天) as a strikethrough. */
   loose: boolean;
+  /** What precedes the run, as remark-cjk-friendly classifies it. */
+  before: ReturnType<typeof classifyCharacter>;
 }
 
 /**
- * Emphasis delimiter runs of `masked` with whether each can open or close,
- * by CommonMark's flanking rules; null when one is ambiguous (`***`).
+ * Whether the run of `char` between `previous` and `next` can open or close,
+ * exactly as remark-cjk-friendly decides it (micromark-extension-cjk-friendly
+ * and its GFM strikethrough): CJK text and punctuation next to a delimiter
+ * count like letters, so `的**“引号”**，` is bold.
  */
-function delimiterRuns(masked: string): DelimiterRun[] | null {
+function flanking(
+  char: string,
+  text: string,
+  start: number,
+  end: number,
+): Pick<DelimiterRun, 'canOpen' | 'canClose' | 'before'> {
+  const previous = codeBefore(text, start);
+  const next = end < text.length ? text.codePointAt(end)! : null;
+  const beforeRaw = classifyCharacter(previous);
+  const before = classifyPrecedingCharacter(
+    beforeRaw,
+    () => codeBefore(text, start - (previous! > 0xffff ? 2 : 1)),
+    previous,
+  );
+  const after = classifyCharacter(next);
+  const beforeNonCjkPunctuation = isNonCjkPunctuation(before);
+  const afterNonCjkPunctuation = isNonCjkPunctuation(after);
+  if (char === '~') {
+    const beforeSpace = beforeNonCjkPunctuation || isUnicodeWhitespace(before);
+    const afterSpace = afterNonCjkPunctuation || isUnicodeWhitespace(after);
+    return {
+      before,
+      canOpen:
+        !afterSpace ||
+        (afterNonCjkPunctuation &&
+          (beforeSpace || isCjk(before) || isIvs(beforeRaw))),
+      canClose:
+        !beforeSpace ||
+        (isNonCjkPunctuation(beforeRaw) && (afterSpace || isCjk(after))),
+    };
+  }
+  const beforeSpace =
+    beforeNonCjkPunctuation ||
+    isUnicodeWhitespace(before) ||
+    previous === ASTERISK ||
+    previous === UNDERSCORE;
+  const afterSpace =
+    afterNonCjkPunctuation ||
+    isUnicodeWhitespace(after) ||
+    next === ASTERISK ||
+    next === UNDERSCORE;
+  // GFM makes `~` an attention marker too.
+  const open =
+    !afterSpace ||
+    (afterNonCjkPunctuation && (beforeSpace || isCjkOrIvs(before))) ||
+    next === TILDE;
+  const close =
+    !beforeSpace ||
+    (beforeNonCjkPunctuation && (afterSpace || isCjk(after))) ||
+    previous === TILDE;
+  if (char === '_') {
+    return {
+      before,
+      canOpen: open && (isSpaceOrPunctuation(before) || !close),
+      canClose: close && (isSpaceOrPunctuation(after) || !open),
+    };
+  }
+  // `2*3` is arithmetic far more often than emphasis: never repaired.
+  const arithmetic =
+    previous !== null &&
+    next !== null &&
+    ASCII_WORD.test(String.fromCodePoint(previous)) &&
+    ASCII_WORD.test(String.fromCodePoint(next));
+  return { before, canOpen: open && !arithmetic, canClose: close };
+}
+
+/**
+ * Emphasis delimiter runs of `text` outside its `literal` positions; null
+ * when one is ambiguous (`***`).
+ */
+function delimiterRuns(
+  text: string,
+  literal: Uint8Array,
+): DelimiterRun[] | null {
   const runs: DelimiterRun[] = [];
-  for (let start = 0; start < masked.length; ) {
-    const char = masked[start];
-    if (char !== '*' && char !== '_' && char !== '~') {
+  for (let start = 0; start < text.length; ) {
+    const char = text[start];
+    if ((char !== '*' && char !== '_' && char !== '~') || literal[start]) {
       start += 1;
       continue;
     }
     let end = start + 1;
-    while (masked[end] === char) end += 1;
+    while (text[end] === char && !literal[end]) end += 1;
     if (end - start >= 3) return null;
-    const before = masked[start - 1] ?? '\n';
-    const after = masked[end] ?? '\n';
-    const left =
-      !isSpace(after) &&
-      (!isPunctuation(after) || isSpace(before) || isPunctuation(before));
-    const right =
-      !isSpace(before) &&
-      (!isPunctuation(before) || isSpace(after) || isPunctuation(after));
-    let canOpen = left;
-    let canClose = right;
-    if (char === '_') {
-      canOpen = left && (!right || isPunctuation(before));
-      canClose = right && (!left || isPunctuation(after));
-    } else if (ASCII_WORD.test(before) && ASCII_WORD.test(after)) {
-      // `2*3` is arithmetic far more often than emphasis.
-      canOpen = false;
-    }
     const loose = char === '~' && end - start === 1;
-    runs.push({ char, start, end, canOpen, canClose, loose });
+    runs.push({ char, start, end, loose, ...flanking(char, text, start, end) });
     start = end;
   }
   return runs;
@@ -105,25 +178,27 @@ function delimiterRuns(masked: string): DelimiterRun[] | null {
  * A delimiter run at the very end with nothing after it yet, which the next
  * characters will most likely make an opener (`这是 **`).
  */
-function isDanglingOpener(run: DelimiterRun, masked: string): boolean {
-  if (run.loose || run.end !== masked.length) return false;
-  const before = masked[run.start - 1] ?? '\n';
-  if (isSpace(before) || isPunctuation(before)) return true;
-  return run.char !== '_' && CJK.test(before);
+function isDanglingOpener(run: DelimiterRun, length: number): boolean {
+  if (run.loose || run.end !== length) return false;
+  return (
+    isSpaceOrPunctuation(run.before) ||
+    (run.char !== '_' && isCjkOrIvs(run.before))
+  );
 }
 
 /**
- * Close the emphasis still open at the end of `paragraph` (`masked` by
- * `maskLiterals`), whose last line starts at `lineStart`; the paragraph as
- * it is when nothing is open there, or when an opener is earlier or unsure.
+ * Close the emphasis still open at the end of `paragraph` (its
+ * `literalPositions` given), whose last line starts at `lineStart`; the
+ * paragraph as it is when nothing is open there, or when an opener is
+ * earlier or unsure.
  */
 function closeEmphasis(
   paragraph: string,
-  masked: string | null,
+  literal: Uint8Array | null,
   lineStart: number,
 ): string {
-  if (masked === null) return paragraph;
-  const runs = delimiterRuns(masked);
+  if (literal === null) return paragraph;
+  const runs = delimiterRuns(paragraph, literal);
   if (runs === null) return paragraph;
   let text = paragraph;
   const open: DelimiterRun[] = [];
@@ -136,11 +211,13 @@ function closeEmphasis(
         open.pop();
         continue;
       }
-      // A closer still being written: `**粗体*`.
+      // A closer still being written: `**粗体*`. Not `_`, which closes or
+      // opens by what follows (`.__` before a letter opens).
       if (
         top.char === run.char &&
+        run.char !== '_' &&
         length < topLength &&
-        run.end === masked.length
+        run.end === paragraph.length
       ) {
         text += run.char.repeat(topLength - length);
         open.pop();
@@ -151,7 +228,9 @@ function closeEmphasis(
     }
     if (run.loose) continue;
     if (run.canOpen) open.push(run);
-    else if (isDanglingOpener(run, masked)) text = text.slice(0, run.start);
+    else if (isDanglingOpener(run, paragraph.length)) {
+      text = text.slice(0, run.start);
+    }
   }
   if (open.length === 0) return text;
   if (open[0].start < lineStart) return paragraph;
@@ -194,16 +273,16 @@ export function repairOpenTail(block: string): string {
   const line = block.slice(lineStart);
   if (!line.trim() || FENCE_PATTERN.test(line)) return block;
   const start = paragraphStart(block, lineStart);
-  const masked = maskLiterals(block.slice(start));
+  const literal = literalPositions(block.slice(start));
   // Inside a code span still being written, everything is code.
-  if (masked === null) return block;
+  if (literal === null) return block;
   const shown = line.replace(PARTIAL_IMAGE, '$1').replace(PARTIAL_LINK, '$1$2');
   const paragraph = block.slice(start, lineStart) + shown;
   return (
     block.slice(0, start) +
     closeEmphasis(
       paragraph,
-      shown === line ? masked : maskLiterals(paragraph),
+      shown === line ? literal : literalPositions(paragraph),
       lineStart - start,
     )
   );

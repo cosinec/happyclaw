@@ -20,10 +20,13 @@ describe('repairOpenTail', () => {
     ['first line\nsecond **bold', 'first line\nsecond **bold**'],
     ['- **a\n\n- b **c', '- **a\n\n- b **c**'],
     ['链接 https://a.com/_x_ 后 **粗', '链接 https://a.com/_x_ 后 **粗**'],
+    // Next to curly quotes, as remark-cjk-friendly reads them.
+    ['精密绝伦的**“微观光学实验', '精密绝伦的**“微观光学实验**'],
+    ['的**“引号”', '的**“引号”**'],
+    ['的**“引号”**，再**“另一', '的**“引号”**，再**“另一**'],
     // A closer being written is completed, not doubled.
     ['**粗体*', '**粗体**'],
     ['~~删除~', '~~删除~~'],
-    ['__强调_', '__强调__'],
     // An opener with nothing after it yet does not show.
     ['前文 **', '前文 '],
     ['这是**', '这是'],
@@ -56,6 +59,14 @@ describe('repairOpenTail', () => {
     // An opener on an earlier line of the paragraph.
     '**first line\nsecond',
     '**第一行\n第二行**继续',
+    // Closed next to quotes and full-width punctuation: nothing to add.
+    '的**“引号”**，',
+    '有**“七种颜色”**呢？',
+    '**注意：**正文',
+    '前文**重点；**\n下一行',
+    '；**\n下一行',
+    // Whether `_` closes depends on what follows it.
+    '__强调_',
     // Not emphasis at all.
     'snake_case_name',
     'foo_',
