@@ -62,6 +62,9 @@ function sendMessage(
   response: http.ServerResponse,
   id: string,
   blocks: ReplyBlock[],
+  stopReason = blocks.some((block) => block.type === 'tool_use')
+    ? 'tool_use'
+    : 'end_turn',
 ): void {
   response.writeHead(200, {
     'content-type': 'text/event-stream',
@@ -126,9 +129,7 @@ function sendMessage(
   writeEvent(response, 'message_delta', {
     type: 'message_delta',
     delta: {
-      stop_reason: blocks.some((block) => block.type === 'tool_use')
-        ? 'tool_use'
-        : 'end_turn',
+      stop_reason: stopReason,
       stop_sequence: null,
     },
     usage: { output_tokens: 8 },
@@ -205,8 +206,15 @@ function answerMemoryRequests(tasksDir: string): void {
 async function runRunner(options: {
   name: string;
   reply: (call: number) => ReplyBlock[];
+  /** Stop reason of each main call; derived from its blocks by default. */
+  stopReason?: (call: number) => string | undefined;
   /** Close the runner once this frame arrives. */
   settled: (frame: Frame) => boolean;
+  /**
+   * Further Host inputs, each written once the previous one settled; the
+   * runner takes them into the same query while its stream is still open.
+   */
+  followUps?: string[];
 }): Promise<RunnerRun> {
   const scratch = path.join(scratchRoot, options.name);
   const dirs = {
@@ -220,20 +228,27 @@ async function runRunner(options: {
   for (const dir of [dirs.group, inputDir, tasksDir, dirs.config, dirs.home]) {
     fs.mkdirSync(dir, { recursive: true });
   }
-  // The Host's durable input: its receipt must come back exactly once.
-  fs.writeFileSync(
-    path.join(inputDir, '0001-input.json'),
-    JSON.stringify({
-      type: 'message',
-      text: 'Please answer the question.',
-      queryRunId: 'query-run-1',
-      receipt: {
-        deliveryId: 'delivery-1',
-        chatJid: 'web:runner-process',
-        cursor: { timestamp: '2026-10-26T00:00:00.000Z', id: 'message-1' },
-      },
-    }),
-  );
+  // A durable Host input: its receipt must come back exactly once.
+  const writeInput = (index: number, text: string): void => {
+    fs.writeFileSync(
+      path.join(inputDir, `000${index}-input.json`),
+      JSON.stringify({
+        type: 'message',
+        text,
+        queryRunId: 'query-run-1',
+        receipt: {
+          deliveryId: `delivery-${index}`,
+          chatJid: 'web:runner-process',
+          cursor: {
+            timestamp: `2026-10-26T00:00:0${index}.000Z`,
+            id: `message-${index}`,
+          },
+        },
+      }),
+    );
+  };
+  writeInput(1, 'Please answer the question.');
+  const followUps = [...(options.followUps ?? [])];
 
   const mainRequests: RunnerRun['mainRequests'] = [];
   const server = http.createServer((request, response) => {
@@ -258,7 +273,12 @@ async function runRunner(options: {
       }
       mainRequests.push(body);
       const call = mainRequests.length;
-      sendMessage(response, `msg_main_${call}`, options.reply(call));
+      sendMessage(
+        response,
+        `msg_main_${call}`,
+        options.reply(call),
+        options.stopReason?.(call),
+      );
     });
   });
   await new Promise<void>((resolve, reject) => {
@@ -293,7 +313,10 @@ async function runRunner(options: {
       if (event.kind !== 'frame') throw new Error(`runner frame ${event.kind}`);
       const frame = JSON.parse(event.json) as Frame;
       frames.push(frame);
-      if (options.settled(frame)) requestClose();
+      if (!options.settled(frame)) continue;
+      const next = followUps.shift();
+      if (next === undefined) requestClose();
+      else writeInput(options.followUps!.length - followUps.length + 1, next);
     }
   });
   const guard = setTimeout(() => requestClose(), 45_000);
@@ -310,7 +333,8 @@ async function runRunner(options: {
     }),
   );
   const exitCode = await new Promise<number | null>((resolve) =>
-    child.once('exit', (code) => resolve(code)),
+    // 'close' waits for stdout/stderr to drain as well; 'exit' may come first.
+    child.once('close', (code) => resolve(code)),
   );
   clearTimeout(guard);
   clearTimeout(killGuard);
@@ -321,6 +345,10 @@ async function runRunner(options: {
 
 const isFinalResult = (frame: Frame): boolean =>
   frame.status === 'success' && frame.inputTurnCompleted === true;
+
+/** Whether the silent-stop prompt appears in `value` (a boolean keeps failures short). */
+const carriesSilentStopPrompt = (value: unknown): boolean =>
+  JSON.stringify(value).includes('without any reply text');
 
 const runnerLines = (stderr: string, prefix: string): string[] =>
   stderr.split('\n').filter((line) => line.includes(prefix));
@@ -388,10 +416,8 @@ describe('Agent Runner process against a fake Anthropic endpoint', () => {
     ).toEqual(['delivery-1']);
     // The prompt reached the model as the continuation's user turn, but no
     // frame shows it to the Host as a message.
-    expect(JSON.stringify(run.mainRequests[2]!.messages)).toContain(
-      'without any reply text',
-    );
-    expect(JSON.stringify(run.frames)).not.toContain('without any reply text');
+    expect(carriesSilentStopPrompt(run.mainRequests[2]!.messages)).toBe(true);
+    expect(carriesSilentStopPrompt(run.frames)).toBe(false);
     // Every model call is billed once, to this input, including the empty one.
     const callUsage = run.frames.filter(
       (frame) =>
@@ -455,6 +481,36 @@ describe('Agent Runner process against a fake Anthropic endpoint', () => {
     ]);
   }, 60_000);
 
+  test('a thinking-only turn the model did not end itself is not asked for a reply', async () => {
+    // Claude Code 2.1.296 resumes a max_tokens response by itself and ends
+    // with an assistant max_output_tokens error, and a refusal arrives as an
+    // error frame; both take the provider-failure path. A stop sequence is
+    // the reason that reaches a healthy Result here.
+    const run = await runRunner({
+      name: 'silent-stop-stop-sequence',
+      reply: (call) => [{ type: 'thinking', thinking: `Thinking ${call}.` }],
+      stopReason: () => 'stop_sequence',
+      settled: isFinalResult,
+    });
+
+    expect(run.exitCode).toBe(0);
+    // No continuation prompt; the empty reply is published as before.
+    expect(carriesSilentStopPrompt(run.mainRequests)).toBe(false);
+    const finals = run.frames.filter(
+      (frame) => frame.status === 'success' && frame.sourceKind === 'sdk_final',
+    );
+    expect(finals).toHaveLength(1);
+    expect(finals[0]).toMatchObject({ result: null, inputTurnCompleted: true });
+    expect(runnerLines(run.stderr, '[silent-stop]')).toEqual([
+      expect.stringContaining(
+        'ended after thinking with stop_reason=stop_sequence; skipped, publishing the empty reply',
+      ),
+    ]);
+    expect(runnerLines(run.stderr, '[reply-shape]')).toEqual([
+      expect.stringContaining('reason=thinking_only'),
+    ]);
+  }, 60_000);
+
   test('a reply that keeps stopping after thinking is asked for only once, then published empty as before', async () => {
     const run = await runRunner({
       name: 'silent-stop-exhausted',
@@ -499,38 +555,50 @@ describe('Agent Runner process against a fake Anthropic endpoint', () => {
     }
   }, 60_000);
 
-  test('a repeated tool call is logged as a suspected loop without stopping the turn', async () => {
+  test('a repeated tool call is logged once per input as a suspected loop without stopping the turn', async () => {
+    const bash = (call: number): ReplyBlock[] => [
+      {
+        type: 'tool_use',
+        id: `toolu_loop_${call}`,
+        name: 'Bash',
+        input: { command: 'echo LOOP_SECRET_ARG', description: 'same check' },
+      },
+    ];
     const run = await runRunner({
       name: 'tool-loop',
+      // Input 1 repeats one call 12 times (enough for repeat and pingpong),
+      // input 2, taken into the same query, repeats it 4 times.
       reply: (call) =>
-        call <= 4
-          ? [
-              {
-                type: 'tool_use',
-                id: `toolu_loop_${call}`,
-                name: 'Bash',
-                input: {
-                  command: 'echo LOOP_SECRET_ARG',
-                  description: 'same check',
-                },
-              },
-            ]
-          : [{ type: 'text', text: 'LOOP_DONE' }],
+        call <= 12
+          ? bash(call)
+          : call === 13
+            ? [{ type: 'text', text: 'LOOP_DONE_1' }]
+            : call <= 17
+              ? bash(call)
+              : [{ type: 'text', text: 'LOOP_DONE_2' }],
       settled: isFinalResult,
+      followUps: ['Check it again.'],
     });
 
     expect(run.exitCode).toBe(0);
-    // Logging only: the turn runs on and its reply is delivered.
-    expect(run.mainRequests).toHaveLength(5);
+    // Logging only: each turn runs on and its reply is delivered.
+    expect(run.mainRequests).toHaveLength(18);
     expect(run.frames.filter(isFinalResult).map((f) => f.result)).toEqual([
-      'LOOP_DONE',
+      'LOOP_DONE_1',
+      'LOOP_DONE_2',
     ]);
+    expect(runnerLines(run.stderr, '[query-timing]')).toHaveLength(1);
+    // One line per input and scope: the first rule tripped, nothing after it.
     const loops = runnerLines(run.stderr, '[tool-loop]');
-    expect(loops).toHaveLength(1);
-    expect(loops[0]).toMatch(
-      /^\[agent-runner:warn\] \[tool-loop\] suspected rule=repeat tool=Bash count=4 distinct=1 scope=main turnId=\S+ inputTurnId=delivery-1 queryRunId=query-run-1$/,
-    );
-    expect(loops[0]).not.toContain('LOOP_SECRET_ARG');
+    expect(loops).toHaveLength(2);
+    loops.forEach((line, index) => {
+      expect(line).toMatch(
+        new RegExp(
+          `^\\[agent-runner:warn\\] \\[tool-loop\\] suspected rule=repeat tool=Bash count=4 distinct=1 scope=main turnId=\\S+ inputTurnId=delivery-${index + 1} queryRunId=query-run-1$`,
+        ),
+      );
+      expect(line).not.toContain('LOOP_SECRET_ARG');
+    });
     // Nothing about it reaches the Host.
     expect(JSON.stringify(run.frames)).not.toContain('suspected rule=');
   }, 60_000);
