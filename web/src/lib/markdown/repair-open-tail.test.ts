@@ -1,0 +1,79 @@
+import { describe, expect, it } from 'vitest';
+import { repairOpenTail } from './repair-open-tail';
+
+describe('repairOpenTail', () => {
+  it.each([
+    // Emphasis still open on the last line closes where the text ends.
+    ['**粗体', '**粗体**'],
+    ['这是**重点内容', '这是**重点内容**'],
+    ['a **bold text ', 'a **bold text** '],
+    ['see *it', 'see *it*'],
+    ['see _it', 'see _it_'],
+    ['x __strong', 'x __strong__'],
+    ['~~删除', '~~删除~~'],
+    ['**注意：**正文 **再', '**注意：**正文 **再**'],
+    ['**a _b', '**a _b_**'],
+    ['**a *b', '**a *b***'],
+    ['`code` 和 **粗', '`code` 和 **粗**'],
+    ['# **标题', '# **标题**'],
+    ['- 第一项\n- **第二', '- 第一项\n- **第二**'],
+    ['first line\nsecond **bold', 'first line\nsecond **bold**'],
+    ['- **a\n\n- b **c', '- **a\n\n- b **c**'],
+    ['链接 https://a.com/_x_ 后 **粗', '链接 https://a.com/_x_ 后 **粗**'],
+    // A closer being written is completed, not doubled.
+    ['**粗体*', '**粗体**'],
+    ['~~删除~', '~~删除~~'],
+    ['__强调_', '__强调__'],
+    // An opener with nothing after it yet does not show.
+    ['前文 **', '前文 '],
+    ['这是**', '这是'],
+    ['**', ''],
+    ['**粗体** 然后 **', '**粗体** 然后 '],
+    // A half-written link shows its text; a half-written image nothing.
+    ['参见[文档](https://exa', '参见文档'],
+    ['[文档](', '文档'],
+    ['[**粗**](htt', '**粗**'],
+    ['图片：![示意图](https://img.example.com/a', '图片：'],
+    ['图片：![示意', '图片：'],
+    ['图片：![示意图]', '图片：'],
+  ])('%j shows as %j', (block, shown) => {
+    expect(repairOpenTail(block)).toBe(shown);
+  });
+
+  it.each([
+    // Complete or ambiguous emphasis.
+    '**粗体**',
+    '***粗斜体',
+    '* item',
+    '** 空格后',
+    'a ** b',
+    '**a *b**',
+    // Code: an open fence, an inline code span still open or complete.
+    '```js\nconst a = **b',
+    '`a **b',
+    '`a **b` c',
+    'text `a\nb **c',
+    // An opener on an earlier line of the paragraph.
+    '**first line\nsecond',
+    '**第一行\n第二行**继续',
+    // Not emphasis at all.
+    'snake_case_name',
+    'foo_',
+    '变量_',
+    '2*3 = 6',
+    '2*',
+    '约 3~5 天',
+    '约 3~',
+    'text \\*escaped',
+    'https://example.com/_private',
+    '[notes]',
+    '[文字](https://example.com "标题',
+    '`[a](b`',
+    '感叹号!',
+    // The block ends a line: nothing is being written on it.
+    'para **bold\n',
+    '',
+  ])('%j stays as written', (block) => {
+    expect(repairOpenTail(block)).toBe(block);
+  });
+});

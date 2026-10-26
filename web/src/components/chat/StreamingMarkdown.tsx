@@ -7,6 +7,7 @@ import {
   findMarkdownDefinitions,
   splitMarkdownBlocks,
 } from '../../lib/markdown-blocks';
+import { repairOpenTail } from '../../lib/markdown/repair-open-tail';
 
 const MarkdownBlock = memo(function MarkdownBlock({
   content,
@@ -111,7 +112,8 @@ function MarkdownBlocks({
     if (streaming) splitRef.current = { text: content, blocks: split.slice() };
     if (!streaming) return split;
     if (split.length > 0) {
-      split[split.length - 1] = stableOpenTable(split[split.length - 1]);
+      const last = split.length - 1;
+      split[last] = repairOpenTail(stableOpenTable(split[last]));
     }
     const { links, footnotes } = findMarkdownDefinitions(content);
     return withStreamingDefinitions(split, links, footnotes);
