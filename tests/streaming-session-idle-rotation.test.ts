@@ -181,4 +181,15 @@ describe('main-runner rotation guards use the settled predicate', () => {
       /answerProjection\?\.visibleAnswerChanged &&\s*streamingSession\.isActive\(\)/,
     );
   });
+
+  test('runtime-session text projection uses the idle-aware append helper', () => {
+    // A Runtime Session card starts idle like the main one; an isActive()
+    // guard here drops a text-only turn's deltas until the final reply.
+    expect(main).toMatch(
+      /if \(agentAnswerProjection\?\.visibleAnswerChanged\) \{\s*appendStreamingSessionAnswer\(\s*agentStreamingSession,/,
+    );
+    expect(main).not.toMatch(
+      /agentAnswerProjection\?\.visibleAnswerChanged &&\s*agentStreamingSession\.isActive\(\)/,
+    );
+  });
 });
