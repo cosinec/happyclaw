@@ -2,9 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, type RefObject } from 'react';
 import {
   FOLLOW_GLIDE_EASING,
   FOLLOW_GLIDE_MS,
-  glideOffsetAt,
   stickyTrack,
-  type Glide,
   type GlideTrack,
 } from '../lib/follow-glide';
 
@@ -26,20 +24,26 @@ export function useFollowGlide(
   stickyScopeRef: RefObject<HTMLElement | null>,
   stickySelector: string,
 ) {
-  const glideRef = useRef<(Glide & { animations: Animation[] }) | null>(null);
+  const glideRef = useRef<Animation[] | null>(null);
   // scrollTop as last shown. A shrink that clamps scrollTop and a regrowth
   // in the same frame never showed the clamped position: the glide starts
   // from where the content was on screen, not from the clamp.
   const shownTopRef = useRef<number | null>(null);
 
-  /** Stops the glide; returns how far below its layout the content showed. */
+  /** Stops the glide; returns how far below its layout the content shows. */
   const cancel = useCallback(() => {
-    const glide = glideRef.current;
+    const animations = glideRef.current;
     glideRef.current = null;
-    if (!glide) return 0;
-    for (const animation of glide.animations) animation.cancel();
-    return glideOffsetAt(glide, performance.now());
-  }, []);
+    if (!animations) return 0;
+    // The offset as this frame presents it. On a slow frame the animation is
+    // behind the clock, and an offset worked out from the clock would move
+    // the content when it is folded into scrollTop.
+    const transform = layerRef.current
+      ? getComputedStyle(layerRef.current).transform
+      : 'none';
+    for (const animation of animations) animation.cancel();
+    return transform === 'none' ? 0 : new DOMMatrixReadOnly(transform).m42;
+  }, [layerRef]);
 
   /** Moves the reader to the bottom; `smooth` glides there when it grew. */
   const follow = useCallback(
@@ -83,15 +87,14 @@ export function useFollowGlide(
           offsets.map((offset) => ({ transform: `translateY(${offset}px)` })),
           { duration: FOLLOW_GLIDE_MS, easing, fill: 'backwards' },
         );
-        // Start now, not once the compositor picks it up a frame later: the
-        // offset sampled at wall-clock time is then the one on screen.
+        // Start now, not once the compositor picks it up a frame later; the
+        // first keyframe holds until then.
         animation.startTime = startedAt;
         return animation;
       });
-      const glide = { from, startedAt, animations };
-      glideRef.current = glide;
+      glideRef.current = animations;
       animations[0].onfinish = () => {
-        if (glideRef.current === glide) glideRef.current = null;
+        if (glideRef.current === animations) glideRef.current = null;
       };
     },
     [cancel, layerRef, scrollerRef, stickyScopeRef, stickySelector],

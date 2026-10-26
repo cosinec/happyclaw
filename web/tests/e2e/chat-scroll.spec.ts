@@ -486,6 +486,9 @@ function streamBatch(i: number) {
   return `\n\n第 ${i} 批第一段，流式输出的内容。\n\n第 ${i} 批第二段。`;
 }
 
+/** A large batch, so a slow frame still leaves much of its glide to go. */
+const LARGE_BATCH = [0, 1, 2, 3].map(streamBatch).join('');
+
 interface GlideFrame {
   top: number;
   gap: number;
@@ -634,7 +637,7 @@ test('a wheel up mid-glide hands the reader over where the content shows', async
   await page.waitForTimeout(600);
   await expect.poll(async () => (await metrics(page)).gap).toBeLessThan(24);
 
-  await harness(page, 'appendStream', streamBatch(0) + streamBatch(1));
+  await harness(page, 'appendStream', LARGE_BATCH);
   // In a frame of the glide, a wheel up (synthetic: it never scrolls natively,
   // so only the takeover can move the transcript).
   const handover = await page.evaluate(async () => {
@@ -650,10 +653,12 @@ test('a wheel up mid-glide hands the reader over where the content shows', async
       const transform = getComputedStyle(layer).transform;
       return transform === 'none' ? 0 : new DOMMatrixReadOnly(transform).m42;
     };
-    // A few frames into it, partly covered.
-    for (let i = 0, gliding = 0; i < 40 && gliding < 3; i += 1) {
+    // Partly covered: the first frame it has moved in.
+    for (let i = 0, peak = 0; i < 40; i += 1) {
       await new Promise((resolve) => requestAnimationFrame(resolve));
-      if (shiftOf() > 0) gliding += 1;
+      const shift = shiftOf();
+      if (shift > 0 && shift < peak) break;
+      peak = Math.max(peak, shift);
     }
     const shift = shiftOf();
     const shownBefore = el.scrollTop - shift;
@@ -729,9 +734,9 @@ test('scrolling toward the bottom mid-glide lets the glide carry on', async ({
   await expect.poll(async () => (await metrics(page)).gap).toBeLessThan(24);
 
   for (const input of ['wheel', 'key'] as const) {
-    await harness(page, 'appendStream', streamBatch(0) + streamBatch(1));
-    // A few frames into the glide, a wheel or arrow key down, scrolled at
-    // once as without smooth scrolling (Firefox, or smooth scrolling off).
+    await harness(page, 'appendStream', LARGE_BATCH);
+    // In a frame of the glide, a wheel or arrow key down, scrolled at once as
+    // without smooth scrolling (Firefox, or smooth scrolling off).
     const result = await page.evaluate(async (input) => {
       const el = [
         ...document.querySelectorAll<HTMLElement>(
@@ -745,9 +750,8 @@ test('scrolling toward the bottom mid-glide lets the glide carry on', async ({
         const transform = getComputedStyle(layer).transform;
         return transform === 'none' ? 0 : new DOMMatrixReadOnly(transform).m42;
       };
-      for (let i = 0, gliding = 0; i < 40 && gliding < 3; i += 1) {
+      for (let i = 0; i < 40 && shiftOf() === 0; i += 1) {
         await new Promise((resolve) => requestAnimationFrame(resolve));
-        if (shiftOf() > 0) gliding += 1;
       }
       const shift = shiftOf();
       const shownBefore = el.scrollTop - shift;

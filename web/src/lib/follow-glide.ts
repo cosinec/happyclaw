@@ -1,4 +1,4 @@
-import { clamp, cubicBezier } from 'motion/react';
+import { cubicBezier } from 'motion/react';
 import { DURATION } from './motion';
 
 /**
@@ -13,27 +13,6 @@ export const FOLLOW_GLIDE_MS = DURATION.standard * 1000;
 const FOLLOW_GLIDE_CURVE = [0.4, 0, 0.2, 1] as const;
 export const FOLLOW_GLIDE_EASING = `cubic-bezier(${FOLLOW_GLIDE_CURVE.join(', ')})`;
 const followEase = cubicBezier(...FOLLOW_GLIDE_CURVE);
-
-/** The glide's eased progress at time progress `x`, held at its ends. */
-function easeAt(x: number): number {
-  return followEase(clamp(0, 1, x));
-}
-
-export interface Glide {
-  /** How far below its layout position the content shows at the start. */
-  from: number;
-  /** `performance.now()` at the start. */
-  startedAt: number;
-}
-
-/**
- * How far below its layout position the glide shows the content at `now`.
- * Sampled at wall-clock time like the compositor does, not read back from the
- * animation, whose computed value can lag a frame behind during a long task.
- */
-export function glideOffsetAt(glide: Glide, now: number): number {
-  return glide.from * (1 - easeAt((now - glide.startedAt) / FOLLOW_GLIDE_MS));
-}
 
 /** One element's keyframe translations (px) over a glide, and easing. */
 export interface GlideTrack {
@@ -57,7 +36,7 @@ export function stickyTrack(from: number, depth: number): GlideTrack {
   return {
     offsets: Array.from(
       { length: steps + 1 },
-      (_, i) => -Math.min(depth, from * (1 - easeAt(i / steps))),
+      (_, i) => -Math.min(depth, from * (1 - followEase(i / steps))),
     ),
     easing: 'linear',
   };
