@@ -20,6 +20,8 @@ const BACKTICKS = /`+/g;
 /** A literal URL, without the punctuation that ends a sentence after it. */
 const LITERAL_URL = /(?:https?:\/\/|www\.)\S*?(?=[*_~.,:;!?'")\]]*(?:\s|$))/g;
 const LINK_DESTINATION = /\]\([^()\s]*\)/g;
+/** `$$…$$`, or `$…$` on one line: `$x^*$`, `$\hat{x}_{t}$`. */
+const MATH = /\$\$[\s\S]*?\$\$|\$[^\s$](?:[^$\n]*[^\s$])?\$/g;
 const ASCII_WORD = /[A-Za-z0-9]/;
 
 const ASTERISK = 0x2a;
@@ -28,8 +30,8 @@ const TILDE = 0x7e;
 
 /**
  * Positions of `text` that cannot hold an emphasis delimiter (escaped
- * characters, code spans, URLs, link destinations), or null when a code span
- * is still open.
+ * characters, code spans, URLs, link destinations, math), or null when a
+ * code span or display math is still open.
  */
 function literalPositions(text: string): Uint8Array | null {
   const literal = new Uint8Array(text.length);
@@ -46,10 +48,15 @@ function literalPositions(text: string): Uint8Array | null {
     literal.fill(1, open.index, ticks[close].index + ticks[close][0].length);
     i = close;
   }
-  for (const pattern of [LITERAL_URL, LINK_DESTINATION]) {
+  for (const pattern of [LITERAL_URL, LINK_DESTINATION, MATH]) {
     for (const match of unescaped.matchAll(pattern)) {
       literal.fill(1, match.index, match.index + match[0].length);
     }
+  }
+  // Inside display math still being written, everything is math.
+  for (let at = unescaped.indexOf('$$'); at >= 0; ) {
+    if (!literal[at]) return null;
+    at = unescaped.indexOf('$$', at + 2);
   }
   return literal;
 }
@@ -175,11 +182,11 @@ function delimiterRuns(
 }
 
 /**
- * A delimiter run at the very end with nothing after it yet, which the next
- * characters will most likely make an opener (`这是 **`).
+ * A `**`, `__` or `~~` at the very end with nothing after it yet, which the
+ * next characters will most likely make an opener (`这是 **`).
  */
 function isDanglingOpener(run: DelimiterRun, length: number): boolean {
-  if (run.loose || run.end !== length) return false;
+  if (run.end - run.start !== 2 || run.end !== length) return false;
   return (
     isSpaceOrPunctuation(run.before) ||
     (run.char !== '_' && isCjkOrIvs(run.before))
@@ -234,6 +241,9 @@ function closeEmphasis(
   }
   if (open.length === 0) return text;
   if (open[0].start < lineStart) return paragraph;
+  // Only `**`, `__` and `~~` are closed: a single `*` or `_` is as often a
+  // footnote mark (`注*：`), `(*)`, `*args` or math as emphasis.
+  if (open.some((run) => run.end - run.start === 1)) return paragraph;
   // The opener must have text after it already: `**` alone stays.
   if (!/[^\s*_~]/.test(text.slice(open[open.length - 1].end))) {
     return paragraph;

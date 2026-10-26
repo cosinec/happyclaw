@@ -7,13 +7,9 @@ describe('repairOpenTail', () => {
     ['**粗体', '**粗体**'],
     ['这是**重点内容', '这是**重点内容**'],
     ['a **bold text ', 'a **bold text** '],
-    ['see *it', 'see *it*'],
-    ['see _it', 'see _it_'],
     ['x __strong', 'x __strong__'],
     ['~~删除', '~~删除~~'],
     ['**注意：**正文 **再', '**注意：**正文 **再**'],
-    ['**a _b', '**a _b_**'],
-    ['**a *b', '**a *b***'],
     ['`code` 和 **粗', '`code` 和 **粗**'],
     ['# **标题', '# **标题**'],
     ['- 第一项\n- **第二', '- 第一项\n- **第二**'],
@@ -24,6 +20,8 @@ describe('repairOpenTail', () => {
     ['精密绝伦的**“微观光学实验', '精密绝伦的**“微观光学实验**'],
     ['的**“引号”', '的**“引号”**'],
     ['的**“引号”**，再**“另一', '的**“引号”**，再**“另一**'],
+    // Math holds no delimiters.
+    ['the dual $x^{**}$ and **粗', 'the dual $x^{**}$ and **粗**'],
     // A closer being written is completed, not doubled.
     ['**粗体*', '**粗体**'],
     ['~~删除~', '~~删除~~'],
@@ -67,6 +65,20 @@ describe('repairOpenTail', () => {
     '；**\n下一行',
     // Whether `_` closes depends on what follows it.
     '__强调_',
+    // A single `*` or `_` is never closed: footnote marks, `(*)`, `*args`,
+    // math, or emphasis inside the bold it would cross.
+    '注*：本数据',
+    'see note (*) below',
+    'call foo_bar(*args',
+    'the optimal $x^*$ is attained',
+    '$\\hat{x}_{t}$ is the estimate',
+    'see *it',
+    'see _it',
+    '**a _b',
+    '**a *b',
+    '这是*',
+    // Display math still being written is all math.
+    '$$\nx^{**} 和 **粗',
     // Not emphasis at all.
     'snake_case_name',
     'foo_',
