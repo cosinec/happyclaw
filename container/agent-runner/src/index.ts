@@ -196,6 +196,7 @@ import {
   decideSilentStop,
   MAX_SILENT_STOP_CONTINUES,
 } from './silent-stop.js';
+import { ToolLoopDetector } from './tool-loop-detector.js';
 
 // 路径解析：优先读取环境变量，降级到容器内默认路径（保持向后兼容）
 const WORKSPACE_GROUP =
@@ -1909,6 +1910,7 @@ async function runQueryAttempt(
   const durableInputCompletion = new DurableInputTurnCompletion();
   const assistantTextTracker = new AssistantTextTracker();
   const replyShape = new ReplyShapeTracker();
+  const toolLoops = new ToolLoopDetector();
   let canonicalAssistantUuid: string | undefined;
   const agentTurnAnchor = resolveAgentTurnAnchor(
     containerInput.agentProfile,
@@ -3723,6 +3725,14 @@ async function runQueryAttempt(
             pipedMessagesDuringQuery,
             providerAccountFailure: true,
           };
+        }
+      }
+
+      if (message.type === 'assistant') {
+        for (const hit of toolLoops.observeAssistantMessage(message)) {
+          logWarn(
+            `[tool-loop] suspected rule=${hit.rule} tool=${hit.tool} count=${hit.count} distinct=${hit.distinct} scope=${hit.scope} ${logCorrelation()}`,
+          );
         }
       }
 

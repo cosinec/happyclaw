@@ -37,7 +37,8 @@ afterAll(() => {
 
 type ReplyBlock =
   | { type: 'thinking'; thinking: string }
-  | { type: 'text'; text: string };
+  | { type: 'text'; text: string }
+  | { type: 'tool_use'; id: string; name: string; input: unknown };
 
 type Frame = Record<string, any>;
 
@@ -86,13 +87,24 @@ function sendMessage(
       content_block:
         block.type === 'text'
           ? { type: 'text', text: '' }
-          : { type: 'thinking', thinking: '', signature: '' },
+          : block.type === 'tool_use'
+            ? { type: 'tool_use', id: block.id, name: block.name, input: {} }
+            : { type: 'thinking', thinking: '', signature: '' },
     });
     if (block.type === 'text') {
       writeEvent(response, 'content_block_delta', {
         type: 'content_block_delta',
         index,
         delta: { type: 'text_delta', text: block.text },
+      });
+    } else if (block.type === 'tool_use') {
+      writeEvent(response, 'content_block_delta', {
+        type: 'content_block_delta',
+        index,
+        delta: {
+          type: 'input_json_delta',
+          partial_json: JSON.stringify(block.input),
+        },
       });
     } else {
       writeEvent(response, 'content_block_delta', {
@@ -113,7 +125,12 @@ function sendMessage(
   });
   writeEvent(response, 'message_delta', {
     type: 'message_delta',
-    delta: { stop_reason: 'end_turn', stop_sequence: null },
+    delta: {
+      stop_reason: blocks.some((block) => block.type === 'tool_use')
+        ? 'tool_use'
+        : 'end_turn',
+      stop_sequence: null,
+    },
     usage: { output_tokens: 8 },
   });
   writeEvent(response, 'message_stop', { type: 'message_stop' });
@@ -443,5 +460,41 @@ describe('Agent Runner process against a fake Anthropic endpoint', () => {
       expect(line).not.toContain('PRIVATE_THOUGHT');
       expect(line).not.toContain('Please answer');
     }
+  }, 60_000);
+
+  test('a repeated tool call is logged as a suspected loop without stopping the turn', async () => {
+    const run = await runRunner({
+      name: 'tool-loop',
+      reply: (call) =>
+        call <= 4
+          ? [
+              {
+                type: 'tool_use',
+                id: `toolu_loop_${call}`,
+                name: 'Bash',
+                input: {
+                  command: 'echo LOOP_SECRET_ARG',
+                  description: 'same check',
+                },
+              },
+            ]
+          : [{ type: 'text', text: 'LOOP_DONE' }],
+      settled: isFinalResult,
+    });
+
+    expect(run.exitCode).toBe(0);
+    // Logging only: the turn runs on and its reply is delivered.
+    expect(run.mainRequests).toHaveLength(5);
+    expect(run.frames.filter(isFinalResult).map((f) => f.result)).toEqual([
+      'LOOP_DONE',
+    ]);
+    const loops = runnerLines(run.stderr, '[tool-loop]');
+    expect(loops).toHaveLength(1);
+    expect(loops[0]).toMatch(
+      /^\[agent-runner:warn\] \[tool-loop\] suspected rule=repeat tool=Bash count=4 distinct=1 scope=main turnId=\S+ inputTurnId=delivery-1 queryRunId=query-run-1$/,
+    );
+    expect(loops[0]).not.toContain('LOOP_SECRET_ARG');
+    // Nothing about it reaches the Host.
+    expect(JSON.stringify(run.frames)).not.toContain('suspected rule=');
   }, 60_000);
 });
