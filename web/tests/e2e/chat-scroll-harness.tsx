@@ -5,11 +5,12 @@
 //   &hasMore=1       older pages are available (30 per page, 3 pages)
 //   &slowImage=1     the newest reply embeds an image served late by the test
 // window.__chatScroll also drives a streamed reply: startStreaming() appends a
-// sentence every intervalMs, finishStreaming() swaps the stream for its final
-// message in one store update, as a completed reply does. wsEmit() feeds
-// WebSocket frames (stream_event, stream_snapshot, new_message) through the
-// app's real subscriptions, runStarted()/runFinished() the run lifecycle, and
-// switchTo() opens another workspace (web:e2e-scroll-other) mid-stream.
+// sentence every intervalMs, appendStream() a batch of text at once, and
+// finishStreaming() swaps the stream for its final message in one store
+// update, as a completed reply does. wsEmit() feeds WebSocket frames
+// (stream_event, stream_snapshot, new_message) through the app's real
+// subscriptions, runStarted()/runFinished() the run lifecycle, and switchTo()
+// opens another workspace (web:e2e-scroll-other) mid-stream.
 import { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { MemoryRouter } from 'react-router-dom';
@@ -199,6 +200,8 @@ const state = {
       appendStreamText(`第 ${streamedSentences} 句流式输出内容。\n\n`);
     }, intervalMs);
   },
+  /** Adds text to the stream in one batch, as the runner flushes it. */
+  appendStream: appendStreamText,
   /** Ends the stream; with finalize, its text becomes the final reply. */
   finishStreaming(finalize = true) {
     if (streamTimer !== null) window.clearInterval(streamTimer);
