@@ -60,6 +60,11 @@ const RECENT_BLOCKS = 8;
  * any longer text found without a timeline counts as already shown.
  */
 const FIRST_SIGHT_CHARS = 400;
+/**
+ * A word's CSS fade begins at the commit after the render that timed it, so
+ * a closed block waits this much past its timeline before showing as final.
+ */
+const SETTLE_MS = 100;
 const FADE_CACHE_LIMIT = 64;
 /**
  * Timelines of recently streamed blocks, so a remount (switching
@@ -95,49 +100,52 @@ function useBlockFades(
   const fades: (StreamFade | undefined)[] = [];
   if (sources && sources.length > 0) {
     const kept = keptRef.current;
+    // The blank lines after a block move to the next one once it starts.
+    const texts = sources.map((source) => source.trimEnd());
     const shortKey = `${scope}\0`;
-    const keyOf = (source: string) =>
-      source.length < BLOCK_KEY_CHARS
+    const keyOf = (text: string) =>
+      text.length < BLOCK_KEY_CHARS
         ? shortKey
-        : shortKey + source.slice(0, BLOCK_KEY_CHARS);
-    const known = (source: string, other?: BlockFade) => {
+        : shortKey + text.slice(0, BLOCK_KEY_CHARS);
+    const known = (text: string, other?: BlockFade) => {
       const match = (block?: BlockFade) =>
-        block && block !== other && source.startsWith(block.source)
+        block?.source && block !== other && text.startsWith(block.source)
           ? block
           : undefined;
       return (
         kept.find(match) ??
-        match(fadeCache.get(keyOf(source))) ??
+        match(fadeCache.get(keyOf(text))) ??
         // It may have grown into its key while away.
         match(fadeCache.get(shortKey))
       );
     };
-    const last = sources.length - 1;
+    const last = texts.length - 1;
     const recent = Math.max(0, last - RECENT_BLOCKS);
-    let open = known(sources[last]);
+    let open = known(texts[last]);
     if (!open) {
       const previous = kept[kept.length - 1];
       const fresh = previous
-        ? sources
+        ? texts
             .slice(recent, last)
-            .some((block) => block.startsWith(previous.source))
-        : last === 0 && sources[0].length <= FIRST_SIGHT_CHARS;
+            .some((text) => text.startsWith(previous.source))
+        : last === 0 && texts[0].length <= FIRST_SIGHT_CHARS;
       open = { source: '', fade: createStreamFade({ shown: !fresh }) };
     }
-    open.source = sources[last];
+    open.source = texts[last];
     rememberFade(keyOf(open.source), open);
     fades[last] = open.fade;
     const next: BlockFade[] = [];
     const now = performance.now();
     for (let index = recent; index < last; index += 1) {
-      const closed = known(sources[index], open);
+      const closed = known(texts[index], open);
       if (
         !closed ||
-        (closed.source === sources[index] && streamFadeEnd(closed.fade) <= now)
+        (closed.source === texts[index] &&
+          streamFadeEnd(closed.fade) + SETTLE_MS <= now)
       ) {
         continue;
       }
-      closed.source = sources[index];
+      closed.source = texts[index];
       rememberFade(keyOf(closed.source), closed);
       fades[index] = closed.fade;
       next.push(closed);
@@ -154,7 +162,7 @@ function useBlockFades(
     const until = Math.max(...closed.map(({ fade }) => streamFadeEnd(fade)));
     const timer = window.setTimeout(
       () => settle((count) => count + 1),
-      Math.max(0, until - performance.now()) + 20,
+      Math.max(0, until + SETTLE_MS - performance.now()),
     );
     return () => window.clearTimeout(timer);
   });

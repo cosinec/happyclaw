@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { unified } from 'unified';
 import remarkParse from 'remark-parse';
 import remarkRehype from 'remark-rehype';
@@ -197,5 +197,23 @@ describe('syncStreamFade', () => {
     // Its animation was taken off and put back, so it starts over.
     expect(classChanges).toHaveLength(2);
     expect(word.className).toBe('hc-stream-word');
+  });
+
+  it('restarts every reused span with one style update', () => {
+    const root = document.createElement('div');
+    root.innerHTML = Array.from(
+      { length: 20 },
+      (_, i) =>
+        `<span class="hc-stream-word" data-fade-at="${1000 + i}">w</span>`,
+    ).join('');
+    syncStreamFade(root, 1000);
+    for (const word of root.querySelectorAll<HTMLElement>('span')) {
+      word.dataset.fadeAt = String(Number(word.dataset.fadeAt) + 500);
+    }
+    const styles = vi.spyOn(window, 'getComputedStyle');
+    syncStreamFade(root, 1100);
+    expect(styles).toHaveBeenCalledTimes(1);
+    styles.mockRestore();
+    expect(root.querySelectorAll('.hc-stream-word')).toHaveLength(20);
   });
 });

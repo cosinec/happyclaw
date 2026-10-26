@@ -307,6 +307,7 @@ const timedWords = new WeakMap<HTMLElement, string>();
  * `rehypeStreamFade`.
  */
 export function syncStreamFade(root: HTMLElement, now = performance.now()) {
+  const restarted: HTMLElement[] = [];
   for (const word of root.querySelectorAll<HTMLElement>('.hc-stream-word')) {
     const start = word.dataset.fadeAt ?? '';
     const timed = timedWords.get(word);
@@ -316,13 +317,14 @@ export function syncStreamFade(root: HTMLElement, now = performance.now()) {
       '--hc-fade-delay',
       `${Math.round(Number(start) - now)}ms`,
     );
-    if (timed !== undefined) {
-      // A running CSS animation keeps its start: drop it and begin anew.
-      word.classList.remove('hc-stream-word');
-      void getComputedStyle(word).animationName;
-      word.classList.add('hc-stream-word');
-    }
+    if (timed !== undefined) restarted.push(word);
   }
+  if (restarted.length === 0) return;
+  // A running CSS animation keeps its start: drop them all, let one style
+  // update see them gone, and begin anew.
+  for (const word of restarted) word.classList.remove('hc-stream-word');
+  void getComputedStyle(restarted[0]).animationName;
+  for (const word of restarted) word.classList.add('hc-stream-word');
 }
 
 /** When the last word `fade` has scheduled finishes fading in. */
