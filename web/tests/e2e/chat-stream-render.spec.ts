@@ -8,6 +8,8 @@ import { expect, test, type Page } from '@playwright/test';
 
 const HARNESS = '/tests/e2e/chat-render-harness.html';
 
+type WordSeen = { inserted: number[]; fading: boolean[]; frames: number[] };
+
 declare global {
   interface Window {
     renderHarness: {
@@ -15,6 +17,10 @@ declare global {
       emit: (event: Record<string, unknown>) => void;
       finish: (content: string) => void;
     };
+    /** The answer's word spans as `watchWords` saw them, by text. */
+    __words: Record<string, WordSeen>;
+    /** Each text the answer showed, and when (`recordAnswer`). */
+    __answer: { at: number; text: string }[];
   }
 }
 
@@ -966,5 +972,233 @@ test.describe('on a wide screen', () => {
       .locator('[data-hc-process-panel]')
       .getByRole('button', { name: /处理过程/ });
     await expect(toggle).toContainText('最近：运行');
+  });
+});
+
+test.describe('the streamed answer', () => {
+  const ANSWER = '[data-hc-streaming-block] [data-markdown-root]';
+
+  const emitText = (page: Page, text: string) =>
+    page.evaluate(
+      (delta) =>
+        window.renderHarness.emit({ eventType: 'text_delta', text: delta }),
+      text,
+    );
+
+  /** Record each text the answer shows, and when. */
+  const recordAnswer = (page: Page) =>
+    page.evaluate((answer) => {
+      window.__answer = [];
+      let last = '';
+      new MutationObserver(() => {
+        const text = document.querySelector(answer)?.textContent ?? '';
+        if (text === last) return;
+        last = text;
+        window.__answer.push({ at: performance.now(), text });
+      }).observe(document.body, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+    }, ANSWER);
+
+  /**
+   * Watch each word span of the answer: its opacity when it entered the DOM,
+   * whether it was fading then, and its opacity on every frame after.
+   */
+  async function watchWords(page: Page) {
+    await page.evaluate((answer) => {
+      const words: Record<string, WordSeen> = {};
+      window.__words = words;
+      const seen = (span: HTMLElement) =>
+        (words[span.textContent!.trim()] ??= {
+          inserted: [],
+          fading: [],
+          frames: [],
+        });
+      const selector = `${answer} span`;
+      new MutationObserver((records) => {
+        for (const record of records) {
+          for (const node of record.addedNodes) {
+            if (!(node instanceof HTMLElement)) continue;
+            const spans = node.matches(selector)
+              ? [node]
+              : [...node.querySelectorAll<HTMLElement>('span')].filter((span) =>
+                  span.matches(selector),
+                );
+            for (const span of spans) {
+              const word = seen(span);
+              word.inserted.push(Number(getComputedStyle(span).opacity));
+              word.fading.push(span.getAnimations().length > 0);
+            }
+          }
+        }
+      }).observe(document.body, { childList: true, subtree: true });
+      const frame = () => {
+        for (const span of document.querySelectorAll<HTMLElement>(selector)) {
+          seen(span).frames.push(Number(getComputedStyle(span).opacity));
+        }
+        requestAnimationFrame(frame);
+      };
+      requestAnimationFrame(frame);
+    }, ANSWER);
+  }
+
+  const watched = (page: Page) => page.evaluate(() => window.__words);
+
+  /** Once opaque, a word never loses any of it: nothing fades in twice. */
+  function expectNeverFadesAgain(frames: number[], word: string) {
+    expect(frames.at(-1), word).toBe(1);
+    frames.forEach((opacity, i) => {
+      if (i > 0) {
+        expect(opacity, word).toBeGreaterThanOrEqual(frames[i - 1] - 0.01);
+      }
+    });
+  }
+
+  test('fades each new word in once, and a word shown never fades again', async ({
+    page,
+  }) => {
+    await open(page, 'scenario=live');
+    await watchWords(page);
+    await page.evaluate(() => window.renderHarness.start());
+    for (const delta of [
+      'Alpha bravo charlie. ',
+      'Delta echo ',
+      'foxtrot golf ',
+      'hotel india.',
+    ]) {
+      await emitText(page, delta);
+      await page.waitForTimeout(130);
+    }
+    const text = 'Alpha bravo charlie. Delta echo foxtrot golf hotel india.';
+    const answer = block(page).getByText(text);
+    await expect(answer).toBeVisible();
+    await page.waitForTimeout(400);
+    const words = await watched(page);
+    for (const word of ['Alpha', 'charlie.', 'Delta', 'golf', 'india.']) {
+      // It entered transparent and fading...
+      expect(words[word].fading[0], word).toBe(true);
+      expect(words[word].inserted[0], word).toBeLessThan(0.5);
+      // ...and once opaque stayed so through the renders that followed.
+      expectNeverFadesAgain(words[word].frames, word);
+    }
+    // A copy of the words reads exactly as the text.
+    const copied = await answer.evaluate((paragraph) => {
+      getSelection()!.selectAllChildren(paragraph);
+      return getSelection()!.toString();
+    });
+    expect(copied).toBe(text);
+  });
+
+  test('a block re-read mid-fade resumes its words instead of restarting them', async ({
+    page,
+  }) => {
+    await open(page, 'scenario=live');
+    await watchWords(page);
+    await page.evaluate(() => window.renderHarness.start());
+    await emitText(page, 'Heading words arrive');
+    await expect(block(page).getByText('Heading words arrive')).toBeVisible();
+    // The setext underline turns the paragraph into a heading: new elements.
+    await emitText(page, '\n===');
+    await expect(block(page).locator('h1')).toHaveText('Heading words arrive');
+    await page.waitForTimeout(400);
+    const words = await watched(page);
+    // The last word was still fading when the heading replaced it, and its
+    // new element picked the fade up where it was.
+    expect(words.arrive.fading).toEqual([true, true]);
+    expect(words.arrive.inserted[1]).toBeGreaterThan(0.05);
+    for (const word of ['Heading', 'words', 'arrive']) {
+      expectNeverFadesAgain(words[word].frames, word);
+    }
+  });
+
+  test('does not fade when less motion is asked for', async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await open(page, 'scenario=live');
+    await page.evaluate(() => window.renderHarness.start());
+    await emitText(page, '这是一段**普通**的回复，不带淡入。');
+    await expect(block(page).getByText(/^这是一段普通的回复/)).toBeVisible();
+    await expect(page.locator(`${ANSWER} span`)).toHaveCount(0);
+  });
+
+  test('never shows the asterisks or link syntax still being written', async ({
+    page,
+  }) => {
+    await open(page, 'scenario=live');
+    const reply =
+      '这是**重点内容**，然后是*斜体*，参见[文档](https://example.com/doc)。';
+    await recordAnswer(page);
+    // One character every 30ms: renders land mid-syntax.
+    await page.evaluate(async (text) => {
+      window.renderHarness.start();
+      for (const char of text) {
+        window.renderHarness.emit({ eventType: 'text_delta', text: char });
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      }
+    }, reply);
+    const answer = page.locator(ANSWER).first();
+    await expect(answer.locator('strong')).toHaveText('重点内容');
+    await expect(answer.locator('em')).toHaveText('斜体');
+    await expect(answer.locator('a')).toHaveText('文档');
+    const shown = (await page.evaluate(() => window.__answer)).map(
+      ({ text }) => text,
+    );
+    expect(shown.length).toBeGreaterThan(5);
+    expect(shown.filter((text) => /\*|\]\(|\(https/.test(text))).toEqual([]);
+
+    // The final message is the plain rendering, with no word spans left.
+    await page.evaluate(
+      (content) => window.renderHarness.finish(content),
+      reply,
+    );
+    const final = page.locator('[data-message-id="live-final"]');
+    await expect(final.locator('strong')).toHaveText('重点内容');
+    await expect(final.locator('a')).toHaveAttribute(
+      'href',
+      'https://example.com/doc',
+    );
+    await expect(final.locator('[data-markdown-root] span')).toHaveCount(0);
+  });
+
+  test('renders less often while the reader types in the composer', async ({
+    page,
+  }) => {
+    await open(page, 'scenario=live');
+    await recordAnswer(page);
+    await page.evaluate(() => window.renderHarness.start());
+    /** Median milliseconds between renders of the answer as text streams. */
+    const cadence = async (typing: boolean) => {
+      const [from, to] = await page.evaluate(async (typing) => {
+        const textarea = document.querySelector('textarea')!;
+        const setValue = Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          'value',
+        )!.set!;
+        const from = performance.now();
+        for (let i = 0; i < 60; i += 1) {
+          window.renderHarness.emit({
+            eventType: 'text_delta',
+            text: `word${i} `,
+          });
+          if (typing) {
+            setValue.call(textarea, `${textarea.value}a`);
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        return [from, performance.now()];
+      }, typing);
+      const renders = (await page.evaluate(() => window.__answer))
+        .map(({ at }) => at)
+        .filter((at) => at >= from && at <= to);
+      const gaps = renders
+        .slice(1)
+        .map((at, i) => at - renders[i])
+        .sort((a, b) => a - b);
+      return gaps[Math.floor(gaps.length / 2)];
+    };
+    expect(await cadence(false)).toBeLessThan(180);
+    expect(await cadence(true)).toBeGreaterThanOrEqual(240);
   });
 });

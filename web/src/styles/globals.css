@@ -597,6 +597,28 @@ body {
   }
 }
 
+/* Words of a streamed block fade in as they arrive (rehype-stream-fade).
+ * Opacity only, delayed to the start time the renderer gave the word
+ * (`--hc-fade-delay`, negative for a word remounted part-way), so no
+ * re-render restarts one. Not mounted at all when less motion is asked for;
+ * this rule covers the OS setting changing mid-stream. */
+.hc-stream-word {
+  animation: hc-stream-word-in 150ms var(--ease-snappy)
+    var(--hc-fade-delay, 0ms) both;
+}
+
+@keyframes hc-stream-word-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hc-stream-word {
+    animation: none;
+  }
+}
+
 /* Native scrollbar styling is deliberately scoped to the chat context panes.
  * Mobile engines may still hide their overlay scrollbar while idle; those
  * panes render an in-flow edge hint instead of changing every scroller in the

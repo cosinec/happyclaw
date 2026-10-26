@@ -71,6 +71,7 @@ import {
   getDefaultFollowUpMode,
 } from '../../lib/follow-up-preferences';
 import { planImageClipboardPaste } from '../../lib/mixed-paste';
+import { noteComposerInput } from '../../lib/composer-activity';
 import { SHORTCUTS } from '../../lib/shortcuts';
 import { prepareImageForUpload } from '../../lib/image-upload';
 import {
@@ -1132,6 +1133,7 @@ export const MessageInput = memo(function MessageInput({
               ref={textareaRef}
               value={content}
               onChange={(e) => {
+                noteComposerInput();
                 setContent(e.target.value);
                 debouncedSaveDraft(e.target.value);
               }}

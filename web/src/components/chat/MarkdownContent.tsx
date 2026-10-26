@@ -4,6 +4,7 @@ import React, {
   Suspense,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -27,6 +28,11 @@ import {
   rememberRendered,
   renderedCost,
 } from '../../lib/markdown/rendered-cache';
+import {
+  rehypeStreamFade,
+  syncStreamFade,
+  type StreamFade,
+} from '../../lib/markdown/rehype-stream-fade';
 
 const MermaidDiagram = lazy(() =>
   import('./MermaidDiagram').then((module) => ({
@@ -49,6 +55,8 @@ export interface MarkdownRendererProps {
    * between its parts.
    */
   trimEdges?: boolean;
+  /** Fade the words in as they arrive (the open block of a stream). */
+  fade?: StreamFade;
 }
 
 interface MarkdownContentProps extends MarkdownRendererProps {
@@ -639,6 +647,7 @@ export function MarkdownContent({
   eagerImages = false,
   streaming = false,
   trimEdges = true,
+  fade,
   remarkPlugins,
   rehypePlugins,
   pipeline,
@@ -651,18 +660,29 @@ export function MarkdownContent({
     () => sharedMarkdownComponents(variant, groupJid, eagerImages),
     [variant, groupJid, eagerImages],
   );
+  const plugins = useMemo(
+    () => (fade ? [...rehypePlugins, [rehypeStreamFade, fade]] : rehypePlugins),
+    [rehypePlugins, fade],
+  );
+  const rootRef = useRef<HTMLDivElement>(null);
+  // Every commit may mount word spans (a new word, or a re-read structure).
+  useLayoutEffect(() => {
+    if (fade && rootRef.current) syncStreamFade(rootRef.current);
+  });
   const rendered = useMemo(() => {
     // react-markdown's sync renderer is a plain function of its options.
     const render = () =>
       ReactMarkdown({
         remarkPlugins: remarkPlugins as MarkdownOptions['remarkPlugins'],
-        rehypePlugins: rehypePlugins as MarkdownOptions['rehypePlugins'],
+        rehypePlugins: plugins as MarkdownOptions['rehypePlugins'],
         remarkRehypeOptions: REMARK_REHYPE_OPTIONS,
         urlTransform: markdownUrlTransform,
         components,
         children: content,
       });
-    if (streaming || content.length > RENDERED_CACHE_MAX_CHARS) return render();
+    if (streaming || fade || content.length > RENDERED_CACHE_MAX_CHARS) {
+      return render();
+    }
     return rememberRendered(
       [pipeline, variant, groupJid ?? '', eagerImages, content].join('\0'),
       renderedCost(content, pipeline.includes('code')),
@@ -672,7 +692,7 @@ export function MarkdownContent({
     content,
     components,
     remarkPlugins,
-    rehypePlugins,
+    plugins,
     pipeline,
     streaming,
     variant,
@@ -682,6 +702,7 @@ export function MarkdownContent({
 
   return (
     <div
+      ref={rootRef}
       data-markdown-root=""
       className={cn(
         textSizeClass,
