@@ -1,4 +1,4 @@
-import { memo, useMemo, useRef } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { useReducedMotionConfig } from 'motion/react';
 import { MarkdownRenderer } from './MarkdownRenderer';
 import {
@@ -11,6 +11,7 @@ import {
 import { repairOpenTail } from '../../lib/markdown/repair-open-tail';
 import {
   createStreamFade,
+  streamFadeEnd,
   type StreamFade,
 } from '../../lib/markdown/rehype-stream-fade';
 
@@ -40,46 +41,124 @@ const MarkdownBlock = memo(function MarkdownBlock({
   );
 });
 
-/** The open block of a stream: where it starts, its text, its timeline. */
-interface OpenBlockFade {
-  start: number;
+/** A block's fade timeline and the text of the block it has seen. */
+interface BlockFade {
   source: string;
   fade: StreamFade;
 }
 
-const FADE_CACHE_LIMIT = 16;
-/** The latest open block of each stream (group and variant), for remounts. */
-const fadeCache = new Map<string, OpenBlockFade>();
-
 /**
- * The fade timeline of the open block at `start`, given the one this stream
- * showed before (`previous`, none on mount). It stays with the block while
- * the block's text extends; a remount (switching workspaces, the card
- * scrolling out of a virtual list and back) picks it up from the cache; and
- * text rewritten rather than extended (a sliding tail) counts as already
- * shown. No word fades in twice.
+ * In the cache a block is known by its group, variant and this much of the
+ * start of its text; shorter blocks (still growing into a key) share one
+ * entry per group and variant.
  */
-function openBlockFade(
-  previous: OpenBlockFade | null,
-  key: string,
-  start: number,
-  source: string,
-): OpenBlockFade {
-  const known = previous ?? fadeCache.get(key);
-  const block = {
-    start,
-    source,
-    fade:
-      known?.start === start && source.startsWith(known.source)
-        ? known.fade
-        : createStreamFade({ shown: previous?.start === start }),
-  };
+const BLOCK_KEY_CHARS = 32;
+/** Blocks this close to the end may still be fading after they closed. */
+const RECENT_BLOCKS = 8;
+/**
+ * A stream first seen this short is just starting, and its words fade in;
+ * any longer text found without a timeline counts as already shown.
+ */
+const FIRST_SIGHT_CHARS = 400;
+const FADE_CACHE_LIMIT = 64;
+/**
+ * Timelines of recently streamed blocks, so a remount (switching
+ * workspaces, the card scrolling out of a virtual list and back) picks up
+ * where it was instead of fading the words in again.
+ */
+const fadeCache = new Map<string, BlockFade>();
+
+function rememberFade(key: string, block: BlockFade) {
   fadeCache.delete(key);
   fadeCache.set(key, block);
   if (fadeCache.size > FADE_CACHE_LIMIT) {
     fadeCache.delete(fadeCache.keys().next().value!);
   }
-  return block;
+}
+
+/**
+ * The fade timeline of each block of a stream (`sources`, null without
+ * fading): the open block's, and a closed block's until its words are in.
+ * A block keeps its timeline while its text extends, wherever it now starts
+ * (the store drops the start of a long reply); text that neither extends a
+ * known block nor follows the block that was open counts as already shown
+ * (a sliding tail, a remount the cache no longer knows), so no word fades
+ * in twice.
+ */
+function useBlockFades(
+  sources: string[] | null,
+  scope: string,
+): (StreamFade | undefined)[] {
+  // The blocks with a timeline, the open one last.
+  const keptRef = useRef<BlockFade[]>([]);
+  const [, settle] = useState(0);
+  const fades: (StreamFade | undefined)[] = [];
+  if (sources && sources.length > 0) {
+    const kept = keptRef.current;
+    const shortKey = `${scope}\0`;
+    const keyOf = (source: string) =>
+      source.length < BLOCK_KEY_CHARS
+        ? shortKey
+        : shortKey + source.slice(0, BLOCK_KEY_CHARS);
+    const known = (source: string, other?: BlockFade) => {
+      const match = (block?: BlockFade) =>
+        block && block !== other && source.startsWith(block.source)
+          ? block
+          : undefined;
+      return (
+        kept.find(match) ??
+        match(fadeCache.get(keyOf(source))) ??
+        // It may have grown into its key while away.
+        match(fadeCache.get(shortKey))
+      );
+    };
+    const last = sources.length - 1;
+    const recent = Math.max(0, last - RECENT_BLOCKS);
+    let open = known(sources[last]);
+    if (!open) {
+      const previous = kept[kept.length - 1];
+      const fresh = previous
+        ? sources
+            .slice(recent, last)
+            .some((block) => block.startsWith(previous.source))
+        : last === 0 && sources[0].length <= FIRST_SIGHT_CHARS;
+      open = { source: '', fade: createStreamFade({ shown: !fresh }) };
+    }
+    open.source = sources[last];
+    rememberFade(keyOf(open.source), open);
+    fades[last] = open.fade;
+    const next: BlockFade[] = [];
+    const now = performance.now();
+    for (let index = recent; index < last; index += 1) {
+      const closed = known(sources[index], open);
+      if (
+        !closed ||
+        (closed.source === sources[index] && streamFadeEnd(closed.fade) <= now)
+      ) {
+        continue;
+      }
+      closed.source = sources[index];
+      rememberFade(keyOf(closed.source), closed);
+      fades[index] = closed.fade;
+      next.push(closed);
+    }
+    next.push(open);
+    keptRef.current = next;
+  } else {
+    keptRef.current = [];
+  }
+  // Render a closed block once more when its last word is in, as final.
+  useEffect(() => {
+    const closed = keptRef.current.slice(0, -1);
+    if (closed.length === 0) return;
+    const until = Math.max(...closed.map(({ fade }) => streamFadeEnd(fade)));
+    const timer = window.setTimeout(
+      () => settle((count) => count + 1),
+      Math.max(0, until - performance.now()) + 20,
+    );
+    return () => window.clearTimeout(timer);
+  });
+  return fades;
 }
 
 /**
@@ -155,38 +234,30 @@ function MarkdownBlocks({
   // Streamed text only grows: extend the previous split instead of
   // re-scanning a long reply on every render.
   const splitRef = useRef<{ text: string; blocks: string[] } | null>(null);
-  const { blocks, openSource } = useMemo(() => {
+  const { blocks, sources } = useMemo(() => {
     const split = streaming
       ? extendMarkdownBlocks(splitRef.current, content)
       : splitMarkdownBlocks(content);
-    if (streaming) splitRef.current = { text: content, blocks: split.slice() };
     if (!streaming || split.length === 0) {
-      return { blocks: split, openSource: null };
+      return { blocks: split, sources: null };
     }
+    splitRef.current = { text: content, blocks: split.slice() };
     const last = split.length - 1;
-    const source = split[last];
-    split[last] = repairOpenTail(stableOpenTable(source));
+    const sources = split.slice();
+    split[last] = repairOpenTail(stableOpenTable(split[last]));
     const { links, footnotes } = findMarkdownDefinitions(content);
     return {
       blocks: withStreamingDefinitions(split, links, footnotes),
-      openSource: source,
+      sources,
     };
   }, [content, streaming]);
-  // Words of the open block fade in as they arrive, unless less motion is
-  // asked for (static markup has nothing to animate).
+  // Words fade in as they arrive, unless less motion is asked for (static
+  // markup has nothing to animate).
   const reduceMotion = useReducedMotionConfig();
-  const fadeRef = useRef<OpenBlockFade | null>(null);
-  let fade: StreamFade | undefined;
-  if (openSource !== null && !reduceMotion && typeof document !== 'undefined') {
-    fadeRef.current = openBlockFade(
-      fadeRef.current,
-      `${groupJid ?? ''}\0${variant}`,
-      // The blocks join back into the text, so this is where it starts.
-      content.length - openSource.length,
-      openSource,
-    );
-    fade = fadeRef.current.fade;
-  }
+  const fades = useBlockFades(
+    reduceMotion || typeof document === 'undefined' ? null : sources,
+    `${groupJid ?? ''}\0${variant}`,
+  );
   return (
     <div
       className={BLOCKS_CLASS}
@@ -197,8 +268,9 @@ function MarkdownBlocks({
           // Blocks only ever append, so the index is a stable identity.
           key={index}
           content={block}
-          open={streaming && index === blocks.length - 1}
-          fade={index === blocks.length - 1 ? fade : undefined}
+          // A block that closed keeps streaming until its words are in.
+          open={streaming && (index === blocks.length - 1 || !!fades[index])}
+          fade={fades[index]}
           groupJid={groupJid}
           variant={variant}
         />
