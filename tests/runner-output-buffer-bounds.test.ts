@@ -8,6 +8,7 @@ import { afterAll, beforeEach, describe, expect, test, vi } from 'vitest';
 const settings = vi.hoisted(() => ({ containerMaxOutputSize: 10_485_760 }));
 const getSystemSettings = vi.hoisted(() => vi.fn(() => settings));
 const logged = vi.hoisted(() => ({
+  info: [] as Array<[Record<string, unknown>, string]>,
   warn: [] as Array<[Record<string, unknown>, string]>,
   error: [] as Array<[Record<string, unknown>, string]>,
 }));
@@ -17,7 +18,8 @@ vi.mock('../src/logger.js', () => ({
   logger: {
     isLevelEnabled: () => false,
     debug: () => {},
-    info: () => {},
+    info: (obj: Record<string, unknown>, msg: string) =>
+      logged.info.push([obj, msg]),
     warn: (obj: Record<string, unknown>, msg: string) =>
       logged.warn.push([obj, msg]),
     error: (obj: Record<string, unknown>, msg: string) =>
@@ -257,6 +259,18 @@ describe('runner stderr tail', () => {
         ([, m]) => m === 'Host agent stderr truncated due to size limit',
       ),
     ).toHaveLength(0);
+  });
+
+  test('prefixed runner lines reach production levels; the rest stays debug', () => {
+    const stream = new PassThrough();
+    attachStderrHandler(stream, createStderrState(), 'g', { host: 'g' });
+    const info = '[agent-runner:info] [query-timing] mode=resume init=812ms';
+    const warn = '[agent-runner:warn] [tool-loop] suspected rule=repeat';
+    stream.write(`[agent-runner] plain line\n${info}\n${warn}\n`);
+
+    expect(logged.info).toContainEqual([{ host: 'g' }, info]);
+    expect(logged.warn).toContainEqual([{ host: 'g' }, warn]);
+    expect(logged.info.some(([, m]) => m.includes('plain line'))).toBe(false);
   });
 });
 
