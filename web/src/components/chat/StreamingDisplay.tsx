@@ -644,7 +644,10 @@ export function StreamingDisplay({
   // phase and elapsed time. Same height as MessageBubble's row so the
   // streaming → final swap doesn't move content.
   const identityRow = (
-    <div className="sticky top-0 z-10 mb-1.5 flex h-6 items-center gap-2 bg-background">
+    <div
+      data-follow-sticky
+      className="sticky top-0 z-10 mb-1.5 flex h-6 items-center gap-2 bg-background"
+    >
       <EmojiAvatar
         imageUrl={agentIdentity.imageUrl}
         emoji={agentIdentity.emoji}
@@ -794,7 +797,10 @@ export function StreamingDisplay({
     return (
       <div className="mb-2 border-b border-surface-border pb-2">
         {/* Sender line */}
-        <div className="sticky top-0 z-10 mb-1 flex h-6 items-center gap-1.5 bg-background">
+        <div
+          data-follow-sticky
+          className="sticky top-0 z-10 mb-1 flex h-6 items-center gap-1.5 bg-background"
+        >
           <span className="text-caption font-medium text-foreground">
             {senderName}
           </span>

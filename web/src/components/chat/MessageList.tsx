@@ -249,7 +249,11 @@ export const MessageList = memo(function MessageList({
   // The transcript's content; a pinned reader's streaming reply glides it up
   // under the streaming cards' sticky identity rows.
   const contentRef = useRef<HTMLDivElement>(null);
-  const followGlide = useFollowGlide(parentRef, contentRef, '.sticky');
+  const followGlide = useFollowGlide(
+    parentRef,
+    contentRef,
+    '[data-follow-sticky]',
+  );
 
   /** Ends a follow glide where it shows; its fold of scrollTop is layout. */
   const settleGlide = useCallback(() => {
