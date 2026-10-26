@@ -302,17 +302,32 @@ const timedWords = new WeakMap<HTMLElement, string>();
  * Give each word span newly in the DOM its fade delay: its start time minus
  * now, negative when a word that was already fading is mounted again (the
  * block was re-read into a different structure), so it resumes rather than
- * starts over. Run after every commit of a block rendered with
+ * starts over. A span React kept for a different word restarts its fade from
+ * that word's start. Run after every commit of a block rendered with
  * `rehypeStreamFade`.
  */
 export function syncStreamFade(root: HTMLElement, now = performance.now()) {
   for (const word of root.querySelectorAll<HTMLElement>('.hc-stream-word')) {
     const start = word.dataset.fadeAt ?? '';
-    if (timedWords.get(word) === start) continue;
+    const timed = timedWords.get(word);
+    if (timed === start) continue;
     timedWords.set(word, start);
     word.style.setProperty(
       '--hc-fade-delay',
       `${Math.round(Number(start) - now)}ms`,
     );
+    if (timed !== undefined) {
+      // A running CSS animation keeps its start: drop it and begin anew.
+      word.classList.remove('hc-stream-word');
+      void getComputedStyle(word).animationName;
+      word.classList.add('hc-stream-word');
+    }
   }
+}
+
+/** When the last word `fade` has scheduled finishes fading in. */
+export function streamFadeEnd(fade: StreamFade): number {
+  return fade.starts.length > 0
+    ? fade.starts[fade.starts.length - 1] + STREAM_FADE_MS
+    : 0;
 }

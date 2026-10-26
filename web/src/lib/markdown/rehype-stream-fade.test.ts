@@ -173,4 +173,29 @@ describe('syncStreamFade', () => {
     syncStreamFade(root, 1080);
     expect(next.style.getPropertyValue('--hc-fade-delay')).toBe('60ms');
   });
+
+  it('restarts the fade of a span React kept for another word', async () => {
+    const root = document.createElement('div');
+    root.innerHTML =
+      '<span class="hc-stream-word" data-fade-at="1000">a</span>';
+    const word = root.querySelector('span')!;
+    syncStreamFade(root, 1000);
+    const classChanges: (string | null)[] = [];
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        if (record.attributeName === 'class') {
+          classChanges.push(record.oldValue);
+        }
+      }
+    });
+    observer.observe(word, { attributes: true, attributeOldValue: true });
+    word.dataset.fadeAt = '1200';
+    syncStreamFade(root, 1100);
+    await Promise.resolve();
+    observer.disconnect();
+    expect(word.style.getPropertyValue('--hc-fade-delay')).toBe('100ms');
+    // Its animation was taken off and put back, so it starts over.
+    expect(classChanges).toHaveLength(2);
+    expect(word.className).toBe('hc-stream-word');
+  });
 });
