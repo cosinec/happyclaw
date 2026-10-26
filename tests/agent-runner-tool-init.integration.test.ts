@@ -8,6 +8,7 @@ import { afterAll, describe, expect, test } from 'vitest';
 
 import { createMcpTools } from '../container/agent-runner/src/mcp-tools.js';
 import { RUNNER_DISALLOWED_BUILTIN_TOOLS } from '../container/agent-runner/src/builtin-tool-policy.js';
+import { buildClaudeRuntimeEnv } from '../container/agent-runner/src/claude-runtime-env.js';
 import { hasBackgroundTaskTools } from '../container/agent-runner/src/prompt-plan.js';
 
 const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'happyclaw-tool-init-'));
@@ -276,8 +277,11 @@ describe('HappyClaw tool initialization', () => {
     expect(hasBackgroundTaskTools(initializedTools ?? [])).toBe(true);
   }, 20_000);
 
-  test('the runner deny list names real CLI tools and keeps Workflow', async () => {
-    const initTools = async (disallowedTools: string[]) => {
+  test('the runner deny list names real CLI tools and keeps Workflow, and its environment drops native cron', async () => {
+    const initTools = async (
+      disallowedTools: string[],
+      runtimeEnv: Record<string, string> = {},
+    ) => {
       const stream = runnerSdk.query({
         prompt: 'Reply with OK.',
         options: {
@@ -286,6 +290,7 @@ describe('HappyClaw tool initialization', () => {
           model: 'claude-sonnet-4-5-20250929',
           env: {
             ...cleanEnv(),
+            ...runtimeEnv,
             ANTHROPIC_BASE_URL: 'http://127.0.0.1:9',
             ANTHROPIC_AUTH_TOKEN: 'happyclaw-init-test',
             ANTHROPIC_API_KEY: '',
@@ -317,5 +322,12 @@ describe('HappyClaw tool initialization', () => {
       expect(restricted).not.toContain(tool);
     }
     expect(restricted).toContain('Workflow');
+    // The runner's environment also turns off the CLI's own cron
+    // (CLAUDE_CODE_DISABLE_CRON), which the deny list alone would leave on.
+    const runnerEnvTools = await initTools([], buildClaudeRuntimeEnv({}));
+    expect(runnerEnvTools.length).toBeGreaterThan(0);
+    expect(runnerEnvTools.filter((tool) => tool.startsWith('Cron'))).toEqual(
+      [],
+    );
   }, 30_000);
 });
