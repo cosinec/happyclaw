@@ -332,19 +332,110 @@ describe('Agent Runner process against a fake Anthropic endpoint', () => {
     expect(event).toBeLessThanOrEqual(output!);
   }, 60_000);
 
-  test('an empty final reply logs its shape without content', async () => {
+  test('a reply that stopped after thinking is asked for once and the continuation becomes the final reply', async () => {
     const run = await runRunner({
-      name: 'reply-shape',
-      reply: () => [{ type: 'thinking', thinking: 'PRIVATE_THOUGHT' }],
+      name: 'silent-stop-recovered',
+      // Claude Code answers the first thinking-only response with its own
+      // retry (call 2); the runner's continuation is call 3.
+      reply: (call) =>
+        call <= 2
+          ? [{ type: 'thinking', thinking: `Still thinking ${call}.` }]
+          : [
+              { type: 'thinking', thinking: 'Now I answer.' },
+              { type: 'text', text: 'SILENT_STOP_RECOVERED' },
+            ],
       settled: isFinalResult,
     });
 
     expect(run.exitCode).toBe(0);
-    // Claude Code 2.1.296 itself retries a response without visible output
-    // once, so the empty Result follows two thinking-only responses.
-    expect(run.mainRequests).toHaveLength(2);
+    expect(run.mainRequests).toHaveLength(3);
+    // The empty Result is never published: one final, the continuation's.
+    const finals = run.frames.filter(
+      (frame) => frame.status === 'success' && frame.sourceKind === 'sdk_final',
+    );
+    expect(finals.map((frame) => frame.result)).toEqual([
+      'SILENT_STOP_RECOVERED',
+    ]);
+    expect(finals[0]).toMatchObject({
+      inputTurnCompleted: true,
+      finalizationReason: 'completed',
+      inputTurnId: 'delivery-1',
+    });
+    // The Host input is acknowledged exactly once, by that final.
+    expect(
+      run.frames.flatMap((frame) =>
+        (frame.ipcReceipts ?? []).map(
+          (receipt: { deliveryId: string }) => receipt.deliveryId,
+        ),
+      ),
+    ).toEqual(['delivery-1']);
+    // The prompt reached the model as the continuation's user turn, but no
+    // frame shows it to the Host as a message.
+    expect(JSON.stringify(run.mainRequests[2]!.messages)).toContain(
+      'without any reply text',
+    );
+    expect(JSON.stringify(run.frames)).not.toContain('without any reply text');
+    // Every model call is billed once, to this input, including the empty one.
+    const callUsage = run.frames.filter(
+      (frame) =>
+        frame.streamEvent?.eventType === 'usage' &&
+        String(frame.streamEvent.usage.eventId).startsWith(
+          'claude-code:msg_main_',
+        ),
+    );
+    expect(
+      callUsage.map((frame) => frame.streamEvent.usage.eventId).sort(),
+    ).toEqual([
+      'claude-code:msg_main_1',
+      'claude-code:msg_main_2',
+      'claude-code:msg_main_3',
+    ]);
+    expect(callUsage.every((frame) => frame.inputTurnId === 'delivery-1')).toBe(
+      true,
+    );
+    const silentStops = runnerLines(run.stderr, '[silent-stop]');
+    expect(silentStops).toHaveLength(1);
+    expect(silentStops[0]).toMatch(
+      /^\[agent-runner:warn\] \[silent-stop\] result #1 ended after thinking without a reply; asking for the reply \(1\/1\) turnId=\S+ inputTurnId=delivery-1 queryRunId=query-run-1$/,
+    );
+    expect(runnerLines(run.stderr, '[reply-shape]')).toHaveLength(1);
+  }, 60_000);
+
+  test('a reply that keeps stopping after thinking is asked for only once, then published empty as before', async () => {
+    const run = await runRunner({
+      name: 'silent-stop-exhausted',
+      reply: (call) => [
+        { type: 'thinking', thinking: `PRIVATE_THOUGHT ${call}.` },
+      ],
+      settled: isFinalResult,
+    });
+
+    expect(run.exitCode).toBe(0);
+    // Two turns of two calls each (Claude Code's retry inside each turn).
+    expect(run.mainRequests).toHaveLength(4);
+    const finals = run.frames.filter(
+      (frame) => frame.status === 'success' && frame.sourceKind === 'sdk_final',
+    );
+    expect(finals).toHaveLength(1);
+    expect(finals[0]).toMatchObject({
+      result: null,
+      inputTurnCompleted: true,
+      inputTurnId: 'delivery-1',
+    });
+    expect(
+      finals[0]!.ipcReceipts.map(
+        (receipt: { deliveryId: string }) => receipt.deliveryId,
+      ),
+    ).toEqual(['delivery-1']);
+    const silentStops = runnerLines(run.stderr, '[silent-stop]');
+    expect(silentStops).toHaveLength(2);
+    expect(silentStops[0]).toContain('asking for the reply (1/1)');
+    expect(silentStops[1]).toContain(
+      'continuations used up (1/1), publishing the empty reply',
+    );
+    // One shape line per empty Result, with block types and counts only.
     const shapes = runnerLines(run.stderr, '[reply-shape]');
-    expect(shapes).toHaveLength(1);
+    expect(shapes).toHaveLength(2);
     for (const line of shapes) {
       expect(line).toMatch(
         /^\[agent-runner:warn\] \[reply-shape\] empty final reply reason=thinking_only assistant_responses=2 tool_uses=0 last_blocks=thinking stop_reason=end_turn .*inputTurnId=delivery-1 queryRunId=query-run-1$/,

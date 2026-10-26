@@ -191,6 +191,11 @@ import {
 import { IpcInputClaimStore } from './ipc-input-claims.js';
 import { QueryStartupTiming } from './query-timing.js';
 import { ReplyShapeTracker } from './reply-shape.js';
+import {
+  buildSilentStopContinuationPrompt,
+  decideSilentStop,
+  MAX_SILENT_STOP_CONTINUES,
+} from './silent-stop.js';
 
 // 路径解析：优先读取环境变量，降级到容器内默认路径（保持向后兼容）
 const WORKSPACE_GROUP =
@@ -2147,6 +2152,8 @@ async function runQueryAttempt(
   let sawPendingBackgroundTasks = false;
   let backgroundSummaryForceAttempts = 0;
   const MAX_BACKGROUND_SUMMARY_FORCE_ATTEMPTS = 2;
+  // Silent-stop continuations spent on the current input (see silent-stop.ts).
+  let silentStopContinues = 0;
   // Per-message assistant usage is the primary Kaboo-compatible ledger. The
   // reconciler differences each result's cumulative modelUsage against a
   // per-session baseline (persisted next to the transcript, so a resumed
@@ -2318,6 +2325,25 @@ async function runQueryAttempt(
     postResultInterruptRequested = true;
     log(`${reason}, interrupting current query before closing stream`);
     stopActiveTurn(activeQuery, `${reason} (shutdown)`);
+  };
+
+  /**
+   * Ask the model for more in the same SDK stream instead of publishing the
+   * Result just received: the input keeps its receipt, card and turn until
+   * the Result that answers this prompt settles them.
+   */
+  const continueInStream = (prompt: string, label: string): boolean => {
+    assistantTextTracker.reset();
+    canonicalAssistantUuid = undefined;
+    suspectTruncatedTail = undefined;
+    const rejected = stream.push(prompt);
+    if (rejected.length > 0) {
+      log(`${label} prompt was rejected: ${rejected.join('; ')}`);
+      return false;
+    }
+    containerInput.turnId = generateTurnId();
+    resultReceivedAt = null;
+    return true;
   };
 
   const pollIpcDuringQuery = async (): Promise<void> => {
@@ -2676,6 +2702,7 @@ async function runQueryAttempt(
     if (inputTurnCompleted) {
       clearBackgroundProtocolDebtWatchdog();
       if (!candidate.suspectTruncated) compactionAwaitingCompletion = false;
+      silentStopContinues = 0;
     }
     const ipcReceipts = inputTurnCompleted
       ? ipcDeliveryTracker.completeAnsweredTurns()
@@ -4023,7 +4050,6 @@ async function runQueryAttempt(
           })
         ) {
           backgroundSummaryForceAttempts++;
-          const forcePrompt = buildBackgroundTaskSummaryPrompt();
           log(
             `Result #${resultCount} looked like a stale background-task wait reply after all tasks settled; forcing final summary (${backgroundSummaryForceAttempts}/${MAX_BACKGROUND_SUMMARY_FORCE_ATTEMPTS})`,
           );
@@ -4038,17 +4064,55 @@ async function runQueryAttempt(
               displayLevel: 'primary',
             },
           });
-          assistantTextTracker.reset();
-          canonicalAssistantUuid = undefined;
-          suspectTruncatedTail = undefined;
-          const rejected = stream.push(forcePrompt);
-          if (rejected.length === 0) {
-            containerInput.turnId = generateTurnId();
-            resultReceivedAt = null;
+          if (
+            continueInStream(
+              buildBackgroundTaskSummaryPrompt(),
+              'Forced background summary',
+            )
+          ) {
             continue;
           }
-          log(
-            `Forced background summary prompt was rejected: ${rejected.join('; ')}`,
+        }
+        // Silent stop: the model ended after thinking without a reply.
+        const silentStop = decideSilentStop({
+          emitOutput,
+          isError: resultMsg.is_error === true,
+          stopping:
+            closedDuringQuery ||
+            interruptedDuringQuery ||
+            postResultInterruptRequested ||
+            stream.ended,
+          continuationPrevented,
+          proactive: proactiveInteractiveContract,
+          blockingBackgroundWork:
+            processor.getBlockingBackgroundProtocolCount(),
+          laterInputs:
+            ipcDeliveryTracker.laterTurnMessages.length +
+            nonNegativeNumber(resultMsg.queued_turn_count),
+          finalText,
+          reason: resultShape.reason,
+          attempts: silentStopContinues,
+        });
+        if (silentStop === 'continue') {
+          const correlation = logCorrelation();
+          // Bill the empty call with its own Result; the continuation's
+          // Result then covers only what follows it.
+          emitResultUsage(resultMsg, containerInput.turnId || generateTurnId());
+          if (
+            continueInStream(
+              buildSilentStopContinuationPrompt(),
+              'Silent-stop continuation',
+            )
+          ) {
+            silentStopContinues++;
+            logWarn(
+              `[silent-stop] result #${resultCount} ended after thinking without a reply; asking for the reply (${silentStopContinues}/${MAX_SILENT_STOP_CONTINUES}) ${correlation}`,
+            );
+            continue;
+          }
+        } else if (silentStop === 'exhausted') {
+          logWarn(
+            `[silent-stop] result #${resultCount} ended after thinking again; continuations used up (${silentStopContinues}/${MAX_SILENT_STOP_CONTINUES}), publishing the empty reply ${logCorrelation()}`,
           );
         }
         if (suspectTruncated && finalText) {
