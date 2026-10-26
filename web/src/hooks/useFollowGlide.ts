@@ -15,13 +15,15 @@ import {
  * mid-glide retargets from where the content currently shows. The transform
  * is invisible to layout, so row measurements, offsetHeight and scrollTop are
  * untouched; `layer` must sit in a box that clips it vertically, or the
- * translation would add scroll range below the content. Rows matching
- * `stickySelector` that are stuck to the top stay there while the content
- * glides under them; in flow they sit at the top of their parent.
+ * translation would add scroll range below the content. Rows in
+ * `stickyScope` matching `stickySelector` that are stuck to the top stay
+ * there while the content glides under them; in flow they sit at the top of
+ * their parent.
  */
 export function useFollowGlide(
   scrollerRef: RefObject<HTMLElement | null>,
   layerRef: RefObject<HTMLElement | null>,
+  stickyScopeRef: RefObject<HTMLElement | null>,
   stickySelector: string,
 ) {
   const glideRef = useRef<(Glide & { animations: Animation[] }) | null>(null);
@@ -63,7 +65,10 @@ export function useFollowGlide(
       const tracks: [HTMLElement, GlideTrack][] = [
         [layer, { offsets: [from, 0], easing: FOLLOW_GLIDE_EASING }],
       ];
-      for (const row of layer.querySelectorAll<HTMLElement>(stickySelector)) {
+      const rows =
+        stickyScopeRef.current?.querySelectorAll<HTMLElement>(stickySelector) ??
+        [];
+      for (const row of rows) {
         const stuckAt =
           top + (Number.parseFloat(getComputedStyle(row).top) || 0);
         if (Math.abs(row.getBoundingClientRect().top - stuckAt) < 0.5) {
@@ -89,7 +94,7 @@ export function useFollowGlide(
         if (glideRef.current === glide) glideRef.current = null;
       };
     },
-    [cancel, layerRef, scrollerRef, stickySelector],
+    [cancel, layerRef, scrollerRef, stickyScopeRef, stickySelector],
   );
 
   /**

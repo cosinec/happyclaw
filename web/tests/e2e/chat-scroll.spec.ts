@@ -719,6 +719,61 @@ test('a real wheel up mid-glide leaves the bottom and stays there', async ({
   await harness(page, 'finishStreaming', false);
 });
 
+test('scrolling toward the bottom mid-glide lets the glide carry on', async ({
+  page,
+}) => {
+  await openHarness(page, { n: '60' });
+  await settledAtBottom(page);
+  await harness(page, 'startStreaming', 0, LONG_REPLY);
+  await page.waitForTimeout(600);
+  await expect.poll(async () => (await metrics(page)).gap).toBeLessThan(24);
+
+  for (const input of ['wheel', 'key'] as const) {
+    await harness(page, 'appendStream', streamBatch(0) + streamBatch(1));
+    // A few frames into the glide, a wheel or arrow key down, scrolled at
+    // once as without smooth scrolling (Firefox, or smooth scrolling off).
+    const result = await page.evaluate(async (input) => {
+      const el = [
+        ...document.querySelectorAll<HTMLElement>(
+          '[data-hc-chat-view] .overflow-y-auto',
+        ),
+      ].sort((a, b) => b.scrollHeight - a.scrollHeight)[0];
+      const layer = el.querySelector<HTMLElement>(
+        ':scope > .overflow-y-clip > div',
+      )!;
+      const shiftOf = () => {
+        const transform = getComputedStyle(layer).transform;
+        return transform === 'none' ? 0 : new DOMMatrixReadOnly(transform).m42;
+      };
+      for (let i = 0, gliding = 0; i < 40 && gliding < 3; i += 1) {
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+        if (shiftOf() > 0) gliding += 1;
+      }
+      const shift = shiftOf();
+      const shownBefore = el.scrollTop - shift;
+      el.dispatchEvent(
+        input === 'wheel'
+          ? new WheelEvent('wheel', { deltaY: 40, bubbles: true })
+          : new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+      );
+      el.scrollTop += 40;
+      return {
+        shift,
+        moved: el.scrollTop - shiftOf() - shownBefore,
+        animations: layer.getAnimations().length,
+      };
+    }, input);
+    expect(result.shift).toBeGreaterThan(40);
+    // Already at the bottom: nothing moves and the glide runs on.
+    expect(Math.abs(result.moved)).toBeLessThan(4);
+    expect(result.animations).toBe(1);
+    await page.waitForTimeout(300);
+    await expect(bottomButton(page)).toHaveCount(0);
+    expect((await metrics(page)).gap).toBeLessThan(2);
+  }
+  await harness(page, 'finishStreaming', false);
+});
+
 test('a streamed reply jumps to the bottom without a glide when reduced motion is preferred', async ({
   page,
 }) => {

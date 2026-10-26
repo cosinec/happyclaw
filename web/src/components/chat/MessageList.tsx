@@ -249,9 +249,11 @@ export const MessageList = memo(function MessageList({
   // The transcript's content; a pinned reader's streaming reply glides it up
   // under the streaming cards' sticky identity rows.
   const contentRef = useRef<HTMLDivElement>(null);
+  const streamCardsRef = useRef<HTMLDivElement>(null);
   const followGlide = useFollowGlide(
     parentRef,
     contentRef,
+    streamCardsRef,
     '[data-follow-sticky]',
   );
 
@@ -750,20 +752,22 @@ export const MessageList = memo(function MessageList({
         pinToBottom();
       }
     };
+    const scrollsUp = (event: KeyboardEvent) =>
+      event.key === 'PageUp' ||
+      event.key === 'ArrowUp' ||
+      event.key === 'Home' ||
+      (event.key === ' ' && event.shiftKey);
+    const grabsScrollbar = (event: PointerEvent) =>
+      event.target === parent && event.offsetX >= parent.clientWidth;
     const handleKeyDown = (event: KeyboardEvent) => {
       anchorHoldRef.current = null;
-      const scrollsUp =
-        event.key === 'PageUp' ||
-        event.key === 'ArrowUp' ||
-        event.key === 'Home' ||
-        (event.key === ' ' && event.shiftKey);
-      if (scrollsUp) releasePin(true);
+      if (scrollsUp(event)) releasePin(true);
       else endSettle();
     };
     const handlePointerDown = (event: PointerEvent) => {
       // Grabbing the scrollbar takes manual control; where it is dragged
       // decides the rest.
-      if (event.target === parent && event.offsetX >= parent.clientWidth) {
+      if (grabsScrollbar(event)) {
         anchorHoldRef.current = null;
         releasePin(false);
       }
@@ -787,14 +791,30 @@ export const MessageList = memo(function MessageList({
       }
     };
 
-    // Reader input takes over from a follow glide where the content shows,
-    // before the handlers below and before the input scrolls natively. A
-    // wheel up leaves the bottom at once, as during a smooth scroll.
-    const takeOverGlide = (event: Event) => {
-      if (!settleGlide()) return;
-      if (event instanceof WheelEvent && event.deltaY < 0 && !event.ctrlKey) {
-        setPinned(false);
+    // Reader input that may leave the bottom takes over from a follow glide
+    // where the content shows, before the handlers below and before it
+    // scrolls natively. Input toward the bottom lets the glide carry on: a
+    // pinned reader has nowhere further to go, and folding the glide into
+    // scrollTop under it would read as scrolling up. A wheel up leaves the
+    // bottom at once, as during a smooth scroll.
+    const mayLeaveBottom = (event: Event) => {
+      switch (event.type) {
+        case 'wheel': {
+          const wheel = event as WheelEvent;
+          return wheel.deltaY < 0 && !wheel.ctrlKey;
+        }
+        case 'keydown':
+          return scrollsUp(event as KeyboardEvent);
+        case 'pointerdown':
+          return grabsScrollbar(event as PointerEvent);
+        default:
+          // touchstart: where the finger goes is not known yet.
+          return true;
       }
+    };
+    const takeOverGlide = (event: Event) => {
+      if (!mayLeaveBottom(event) || !settleGlide()) return;
+      if (event.type === 'wheel') setPinned(false);
     };
     const takeOverEvents = ['wheel', 'touchstart', 'pointerdown', 'keydown'];
     for (const type of takeOverEvents) {
@@ -1430,62 +1450,68 @@ export const MessageList = memo(function MessageList({
               </div>
             )}
 
-            <div ref={streamingBlockRef} data-hc-streaming-block="">
-              {groupJid && settledRunKey !== null && (
-                <div key={`run:${settledRunKey}`} data-hc-stream-card="settled">
-                  <StreamingDisplay
-                    groupJid={groupJid}
-                    isWaiting={false}
-                    agentId={agentId}
-                    senderName={agentIdentity.name}
-                    agentAvatarUrl={agentAvatarUrl}
-                    agentAvatarEmoji={agentAvatarEmoji}
-                    agentAvatarColor={agentAvatarColor}
-                    interactionMode={interactionMode}
-                    settled
-                  />
-                </div>
-              )}
-              {groupJid && (
-                <div
-                  key={
-                    liveRunKey && liveRunKey !== settledRunKey
-                      ? `run:${liveRunKey}`
-                      : 'live'
-                  }
-                  data-hc-stream-card="live"
-                >
-                  <StreamingDisplay
-                    groupJid={groupJid}
-                    isWaiting={!!isWaiting}
-                    agentId={agentId}
-                    senderName={agentIdentity.name}
-                    agentAvatarUrl={agentAvatarUrl}
-                    agentAvatarEmoji={agentAvatarEmoji}
-                    agentAvatarColor={agentAvatarColor}
-                    interactionMode={interactionMode}
-                    stopHint
-                  />
-                </div>
-              )}
-            </div>
+            {/* The streaming cards: where the follow glide finds sticky rows. */}
+            <div ref={streamCardsRef}>
+              <div ref={streamingBlockRef} data-hc-streaming-block="">
+                {groupJid && settledRunKey !== null && (
+                  <div
+                    key={`run:${settledRunKey}`}
+                    data-hc-stream-card="settled"
+                  >
+                    <StreamingDisplay
+                      groupJid={groupJid}
+                      isWaiting={false}
+                      agentId={agentId}
+                      senderName={agentIdentity.name}
+                      agentAvatarUrl={agentAvatarUrl}
+                      agentAvatarEmoji={agentAvatarEmoji}
+                      agentAvatarColor={agentAvatarColor}
+                      interactionMode={interactionMode}
+                      settled
+                    />
+                  </div>
+                )}
+                {groupJid && (
+                  <div
+                    key={
+                      liveRunKey && liveRunKey !== settledRunKey
+                        ? `run:${liveRunKey}`
+                        : 'live'
+                    }
+                    data-hc-stream-card="live"
+                  >
+                    <StreamingDisplay
+                      groupJid={groupJid}
+                      isWaiting={!!isWaiting}
+                      agentId={agentId}
+                      senderName={agentIdentity.name}
+                      agentAvatarUrl={agentAvatarUrl}
+                      agentAvatarEmoji={agentAvatarEmoji}
+                      agentAvatarColor={agentAvatarColor}
+                      interactionMode={interactionMode}
+                      stopHint
+                    />
+                  </div>
+                )}
+              </div>
 
-            {/* Inline streaming for spawn agents — parallel tasks in same chat */}
-            {groupJid &&
-              !agentId &&
-              spawnAgents.map((a) => (
-                <StreamingDisplay
-                  key={a.id}
-                  groupJid={groupJid}
-                  isWaiting={true}
-                  agentId={a.id}
-                  senderName={a.name}
-                  agentAvatarUrl={agentAvatarUrl}
-                  agentAvatarEmoji={agentAvatarEmoji}
-                  agentAvatarColor={agentAvatarColor}
-                  interactionMode={interactionMode}
-                />
-              ))}
+              {/* Inline streaming for spawn agents — parallel tasks in same chat */}
+              {groupJid &&
+                !agentId &&
+                spawnAgents.map((a) => (
+                  <StreamingDisplay
+                    key={a.id}
+                    groupJid={groupJid}
+                    isWaiting={true}
+                    agentId={a.id}
+                    senderName={a.name}
+                    agentAvatarUrl={agentAvatarUrl}
+                    agentAvatarEmoji={agentAvatarEmoji}
+                    agentAvatarColor={agentAvatarColor}
+                    interactionMode={interactionMode}
+                  />
+                ))}
+            </div>
           </div>
         </div>
       </div>
