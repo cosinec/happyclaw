@@ -22749,6 +22749,10 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
     onFollowUpMessage: handleIncomingFollowUp,
     onFollowUpsChanged: broadcastFollowUpUpdate,
     onSessionBreak: handleSessionBreak,
+    // Group response audience; Feishu replaces the gate with its own owner
+    // discovery, and 1:1-only WeChat never consults it.
+    isSenderAllowedInGroup,
+    resolveRegisteredGroup: getRegisteredGroup,
     onCommand: handleCommand,
     resolveGroupFolder: (jid: string) => resolveEffectiveFolder(jid),
     resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
@@ -22845,8 +22849,6 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
         {
           ...common,
           onBotAddedToGroup: onNewChat,
-          isSenderAllowedInGroup,
-          resolveRegisteredGroup: getRegisteredGroup,
         },
       );
     } else if (account.provider === 'qq') {
@@ -22865,11 +22867,7 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
           workspace.jid,
           account.is_legacy_default,
         ),
-        {
-          ...common,
-          isSenderAllowedInGroup,
-          resolveRegisteredGroup: getRegisteredGroup,
-        },
+        common,
       );
     } else if (account.provider === 'wechat') {
       const bypassProxy = secret.bypassProxy !== 'false';
@@ -22995,8 +22993,6 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
           ),
           shouldProcessGroupMessage,
           isGroupOwnerMessage,
-          isSenderAllowedInGroup,
-          resolveRegisteredGroup: getRegisteredGroup,
           onConnectionStateChange: (state) => {
             if (state.status === 'connected') {
               updateChannelAccountAuthStatus(account.id, 'authorized');
@@ -23050,8 +23046,6 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
           onBotAddedToGroup: onNewChat,
           shouldProcessGroupMessage,
           isGroupOwnerMessage,
-          isSenderAllowedInGroup,
-          resolveRegisteredGroup: getRegisteredGroup,
         },
       );
     } else if (account.provider === 'discord') {
@@ -23078,8 +23072,6 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
           onBotAddedToGroup: onNewChat,
           shouldProcessGroupMessage,
           isGroupOwnerMessage,
-          isSenderAllowedInGroup,
-          resolveRegisteredGroup: getRegisteredGroup,
         },
       );
     } else if (account.provider === 'whatsapp') {
@@ -23116,8 +23108,6 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
           onBotAddedToGroup: onNewChat,
           shouldProcessGroupMessage,
           isGroupOwnerMessage,
-          isSenderAllowedInGroup,
-          resolveRegisteredGroup: getRegisteredGroup,
           onConnectionUpdate: (uid, connectedAccountId, state) => {
             if (state.status === 'connected') {
               updateChannelAccountAuthStatus(account.id, 'authorized');

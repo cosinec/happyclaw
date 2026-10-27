@@ -53,9 +53,8 @@ import {
   offerChannelFollowUp,
   parseConnectorRuntimeControl,
   runSessionBreak,
+  type ChannelFollowUpConnectOpts,
   type ChannelFollowUpOutcome,
-  type OnChannelFollowUpMessage,
-  type OnChannelSessionBreak,
 } from './im-connector-follow-up.js';
 
 const AUTH_TIMEOUT_MS = 15_000;
@@ -513,7 +512,7 @@ export interface WeComConnectionConfig {
   mediaDownloadTimeoutMs?: number;
 }
 
-export interface WeComConnectOpts {
+export interface WeComConnectOpts extends ChannelFollowUpConnectOpts {
   onReady?: () => void;
   onNewChat: (jid: string, name: string) => void;
   ignoreMessagesBefore?: number;
@@ -537,11 +536,6 @@ export interface WeComConnectOpts {
   } | null;
   onAgentMessage?: (baseChatJid: string, agentId: string) => void;
   onMessagePersisted?: import('./channel-contracts.js').OnChannelMessagePersisted;
-  /** Offer each persisted input to the host's durable follow-up queue. */
-  onFollowUpMessage?: OnChannelFollowUpMessage;
-  onFollowUpsChanged?: import('./channel-contracts.js').OnChannelFollowUpsChanged;
-  /** `/break` — cancel the pending queue and interrupt the active query. */
-  onSessionBreak?: OnChannelSessionBreak;
   normalizeIncomingJid?: (jid: string) => string | null;
   shouldProcessGroupMessage?: (chatJid: string, senderImId?: string) => boolean;
   isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
@@ -1495,25 +1489,26 @@ export function createWeComConnection(
       const steerText =
         runtimeControl?.kind === 'steer' ? runtimeControl.text : undefined;
       const onCommand = opts?.onCommand;
-      const commandReply =
-        runtimeControl?.kind === 'break'
-          ? await settleCommandReply(dedupKey, jid, 'break', () =>
-              runSessionBreak(opts?.onSessionBreak, {
-                sourceJid: jid,
-                targetJid,
-                senderImId: fromUserId,
-                chatType: conversation.isGroup ? 'group' : 'p2p',
-              }),
-            )
-          : slashMatch && onCommand && steerText === undefined
-            ? await settleCommandReply(dedupKey, jid, commandName, () =>
-                onCommand(
-                  jid,
-                  `${slashMatch[1]}${slashMatch[2] ? ` ${slashMatch[2]}` : ''}`,
-                  fromUserId,
-                ),
-              )
-            : null;
+      let commandReply: string | null = null;
+      if (runtimeControl?.kind === 'break') {
+        const onSessionBreak = opts?.onSessionBreak;
+        commandReply = await settleCommandReply(dedupKey, jid, 'break', () =>
+          runSessionBreak(onSessionBreak, {
+            sourceJid: jid,
+            targetJid,
+            senderImId: fromUserId,
+            chatType: conversation.isGroup ? 'group' : 'p2p',
+          }),
+        );
+      } else if (slashMatch && onCommand && steerText === undefined) {
+        const command = `${slashMatch[1]}${slashMatch[2] ? ` ${slashMatch[2]}` : ''}`;
+        commandReply = await settleCommandReply(
+          dedupKey,
+          jid,
+          commandName,
+          () => onCommand(jid, command, fromUserId),
+        );
+      }
       if (commandReply) {
         if (!ws) throw new Error('WeCom connection is unavailable');
         // A failed send keeps the cached reply for the provider retry.
@@ -1521,8 +1516,9 @@ export function createWeComConnection(
         commandReplies.delete(dedupKey);
         return;
       }
+      // An unknown command (no reply) is ordinary input for the Agent, as on
+      // Feishu.
       commandReplies.delete(dedupKey);
-      // An unknown command is ordinary input for the Agent, as on Feishu.
 
       // All registration and business side effects are after admission,
       // routing, command handling, and group policy filters.

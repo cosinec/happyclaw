@@ -4,8 +4,13 @@
  * handleSessionBreak); a connector only decides when a message is eligible,
  * offers each persisted input to the queue, and projects the outcome.
  */
+import type {
+  OnChannelFollowUpsChanged,
+  OnChannelMessagePersisted,
+} from './channel-contracts.js';
 import { parseRuntimeControl } from './follow-up-policy.js';
-import type { FollowUpDisposition, FollowUpMode } from './types.js';
+import { logger } from './logger.js';
+import type { FollowUpDisposition, FollowUpMode, NewMessage } from './types.js';
 
 export interface ChannelFollowUpInput {
   targetJid: string;
@@ -28,6 +33,15 @@ export type OnChannelSessionBreak = (input: {
   /** Native chat type of the command message, when known. */
   chatType?: 'p2p' | 'group';
 }) => Promise<string>;
+
+/** Host callbacks a connector needs for the queue and runtime controls. */
+export interface ChannelFollowUpConnectOpts {
+  /** Offer each persisted input to the host's durable follow-up queue. */
+  onFollowUpMessage?: OnChannelFollowUpMessage;
+  onFollowUpsChanged?: OnChannelFollowUpsChanged;
+  /** `/break` — cancel the pending queue and interrupt the active query. */
+  onSessionBreak?: OnChannelSessionBreak;
+}
 
 export interface ChannelFollowUpOutcome {
   /**
@@ -86,6 +100,46 @@ export function offerChannelFollowUp(
   return describeFollowUpOutcome(
     onFollowUpMessage?.(input) ?? { disposition: 'started' },
   );
+}
+
+/**
+ * The step after a connector persisted an input: offer it to the durable
+ * queue, project it with the outcome, and announce the queue change when it
+ * waits. The caller starts a turn (wakes the poller, starts its conversation
+ * agent) only when `shouldStartTurn`; a waiting input is released by the host
+ * when the active run ends. The row is already durable, so a failing offer
+ * is logged and the input starts as it did before the queue existed.
+ */
+export function projectChannelInbound(
+  opts: ChannelFollowUpConnectOpts & {
+    onMessagePersisted?: OnChannelMessagePersisted;
+  },
+  message: NewMessage & { source_jid: string; is_from_me?: boolean },
+  options: { agentId?: string; requestedMode?: FollowUpMode } = {},
+): ChannelFollowUpOutcome {
+  let followUp: ChannelFollowUpOutcome;
+  try {
+    followUp = offerChannelFollowUp(opts.onFollowUpMessage, {
+      targetJid: message.chat_jid,
+      sourceJid: message.source_jid,
+      messageId: message.id,
+      senderImId: message.sender,
+      requestedMode: options.requestedMode,
+    });
+  } catch (err) {
+    logger.error(
+      { err, chatJid: message.chat_jid, messageId: message.id },
+      'Follow-up queue offer failed; starting the input now',
+    );
+    followUp = describeFollowUpOutcome({ disposition: 'started' });
+  }
+  opts.onMessagePersisted?.(
+    message.chat_jid,
+    { ...message, ...followUp.deliveryFields },
+    options.agentId,
+  );
+  if (!followUp.shouldStartTurn) opts.onFollowUpsChanged?.(message.chat_jid);
+  return followUp;
 }
 
 /**

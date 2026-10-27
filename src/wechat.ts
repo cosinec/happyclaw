@@ -28,11 +28,10 @@ import { createDedupCache } from './im-utils.js';
 import { weChatIlinkHeaders } from './wechat-onboarding.js';
 import { resolveAdmittedChannelRoute } from './channel-admission.js';
 import {
-  offerChannelFollowUp,
   parseConnectorRuntimeControl,
+  projectChannelInbound,
   runSessionBreak,
-  type OnChannelFollowUpMessage,
-  type OnChannelSessionBreak,
+  type ChannelFollowUpConnectOpts,
 } from './im-connector-follow-up.js';
 import { createWeChatHttpDispatcher } from './wechat-http.js';
 import {
@@ -138,7 +137,7 @@ export interface WeChatPhysicalDeliveryOptions {
   physicalOutput?: boolean;
 }
 
-export interface WeChatConnectOpts {
+export interface WeChatConnectOpts extends ChannelFollowUpConnectOpts {
   onReady?: () => void;
   onNewChat: (jid: string, name: string) => void;
   ignoreMessagesBefore?: number;
@@ -153,11 +152,6 @@ export interface WeChatConnectOpts {
   ) => { effectiveJid: string; agentId: string | null } | null;
   onAgentMessage?: (baseChatJid: string, agentId: string) => void;
   onMessagePersisted?: import('./channel-contracts.js').OnChannelMessagePersisted;
-  /** Offer each persisted input to the host's durable follow-up queue. */
-  onFollowUpMessage?: OnChannelFollowUpMessage;
-  onFollowUpsChanged?: import('./channel-contracts.js').OnChannelFollowUpsChanged;
-  /** `/break` — cancel the pending queue and interrupt the active query. */
-  onSessionBreak?: OnChannelSessionBreak;
   normalizeIncomingJid?: (jid: string) => string | null;
   /** No inbound message may register or download media before this passes. */
   isChatAuthorized?: (jid: string) => boolean;
@@ -1491,16 +1485,8 @@ export function createWeChatConnection(
           sourceJid: jid,
         },
       );
-      const followUp = offerChannelFollowUp(opts.onFollowUpMessage, {
-        targetJid,
-        sourceJid: jid,
-        messageId: id,
-        senderImId: senderId,
-        requestedMode: requestedFollowUpMode,
-      });
-
-      opts.onMessagePersisted?.(
-        targetJid,
+      const followUp = projectChannelInbound(
+        opts,
         {
           id,
           chat_jid: targetJid,
@@ -1511,13 +1497,14 @@ export function createWeChatConnection(
           timestamp,
           attachments: attachmentsJson,
           is_from_me: false,
-          ...followUp.deliveryFields,
         },
-        agentRouting?.agentId ?? undefined,
+        {
+          agentId: agentRouting?.agentId ?? undefined,
+          requestedMode: requestedFollowUpMode,
+        },
       );
       if (!followUp.shouldStartTurn) {
         // Released by the host when the active run ends.
-        opts.onFollowUpsChanged?.(targetJid);
         logger.info(
           { jid, targetJid, disposition: followUp.disposition },
           'WeChat message queued behind the active run',

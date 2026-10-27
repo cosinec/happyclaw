@@ -82,22 +82,22 @@ describe('host group admission policy', () => {
 
 describe('connector gate and owner bootstrap', () => {
   test('without the host callback every sender passes (legacy connectors)', () => {
-    expect(isGroupSenderAdmitted({ chatJid: 'x', commandText: 'hi' })).toBe(
-      true,
-    );
+    expect(isGroupSenderAdmitted({}, 'x', 'm', 'hi')).toBe(true);
   });
 
   test('only /owner_mention in an unowned, unquarantined group bypasses the gate', () => {
     const reject = () => false;
     const unowned = { owner_im_id: undefined };
-    const admitted = (commandText: string, group?: object) =>
-      isGroupSenderAdmitted({
-        chatJid: 'g',
-        senderImId: 'm',
+    const resolveRegisteredGroup = vi.fn();
+    const admitted = (commandText: string, group?: object) => {
+      resolveRegisteredGroup.mockReturnValue(group);
+      return isGroupSenderAdmitted(
+        { isSenderAllowedInGroup: reject, resolveRegisteredGroup },
+        'g',
+        'm',
         commandText,
-        isSenderAllowedInGroup: reject,
-        resolveRegisteredGroup: () => group,
-      });
+      );
+    };
     expect(admitted('/owner_mention', unowned)).toBe(true);
     expect(admitted('  /OWNER_MENTION@happy_bot', unowned)).toBe(true);
     expect(admitted('/status', unowned)).toBe(false);
@@ -107,6 +107,19 @@ describe('connector gate and owner bootstrap', () => {
     ).toBe(false);
     expect(admitted('/owner_mention', undefined)).toBe(false);
     expect(isOwnerBootstrapCommand('/owner_mentionx', unowned)).toBe(false);
+  });
+
+  test('ordinary rejected messages never look the group up', () => {
+    const resolveRegisteredGroup = vi.fn();
+    expect(
+      isGroupSenderAdmitted(
+        { isSenderAllowedInGroup: () => false, resolveRegisteredGroup },
+        'g',
+        'm',
+        'hello',
+      ),
+    ).toBe(false);
+    expect(resolveRegisteredGroup).not.toHaveBeenCalled();
   });
 
   test('mentions resolve to the channel sender namespace, Feishu shape included', () => {

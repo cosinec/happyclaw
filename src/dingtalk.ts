@@ -50,15 +50,15 @@ import { extractProviderTarget } from './channel-address.js';
 import {
   isGroupSenderAdmitted,
   type ChannelCommandMention,
+  type GroupAudienceConnectOpts,
   type GroupOwnerView,
 } from './im-group-audience.js';
 import {
   describeFollowUpOutcome,
-  offerChannelFollowUp,
   parseConnectorRuntimeControl,
+  projectChannelInbound,
   runSessionBreak,
-  type OnChannelFollowUpMessage,
-  type OnChannelSessionBreak,
+  type ChannelFollowUpConnectOpts,
 } from './im-connector-follow-up.js';
 import {
   ExactAsyncIndicatorRegistry,
@@ -412,7 +412,9 @@ export interface DingTalkConnectionConfig {
   clientSecret: string;
 }
 
-export interface DingTalkConnectOpts {
+/** Group audience senders are the robot callback's `senderId`. */
+export interface DingTalkConnectOpts
+  extends ChannelFollowUpConnectOpts, GroupAudienceConnectOpts {
   onReady?: () => void;
   onNewChat: (jid: string, name: string) => void;
   isChatAuthorized?: (jid: string) => boolean;
@@ -428,13 +430,6 @@ export interface DingTalkConnectOpts {
     senderImId?: string,
     mentions?: ChannelCommandMention[],
   ) => Promise<string | null>;
-  /** Offer each persisted input to the host's durable follow-up queue. */
-  onFollowUpMessage?: OnChannelFollowUpMessage;
-  onFollowUpsChanged?: import('./channel-contracts.js').OnChannelFollowUpsChanged;
-  /** `/break` — cancel the pending queue and interrupt the active query. */
-  onSessionBreak?: OnChannelSessionBreak;
-  /** Group response audience, keyed by the robot callback's `senderId`. */
-  isSenderAllowedInGroup?: (chatJid: string, senderImId?: string) => boolean;
   resolveGroupFolder?: (jid: string) => string | undefined;
   resolveEffectiveChatJid?: (
     chatJid: string,
@@ -2211,10 +2206,11 @@ export function createDingTalkConnection(
           ? `钉钉群 ${conversationId.slice(0, 8)}`
           : senderName;
 
+        const admissionText = extractDingTalkAdmissionText(data);
         const admission = await evaluateChannelAdmission({
           jid,
           chatName,
-          text: extractDingTalkAdmissionText(data),
+          text: admissionText,
           isChatAuthorized: opts.isChatAuthorized,
           onPairAttempt: opts.onPairAttempt,
         });
@@ -2293,19 +2289,7 @@ export function createDingTalkConnection(
         // or attachment download. A rejected group message has zero business
         // side effects.
         if (isGroup) {
-          if (
-            !isGroupSenderAdmitted({
-              chatJid: jid,
-              senderImId: data.senderId,
-              commandText: extractDingTalkAdmissionText(data),
-              isSenderAllowedInGroup: opts.isSenderAllowedInGroup,
-              resolveRegisteredGroup: opts.resolveRegisteredGroup,
-            })
-          ) {
-            logger.debug(
-              { jid },
-              'DingTalk group message dropped: sender rejected by audience policy',
-            );
+          if (!isGroupSenderAdmitted(opts, jid, data.senderId, admissionText)) {
             return;
           }
           const mode = opts.resolveRegisteredGroup?.(jid)?.activation_mode;
@@ -2358,7 +2342,7 @@ export function createDingTalkConnection(
         // DingTalk pushes a group message only for an @mention and marks it
         // with isInAtList; a 1:1 chat is addressed to the bot by construction.
         const runtimeControl = parseConnectorRuntimeControl({
-          commandText: extractDingTalkAdmissionText(data),
+          commandText: admissionText,
           eligible: !isGroup || isDingTalkBotMentioned(data),
           hasAttachments: data.msgtype !== 'text',
         });
@@ -2957,27 +2941,10 @@ export function createDingTalkConnection(
         // silently drops the message.
         dedup.markSeen(msgId);
 
-        // Persistence is the ACK boundary: nothing after it may throw back
-        // into the Stream callback. A failed queue offer falls back to the
-        // legacy start-now path rather than losing the stored message.
         let followUp = describeFollowUpOutcome({ disposition: 'started' });
         try {
-          followUp = offerChannelFollowUp(opts.onFollowUpMessage, {
-            targetJid,
-            sourceJid: jid,
-            messageId: id,
-            senderImId: senderId,
-            requestedMode: steerText === undefined ? undefined : 'steer',
-          });
-        } catch (err) {
-          logger.error(
-            { err, jid, targetJid, msgId },
-            'DingTalk follow-up queue offer failed',
-          );
-        }
-        try {
-          opts.onMessagePersisted?.(
-            targetJid,
+          followUp = projectChannelInbound(
+            opts,
             {
               id,
               chat_jid: targetJid,
@@ -2988,9 +2955,11 @@ export function createDingTalkConnection(
               timestamp,
               attachments: attachmentsJson,
               is_from_me: false,
-              ...followUp.deliveryFields,
             },
-            agentRouting?.agentId ?? undefined,
+            {
+              agentId: agentRouting?.agentId ?? undefined,
+              requestedMode: steerText === undefined ? undefined : 'steer',
+            },
           );
         } catch (err) {
           // Persistence is the ACK boundary. A notification hook failure must
@@ -3013,14 +2982,6 @@ export function createDingTalkConnection(
 
         if (!followUp.shouldStartTurn) {
           // Released by the host when the active run ends.
-          try {
-            opts.onFollowUpsChanged?.(targetJid);
-          } catch (err) {
-            logger.error(
-              { err, jid, targetJid, msgId },
-              'DingTalk follow-up projection failed',
-            );
-          }
           logger.info(
             { jid, targetJid, msgId, disposition: followUp.disposition },
             'DingTalk message queued behind the active run',

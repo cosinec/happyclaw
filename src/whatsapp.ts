@@ -46,14 +46,13 @@ import { canonicalizeWhatsAppProviderConversationJid } from './whatsapp-jid.js';
 import {
   isGroupSenderAdmitted,
   type ChannelCommandMention,
-  type GroupOwnerView,
+  type GroupAudienceConnectOpts,
 } from './im-group-audience.js';
 import {
-  offerChannelFollowUp,
   parseConnectorRuntimeControl,
+  projectChannelInbound,
   runSessionBreak,
-  type OnChannelFollowUpMessage,
-  type OnChannelSessionBreak,
+  type ChannelFollowUpConnectOpts,
 } from './im-connector-follow-up.js';
 import { PhysicalDeliveryTracker } from './im-delivery-progress.js';
 import {
@@ -108,7 +107,9 @@ export interface WhatsAppConnectionState {
   meName?: string;
 }
 
-export interface WhatsAppConnectOpts {
+/** Group audience senders are `jidNormalizedUser` participant JIDs. */
+export interface WhatsAppConnectOpts
+  extends ChannelFollowUpConnectOpts, GroupAudienceConnectOpts {
   onReady?: () => void;
   onNewChat: (jid: string, name: string) => void;
   isChatAuthorized?: (jid: string) => boolean;
@@ -138,14 +139,6 @@ export interface WhatsAppConnectOpts {
   shouldProcessGroupMessage?: (chatJid: string, senderImId?: string) => boolean;
   /** owner_mentioned mode: bot @mentioned but sender not group owner → drop */
   isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
-  /** Offer each persisted input to the host's durable follow-up queue. */
-  onFollowUpMessage?: OnChannelFollowUpMessage;
-  onFollowUpsChanged?: import('./channel-contracts.js').OnChannelFollowUpsChanged;
-  /** `/break` — cancel the pending queue and interrupt the active query. */
-  onSessionBreak?: OnChannelSessionBreak;
-  /** Group response audience: false → drop before any further processing */
-  isSenderAllowedInGroup?: (chatJid: string, senderImId?: string) => boolean;
-  resolveRegisteredGroup?: (jid: string) => GroupOwnerView | undefined;
   /** WhatsApp 专属：连接状态变化回调（QR 出现、connected、断线等） */
   onConnectionUpdate?: (state: WhatsAppConnectionState) => void;
   normalizeIncomingJid?: (jid: string) => string | null;
@@ -873,22 +866,13 @@ export function createWhatsAppConnection(
       // ── Group gates: response audience → mention required → owner check ──
       const isBotMentioned = isGroup && isMentioningBot(inner, activeSock.user);
       if (isGroup) {
-        const addressedText = text
-          ? stripLeadingWhatsAppBotMention(text, inner, activeSock.user)
-          : text;
+        const addressedText =
+          isBotMentioned && text
+            ? stripLeadingWhatsAppBotMention(text, inner, activeSock.user)
+            : text;
         if (
-          !isGroupSenderAdmitted({
-            chatJid,
-            senderImId,
-            commandText: addressedText ?? '',
-            isSenderAllowedInGroup: opts.isSenderAllowedInGroup,
-            resolveRegisteredGroup: opts.resolveRegisteredGroup,
-          })
+          !isGroupSenderAdmitted(opts, chatJid, senderImId, addressedText ?? '')
         ) {
-          logger.debug(
-            { chatJid, senderImId },
-            'WhatsApp dropped: sender rejected by audience policy',
-          );
           return;
         }
 
@@ -1049,16 +1033,8 @@ export function createWhatsAppConnection(
         false,
         { attachments: attachmentsJson, sourceJid: chatJid },
       );
-      const followUp = offerChannelFollowUp(opts.onFollowUpMessage, {
-        targetJid,
-        sourceJid: chatJid,
-        messageId: id,
-        senderImId: senderId,
-        requestedMode: steerText === undefined ? undefined : 'steer',
-      });
-
-      opts.onMessagePersisted?.(
-        targetJid,
+      const followUp = projectChannelInbound(
+        opts,
         {
           id,
           chat_jid: targetJid,
@@ -1069,13 +1045,14 @@ export function createWhatsAppConnection(
           timestamp: timestampISO,
           attachments: attachmentsJson,
           is_from_me: false,
-          ...followUp.deliveryFields,
         },
-        routing?.agentId ?? undefined,
+        {
+          agentId: routing?.agentId ?? undefined,
+          requestedMode: steerText === undefined ? undefined : 'steer',
+        },
       );
       if (!followUp.shouldStartTurn) {
         // Released by the host when the active run ends.
-        opts.onFollowUpsChanged?.(targetJid);
         logger.info(
           {
             chatJid,

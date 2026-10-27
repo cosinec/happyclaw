@@ -49,14 +49,13 @@ import { extractProviderTarget } from './channel-address.js';
 import {
   isGroupSenderAdmitted,
   type ChannelCommandMention,
-  type GroupOwnerView,
+  type GroupAudienceConnectOpts,
 } from './im-group-audience.js';
 import {
-  offerChannelFollowUp,
   parseConnectorRuntimeControl,
+  projectChannelInbound,
   runSessionBreak,
-  type OnChannelFollowUpMessage,
-  type OnChannelSessionBreak,
+  type ChannelFollowUpConnectOpts,
 } from './im-connector-follow-up.js';
 import {
   ExactAsyncIndicatorRegistry,
@@ -121,7 +120,9 @@ export interface DiscordConnectionConfig {
   botToken: string;
 }
 
-export interface DiscordConnectOpts {
+/** Group audience senders are Discord user ids. */
+export interface DiscordConnectOpts
+  extends ChannelFollowUpConnectOpts, GroupAudienceConnectOpts {
   onReady?: () => void;
   onNewChat: (jid: string, name: string) => void;
   isChatAuthorized?: (jid: string) => boolean;
@@ -137,14 +138,6 @@ export interface DiscordConnectOpts {
     senderImId?: string,
     mentions?: ChannelCommandMention[],
   ) => Promise<string | null>;
-  /** Offer each persisted input to the host's durable follow-up queue. */
-  onFollowUpMessage?: OnChannelFollowUpMessage;
-  onFollowUpsChanged?: import('./channel-contracts.js').OnChannelFollowUpsChanged;
-  /** `/break` — cancel the pending queue and interrupt the active query. */
-  onSessionBreak?: OnChannelSessionBreak;
-  /** Guild-channel response audience, keyed by the author's user id. */
-  isSenderAllowedInGroup?: (chatJid: string, senderImId?: string) => boolean;
-  resolveRegisteredGroup?: (jid: string) => GroupOwnerView | undefined;
   resolveGroupFolder?: (jid: string) => string | undefined;
   resolveEffectiveChatJid?: (
     chatJid: string,
@@ -590,21 +583,14 @@ export function createDiscordConnection(
           return;
         }
 
+        // Guild text without mention tokens: <@123456> or <@!123456>.
+        const unmentionedContent = msg.content.replace(/<@!?\d+>/g, '').trim();
+
         // Guild channel: check group filtering (must check actual @mention first)
         if (!isDM) {
           if (
-            !isGroupSenderAdmitted({
-              chatJid: jid,
-              senderImId,
-              commandText: msg.content.replace(/<@!?\d+>/g, '').trim(),
-              isSenderAllowedInGroup: opts.isSenderAllowedInGroup,
-              resolveRegisteredGroup: opts.resolveRegisteredGroup,
-            })
+            !isGroupSenderAdmitted(opts, jid, senderImId, unmentionedContent)
           ) {
-            logger.debug(
-              { jid, senderImId },
-              'Discord group message dropped: sender rejected by audience policy',
-            );
             return;
           }
           const isBotMentioned = connectedClient.user
@@ -642,11 +628,9 @@ export function createDiscordConnection(
         }
 
         // Extract content, stripping bot mentions
-        let content = msg.content;
-        if (!isDM && connectedClient.user) {
-          // Remove bot mention patterns: <@123456> or <@!123456>
-          content = content.replace(/<@!?\d+>/g, '').trim();
-        }
+        let content =
+          !isDM && connectedClient.user ? unmentionedContent : msg.content;
+        const inboundAttachments = collectDiscordInboundAttachments(msg);
 
         const addressedText = isDM
           ? msg.content.trim()
@@ -658,7 +642,7 @@ export function createDiscordConnection(
         const runtimeControl = parseConnectorRuntimeControl({
           commandText: addressedText ?? '',
           eligible: addressedText !== null,
-          hasAttachments: collectDiscordInboundAttachments(msg).length > 0,
+          hasAttachments: inboundAttachments.length > 0,
         });
         if (runtimeControl?.kind === 'break') {
           const reply = await runSessionBreak(opts.onSessionBreak, {
@@ -739,7 +723,7 @@ export function createDiscordConnection(
           mimeType: string;
         }[] = [];
 
-        for (const attachment of collectDiscordInboundAttachments(msg)) {
+        for (const attachment of inboundAttachments) {
           const contentType = attachment.contentType || '';
           const isImage = contentType.startsWith('image/');
           const attachUrl = attachment.url;
@@ -891,16 +875,8 @@ export function createDiscordConnection(
             sourceJid: jid,
           },
         );
-        const followUp = offerChannelFollowUp(opts.onFollowUpMessage, {
-          targetJid,
-          sourceJid: jid,
-          messageId: id,
-          senderImId: senderId,
-          requestedMode: requestedFollowUpMode,
-        });
-
-        opts.onMessagePersisted?.(
-          targetJid,
+        const followUp = projectChannelInbound(
+          opts,
           {
             id,
             chat_jid: targetJid,
@@ -911,9 +887,11 @@ export function createDiscordConnection(
             timestamp,
             attachments: attachmentsJson,
             is_from_me: false,
-            ...followUp.deliveryFields,
           },
-          agentRouting?.agentId ?? undefined,
+          {
+            agentId: agentRouting?.agentId ?? undefined,
+            requestedMode: requestedFollowUpMode,
+          },
         );
 
         // Exact-input ack reaction: install ownership before the async
@@ -949,7 +927,6 @@ export function createDiscordConnection(
 
         if (!followUp.shouldStartTurn) {
           // Released by the host when the active run ends.
-          opts.onFollowUpsChanged?.(targetJid);
           logger.info(
             { jid, targetJid, msgId, disposition: followUp.disposition },
             'Discord message queued behind the active run',

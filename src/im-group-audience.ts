@@ -10,12 +10,20 @@ import {
   effectiveAudienceMode,
   isSenderAllowedByAudience,
 } from './im-audience-policy.js';
+import { logger } from './logger.js';
 import type { RegisteredGroup } from './types.js';
 
 /** The registered-group fields the owner bootstrap needs. */
 export interface GroupOwnerView {
   owner_im_id?: string;
   owner_claim_source?: string;
+}
+
+/** Host callbacks a connector needs for the group audience gate. */
+export interface GroupAudienceConnectOpts {
+  /** Group response audience, keyed by the connector's sender namespace. */
+  isSenderAllowedInGroup?: (chatJid: string, senderImId?: string) => boolean;
+  resolveRegisteredGroup?: (jid: string) => GroupOwnerView | undefined;
 }
 
 /**
@@ -71,12 +79,16 @@ export function isOwnerBootstrapCommand(
   commandText: string,
   group: GroupOwnerView | undefined,
 ): boolean {
-  const name = commandText
-    .trim()
-    .match(/^\/([^\s@]+)/)?.[1]
-    ?.toLowerCase();
+  return isOwnerMentionCommand(commandText) && isOwnerClaimable(group);
+}
+
+function isOwnerMentionCommand(commandText: string): boolean {
+  const name = commandText.trim().match(/^\/([^\s@]+)/)?.[1];
+  return name?.toLowerCase() === 'owner_mention';
+}
+
+function isOwnerClaimable(group: GroupOwnerView | undefined): boolean {
   return (
-    name === 'owner_mention' &&
     !!group &&
     !group.owner_im_id &&
     group.owner_claim_source !== 'transfer_reset'
@@ -88,21 +100,28 @@ export function isOwnerBootstrapCommand(
  * side effect. Call it only for group chats, after pairing/authorization and
  * before commands, mention gates, registration and downloads. A connector
  * without the host callback admits everyone (unchanged legacy behavior).
+ *
+ * @param commandText message text after removing a leading structured bot
+ *   mention; only consulted for the `/owner_mention` bootstrap.
  */
-export function isGroupSenderAdmitted(input: {
-  chatJid: string;
-  senderImId?: string;
-  /** Message text after removing a leading structured bot mention. */
-  commandText: string;
-  isSenderAllowedInGroup?: (chatJid: string, senderImId?: string) => boolean;
-  resolveRegisteredGroup?: (jid: string) => GroupOwnerView | undefined;
-}): boolean {
-  if (!input.isSenderAllowedInGroup) return true;
-  if (input.isSenderAllowedInGroup(input.chatJid, input.senderImId)) {
+export function isGroupSenderAdmitted(
+  opts: GroupAudienceConnectOpts,
+  chatJid: string,
+  senderImId: string | undefined,
+  commandText: string,
+): boolean {
+  if (!opts.isSenderAllowedInGroup) return true;
+  if (opts.isSenderAllowedInGroup(chatJid, senderImId)) return true;
+  // Look the group up only for the one message that may bypass the gate.
+  if (
+    isOwnerMentionCommand(commandText) &&
+    isOwnerClaimable(opts.resolveRegisteredGroup?.(chatJid))
+  ) {
     return true;
   }
-  return isOwnerBootstrapCommand(
-    input.commandText,
-    input.resolveRegisteredGroup?.(input.chatJid),
+  logger.debug(
+    { chatJid },
+    'Group message dropped: sender rejected by audience policy',
   );
+  return false;
 }

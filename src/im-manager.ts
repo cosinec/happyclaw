@@ -241,6 +241,18 @@ export interface ConnectFeishuOptions {
   onTransportIssue?: IMChannelConnectOpts['onTransportIssue'];
 }
 
+/** Durable follow-up queue and `/steer`/`/break` host callbacks. */
+type ConnectorQueueOptions = Pick<
+  IMChannelConnectOpts,
+  'onFollowUpMessage' | 'onFollowUpsChanged' | 'onSessionBreak'
+>;
+
+/** Group response-audience host callbacks. */
+type ConnectorAudienceOptions = Pick<
+  IMChannelConnectOpts,
+  'isSenderAllowedInGroup' | 'resolveRegisteredGroup'
+>;
+
 export class IMConnectionManager {
   private connections = new Map<string, UserIMConnection>();
   private adminUserIds = new Set<string>();
@@ -1483,18 +1495,14 @@ export class IMConnectionManager {
       } | null;
       onAgentMessage?: (baseChatJid: string, agentId: string) => void;
       onMessagePersisted?: IMChannelConnectOpts['onMessagePersisted'];
-      onFollowUpMessage?: IMChannelConnectOpts['onFollowUpMessage'];
-      onFollowUpsChanged?: IMChannelConnectOpts['onFollowUpsChanged'];
-      onSessionBreak?: IMChannelConnectOpts['onSessionBreak'];
       onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
       onBotRemovedFromGroup?: (chatJid: string) => void;
       onNativeContextDetected?: (
         chatJid: string,
         contextType: 'thread',
       ) => boolean | void | Promise<boolean | void>;
-      isSenderAllowedInGroup?: IMChannelConnectOpts['isSenderAllowedInGroup'];
-      resolveRegisteredGroup?: IMChannelConnectOpts['resolveRegisteredGroup'];
-    },
+    } & ConnectorQueueOptions &
+      ConnectorAudienceOptions,
   ): Promise<boolean> {
     if (!config.botToken) {
       logger.info({ userId }, 'Telegram config empty, skipping connection');
@@ -1563,12 +1571,8 @@ export class IMConnectionManager {
       } | null;
       onAgentMessage?: (baseChatJid: string, agentId: string) => void;
       onMessagePersisted?: IMChannelConnectOpts['onMessagePersisted'];
-      onFollowUpMessage?: IMChannelConnectOpts['onFollowUpMessage'];
-      onFollowUpsChanged?: IMChannelConnectOpts['onFollowUpsChanged'];
-      onSessionBreak?: IMChannelConnectOpts['onSessionBreak'];
-      isSenderAllowedInGroup?: IMChannelConnectOpts['isSenderAllowedInGroup'];
-      resolveRegisteredGroup?: IMChannelConnectOpts['resolveRegisteredGroup'];
-    },
+    } & ConnectorQueueOptions &
+      ConnectorAudienceOptions,
   ): Promise<boolean> {
     if (!config.appId || !config.appSecret) {
       logger.info({ userId }, 'QQ config empty, skipping connection');
@@ -1648,9 +1652,6 @@ export class IMConnectionManager {
       } | null;
       onAgentMessage?: (baseChatJid: string, agentId: string) => void;
       onMessagePersisted?: IMChannelConnectOpts['onMessagePersisted'];
-      onFollowUpMessage?: IMChannelConnectOpts['onFollowUpMessage'];
-      onFollowUpsChanged?: IMChannelConnectOpts['onFollowUpsChanged'];
-      onSessionBreak?: IMChannelConnectOpts['onSessionBreak'];
       isChatAuthorized?: (jid: string) => boolean;
       onPairAttempt?: (
         jid: string,
@@ -1659,7 +1660,7 @@ export class IMConnectionManager {
       ) => Promise<boolean>;
       onConnectionStateChange?: (state: WeChatConnectionState) => void;
       onUpdatesBuf?: (cursor: string) => void | Promise<void>;
-    },
+    } & ConnectorQueueOptions,
   ): Promise<boolean> {
     if (!config.botToken || !config.ilinkBotId) {
       logger.info({ userId }, 'WeChat config empty, skipping connection');
@@ -1733,9 +1734,6 @@ export class IMConnectionManager {
       } | null;
       onAgentMessage?: (baseChatJid: string, agentId: string) => void;
       onMessagePersisted?: IMChannelConnectOpts['onMessagePersisted'];
-      onFollowUpMessage?: IMChannelConnectOpts['onFollowUpMessage'];
-      onFollowUpsChanged?: IMChannelConnectOpts['onFollowUpsChanged'];
-      onSessionBreak?: IMChannelConnectOpts['onSessionBreak'];
       shouldProcessGroupMessage?: (
         chatJid: string,
         senderImId?: string,
@@ -1749,9 +1747,8 @@ export class IMConnectionManager {
       ) => Promise<boolean>;
       onConnectionStateChange?: (state: WeComConnectionState) => void;
       onCommand?: IMChannelConnectOpts['onCommand'];
-      isSenderAllowedInGroup?: IMChannelConnectOpts['isSenderAllowedInGroup'];
-      resolveRegisteredGroup?: IMChannelConnectOpts['resolveRegisteredGroup'];
-    },
+    } & ConnectorQueueOptions &
+      ConnectorAudienceOptions,
   ): Promise<boolean> {
     if (!config.botId || !config.secret) {
       logger.info({ userId }, 'WeCom config empty, skipping connection');
@@ -1829,9 +1826,6 @@ export class IMConnectionManager {
       } | null;
       onAgentMessage?: (baseChatJid: string, agentId: string) => void;
       onMessagePersisted?: IMChannelConnectOpts['onMessagePersisted'];
-      onFollowUpMessage?: IMChannelConnectOpts['onFollowUpMessage'];
-      onFollowUpsChanged?: IMChannelConnectOpts['onFollowUpsChanged'];
-      onSessionBreak?: IMChannelConnectOpts['onSessionBreak'];
       onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
       onBotRemovedFromGroup?: (chatJid: string) => void;
       shouldProcessGroupMessage?: (
@@ -1839,15 +1833,14 @@ export class IMConnectionManager {
         senderImId?: string,
       ) => boolean;
       isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
-      isSenderAllowedInGroup?: IMChannelConnectOpts['isSenderAllowedInGroup'];
-      resolveRegisteredGroup?: IMChannelConnectOpts['resolveRegisteredGroup'];
       normalizeIncomingJid?: (jid: string) => string | null;
       onConnectionUpdate?: (
         userId: string,
         accountId: string,
         state: WhatsAppConnectionStateSnapshot,
       ) => void;
-    },
+    } & ConnectorQueueOptions &
+      ConnectorAudienceOptions,
   ): Promise<boolean> {
     const { getWhatsAppAuthDir } = await import('./whatsapp-auth.js');
     const channel = createWhatsAppChannel(
@@ -2010,9 +2003,6 @@ export class IMConnectionManager {
       } | null;
       onAgentMessage?: (baseChatJid: string, agentId: string) => void;
       onMessagePersisted?: IMChannelConnectOpts['onMessagePersisted'];
-      onFollowUpMessage?: IMChannelConnectOpts['onFollowUpMessage'];
-      onFollowUpsChanged?: IMChannelConnectOpts['onFollowUpsChanged'];
-      onSessionBreak?: IMChannelConnectOpts['onSessionBreak'];
       onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
       onBotRemovedFromGroup?: (chatJid: string) => void;
       shouldProcessGroupMessage?: (
@@ -2020,9 +2010,8 @@ export class IMConnectionManager {
         senderImId?: string,
       ) => boolean;
       isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
-      isSenderAllowedInGroup?: IMChannelConnectOpts['isSenderAllowedInGroup'];
-      resolveRegisteredGroup?: IMChannelConnectOpts['resolveRegisteredGroup'];
-    },
+    } & ConnectorQueueOptions &
+      ConnectorAudienceOptions,
   ): Promise<boolean> {
     if (!config.clientId || !config.clientSecret) {
       logger.info({ userId }, 'DingTalk config empty, skipping connection');
@@ -2104,9 +2093,6 @@ export class IMConnectionManager {
       } | null;
       onAgentMessage?: (baseChatJid: string, agentId: string) => void;
       onMessagePersisted?: IMChannelConnectOpts['onMessagePersisted'];
-      onFollowUpMessage?: IMChannelConnectOpts['onFollowUpMessage'];
-      onFollowUpsChanged?: IMChannelConnectOpts['onFollowUpsChanged'];
-      onSessionBreak?: IMChannelConnectOpts['onSessionBreak'];
       onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
       onBotRemovedFromGroup?: (chatJid: string) => void;
       shouldProcessGroupMessage?: (
@@ -2114,9 +2100,8 @@ export class IMConnectionManager {
         senderImId?: string,
       ) => boolean;
       isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
-      isSenderAllowedInGroup?: IMChannelConnectOpts['isSenderAllowedInGroup'];
-      resolveRegisteredGroup?: IMChannelConnectOpts['resolveRegisteredGroup'];
-    },
+    } & ConnectorQueueOptions &
+      ConnectorAudienceOptions,
   ): Promise<boolean> {
     if (!config.botToken) return false;
     const channel = createDiscordChannel(

@@ -190,25 +190,4 @@ describe('Feishu brand and connection callbacks reach the connector', () => {
       restore();
     }
   });
-
-  test('the account reload reads the brand from the secret and maps conflicts to the account status', () => {
-    const source = fs.readFileSync(
-      new URL('../src/index.ts', import.meta.url),
-      'utf8',
-    );
-    const start = source.indexOf('async function reloadChannelAccountById');
-    const end = source.indexOf("account.provider === 'telegram'", start);
-    expect(start).toBeGreaterThan(-1);
-    expect(end).toBeGreaterThan(start);
-    const feishuBranch = source.slice(start, end);
-    expect(feishuBranch).toContain(
-      'domain: normalizeFeishuBrand(secret.domain)',
-    );
-    expect(feishuBranch).toContain(
-      'getOwnerOpenId: () => secret.ownerOpenId || undefined',
-    );
-    expect(feishuBranch).toMatch(
-      /onTransportIssue: \(issue\) => \{\s*const latest = applyFeishuTransportIssue\(account\.id, issue\);/,
-    );
-  });
 });

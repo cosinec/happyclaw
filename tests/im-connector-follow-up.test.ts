@@ -11,6 +11,7 @@ import {
 } from '../src/im-channel.js';
 import {
   offerChannelFollowUp,
+  projectChannelInbound,
   parseConnectorRuntimeControl,
   runSessionBreak,
 } from '../src/im-connector-follow-up.js';
@@ -62,6 +63,64 @@ describe('connector runtime controls', () => {
     await expect(
       runSessionBreak(undefined, { sourceJid: 's', senderImId: 'u' }),
     ).resolves.toBe('当前运行环境不支持 /break。');
+  });
+});
+
+describe('projectChannelInbound', () => {
+  const message = {
+    id: 'm1',
+    chat_jid: 'web:home',
+    source_jid: 'telegram:1',
+    sender: 'tg:1',
+    sender_name: 'A',
+    content: 'hi',
+    timestamp: '2026-10-27T00:00:00.000Z',
+    is_from_me: false,
+  };
+
+  test('a waiting input is projected as queued and announced', () => {
+    const onMessagePersisted = vi.fn();
+    const onFollowUpsChanged = vi.fn();
+    const outcome = projectChannelInbound(
+      {
+        onFollowUpMessage: () => ({ disposition: 'queued', runId: 'r1' }),
+        onFollowUpsChanged,
+        onMessagePersisted,
+      },
+      message,
+      { agentId: 'a1' },
+    );
+    expect(outcome.shouldStartTurn).toBe(false);
+    expect(onMessagePersisted).toHaveBeenCalledWith(
+      'web:home',
+      expect.objectContaining({
+        id: 'm1',
+        delivery_status: 'queued',
+        delivery_run_id: 'r1',
+      }),
+      'a1',
+    );
+    expect(onFollowUpsChanged).toHaveBeenCalledWith('web:home');
+  });
+
+  test('a failing queue offer starts the already durable input', () => {
+    const onMessagePersisted = vi.fn();
+    const onFollowUpsChanged = vi.fn();
+    const outcome = projectChannelInbound(
+      {
+        onFollowUpMessage: () => {
+          throw new Error('database is locked');
+        },
+        onFollowUpsChanged,
+        onMessagePersisted,
+      },
+      message,
+    );
+    expect(outcome.shouldStartTurn).toBe(true);
+    expect(onMessagePersisted.mock.calls[0][1]).not.toHaveProperty(
+      'delivery_status',
+    );
+    expect(onFollowUpsChanged).not.toHaveBeenCalled();
   });
 });
 

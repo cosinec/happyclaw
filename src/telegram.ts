@@ -29,17 +29,15 @@ import { resolveAdmittedChannelRoute } from './channel-admission.js';
 import {
   isGroupSenderAdmitted,
   type ChannelCommandMention,
-  type GroupOwnerView,
+  type GroupAudienceConnectOpts,
 } from './im-group-audience.js';
 import {
-  offerChannelFollowUp,
   parseConnectorRuntimeControl,
+  projectChannelInbound,
   runSessionBreak,
+  type ChannelFollowUpConnectOpts,
   type ChannelFollowUpOutcome,
-  type OnChannelFollowUpMessage,
-  type OnChannelSessionBreak,
 } from './im-connector-follow-up.js';
-import type { OnChannelFollowUpsChanged } from './channel-contracts.js';
 import {
   PartialChannelDeliveryError,
   PhysicalDeliveryTracker,
@@ -57,7 +55,9 @@ export interface TelegramConnectionConfig {
   proxyUrl?: string;
 }
 
-export interface TelegramConnectOpts {
+/** Group audience senders are bare Telegram user ids. */
+export interface TelegramConnectOpts
+  extends ChannelFollowUpConnectOpts, GroupAudienceConnectOpts {
   onReady?: () => void;
   /** 收到消息后调用，让调用方自动注册未知的 Telegram 聊天 */
   onNewChat: (jid: string, name: string) => void;
@@ -79,14 +79,6 @@ export interface TelegramConnectOpts {
     senderImId?: string,
     mentions?: ChannelCommandMention[],
   ) => Promise<string | null>;
-  /** Offer each persisted input to the host's durable follow-up queue. */
-  onFollowUpMessage?: OnChannelFollowUpMessage;
-  onFollowUpsChanged?: OnChannelFollowUpsChanged;
-  /** `/break` — cancel the pending queue and interrupt the active query. */
-  onSessionBreak?: OnChannelSessionBreak;
-  /** Group response audience (owner-only / allowlist), keyed by bare user id. */
-  isSenderAllowedInGroup?: (chatJid: string, senderImId?: string) => boolean;
-  resolveRegisteredGroup?: (jid: string) => GroupOwnerView | undefined;
   /** 热重连时设置：丢弃 date 早于此时间戳（epoch ms）的消息，避免处理渠道关闭期间的堆积消息 */
   ignoreMessagesBefore?: number;
   /** 根据 jid 解析群组 folder，用于下载文件/图片到工作区 */
@@ -472,6 +464,10 @@ interface TelegramChatDescriptor {
   id: string | number;
   type: string;
   is_forum?: boolean;
+}
+
+function isTelegramGroupChat(chat: { type: string }): boolean {
+  return chat.type === 'group' || chat.type === 'supergroup';
 }
 
 /**
@@ -931,13 +927,12 @@ export function createTelegramConnection(
     chat: TelegramChatDescriptor,
     hasAttachments: boolean,
   ) {
-    const commandText =
-      chat.type === 'group' || chat.type === 'supergroup'
-        ? telegramAddressedText(message, {
-            username: botUsername,
-            id: botUserId,
-          })
-        : (message.text ?? message.caption ?? '').trim();
+    const commandText = isTelegramGroupChat(chat)
+      ? telegramAddressedText(message, {
+          username: botUsername,
+          id: botUserId,
+        })
+      : (message.text ?? message.caption ?? '').trim();
     return parseConnectorRuntimeControl({
       commandText: commandText ?? '',
       eligible: commandText !== null,
@@ -987,15 +982,8 @@ export function createTelegramConnection(
       false,
       { attachments: input.attachmentsJson, sourceJid: input.sourceJid },
     );
-    const followUp = offerChannelFollowUp(opts.onFollowUpMessage, {
-      targetJid: input.targetJid,
-      sourceJid: input.sourceJid,
-      messageId: input.id,
-      senderImId: input.senderId,
-      requestedMode: input.requestedMode,
-    });
-    opts.onMessagePersisted?.(
-      input.targetJid,
+    const followUp = projectChannelInbound(
+      opts,
       {
         id: input.id,
         chat_jid: input.targetJid,
@@ -1004,20 +992,15 @@ export function createTelegramConnection(
         sender_name: input.senderName,
         content: input.content,
         timestamp: input.timestamp,
-        ...(input.attachmentsJson
-          ? { attachments: input.attachmentsJson }
-          : {}),
+        attachments: input.attachmentsJson,
         is_from_me: false,
-        ...followUp.deliveryFields,
       },
-      input.agentId,
+      { agentId: input.agentId, requestedMode: input.requestedMode },
     );
-    if (!followUp.shouldStartTurn) {
-      opts.onFollowUpsChanged?.(input.targetJid);
-      return followUp;
+    if (followUp.shouldStartTurn) {
+      notifyNewImMessage();
+      if (input.agentId) opts.onAgentMessage?.(input.jid, input.agentId);
     }
-    notifyNewImMessage();
-    if (input.agentId) opts.onAgentMessage?.(input.jid, input.agentId);
     return followUp;
   }
 
@@ -1032,21 +1015,15 @@ export function createTelegramConnection(
     senderId: number | undefined,
     text: string | undefined,
   ): boolean {
-    if (chat.type !== 'group' && chat.type !== 'supergroup') return true;
-    const admitted = isGroupSenderAdmitted({
-      chatJid: jid,
-      senderImId: senderId ? String(senderId) : undefined,
-      commandText: text ?? '',
-      isSenderAllowedInGroup: opts.isSenderAllowedInGroup,
-      resolveRegisteredGroup: opts.resolveRegisteredGroup,
-    });
-    if (!admitted) {
-      logger.debug(
-        { jid },
-        'Telegram message dropped: sender rejected by audience policy',
-      );
-    }
-    return admitted;
+    return (
+      !isTelegramGroupChat(chat) ||
+      isGroupSenderAdmitted(
+        opts,
+        jid,
+        senderId ? String(senderId) : undefined,
+        text ?? '',
+      )
+    );
   }
 
   /**
@@ -1344,13 +1321,11 @@ export function createTelegramConnection(
               false,
             );
             if (runtimeControl?.kind === 'break') {
-              const isGroupChat =
-                ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
               const reply = await runSessionBreak(opts.onSessionBreak, {
                 sourceJid: jid,
                 targetJid: resolveRoute()?.targetJid,
                 senderImId: ctx.from?.id ? String(ctx.from.id) : '',
-                chatType: isGroupChat ? 'group' : 'p2p',
+                chatType: isTelegramGroupChat(ctx.chat) ? 'group' : 'p2p',
               });
               await ctx.reply(reply);
               return;
