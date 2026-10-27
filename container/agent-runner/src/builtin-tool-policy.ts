@@ -39,20 +39,33 @@ export const ASK_USER_QUESTION_DEFERRED_RESULT =
   'its options, so the user can answer from any channel.';
 
 /**
- * The CLI registers AskUserQuestion only when the host answers permission
- * requests. Everything else stays allowed exactly as bypassPermissions
- * allows it; AskUserQuestion is answered with the deferred result above.
+ * Tool result of any other call that asked for approval. bypassPermissions
+ * approves ordinary calls before the handler is consulted, so what reaches it
+ * asked for a person on purpose (e.g. a hook answering `ask`); without a
+ * handler the CLI denied those, and it still does.
  */
-export const runnerCanUseTool: CanUseTool = async (toolName, input) =>
-  toolName === 'AskUserQuestion'
-    ? { behavior: 'deny', message: ASK_USER_QUESTION_DEFERRED_RESULT }
-    : { behavior: 'allow', updatedInput: input };
+export const APPROVAL_UNAVAILABLE_RESULT =
+  'This call asked for approval, and HappyClaw runs without interactive ' +
+  'approval, so it was not run.';
+
+/**
+ * The CLI registers AskUserQuestion only when the host answers permission
+ * requests. AskUserQuestion is answered with the deferred result above;
+ * every other request is denied, as it was without a handler.
+ */
+export const runnerCanUseTool: CanUseTool = async (toolName) => ({
+  behavior: 'deny',
+  message:
+    toolName === 'AskUserQuestion'
+      ? ASK_USER_QUESTION_DEFERRED_RESULT
+      : APPROVAL_UNAVAILABLE_RESULT,
+});
 
 /**
  * The SDK warns on every query that bypassPermissions shadows `canUseTool`.
- * That holds for ordinary tools, not for AskUserQuestion: asking the user is
- * never auto-approved, so it still reaches the handler. Drop only this
- * warning; every other one keeps Node's default output.
+ * That holds for ordinary tools, not for a request that asks for a person
+ * (AskUserQuestion, a hook's `ask`): those still reach the handler. Drop
+ * only this warning; every other one keeps Node's default output.
  */
 export function silenceShadowedCanUseToolWarning(): void {
   const listeners = process.listeners('warning');

@@ -3031,7 +3031,7 @@ async function runQueryAttempt(
       permissionMode: 'bypassPermissions' as const,
       allowDangerouslySkipPermissions: true,
       // Registers AskUserQuestion, which the CLI omits without a handler.
-      // bypassPermissions still approves every other tool before it.
+      // bypassPermissions still approves ordinary calls before it is asked.
       canUseTool: runnerCanUseTool,
       agentProgressSummaries: true,
       settingSources: activeAgentMcpPolicy.settingSources,

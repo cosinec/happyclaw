@@ -192,7 +192,8 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
   并设置 `CLAUDE_CODE_DISABLE_CRON=1` 关闭 CLI 自带的定时调度；定时需求走 HappyClaw
   的 `schedule_task`。
 - Runner 安装 `canUseTool`（`builtin-tool-policy.ts`），CLI 才会注册
-  AskUserQuestion；其余工具仍由 `bypassPermissions` 放行。Runner 没有交互作答通道：
+  AskUserQuestion；普通调用仍由 `bypassPermissions` 直接放行，不经过它，其余请求人工
+  确认的调用（如 Hook 返回 `ask`）与没有它时一样被拒绝。Runner 没有交互作答通道：
   AskUserQuestion 立即以「已向用户展示、下一条消息作答」的结果返回，模型在回复里复述
   问题和选项后结束本轮；Web 卡片和飞书按钮只是作答捷径，用户的回答作为下一条消息到达。
 - 一次运行绑定的模型配置按固定顺序解析（`container-runner.ts` 的

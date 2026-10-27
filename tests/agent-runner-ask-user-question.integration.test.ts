@@ -8,6 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { afterAll, describe, expect, test, vi } from 'vitest';
 
 import {
+  APPROVAL_UNAVAILABLE_RESULT,
   ASK_USER_QUESTION_DEFERRED_RESULT,
   RUNNER_DISALLOWED_BUILTIN_TOOLS,
   runnerCanUseTool,
@@ -118,7 +119,14 @@ interface AgentRequest {
   messages: Array<{ role: string; content: unknown }>;
 }
 
-function startUpstream() {
+function startUpstream(
+  firstCall: Block = {
+    type: 'tool_use',
+    id: 'toolu_ask_1',
+    name: 'AskUserQuestion',
+    input: QUESTION_INPUT,
+  },
+) {
   const agentRequests: AgentRequest[] = [];
   let calls = 0;
   const server = http.createServer((req, res) => {
@@ -143,14 +151,7 @@ function startUpstream() {
           messages: body.messages ?? [],
         });
         if (agentRequests.length === 1) {
-          blocks = [
-            {
-              type: 'tool_use',
-              id: 'toolu_ask_1',
-              name: 'AskUserQuestion',
-              input: QUESTION_INPUT,
-            },
-          ];
+          blocks = [firstCall];
           stop = 'tool_use';
         } else {
           blocks = [{ type: 'text', text: REPLY }];
@@ -189,6 +190,77 @@ async function* singleUserMessage(text: string) {
   };
 }
 
+type ToolResultBlock = {
+  type: string;
+  tool_use_id: string;
+  is_error?: boolean;
+  content: unknown;
+};
+
+/** One runner-shaped turn against the scripted upstream. */
+async function runTurn(
+  firstCall?: Block,
+  hooks?: NonNullable<
+    Parameters<typeof runnerSdk.query>[0]['options']
+  >['hooks'],
+) {
+  const upstream = await startUpstream(firstCall);
+  try {
+    const stream = runnerSdk.query({
+      prompt: singleUserMessage('问我午饭吃什么'),
+      options: {
+        pathToClaudeCodeExecutable: runnerClaudeExecutable,
+        cwd,
+        model: MODEL,
+        env: {
+          ...Object.fromEntries(
+            Object.entries(process.env).filter(
+              (entry): entry is [string, string] =>
+                typeof entry[1] === 'string',
+            ),
+          ),
+          ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstream.port}`,
+          ANTHROPIC_AUTH_TOKEN: 'happyclaw-ask-test',
+          ANTHROPIC_API_KEY: '',
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+        },
+        allowedTools: ['Bash', 'Read', 'Write'],
+        disallowedTools: [...RUNNER_DISALLOWED_BUILTIN_TOOLS],
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+        canUseTool: runnerCanUseTool,
+        settingSources: [],
+        ...(hooks ? { hooks } : {}),
+      },
+    });
+    let result: { subtype?: string; result?: string } | undefined;
+    for await (const message of stream) {
+      if (message.type === 'result') {
+        result = message as typeof result;
+        break;
+      }
+    }
+    const { agentRequests } = upstream;
+    return {
+      result,
+      agentRequests,
+      toolResult: (toolUseId: string) =>
+        agentRequests
+          .flatMap((request) => request.messages)
+          .flatMap((message) =>
+            Array.isArray(message.content) ? message.content : [],
+          )
+          .find(
+            (block): block is ToolResultBlock =>
+              (block as { type?: string }).type === 'tool_result' &&
+              (block as { tool_use_id?: string }).tool_use_id === toolUseId,
+          ),
+    };
+  } finally {
+    upstream.server.close();
+  }
+}
+
 afterAll(() => {
   fs.rmSync(cwd, { recursive: true, force: true });
 });
@@ -220,7 +292,7 @@ describe('AskUserQuestion in the runner', () => {
     }
   });
 
-  test('the handler defers AskUserQuestion and allows every other tool', async () => {
+  test('the handler defers AskUserQuestion and denies every other approval request', async () => {
     const options = { signal: new AbortController().signal };
     await expect(
       runnerCanUseTool('AskUserQuestion', QUESTION_INPUT, options),
@@ -228,77 +300,60 @@ describe('AskUserQuestion in the runner', () => {
       behavior: 'deny',
       message: ASK_USER_QUESTION_DEFERRED_RESULT,
     });
-    const input = { command: 'ls' };
-    await expect(runnerCanUseTool('Bash', input, options)).resolves.toEqual({
-      behavior: 'allow',
-      updatedInput: input,
+    await expect(
+      runnerCanUseTool('Write', { file_path: 'a' }, options),
+    ).resolves.toEqual({
+      behavior: 'deny',
+      message: APPROVAL_UNAVAILABLE_RESULT,
     });
   });
 
   test('the model receives the deferred result and ends the turn with its reply', async () => {
-    const upstream = await startUpstream();
-    try {
-      const stream = runnerSdk.query({
-        prompt: singleUserMessage('问我午饭吃什么'),
-        options: {
-          pathToClaudeCodeExecutable: runnerClaudeExecutable,
-          cwd,
-          model: MODEL,
-          env: {
-            ...Object.fromEntries(
-              Object.entries(process.env).filter(
-                (entry): entry is [string, string] =>
-                  typeof entry[1] === 'string',
-              ),
-            ),
-            ANTHROPIC_BASE_URL: `http://127.0.0.1:${upstream.port}`,
-            ANTHROPIC_AUTH_TOKEN: 'happyclaw-ask-test',
-            ANTHROPIC_API_KEY: '',
-            CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
-          },
-          allowedTools: ['Bash', 'Read'],
-          disallowedTools: [...RUNNER_DISALLOWED_BUILTIN_TOOLS],
-          permissionMode: 'bypassPermissions',
-          allowDangerouslySkipPermissions: true,
-          canUseTool: runnerCanUseTool,
-          settingSources: [],
-        },
-      });
-      let result: { subtype?: string; result?: string } | undefined;
-      for await (const message of stream) {
-        if (message.type === 'result') {
-          result = message as typeof result;
-          break;
-        }
-      }
+    const run = await runTurn();
+    expect(run.result).toMatchObject({ subtype: 'success', result: REPLY });
+    const [first] = run.agentRequests;
+    expect(first.tools).toContain('AskUserQuestion');
+    expect(first.tools).not.toContain('EnterPlanMode');
+    expect(first.tools).not.toContain('ExitPlanMode');
+    const toolResult = run.toolResult('toolu_ask_1');
+    expect(toolResult?.is_error).toBe(true);
+    expect(JSON.stringify(toolResult?.content)).toContain(
+      ASK_USER_QUESTION_DEFERRED_RESULT,
+    );
+  }, 60_000);
 
-      expect(result).toMatchObject({ subtype: 'success', result: REPLY });
-      const [first, second] = upstream.agentRequests;
-      expect(first.tools).toContain('AskUserQuestion');
-      expect(first.tools).not.toContain('EnterPlanMode');
-      expect(first.tools).not.toContain('ExitPlanMode');
-      const toolResult = second.messages
-        .flatMap((message) =>
-          Array.isArray(message.content) ? message.content : [],
-        )
-        .find(
-          (
-            block,
-          ): block is {
-            type: string;
-            tool_use_id: string;
-            is_error?: boolean;
-            content: unknown;
-          } =>
-            (block as { type?: string }).type === 'tool_result' &&
-            (block as { tool_use_id?: string }).tool_use_id === 'toolu_ask_1',
-        );
-      expect(toolResult?.is_error).toBe(true);
-      expect(JSON.stringify(toolResult?.content)).toContain(
-        ASK_USER_QUESTION_DEFERRED_RESULT,
-      );
-    } finally {
-      upstream.server.close();
-    }
+  test('a call a hook sends for approval stays denied, as without the handler', async () => {
+    const target = path.join(cwd, 'guarded.txt');
+    const run = await runTurn(
+      {
+        type: 'tool_use',
+        id: 'toolu_write_1',
+        name: 'Write',
+        input: { file_path: target, content: 'should not be written' },
+      },
+      {
+        PreToolUse: [
+          {
+            matcher: 'Write',
+            hooks: [
+              async () => ({
+                hookSpecificOutput: {
+                  hookEventName: 'PreToolUse' as const,
+                  permissionDecision: 'ask' as const,
+                  permissionDecisionReason: 'confirm before writing',
+                },
+              }),
+            ],
+          },
+        ],
+      },
+    );
+    expect(run.result).toMatchObject({ subtype: 'success' });
+    expect(fs.existsSync(target)).toBe(false);
+    const toolResult = run.toolResult('toolu_write_1');
+    expect(toolResult?.is_error).toBe(true);
+    expect(JSON.stringify(toolResult?.content)).toContain(
+      APPROVAL_UNAVAILABLE_RESULT,
+    );
   }, 60_000);
 });
