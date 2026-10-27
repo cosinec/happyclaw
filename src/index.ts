@@ -253,6 +253,7 @@ import {
   updateChannelAccountStatus,
   cancelQueuedFollowUpsAtCutoff,
   cancelQueuedFollowUp,
+  withdrawQueuedFollowUp,
   claimNextQueuedFollowUpBatch,
   getQueuedFollowUp,
   getQueuedFollowUpChatJids,
@@ -1802,23 +1803,52 @@ function broadcastFollowUpBatchUpdate(
  */
 function withdrawQueuedInputsOutsideAudience(chatJid: string): void {
   for (const item of listQueuedFollowUps(chatJid)) {
-    const sourceJid = item.source_jid;
-    if (!sourceJid || !getChannelType(sourceJid)) continue;
+    const sender = queuedInputImSender(item);
+    if (!sender) continue;
+    const sourceJid = item.source_jid!;
     const conversationJid = channelConversationJid(
       stripVirtualJidSuffix(sourceJid),
     );
     const group =
       registeredGroups[conversationJid] ?? getRegisteredGroup(conversationJid);
     if (isDirectImConversation(conversationJid, group)) continue;
-    const sender =
-      ownerImIdFromPersistedSender(sourceJid, item.sender) ?? undefined;
-    if (isSenderAllowedInGroup(sourceJid, sender)) continue;
-    const result = cancelFollowUp(chatJid, item.id);
+    if (isSenderAllowedInGroup(sourceJid, sender.imId)) continue;
+    const deliveryUpdatedAt = new Date().toISOString();
+    // The input and any forward root it covers leave the queue together.
+    const withdrawn = withdrawQueuedFollowUp(
+      chatJid,
+      item.id,
+      deliveryUpdatedAt,
+    );
+    if (withdrawn) {
+      settleCancelledFollowUp(chatJid, withdrawn, deliveryUpdatedAt);
+    }
     logger.info(
-      { chatJid, messageId: item.id, withdrawn: result.ok },
+      { chatJid, messageId: item.id, withdrawn: !!withdrawn },
       'Queued input withdrawn: its sender is no longer in the response audience',
     );
   }
+}
+
+/**
+ * The channel sender of a queued input, or null when it is not one (Web,
+ * scheduled task, system input). Decided by what was persisted with it, not
+ * by the chat JID a Web user may also post to: its ChannelTurnContext names
+ * the provider; without one only a sender in the provider's own format
+ * (`tg:42`, `qq:…`) is a channel sender. Feishu inputs always carry one.
+ */
+function queuedInputImSender(
+  item: QueuedFollowUp,
+): { imId: string | undefined } | null {
+  const sourceJid = item.source_jid;
+  const provider = sourceJid ? getChannelType(sourceJid) : null;
+  if (!sourceJid || !provider) return null;
+  const imId =
+    ownerImIdFromPersistedSender(sourceJid, item.sender) ?? undefined;
+  if (item.channel_context) {
+    return item.channel_context.provider === provider ? { imId } : null;
+  }
+  return provider !== 'feishu' && imId ? { imId } : null;
 }
 
 async function dispatchNextQueuedFollowUp(chatJid: string): Promise<void> {
@@ -1992,13 +2022,23 @@ function cancelFollowUp(
   const deliveryUpdatedAt = new Date().toISOString();
   const item = cancelQueuedFollowUp(chatJid, messageId, deliveryUpdatedAt);
   if (!item) return { ok: false, message: '这条排队消息已被处理或取消。' };
+  settleCancelledFollowUp(chatJid, item, deliveryUpdatedAt);
+  return { ok: true, state: 'cancelled', message: '已取消排队消息。', item };
+}
+
+/** Close, announce and un-indicate an input that left the durable queue. */
+function settleCancelledFollowUp(
+  chatJid: string,
+  item: QueuedFollowUp,
+  deliveryUpdatedAt: string,
+): void {
   closeRetryWaitTurnsForWithdrawnInputs(
     channelTurnScopeForInput(chatJid, item.source_jid),
-    [messageId],
+    [item.id],
     'Queued input cancelled',
   );
   broadcastFollowUpUpdate(chatJid, {
-    id: messageId,
+    id: item.id,
     delivery_status: 'cancelled',
     delivery_run_id: item.delivery_run_id,
     delivery_updated_at: deliveryUpdatedAt,
@@ -2010,9 +2050,8 @@ function cancelFollowUp(
         ? chatJid
         : null;
   if (indicatorJid) {
-    void clearStandaloneProcessingIndicator(chatJid, indicatorJid, messageId);
+    void clearStandaloneProcessingIndicator(chatJid, indicatorJid, item.id);
   }
-  return { ok: true, state: 'cancelled', message: '已取消排队消息。', item };
 }
 
 function editFollowUp(
