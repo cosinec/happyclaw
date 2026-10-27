@@ -145,11 +145,14 @@ function optionUsable(option: SessionModelOption): boolean {
   return option.usable !== false && !option.codex?.needsReauth;
 }
 
-/** Why a configuration is listed but not (or not usually) chosen. */
+/**
+ * Why a configuration is listed but cannot be chosen. Whether it is in the
+ * automatic pool is left to Settings: an explicit pick ignores the pool.
+ */
 function optionStatus(option: SessionModelOption): string {
   if (option.usable === false) return '缺少凭据';
   if (option.codex?.needsReauth) return '需重新登录';
-  return option.enabled ? '' : '未启用';
+  return '';
 }
 
 /** A model id for a label, with the 1M context window spelled out. */
@@ -645,11 +648,7 @@ export function ModelSelector({
                         <span className="block truncate text-micro text-muted-foreground">
                           {KIND_LABELS[option.kind]}
                           {option.model ? ` · ${option.model}` : ''}
-                          {option.usable === false
-                            ? ' · 缺少凭据'
-                            : option.enabled
-                              ? ''
-                              : ' · 未启用'}
+                          {option.usable === false ? ' · 缺少凭据' : ''}
                         </span>
                       </span>
                     </DropdownMenuRadioItem>
