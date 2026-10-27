@@ -294,14 +294,3 @@ export function buildStreamingAgentCard(
     },
   };
 }
-
-export function buildFollowUpActionResultCard(
-  message: string,
-  ok: boolean,
-): FeishuCardV2 {
-  return buildAgentReplyCard({
-    status: ok ? 'done' : 'warning',
-    title: ok ? '操作已完成' : '操作未执行',
-    text: message,
-  });
-}

@@ -81,7 +81,6 @@ function reloadHarness(provider: Provider, secret: Record<string, string>) {
     handleFeishuSessionClear: vi.fn(),
     handleFeishuSessionFresh: vi.fn(),
     handleChannelMessageRecalled: vi.fn(),
-    handleFollowUpCardAction: vi.fn(),
     handleCardInterrupt: vi.fn(),
     applyFeishuTransportIssue: vi.fn(),
     normalizeFeishuBrand: (value: unknown) =>

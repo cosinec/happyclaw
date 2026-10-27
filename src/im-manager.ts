@@ -51,7 +51,6 @@ import { logger } from './logger.js';
 import type {
   ChannelMessageMeta,
   ChannelTurnContext,
-  FollowUpAction,
   FollowUpActionResult,
   FollowUpDisposition,
   FollowUpMode,
@@ -212,14 +211,6 @@ export interface ConnectFeishuOptions {
     /** Native chat type of the command message, when known. */
     chatType?: 'p2p' | 'group';
   }) => Promise<string>;
-  onFollowUpCardAction?: (input: {
-    sourceJid: string;
-    targetJid: string;
-    messageId: string;
-    action: FollowUpAction;
-    expectedRunId: string;
-    operatorImId: string;
-  }) => Promise<FollowUpActionResult> | FollowUpActionResult;
   onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
   onBotRemovedFromGroup?: (chatJid: string) => void;
   shouldProcessGroupMessage?: (chatJid: string, senderImId?: string) => boolean;
@@ -608,21 +599,6 @@ export class IMConnectionManager {
                     sourceJid: scope(input.sourceJid),
                   })
                 : Promise.resolve('当前通道暂不可用。'),
-          }
-        : {}),
-      ...(opts.onFollowUpCardAction
-        ? {
-            onFollowUpCardAction: (
-              input: Parameters<
-                NonNullable<IMChannelConnectOpts['onFollowUpCardAction']>
-              >[0],
-            ) =>
-              inboundAllowed()
-                ? opts.onFollowUpCardAction!(input)
-                : {
-                    ok: false,
-                    message: '当前连接已停用，无法执行操作。',
-                  },
           }
         : {}),
       ...(opts.onBotAddedToGroup
@@ -1452,7 +1428,6 @@ export class IMConnectionManager {
         onSessionBreak: options?.onSessionBreak,
         onSessionClear: options?.onSessionClear,
         onSessionFresh: options?.onSessionFresh,
-        onFollowUpCardAction: options?.onFollowUpCardAction,
         onBotAddedToGroup: options?.onBotAddedToGroup,
         onBotRemovedFromGroup: options?.onBotRemovedFromGroup,
         shouldProcessGroupMessage: options?.shouldProcessGroupMessage,

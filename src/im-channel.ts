@@ -50,7 +50,6 @@ import { logger } from './logger.js';
 import type {
   ChannelMessageMeta,
   ChannelTurnContext,
-  FollowUpAction,
   FollowUpActionResult,
   FollowUpDisposition,
   FollowUpMode,
@@ -206,14 +205,6 @@ export interface IMChannelConnectOpts {
     /** Native chat type of the command message, when known. */
     chatType?: 'p2p' | 'group';
   }) => Promise<string>;
-  onFollowUpCardAction?: (input: {
-    sourceJid: string;
-    targetJid: string;
-    messageId: string;
-    action: FollowUpAction;
-    expectedRunId: string;
-    operatorImId: string;
-  }) => Promise<FollowUpActionResult> | FollowUpActionResult;
   /** Bot 被添加到群聊时调用 */
   onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
   /** Bot 被移出群聊或群被解散时调用 */
@@ -388,7 +379,6 @@ export function createFeishuChannel(config: FeishuChannelConfig): IMChannel {
         onSessionBreak: opts.onSessionBreak,
         onSessionClear: opts.onSessionClear,
         onSessionFresh: opts.onSessionFresh,
-        onFollowUpCardAction: opts.onFollowUpCardAction,
         onBotAddedToGroup: opts.onBotAddedToGroup,
         onBotRemovedFromGroup: opts.onBotRemovedFromGroup,
         shouldProcessGroupMessage: opts.shouldProcessGroupMessage,

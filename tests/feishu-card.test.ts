@@ -1,7 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import {
   buildAgentReplyCard,
-  buildFollowUpActionResultCard,
   buildStreamingAgentCard,
 } from '../src/feishu-cards/builder.js';
 import { resolveStatusTheme } from '../src/feishu-cards/status-theme.js';
@@ -1160,11 +1159,5 @@ describe('Feishu follow-up controls', () => {
     const serialized = JSON.stringify(card);
     expect(serialized).toContain('停止回复');
     expect(serialized).not.toContain('中断回复');
-  });
-
-  test('terminal action card removes buttons', () => {
-    const card = buildFollowUpActionResultCard('已引导当前运行。', true);
-    expect(validateV2Shape(card)).toEqual([]);
-    expect(countTag(card, 'button')).toBe(0);
   });
 });

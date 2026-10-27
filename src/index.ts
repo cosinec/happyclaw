@@ -21902,40 +21902,6 @@ function handleIncomingFollowUp(input: {
   };
 }
 
-async function handleFollowUpCardAction(input: {
-  sourceJid: string;
-  targetJid: string;
-  messageId: string;
-  action: import('./types.js').FollowUpAction;
-  expectedRunId: string;
-  operatorImId: string;
-}): Promise<FollowUpActionResult> {
-  const item = getQueuedFollowUp(input.targetJid, input.messageId);
-  if (!item) return { ok: false, message: '这条排队消息已被处理或取消。' };
-  if (
-    !input.operatorImId ||
-    item.sender !== input.operatorImId ||
-    !isSenderAllowedInGroup(input.sourceJid, input.operatorImId)
-  ) {
-    return { ok: false, message: '只有这条消息的发送者可以操作它。' };
-  }
-  if (input.action === 'cancel') {
-    return cancelFollowUp(input.targetJid, input.messageId);
-  }
-  if (input.action === 'steer') {
-    return promoteFollowUp(
-      input.targetJid,
-      input.messageId,
-      input.expectedRunId,
-    );
-  }
-  return interruptAndRunFollowUp(
-    input.targetJid,
-    input.messageId,
-    input.expectedRunId,
-  );
-}
-
 /**
  * 飞书流式卡片按钮中断回调。
  * 仅由飞书卡片按钮触发，不涉及自动关键词检测。
@@ -22859,7 +22825,6 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
           onSessionClear: handleFeishuSessionClear,
           onSessionFresh: handleFeishuSessionFresh,
           onMessageRecalled: handleChannelMessageRecalled,
-          onFollowUpCardAction: handleFollowUpCardAction,
           onCardInterrupt: handleCardInterrupt,
           // The same mutable secret onP2pSender fills on the first DM claim.
           getOwnerOpenId: () => secret.ownerOpenId || undefined,

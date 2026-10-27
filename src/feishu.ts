@@ -60,10 +60,7 @@ import {
   prepareFeishuPostTextPages,
   prepareFeishuPlainTextPages,
 } from './feishu-message-capacity.js';
-import {
-  buildAgentReplyCard,
-  buildFollowUpActionResultCard,
-} from './feishu-cards/builder.js';
+import { buildAgentReplyCard } from './feishu-cards/builder.js';
 import {
   evaluateMentionGate,
   isBotMentioned,
@@ -161,7 +158,6 @@ import type {
   ChannelReferencedMessage,
   ChannelTurnContext,
   FeishuMessageMeta,
-  FollowUpAction,
   FollowUpActionResult,
   FollowUpDisposition,
   FollowUpMode,
@@ -268,15 +264,6 @@ export interface ConnectOptions {
     /** Native chat type of the command message, when known. */
     chatType?: 'p2p' | 'group';
   }) => Promise<string>;
-  /** Handle buttons from legacy queued-message cards sent by older versions. */
-  onFollowUpCardAction?: (input: {
-    sourceJid: string;
-    targetJid: string;
-    messageId: string;
-    action: FollowUpAction;
-    expectedRunId: string;
-    operatorImId: string;
-  }) => Promise<FollowUpActionResult> | FollowUpActionResult;
   /** Bot 被添加到群聊时调用（自动注册群组） */
   onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
   /** Bot 被移出群聊或群被解散时调用（自动解绑 IM 绑定） */
@@ -6145,54 +6132,12 @@ export function createFeishuConnection(
               });
             }
 
-            let result: FollowUpActionResult | undefined;
-            if (
-              action === 'steer_queued' ||
-              action === 'cancel_queued' ||
-              action === 'interrupt_and_run'
-            ) {
-              const mappedAction: FollowUpAction =
-                action === 'steer_queued'
-                  ? 'steer'
-                  : action === 'cancel_queued'
-                    ? 'cancel'
-                    : 'interrupt_and_run';
-              if (
-                typeof value.sourceJid !== 'string' ||
-                typeof value.targetJid !== 'string' ||
-                typeof value.messageId !== 'string' ||
-                typeof value.expectedRunId !== 'string'
-              ) {
-                return;
-              }
-              result = await connectOptions?.onFollowUpCardAction?.({
-                sourceJid: value.sourceJid,
-                targetJid: value.targetJid,
-                messageId: value.messageId,
-                action: mappedAction,
-                expectedRunId: value.expectedRunId,
-                operatorImId,
-              });
-            }
-
-            if (!result) return;
-            if (!result.ok) {
-              return {
-                toast: {
-                  type: 'warning',
-                  content: result.message,
-                },
-              };
-            }
-            if (!client) return;
-            await client.im.v1.message.patch({
-              path: { message_id: cardMessageId },
-              data: {
-                content: JSON.stringify(
-                  buildFollowUpActionResultCard(result.message, result.ok),
-                ),
-              },
-            });
+            // Any other button (e.g. queued-message controls on cards older
+            // releases sent) no longer has a handler: say so instead of
+            // leaving Feishu's interaction spinner to time out.
+            return {
+              toast: { type: 'info', content: '这张卡片上的按钮已失效。' },
+            };
           } catch (err) {
             logger.error({ err }, 'Error handling card action trigger');
           }
