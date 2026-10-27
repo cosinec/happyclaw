@@ -7,7 +7,7 @@ import { downloadHttpsBuffer } from './im-media-download.js';
 import { Agent as HttpsAgent } from 'node:https';
 import { ProxyAgent } from 'proxy-agent';
 import { storeChatMetadata, storeMessageDirect, updateChatName } from './db.js';
-import { createDedupCache, splitTextChunks } from './im-utils.js';
+import { createDedupCache } from './im-utils.js';
 import { notifyNewImMessage } from './message-notifier.js';
 import { logger } from './logger.js';
 import {
@@ -26,6 +26,10 @@ import {
   extractProviderTarget,
 } from './channel-address.js';
 import { resolveAdmittedChannelRoute } from './channel-admission.js';
+import {
+  chunkTelegramMarkdown,
+  createTelegramRateLimitRetry,
+} from './telegram-outbound.js';
 import {
   isGroupSenderAdmitted,
   type ChannelCommandMention,
@@ -668,56 +672,6 @@ function classifyTelegramSendError(err: unknown): unknown {
   );
 }
 
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
-
-/**
- * Convert Markdown to Telegram-compatible HTML.
- * Handles: code blocks, inline code, bold, italic, strikethrough, links, headings.
- */
-function markdownToTelegramHtml(md: string): string {
-  // Step 1: Extract code blocks to protect them from further processing
-  const codeBlocks: string[] = [];
-  let text = md.replace(/```[\s\S]*?```/g, (match) => {
-    const code = match.replace(/^```\w*\n?/, '').replace(/\n?```$/, '');
-    codeBlocks.push(`<pre><code>${escapeHtml(code)}</code></pre>`);
-    return `\x00CB${codeBlocks.length - 1}\x00`;
-  });
-
-  // Step 2: Extract inline code
-  const inlineCodes: string[] = [];
-  text = text.replace(/`([^`]+)`/g, (_, code: string) => {
-    inlineCodes.push(`<code>${escapeHtml(code)}</code>`);
-    return `\x00IC${inlineCodes.length - 1}\x00`;
-  });
-
-  // Step 3: Escape HTML in remaining text
-  text = escapeHtml(text);
-
-  // Step 4: Convert Markdown formatting
-  // Links: [text](url)
-  text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
-  // Bold: **text** or __text__
-  text = text.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
-  text = text.replace(/__(.+?)__/g, '<b>$1</b>');
-  // Strikethrough: ~~text~~ (before italic to avoid conflicts)
-  text = text.replace(/~~(.+?)~~/g, '<s>$1</s>');
-  // Italic: *text* (not preceded/followed by word chars to avoid false matches)
-  text = text.replace(/(?<!\w)\*(?!\s)(.+?)(?<!\s)\*(?!\w)/g, '<i>$1</i>');
-  // Headings: # text → bold
-  text = text.replace(/^#{1,6}\s+(.+)$/gm, '<b>$1</b>');
-
-  // Step 5: Restore code blocks and inline code
-  text = text.replace(/\x00CB(\d+)\x00/g, (_, i) => codeBlocks[Number(i)]);
-  text = text.replace(/\x00IC(\d+)\x00/g, (_, i) => inlineCodes[Number(i)]);
-
-  return text;
-}
-
 // ─── Factory Function ──────────────────────────────────────────
 
 /**
@@ -1156,6 +1110,10 @@ export function createTelegramConnection(
           },
         },
       });
+      // A send Telegram refused with 429 is retried after its retry_after.
+      bot.api.config.use(
+        createTelegramRateLimitRetry({ isLive: () => !stopping }),
+      );
       // Track completed Bot API long polls, rather than inbound messages: a
       // quiet chat is healthy as long as getUpdates keeps completing.
       bot.api.config.use(async (prev, method, payload, signal) => {
@@ -2209,15 +2167,13 @@ export function createTelegramConnection(
         : {};
 
       try {
-        // Split original markdown into chunks (leave room for HTML tag overhead)
-        const mdChunks = splitTextChunks(text, 3800);
+        const chunks = chunkTelegramMarkdown(text);
         const tracker = new PhysicalDeliveryTracker(
-          mdChunks.length + (localImagePaths?.length ?? 0),
+          chunks.length + (localImagePaths?.length ?? 0),
         );
 
-        for (const mdChunk of mdChunks) {
+        for (const { markdown: mdChunk, html } of chunks) {
           await tracker.send(async () => {
-            const html = markdownToTelegramHtml(mdChunk);
             try {
               await activeBot.api.sendMessage(target.chatId, html, {
                 parse_mode: 'HTML',
