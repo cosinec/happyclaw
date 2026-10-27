@@ -4,6 +4,11 @@ import * as path from 'node:path';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { fenceFeishuWebSocketLifecycle } from './feishu-ws-lifecycle.js';
 import {
+  createFeishuConflictMonitor,
+  type FeishuTransportIssue,
+} from './feishu-connection-conflict.js';
+import { createFeishuPermissionNotifier } from './feishu-permission-notice.js';
+import {
   feishuSdkDomain,
   normalizeFeishuBrand,
   type FeishuBrand,
@@ -66,6 +71,7 @@ import {
 import {
   classifyFeishuError,
   feishuErrorCode,
+  feishuErrorMessageText,
   isFeishuMissingScopeError,
   neutralizeFeishuMentions,
 } from './feishu-errors.js';
@@ -282,6 +288,19 @@ export interface ConnectOptions {
     chatJid: string,
     messageId: string,
   ) => void | Promise<void>;
+  /**
+   * Another program holds this app's long connection (called once per
+   * incident), or `null` once the connection is ready again. Never called
+   * while connect() is still pending.
+   */
+  onTransportIssue?: (
+    issue: { kind: 'conflict'; message: string } | null,
+  ) => void;
+  /**
+   * open_id of the account owner (learned from the first private chat), the
+   * only recipient of missing-permission notices. Read on every notice.
+   */
+  getOwnerOpenId?: () => string | undefined;
 }
 
 export interface FeishuChatInfo {
@@ -1423,6 +1442,60 @@ export function createFeishuConnection(
   let wsClient: lark.WSClient | null = null;
   let wsConnectionGeneration = 0;
 
+  const permissionNotices = createFeishuPermissionNotifier({
+    brand,
+    appId: config.appId,
+    accountKey: reliabilityAccountId,
+    getOwnerOpenId: () => connectOptions?.getOwnerOpenId?.(),
+    // An `ou_` target is sent by open_id: the owner's private chat.
+    send: (ownerOpenId, text) =>
+      sendToFeishu(ownerOpenId, 'text', JSON.stringify({ text })),
+  });
+
+  // The host marks an account connected once connect() resolves. Reports
+  // made while connect() is pending are held back; the incident still open
+  // then is delivered on the next macrotask, after the host's "connected".
+  let connectInFlight = false;
+  function deliverTransportIssue(issue: FeishuTransportIssue | null): void {
+    if (issue) {
+      logger.warn(
+        { accountId: reliabilityAccountId },
+        'Feishu long connection is held by another program',
+      );
+    } else {
+      logger.info(
+        { accountId: reliabilityAccountId },
+        'Feishu long connection conflict cleared',
+      );
+    }
+    try {
+      connectOptions?.onTransportIssue?.(issue);
+    } catch (err) {
+      logger.warn({ err }, 'Feishu transport issue callback failed');
+    }
+  }
+  const conflictMonitor = createFeishuConflictMonitor({
+    brand,
+    report: (issue) => {
+      if (!connectInFlight) deliverTransportIssue(issue);
+    },
+    reconnectAttempts: () =>
+      wsClient?.getConnectionStatus?.().reconnectAttempts ?? 0,
+  });
+  function releaseTransportIssues(): void {
+    connectInFlight = false;
+    if (!conflictMonitor.current()) return;
+    const opts = connectOptions;
+    setTimeout(() => {
+      const issue = conflictMonitor.current();
+      if (issue && connectOptions === opts) deliverTransportIssue(issue);
+    }, 0).unref?.();
+  }
+  function resetTransportIssues(): void {
+    connectInFlight = false;
+    conflictMonitor.stop();
+  }
+
   // WSClient.start() resolves before the endpoint pull and WS handshake
   // finish, and close() does not cancel that in-flight start attempt. A
   // stop() or reconnect that retires the client inside the handshake window
@@ -1439,13 +1512,28 @@ export function createFeishuConnection(
       // stale-but-OPEN socket (see FEISHU_WS_PING_TIMEOUT_SEC).
       wsConfig: { pingTimeout: FEISHU_WS_PING_TIMEOUT_SEC },
       onReady: () => {
-        if (wsClient === created) return;
+        if (wsClient === created) {
+          conflictMonitor.ready();
+          return;
+        }
         logger.warn(
           'Closing Feishu WS client that finished connecting after it was retired',
         );
         created.close({ force: true });
       },
+      onReconnecting: () => {
+        if (wsClient === created) conflictMonitor.reconnecting();
+      },
+      onReconnected: () => {
+        if (wsClient === created) conflictMonitor.ready();
+      },
+      onError: (error) => {
+        if (wsClient !== created) return;
+        logger.warn({ err: error }, 'Feishu long connection gave up');
+        conflictMonitor.failed(error);
+      },
     });
+    conflictMonitor.starting();
     return fenceFeishuWebSocketLifecycle(created);
   }
   let eventDispatcher: lark.EventDispatcher | null = null;
@@ -1464,10 +1552,15 @@ export function createFeishuConnection(
   let unsubscribeInboundGate: (() => void) | null = null;
   const forwardBundles = new FeishuForwardBundleResolver(async (messageId) => {
     if (!client) return undefined;
-    return client.im.v1.message.get({
-      path: { message_id: messageId },
-      params: { card_msg_content_type: 'user_card_content' },
-    });
+    try {
+      return await client.im.v1.message.get({
+        path: { message_id: messageId },
+        params: { card_msg_content_type: 'user_card_content' },
+      });
+    } catch (err) {
+      permissionNotices.report('message_lookup', err);
+      throw err;
+    }
   });
   // botOpenId 自愈状态：lastBotInfoFetchAt 防止 lazy refetch 高频骚扰 OAPI；
   // botInfoRefetchInFlight 防止并发拉取
@@ -2133,6 +2226,7 @@ export function createFeishuConnection(
         mimeType,
       };
     } catch (err) {
+      permissionNotices.report('message_resource', err);
       logger.warn(
         { err, messageId, fileKey },
         'Failed to download Feishu image',
@@ -2198,6 +2292,7 @@ export function createFeishuConnection(
         throw err;
       }
     } catch (err) {
+      permissionNotices.report('message_resource', err);
       logger.warn(
         { err, messageId, fileKey },
         'Failed to download Feishu file to disk',
@@ -2215,13 +2310,6 @@ export function createFeishuConnection(
       new Error(`${operation} failed: ${response.code} ${response.msg ?? ''}`),
       { code: response.code },
     );
-  }
-
-  function feishuErrorMessage(err: unknown): string | undefined {
-    const body = (err as { response?: { data?: { msg?: unknown } } })?.response
-      ?.data;
-    if (typeof body?.msg === 'string') return body.msg;
-    return err instanceof Error ? err.message : undefined;
   }
 
   const senderNames = createFeishuSenderNameResolver({
@@ -2266,9 +2354,14 @@ export function createFeishuConnection(
         : 'definitive';
     },
     onMissingScope: (source, err) => {
+      permissionNotices.report(source, err);
       // Feishu's msg names the scopes to grant and links to the console.
       logger.warn(
-        { source, code: feishuErrorCode(err), msg: feishuErrorMessage(err) },
+        {
+          source,
+          code: feishuErrorCode(err),
+          msg: feishuErrorMessageText(err),
+        },
         source === 'contact'
           ? 'Feishu app lacks a contact scope (e.g. contact:user.base:readonly); senders outside group member lists show their open_id'
           : 'Feishu app lacks a chat member scope (e.g. im:chat.members:read); group senders are named through the contact directory only',
@@ -2334,6 +2427,7 @@ export function createFeishuConnection(
       };
       return res.data?.reaction_id || null;
     } catch (err) {
+      permissionNotices.report('reaction', err);
       logger.debug({ err, messageId, emojiType }, 'Failed to add reaction');
       return null;
     }
@@ -2367,6 +2461,7 @@ export function createFeishuConnection(
         : null;
     } catch (err) {
       if (!(err instanceof FeishuAckReactionTimeoutError)) {
+        permissionNotices.report('reaction', err);
         logger.debug({ err, messageId }, 'Failed to add OnIt reaction');
         return null;
       }
@@ -5108,6 +5203,7 @@ export function createFeishuConnection(
           // retried next round, cursors untouched.
           throw err;
         }
+        permissionNotices.report('message_history', err);
         logger.warn(
           { err, chatId, threadId },
           'Feishu refused a topic backfill; skipping that topic',
@@ -5306,6 +5402,7 @@ export function createFeishuConnection(
               budget,
             );
           } catch (err) {
+            permissionNotices.report('message_history', err);
             logger.warn({ err, chatId, reason }, 'Feishu chat backfill failed');
           }
         }
@@ -5692,6 +5789,7 @@ export function createFeishuConnection(
 
       // stop() can retire this connect while REST inventory is still loading.
       if (generation !== wsConnectionGeneration) return false;
+      connectInFlight = true;
       const nextWsClient = createWsClient();
       wsClient = nextWsClient;
 
@@ -5711,6 +5809,7 @@ export function createFeishuConnection(
         if (generation !== wsConnectionGeneration) return false;
         onReady();
         startBackfill('startup');
+        releaseTransportIssues();
         return true;
       } catch (err) {
         logger.error(
@@ -5719,6 +5818,7 @@ export function createFeishuConnection(
         );
         nextWsClient.close({ force: true });
         if (generation !== wsConnectionGeneration) return false;
+        resetTransportIssues();
         // Clean up partially initialized state
         stopHealthMonitor();
         stopInboundGateWait();
@@ -5758,6 +5858,7 @@ export function createFeishuConnection(
         clearInterval(timer);
       }
       inboxHeartbeatByClaim.clear();
+      resetTransportIssues();
       connectOptions = null;
       eventDispatcher = null;
       reconnecting = false;
@@ -6134,6 +6235,7 @@ export function createFeishuConnection(
         });
         return info;
       } catch (err) {
+        permissionNotices.report('chat_info', err);
         logger.warn({ err, chatId }, 'Failed to get Feishu chat info');
         return null;
       }
@@ -6210,6 +6312,7 @@ export function createFeishuConnection(
 
         logger.info('Feishu group sync completed');
       } catch (err) {
+        permissionNotices.report('chat_info', err);
         logger.error({ err }, 'Failed to sync Feishu groups');
         throw err;
       }
