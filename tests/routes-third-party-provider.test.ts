@@ -196,7 +196,20 @@ describe('third-party provider routes', () => {
       anthropicModel: 'glm-5.3[1m]',
     });
     expect(status).toBe(200);
-    expect(body).toEqual({ ok: true, probes: [] });
+    expect(body).toEqual({
+      ok: true,
+      probes: [],
+      code: null,
+      authMode: 'x-api-key',
+      record: {
+        ok: true,
+        code: null,
+        status: null,
+        model: null,
+        latencyMs: null,
+        at: expect.any(String),
+      },
+    });
     expect(mocks.connectivity).toHaveBeenCalledWith({
       baseUrl: 'https://open.bigmodel.cn/api/anthropic',
       token: 'glm-old-secret',
