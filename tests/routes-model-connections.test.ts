@@ -60,6 +60,8 @@ const currentUser = vi.hoisted(() => ({ n: 0, role: 'admin' }));
 const web = await import('../src/web.js');
 const db = await import('../src/db.js');
 const runtimeConfig = await import('../src/runtime-config.js');
+const runner = await import('../src/container-runner.js');
+const { providerPool } = await import('../src/provider-pool.js');
 const catalogSync = await import('../src/codex-gateway/model-catalog-sync.js');
 const { CODEX_GATEWAY_BASE_URL_PLACEHOLDER } =
   await import('../src/codex-gateway/types.js');
@@ -105,6 +107,29 @@ function xApiKeyOnly(key: string, ok: Reply): (seen: Seen) => Reply {
           status: 401,
           body: { error: { message: `invalid api key ${key}` } },
         };
+}
+
+/** Refuses the key in one header style; answers `other` to the other style. */
+function refuses(
+  style: 'bearer' | 'x-api-key',
+  other: Reply,
+): (seen: Seen) => Reply {
+  return (request) =>
+    (
+      style === 'bearer'
+        ? !!request.headers.authorization
+        : !!request.headers['x-api-key']
+    )
+      ? {
+          status: 403,
+          body: {
+            error: {
+              type: 'permission_error',
+              message: 'Request not allowed in this region',
+            },
+          },
+        }
+      : other;
 }
 
 // Requests to the real Anthropic and ChatGPT hosts, answered in-process.
@@ -410,6 +435,93 @@ describe('editing a model list', () => {
     ]);
   });
 
+  test('a new default model drops only the sessions that ran the old one', async () => {
+    const folder = 'default-change-folder';
+    const provider = thirdParty({
+      enabled: true,
+      models: [{ id: 'glm-5.3' }, { id: 'glm-5.2' }, { id: 'glm-5.1' }],
+    });
+    const session = (agentId: string | null, model: string | null) => {
+      db.setSession(folder, `sdk-${agentId ?? 'main'}`, agentId);
+      db.setSessionProviderId(folder, agentId, provider.id);
+      if (model) db.setSessionModel(folder, agentId, model);
+    };
+    // The conversation picked glm-5.2 and ran it.
+    db.setSessionModelSelection(folder, null, provider.id, 'u', {
+      model: 'glm-5.2',
+    });
+    session(null, 'glm-5.2');
+    session('on-default', 'glm-5.3');
+    session('unrecorded', null);
+
+    const patched = await request('PATCH', `/providers/${provider.id}`, {
+      anthropicModel: 'glm-5.1',
+    });
+    expect(patched.status).toBe(200);
+    expect(patched.body.applied).toMatchObject({ clearedSessionsCount: 2 });
+    expect(db.getSession(folder)).toBe('sdk-main');
+    expect(db.getSession(folder, 'on-default')).toBeUndefined();
+    expect(db.getSession(folder, 'unrecorded')).toBeUndefined();
+
+    // The pinned conversation resumes the session it ran on glm-5.2.
+    expect(runner.willClearSessionOnProviderSwitch(folder, null)).toBe(false);
+    const next = runner.trySelectPoolProvider(folder, null)!;
+    providerPool.releaseSession(next.profileId);
+    expect(next.resetSession).toBeFalsy();
+    expect(next.resolved.config.anthropicModel).toBe('glm-5.2');
+    expect(db.getSession(folder)).toBe('sdk-main');
+    db.setSessionModelSelection(folder, null, null);
+  });
+
+  test('turning the default model to its 1M window keeps every session', async () => {
+    const provider = thirdParty({ enabled: true });
+    boundSession(provider.id);
+    const patched = await request('PATCH', `/providers/${provider.id}`, {
+      anthropicModel: 'glm-5.3[1m]',
+    });
+    expect(patched.status).toBe(200);
+    // Runners restart for the new window; the SDK session stays valid.
+    expect(queue.pauseGroupsForMutation).toHaveBeenCalled();
+    expect(db.getSession('connections-folder')).toBe('sdk-session-1');
+  });
+
+  test('a default that would push a full list past its cap is refused', async () => {
+    const provider = thirdParty({
+      models: Array.from({ length: 100 }, (_, index) => ({
+        id: index === 0 ? 'glm-5.3' : `m-${index}`,
+      })),
+    });
+    const patched = await request('PATCH', `/providers/${provider.id}`, {
+      anthropicModel: 'glm-new',
+    });
+    expect(patched.status).toBe(400);
+    expect(patched.body.error).toContain('最多 100 个模型');
+    expect(runtimeConfig.getProviderById(provider.id)!.models).toHaveLength(
+      100,
+    );
+  });
+
+  test('a preset does not follow the connection to another address', async () => {
+    const created = await request('POST', '/providers', {
+      name: 'Relay',
+      type: 'third_party',
+      presetId: 'deepseek',
+      anthropicBaseUrl: upstream,
+      anthropicAuthToken: 'relay-secret-123456',
+    });
+    expect(created.body.presetId).toBeNull();
+
+    const preset = thirdParty({
+      anthropicBaseUrl: 'https://api.deepseek.com/anthropic',
+      presetId: 'deepseek',
+    });
+    expect(preset.presetId).toBe('deepseek');
+    const moved = await request('PATCH', `/providers/${preset.id}`, {
+      anthropicBaseUrl: upstream,
+    });
+    expect(moved.body.provider.presetId).toBeNull();
+  });
+
   test('a model an Agent runs cannot be removed, nor renamed by its 1M switch', async () => {
     const provider = thirdParty({
       models: [{ id: 'glm-5.3' }, { id: 'glm-5.2' }, { id: 'glm-5.1' }],
@@ -573,6 +685,32 @@ describe('POST /providers/discover-models', () => {
     expect(logged).not.toContain('relay-secret-123456');
   });
 
+  test('a preset named with another address lists models at that address', async () => {
+    reply = () => ({ status: 200, body: { data: [{ id: 'relay-1' }] } });
+    const { body } = await request('POST', '/providers/discover-models', {
+      presetId: 'moonshot-kimi-cn',
+      anthropicBaseUrl: upstream,
+      anthropicAuthToken: 'relay-secret-123456',
+    });
+    expect(body).toMatchObject({ ok: true, models: [{ id: 'relay-1' }] });
+    expect(seen.map((item) => item.url)).toEqual(['/v1/models']);
+  });
+
+  test('a retry that fails for another reason adopts no header style', async () => {
+    reply = refuses('bearer', { status: 500, body: { error: 'boom' } });
+    const { body } = await request('POST', '/providers/discover-models', {
+      anthropicBaseUrl: upstream,
+      anthropicAuthToken: 'relay-secret-123456',
+    });
+    expect(body).toMatchObject({
+      ok: false,
+      code: 'AUTH_FORBIDDEN',
+      status: 403,
+    });
+    expect(body).not.toHaveProperty('authMode');
+    expect(seen).toHaveLength(2);
+  });
+
   test('a preset address lists models where the vendor does', async () => {
     reply = () => ({ status: 200, body: { data: [] } });
     // Kimi lists its models off the /anthropic path; the preset knows where.
@@ -700,6 +838,92 @@ describe('POST /providers/test', () => {
     expect(body).not.toHaveProperty('authMode');
     expect(body.probes[0].hint).toContain('两种认证方式');
     expect(JSON.stringify(body)).not.toContain('relay-secret-123456');
+  });
+
+  test('a retry that proves nothing about the key adopts no header style', async () => {
+    for (const other of [
+      { status: 503, body: { error: { message: 'upstream overloaded' } } },
+      { status: 429, body: { error: { message: 'slow down' } } },
+      { status: 400, body: { error: { message: 'bad request' } } },
+    ]) {
+      seen.length = 0;
+      reply = refuses('bearer', other);
+      const { body } = await request('POST', '/providers/test', {
+        anthropicBaseUrl: upstream,
+        anthropicAuthToken: 'relay-secret-123456',
+        anthropicModel: 'glm-5.3',
+      });
+      expect(seen).toHaveLength(2);
+      // The first answer stands: the key was refused in its first style.
+      expect(body).toMatchObject({
+        ok: false,
+        code: 'AUTH_FORBIDDEN',
+        record: { status: 403 },
+      });
+      expect(body).not.toHaveProperty('authMode');
+    }
+  });
+
+  test('a retry the endpoint judged past the key adopts that style', async () => {
+    reply = (request) =>
+      request.headers['x-api-key']
+        ? {
+            status: 404,
+            body: { error: { message: 'model glm-5.3 does not exist' } },
+          }
+        : { status: 401, body: { error: { message: 'unauthorized' } } };
+    const { body } = await request('POST', '/providers/test', {
+      anthropicBaseUrl: upstream,
+      anthropicAuthToken: 'relay-secret-123456',
+      anthropicModel: 'glm-5.3',
+    });
+    expect(body).toMatchObject({
+      ok: false,
+      code: 'MODEL_NOT_FOUND',
+      authMode: 'x-api-key',
+    });
+  });
+
+  test('a first answer that proves nothing about the key reports no style', async () => {
+    reply = () => ({ status: 429, body: { error: { message: 'slow down' } } });
+    const { body } = await request('POST', '/providers/test', {
+      anthropicBaseUrl: upstream,
+      anthropicAuthToken: 'relay-secret-123456',
+      anthropicModel: 'glm-5.3',
+    });
+    expect(body).toMatchObject({ ok: false, code: 'RATE_LIMITED' });
+    expect(body).not.toHaveProperty('authMode');
+    expect(seen).toHaveLength(1);
+  });
+
+  test('a saved connection keeps no header style an inconclusive retry suggested', async () => {
+    // Saved before styles were chosen: its runtime sends a bare token as
+    // x-api-key, which this endpoint refuses; Bearer only gets a 503.
+    reply = refuses('x-api-key', {
+      status: 503,
+      body: { error: { message: 'upstream overloaded' } },
+    });
+    const provider = thirdParty();
+    const { body } = await request('POST', '/providers/test', {
+      providerId: provider.id,
+    });
+    expect(body).not.toHaveProperty('authMode');
+    const saved = runtimeConfig.getProviderById(provider.id)!;
+    expect(saved.anthropicAuthMode).toBeUndefined();
+    expect(saved.lastTest).toMatchObject({ ok: false, code: 'AUTH_FORBIDDEN' });
+    expect(
+      queue.drainProviderRunnersForCredentialRefresh,
+    ).not.toHaveBeenCalled();
+  });
+
+  test("a preset named with another address does not lend it the preset's model", async () => {
+    const { body } = await request('POST', '/providers/test', {
+      presetId: 'deepseek',
+      anthropicBaseUrl: upstream,
+      anthropicAuthToken: 'relay-secret-123456',
+    });
+    expect(body.ok).toBe(true);
+    expect(JSON.parse(seen[0].body).model).toBe('claude-haiku-5-5');
   });
 
   test('a preset draft is probed on its first model at its address', async () => {
@@ -865,6 +1089,23 @@ describe('POST /providers/test', () => {
     expect(refused.body).toMatchObject({ ok: false, code: 'AUTH_INVALID' });
     // Never saved.
     expect(runtimeConfig.getProviders()).toEqual([]);
+  });
+
+  test('an account refused for anything but a missing scope fails', async () => {
+    for (const message of [
+      'OAuth authentication is currently not allowed for this organization.',
+      'Request not allowed',
+    ]) {
+      anthropic.mockReturnValue({
+        status: 403,
+        body: { type: 'error', error: { type: 'permission_error', message } },
+      });
+      const { body } = await request('POST', '/providers/test', {
+        type: 'official',
+        claudeCredentialInput: 'sk-ant-oat01-abcdefghijklmnopqrstuvwxyz',
+      });
+      expect(body).toMatchObject({ ok: false, code: 'AUTH_FORBIDDEN' });
+    }
   });
 
   test('a pasted login whose access token expired is not renewed here', async () => {

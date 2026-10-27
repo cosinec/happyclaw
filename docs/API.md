@@ -520,10 +520,12 @@ Provider（模型连接：一份凭据和一个端点，提供一组模型）：
 - `GET /api/config/claude`
 - `GET|POST /api/config/claude/providers`；公开 Provider 带 `models`
   （`{ id, hidden?, effort? }[]`，默认模型 `anthropicModel` 总在其中且不隐藏；
-  ChatGPT 订阅为 `[]`，模型取自其目录）、`presetId`（起步的厂商预设，无则 `null`）
-  和 `lastTest`（最近一次测试 `{ ok, code, status, model, latencyMs, at }`，未测过
-  为 `null`；端点、认证方式或凭据变更后清空）。创建请求可带 `models`、`presetId`
-  （未知预设 400），`models` 不含默认模型时把它加在最前；模型名不能含空白。
+  ChatGPT 订阅为 `[]`，模型取自其目录）、`presetId`（起步的厂商预设，只在地址
+  仍是该预设的地址时保留，否则为 `null`）和 `lastTest`（最近一次测试
+  `{ ok, code, status, model, latencyMs, at }`，未测过为 `null`；端点、认证方式、
+  凭据、`ANTHROPIC_CUSTOM_HEADERS` 或 `ANTHROPIC_DEFAULT_HAIKU_MODEL` 变更后清空）。
+  创建请求可带 `models`、`presetId`（未知预设 400），`models` 不含默认模型时把它
+  加在最前，超过 100 个模型返回 400；模型名不能含空白。
   每种类型创建时都必须带凭据，否则 400 `{ error: '新建模型配置需要凭据' }`；
   未指定 `enabled` 时，只有当前没有已启用的连接才默认启用，两个 OAuth 回调新建
   连接时同样如此，均不自动设为全局默认。可用 `claudeCredentialInput` 提交官方
@@ -534,8 +536,10 @@ Provider（模型连接：一份凭据和一个端点，提供一组模型）：
   请求内提交；删除 ChatGPT 订阅型 Provider 后在后台尽力吊销其 refresh token，
   吊销结果不影响响应。PATCH 的 `models` 是完整的新列表（未列出的即移除），
   `presetId: null` 清除预设；只改模型的显示/隐藏、推理档位或新增模型时不停
-  Runner、不清会话；改 `anthropicModel` 仍按协议字段处理，未带 `models` 时旧默认
-  模型保留在列表中。移除（含切换 1M 改名）仍被智能体使用的模型返回 409
+  Runner、不清会话；改 `anthropicModel` 仍按协议字段处理（停 Runner），未带
+  `models` 时旧默认模型保留在列表中（列表已满 100 个时返回 400）；只改默认模型时
+  只清除跑在旧默认模型上或没有记录模型的会话，选了该连接其他模型的会话保留，只切换
+  `[1m]` 不清会话。移除（含切换 1M 改名）仍被智能体使用的模型返回 409
   `{ error, code: 'MODEL_IN_USE', agents: [{ id, name }] }`；会话里选了被移除模型的
   在下次运行时回到连接的默认模型
 - `PUT /api/config/claude/providers/:id/secrets`，同样接受
@@ -563,10 +567,14 @@ Provider（模型连接：一份凭据和一个端点，提供一组模型）：
   （OAuth、setup-token）只做不计费的账号检查，已保存的授权到期时先续期，粘贴的
   已过期授权不续期、返回 `UNKNOWN`；ChatGPT 订阅拉取一次实时模型目录。响应为
   `{ ok, probes, code, authMode?, record }`，每个 probe 为
-  `{ model, ok, status, latencyMs, message?, hint?, code? }`：`code` 为 `ProviderErrorCode`（通过为 `null`），`authMode`
-  为端点接受的认证方式（被拒时不返回），`record` 即 `ProviderTestRecord`，账号
+  `{ model, ok, status, latencyMs, message?, hint?, code? }`：`code` 为
+  `ProviderErrorCode`（通过为 `null`）；`authMode` 只在那次请求证明凭据被接受时
+  返回（2xx，或只会在认证通过后出现的 `MODEL_NOT_FOUND`、`CONTEXT_TOO_LONG`、
+  `WIRE_INCOMPATIBLE`），换用另一种方式后超时、限流或报其他错时沿用第一次的结果、
+  不返回 `authMode`；订阅的账号检查只有 403 明确指出缺少 scope 时才算通过；`record` 即 `ProviderTestRecord`，账号
   检查的 `model` 为 `null`、其 probe 的 `model` 为空串。`message` 是脱敏且不超过
-  300 字的上游摘录，从不含密钥；日志只记上游 origin。带 `providerId` 且测试的
+  300 字的上游摘录，密钥（含 JSON 转义形式）与自定义请求头的值都会被替换；日志只记
+  上游 origin。带 `providerId` 且测试的
   正是已保存的连接（草稿未改端点、凭据、认证方式或环境变量）时，`record` 存为该
   连接的 `lastTest`（审计 `test_provider`，不停 Runner、不清会话）；没有认证方式
   的旧连接同时记下端点接受的方式，与原先推断的不同时只排空该连接的 Runner。

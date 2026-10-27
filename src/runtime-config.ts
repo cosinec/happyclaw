@@ -30,6 +30,7 @@ import {
   isValidModelId,
   MAX_PROVIDER_MODEL_ID_LENGTH,
   MAX_PROVIDER_MODELS,
+  normalizeProviderBaseUrl,
   normalizeProviderModels,
   PROVIDER_ERROR_CODES,
   type ProviderErrorCode,
@@ -627,6 +628,12 @@ interface StoredProviderV4 {
   presetId?: string;
   /** The last connection test; written only by the test route. */
   lastTest?: ProviderTestRecord;
+  /**
+   * Which Claude login the OAuth credentials come from: a new one on every
+   * login or pasted credential, kept through token renewals. Random, so it
+   * says nothing about the tokens.
+   */
+  claudeOAuthGrantId?: string;
   updatedAt: string;
 }
 
@@ -678,6 +685,7 @@ export interface UnifiedProvider {
   models?: ProviderModelEntry[];
   presetId?: string;
   lastTest?: ProviderTestRecord | null;
+  claudeOAuthGrantId?: string;
   customEnv: Record<string, string>;
   updatedAt: string;
 }
@@ -1474,14 +1482,18 @@ function toStoredProviderV4(provider: UnifiedProvider): StoredProviderV4 {
       ? { codexOAuthLastRefreshError: provider.codexOAuthLastRefreshError }
       : {}),
     ...connectionListFields(provider),
+    ...(provider.claudeOAuthCredentials && provider.claudeOAuthGrantId
+      ? { claudeOAuthGrantId: provider.claudeOAuthGrantId }
+      : {}),
     updatedAt: provider.updatedAt || new Date().toISOString(),
   };
 }
 
 /**
  * The non-secret model fields of a provider as they are stored and read: a
- * well-formed model list and a preset id this release knows (neither for
- * ChatGPT subscriptions), a complete test record. Anything else is dropped, so a
+ * well-formed model list and a preset id this release knows whose endpoint
+ * the provider uses (neither for ChatGPT subscriptions), a complete test
+ * record. Anything else is dropped, so a
  * hand-edited or newer file never fails to load.
  */
 function connectionListFields(provider: {
@@ -1492,11 +1504,17 @@ function connectionListFields(provider: {
 }): Pick<StoredProviderV4, 'models' | 'presetId' | 'lastTest'> {
   const chatGpt = isCodexGatewayProvider(provider);
   const models = chatGpt ? null : normalizeProviderModels(provider.models);
+  // A preset describes one vendor endpoint; moved elsewhere, it no longer
+  // applies (its model list address, its models).
+  const preset =
+    !chatGpt && typeof provider.presetId === 'string'
+      ? getModelPreset(provider.presetId)
+      : null;
   const presetId =
-    !chatGpt &&
-    typeof provider.presetId === 'string' &&
-    getModelPreset(provider.presetId)
-      ? provider.presetId
+    preset &&
+    normalizeProviderBaseUrl(provider.anthropicBaseUrl) ===
+      normalizeProviderBaseUrl(preset.baseUrl)
+      ? preset.id
       : null;
   // Absent fields stay undefined, which JSON leaves out of the file.
   return {
@@ -1613,6 +1631,9 @@ function fromStoredProviderV4(stored: StoredProviderV4): UnifiedProvider {
       ...stored,
       anthropicBaseUrl: stored.anthropicBaseUrl || '',
     }),
+    ...(typeof stored.claudeOAuthGrantId === 'string'
+      ? { claudeOAuthGrantId: stored.claudeOAuthGrantId }
+      : {}),
     updatedAt: stored.updatedAt || '',
   };
 }
@@ -2163,10 +2184,16 @@ export function nextProviderModelList(
         ? effectiveProviderModels(current)
         : current?.models;
   if (!list) return undefined;
-  return effectiveProviderModels({
+  const models = effectiveProviderModels({
     anthropicModel: next.anthropicModel,
     models: list,
-  }).slice(0, MAX_PROVIDER_MODELS);
+  });
+  if (models.length > MAX_PROVIDER_MODELS) {
+    throw new Error(
+      `一个模型配置最多 ${MAX_PROVIDER_MODELS} 个模型，请先移除不用的模型再设置默认模型`,
+    );
+  }
+  return models;
 }
 
 function normalizeDefaultModel(input: unknown): string {
@@ -2177,7 +2204,20 @@ function normalizeDefaultModel(input: unknown): string {
   return model;
 }
 
-/** What a connection test checks: a refreshed OAuth token is the same. */
+/** Provider env a connection test sends or probes with. */
+const TESTED_CUSTOM_ENV_KEYS = [
+  'ANTHROPIC_CUSTOM_HEADERS',
+  'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+] as const;
+
+function testedCustomEnv(provider: Pick<UnifiedProvider, 'customEnv'>) {
+  return TESTED_CUSTOM_ENV_KEYS.map((key) => provider.customEnv?.[key] ?? '');
+}
+
+/**
+ * What a connection test checks. A renewed OAuth token is the same login; a
+ * new login (even into the same account) is not.
+ */
 function testedConnectionIdentity(provider: UnifiedProvider): string {
   return JSON.stringify([
     provider.type,
@@ -2186,8 +2226,14 @@ function testedConnectionIdentity(provider: UnifiedProvider): string {
     provider.anthropicAuthToken,
     provider.anthropicApiKey,
     provider.claudeCodeOauthToken,
-    !!provider.claudeOAuthCredentials,
+    provider.claudeOAuthCredentials
+      ? [
+          provider.claudeOAuthGrantId ?? null,
+          provider.claudeOAuthAccount?.accountUuid ?? null,
+        ]
+      : null,
     provider.codexOAuthCredentials?.accountId ?? null,
+    testedCustomEnv(provider),
   ]);
 }
 
@@ -2302,6 +2348,9 @@ export function createProvider(input: {
     }),
   );
   applyClaudeAuthKind(provider, authKind);
+  if (provider.claudeOAuthCredentials) {
+    provider.claudeOAuthGrantId = crypto.randomBytes(8).toString('hex');
+  }
 
   state.providers.push(provider);
   writeStoredStateV4(
@@ -2371,10 +2420,12 @@ export function updateProvider(
       }),
       presetId:
         patch.presetId === undefined ? current.presetId : patch.presetId,
-      // A test describes the endpoint and header it ran against.
+      // A test describes the endpoint, header and env it ran against.
       lastTest:
         updated.anthropicBaseUrl === current.anthropicBaseUrl &&
-        updated.anthropicAuthMode === current.anthropicAuthMode
+        updated.anthropicAuthMode === current.anthropicAuthMode &&
+        JSON.stringify(testedCustomEnv(updated)) ===
+          JSON.stringify(testedCustomEnv(current))
           ? current.lastTest
           : null,
     }),
@@ -2471,6 +2522,11 @@ export function updateProviderSecrets(
     updated.claudeOAuthAccount = secrets.claudeOAuthAccount ?? null;
     updated.claudeOAuthLastRefreshAt = null;
     updated.claudeOAuthLastRefreshError = null;
+  }
+  if (claudeGrantChanged) {
+    updated.claudeOAuthGrantId = updated.claudeOAuthCredentials
+      ? crypto.randomBytes(8).toString('hex')
+      : undefined;
   }
   // The last test vouched for the old credential.
   if (

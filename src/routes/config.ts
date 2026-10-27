@@ -239,7 +239,9 @@ import {
   findPresetsByBaseUrl,
   getModelPreset,
   modelsUrlFor,
+  normalizeProviderBaseUrl,
   presetModelEntryId,
+  splitOneMillionSuffix,
   type ModelPreset,
   type ProviderErrorCode,
   type ProviderModelEntry,
@@ -362,6 +364,11 @@ interface ApplyOptions {
   sessionInvalidation?: {
     modelChanged: boolean;
     baseUrlChanged: boolean;
+    /**
+     * Set when the default model's change is the only reason: sessions on
+     * another model of the provider keep running it and are kept.
+     */
+    previousDefaultModel?: string;
   };
 }
 
@@ -616,12 +623,15 @@ function getSafeLegacyUnboundFolders(
 function getProviderSessionCleanupOptions(
   providerId: string,
   invalidation?: ApplyOptions['sessionInvalidation'],
-): { includeUnboundFolders: string[] } {
+): { includeUnboundFolders: string[]; previousDefaultModel?: string } {
   return {
     includeUnboundFolders: getSafeLegacyUnboundFolders(
       providerId,
       invalidation,
     ),
+    ...(invalidation?.previousDefaultModel !== undefined
+      ? { previousDefaultModel: invalidation.previousDefaultModel }
+      : {}),
   };
 }
 
@@ -1704,6 +1714,12 @@ configRoutes.patch(
           validation.data.anthropicModel !== undefined &&
           validation.data.anthropicModel !== previous.anthropicModel
         );
+        // Toggling 1M on the default keeps the upstream model: runners pick
+        // up the new window, but the SDK sessions stay valid.
+        const upstreamModelChanged =
+          modelChanged &&
+          splitOneMillionSuffix(validation.data.anthropicModel!).model !==
+            splitOneMillionSuffix(previous.anthropicModel).model;
         const customEnvChanged = !!(
           validation.data.customEnv !== undefined &&
           JSON.stringify(validation.data.customEnv) !==
@@ -1745,16 +1761,32 @@ configRoutes.patch(
           );
         }
         const pendingInvalidation = getPendingProviderSessionInvalidation(id);
+        const sessionsInvalidated =
+          baseUrlChanged ||
+          upstreamModelChanged ||
+          customEnvChanged ||
+          tokenChanged ||
+          authModeChanged;
+        const onlyDefaultModelChanged =
+          upstreamModelChanged &&
+          !baseUrlChanged &&
+          !customEnvChanged &&
+          !tokenChanged &&
+          !authModeChanged &&
+          !pendingInvalidation;
         const sessionInvalidation = {
           modelChanged:
-            modelChanged || pendingInvalidation?.modelChanged === true,
+            upstreamModelChanged || pendingInvalidation?.modelChanged === true,
           baseUrlChanged:
             baseUrlChanged ||
             tokenChanged ||
             pendingInvalidation?.baseUrlChanged === true,
+          ...(onlyDefaultModelChanged
+            ? { previousDefaultModel: previous.anthropicModel }
+            : {}),
         };
         const shouldClearSessions =
-          !!pendingInvalidation || protocolFieldChanged;
+          !!pendingInvalidation || sessionsInvalidated;
         const metadata = {
           trigger: 'provider_update',
           providerId: id,
@@ -2203,12 +2235,19 @@ function resolveCheckedConnection(
   const model = draft.anthropicModel ?? stored?.anthropicModel;
 
   if (type === 'third_party') {
-    const preset = getModelPreset(draft.presetId ?? stored?.presetId);
+    const named = getModelPreset(draft.presetId ?? stored?.presetId);
     const baseUrl =
       draft.anthropicBaseUrl?.trim() ||
       stored?.anthropicBaseUrl ||
-      preset?.baseUrl ||
+      named?.baseUrl ||
       '';
+    // A preset only speaks for its own endpoint.
+    const preset =
+      named &&
+      normalizeProviderBaseUrl(baseUrl) ===
+        normalizeProviderBaseUrl(named.baseUrl)
+        ? named
+        : null;
     const draftToken = draft.anthropicAuthToken?.trim();
     const token =
       draftToken || stored?.anthropicAuthToken || stored?.anthropicApiKey || '';

@@ -28,6 +28,7 @@ import {
   resolveCodexSessionChoice,
 } from './codex-gateway/model-catalog.js';
 import { listCodexModelsForProvider } from './codex-gateway/model-catalog-sync.js';
+import { splitOneMillionSuffix } from './model-providers.js';
 import { hasPermission } from './permissions.js';
 import {
   findProviderModel,
@@ -220,11 +221,14 @@ export function sessionModelHasChanged(
   effectiveModel: string,
   providerDefaultModel: string,
 ): boolean {
+  // `[1m]` only widens the context window Claude Code works with; the
+  // upstream model, and so the session's reasoning, stays the same.
+  const upstream = (model: string) => splitOneMillionSuffix(model).model;
   const recorded = getSessionModel(groupFolder, agentId);
-  if (recorded) return recorded !== effectiveModel;
+  if (recorded) return upstream(recorded) !== upstream(effectiveModel);
   return (
     !!getSession(groupFolder, agentId) &&
-    providerDefaultModel !== effectiveModel
+    upstream(providerDefaultModel) !== upstream(effectiveModel)
   );
 }
 

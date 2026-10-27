@@ -10534,9 +10534,20 @@ export function backfillAgentProfileDefaultsAndWorkspaceMappings(): void {
  * Returns the affected `group_folder` values so callers can also evict the
  * in-memory sessions cache and the row count for telemetry.
  */
+/** Which sessions of a provider a configuration change invalidates. */
+interface ProviderSessionCleanupOptions {
+  includeUnboundFolders?: string[];
+  /**
+   * Set when only the provider's default model changed: a session recorded
+   * on another of its models keeps running that model and stays; only one
+   * that ran the old default, or recorded no model, is dropped.
+   */
+  previousDefaultModel?: string;
+}
+
 function deleteSessionsByProviderIdInCurrentTransaction(
   providerId: string,
-  options?: { includeUnboundFolders?: string[] },
+  options?: ProviderSessionCleanupOptions,
 ): {
   deletedCount: number;
   affectedFolders: string[];
@@ -10553,6 +10564,30 @@ function deleteSessionsByProviderIdInCurrentTransaction(
     ? ` OR (provider_id IS NULL AND group_folder IN (${placeholders}))`
     : '';
   const params = [providerId, ...includeUnboundFolders];
+  if (options?.previousDefaultModel !== undefined) {
+    const doomed = db
+      .prepare(
+        `SELECT group_folder, agent_id FROM sessions
+         WHERE (provider_id = ?${unboundClause})
+           AND (model IS NULL OR model = '' OR model = ?)`,
+      )
+      .all(...params, options.previousDefaultModel) as Array<{
+      group_folder: string;
+      agent_id: string;
+    }>;
+    for (const row of doomed) {
+      db.prepare(
+        'DELETE FROM sessions WHERE group_folder = ? AND agent_id = ?',
+      ).run(row.group_folder, row.agent_id);
+      db.prepare(
+        'DELETE FROM workspace_runtime_sessions WHERE group_folder = ? AND runtime_agent_id = ?',
+      ).run(row.group_folder, row.agent_id);
+    }
+    return {
+      deletedCount: doomed.length,
+      affectedFolders: [...new Set(doomed.map((row) => row.group_folder))],
+    };
+  }
   const rows = db
     .prepare(
       `SELECT DISTINCT group_folder FROM sessions WHERE provider_id = ?${unboundClause}`,
@@ -10572,7 +10607,7 @@ function deleteSessionsByProviderIdInCurrentTransaction(
 
 export function deleteSessionsByProviderId(
   providerId: string,
-  options?: { includeUnboundFolders?: string[] },
+  options?: ProviderSessionCleanupOptions,
 ): {
   deletedCount: number;
   affectedFolders: string[];
@@ -10590,7 +10625,7 @@ export function deleteSessionsByProviderId(
  */
 export function deleteSessionsByProviderIdAroundCommit<T>(
   providerId: string,
-  options: { includeUnboundFolders?: string[] } | undefined,
+  options: ProviderSessionCleanupOptions | undefined,
   commit: () => T,
 ): {
   value: T;
