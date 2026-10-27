@@ -54,6 +54,11 @@ export class TelegramStreamingController {
   private inFlight: Promise<void> | null = null;
   private flushPending = false;
   private readonly finalIds: number[] = [];
+  /**
+   * Every id handed to onCardCreated. The host registers each one, so the
+   * session must name them all at unregistration, deleted progress included.
+   */
+  private readonly announcedIds: string[] = [];
   private terminalError: unknown;
 
   constructor(
@@ -102,7 +107,7 @@ export class TelegramStreamingController {
       try {
         const id = await this.transport.send(chunk);
         this.finalIds.push(id);
-        this.options.onCardCreated?.(String(id));
+        this.announce(id);
       } catch (err) {
         this.terminalError =
           this.finalIds.length > 0
@@ -150,8 +155,15 @@ export class TelegramStreamingController {
     this.clearTimer();
   }
 
+  /** Every message this session created, deleted progress messages included. */
   getAllMessageIds(): string[] {
-    return [...this.progress.map((p) => p.id), ...this.finalIds].map(String);
+    return [...this.announcedIds];
+  }
+
+  private announce(id: number): void {
+    const messageId = String(id);
+    this.announcedIds.push(messageId);
+    this.options.onCardCreated?.(messageId);
   }
 
   /** Confirmed final-answer messages; progress messages are not the answer. */
@@ -227,7 +239,7 @@ export class TelegramStreamingController {
         if (!current) {
           const id = await this.transport.send(chunk);
           this.progress.push({ id, chunk });
-          this.options.onCardCreated?.(String(id));
+          this.announce(id);
         } else if (current.chunk.html !== chunk.html) {
           await this.transport.edit(current.id, chunk);
           current.chunk = chunk;
