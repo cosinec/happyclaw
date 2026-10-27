@@ -14,6 +14,8 @@
 - 系统设置及默认值：`src/runtime-config.ts`
 - 渠道能力与会话路由：`src/im-channel-capabilities.ts`、`src/channel-mount-service.ts`
 - StreamEvent：`shared/stream-event.ts`
+- 模型连接预设、模型列表解析与上游错误分类：`shared/model-providers.ts`
+- 第三方代码与许可：`THIRD_PARTY_NOTICES.md`
 
 `docs/agent-first-architecture-plan.md` 和
 `docs/claude-code-plugin-automation-design.md` 是历史设计记录，不作为当前接口或数据结构的真相源。
@@ -116,6 +118,13 @@ Web UI 约定：
   经 `MotionProvider` 懒加载并遵循减少动态效果设置。流式回复的贴底跟随（每批一次的
   WAAPI 位移补偿）和逐词淡入（CSS keyframes）是逐帧、逐词的热路径，不走 `m.*`，
   同样在减少动态效果时关闭。
+- 聊天输入框是 Tiptap 编辑器（`@tiptap/*` 全部精确锁同一版本）。编辑器内核（结构化列表、
+  中文标点与选区修补、长粘贴折叠块、序列化）取自 cindy，位于
+  `components/chat/composer/cindy/`，按 Apache-2.0 保留来源与修改声明；外层
+  `MessageInput` 和 `components/chat/composer/` 是 HappyClaw 自己的，回车、排队、插话
+  语义见 §4。`/` 面板插入 `/技能名`：HappyClaw 的消息信封让 CLI 不会直接展开斜杠命令，
+  由模型调用 Skill 工具；`@` 选中的文件序列化为 `@"工作区相对路径"`，由 CLI 自动附带。
+  为此消息正文在 `<message>` 内另起一行、不转义引号（属性值照常转义）。
 
 ### 3.3 Agent Runner
 
@@ -200,6 +209,12 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
   `resolvePinnedModelConfigId`）：会话手选 → 智能体绑定 → 全局默认
   （`defaultModelConfigId`，工作区自带 Provider 环境变量时让位）→ 唯一启用的配置 →
   自动池。绑定即权威，没有跨账号故障转移；Web 的选择器与这一顺序必须一致。
+- 一个模型配置（连接）是一份凭据、一个地址和一组模型；`anthropicModel` 是连接的默认
+  模型。会话和智能体按「连接 · 模型」选择（`session_model_selections.model`、
+  `agent_profiles.model`），换模型时开新的 SDK 会话并注入近期历史；只改 `[1m]` 后缀
+  不算换模型。连接的模型列表、预设和最近一次测试存在 V5 配置文件的可选字段里，不升
+  文件版本，旧版本读到会忽略、凭据不受影响。新建连接只有在没有其他启用的连接时才默认
+  加入自动池。测试连接和获取模型列表只有在上游确实接受了凭据时才记录认证头方式。
 - 宿主机 Skills 由 `runtime_policy.skills.host` 独立选择，不能通过
   `host_claude` 开关隐式获得。
 - 工作区 `CLAUDE.md`、项目 `.claude/skills` 和项目 MCP 属于项目上下文层。
@@ -467,6 +482,8 @@ npm run self-test
 - 修改共享类型后运行 `make sync-types`；`make typecheck` 会检查副本一致性。回复步骤归并器
   （`shared/stream-steps.ts`、`shared/thinking-text.ts`）同步到后端和 Web：后端用同一套
   纯函数记录已结算回合的有序步骤，与 Web 流式时渲染的步骤不会漂移。
+  `shared/model-providers.ts` 同样同步到后端和 Web：添加向导的引导与服务端的校验、
+  测试、模型发现用同一套预设和错误分类。
 - 修改 Prompt 后确保 `scripts/check-agent-runner-prompts.sh` 通过。
 - 修改文档后运行 `npm run docs:check`。
 - SDK/CLI 升级必须显式执行 `make update-sdk`，验证后提交 package.json 与 lockfile。
