@@ -92,7 +92,9 @@ describe('composer chip renderHTML', () => {
       display: '粘贴文本 · 2 行',
     });
     expect(pasted?.getAttribute('contenteditable')).toBe('false');
-    expect(pasted?.getAttribute('title')).toBe(pastedText);
+    expect(pasted?.getAttribute('title')).toBe(
+      `${pastedText}\n\n点击展开为可编辑的文本`,
+    );
     expect(pasted?.textContent).toBe('粘贴文本 · 2 行');
   });
 

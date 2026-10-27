@@ -1,6 +1,7 @@
 // Interaction harness for the chat composer: ChatView over mocked stores with
 // a main conversation and two Web sessions in one workspace. Sends, uploads,
 // stops and queue actions are recorded on `window.composerHarness`.
+//   ?empty=1   the main conversation starts with no messages
 import { useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { MemoryRouter, useSearchParams } from 'react-router-dom';
@@ -16,6 +17,8 @@ import type { AgentInfo } from '../../src/types';
 import '../../src/styles/globals.css';
 
 const groupJid = 'web:e2e-composer';
+const startsEmpty =
+  new URLSearchParams(window.location.search).get('empty') === '1';
 const userId = 'composer-user';
 
 const user: UserPublic = {
@@ -130,6 +133,26 @@ const harness = {
     }));
   },
   drafts: () => useChatStore.getState().drafts,
+  /** Adds a message from this user to the main conversation. */
+  pushMessage(content: string) {
+    useChatStore.setState((s) => ({
+      messages: {
+        ...s.messages,
+        [groupJid]: [
+          ...(s.messages[groupJid] ?? []),
+          {
+            id: `pushed-${Date.now()}`,
+            chat_jid: groupJid,
+            sender: userId,
+            sender_name: '测试用户',
+            content,
+            timestamp: new Date().toISOString(),
+            is_from_me: false,
+          } as Message,
+        ],
+      },
+    }));
+  },
 };
 
 const record = async (entry: SentRecord) => {
@@ -165,7 +188,7 @@ useChatStore.setState({
     },
   },
   currentGroup: groupJid,
-  messages: { [groupJid]: history(groupJid, 'main') },
+  messages: { [groupJid]: startsEmpty ? [] : history(groupJid, 'main') },
   waiting: {},
   hasMore: { [groupJid]: false },
   agents: { [groupJid]: [session('a1', '会话 A'), session('a2', '会话 B')] },

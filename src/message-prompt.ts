@@ -48,8 +48,9 @@ export function splitLegacyEmbeddedReferenceContent(
 }
 
 /**
- * Escape element content. Quotes only matter inside attribute values; keeping
- * them literal in bodies leaves CLI syntax such as `@"path"` mentions intact.
+ * Escape the user's own message body. Quotes only matter inside attribute
+ * values; keeping them literal leaves CLI syntax such as `@"path"` mentions
+ * intact. Quoted or forwarded material goes through `escapeQuotedMaterial`.
  */
 function escapeXmlText(value: string): string {
   return value
@@ -61,6 +62,15 @@ function escapeXmlText(value: string): string {
 /** Escape for XML, quotes included: safe in attribute values too. */
 export function escapeXml(value: string): string {
   return escapeXmlText(value).replace(/"/g, '&quot;');
+}
+
+/**
+ * Escape quoted or forwarded material, whose mentions must attach nothing:
+ * besides `escapeXml`, an `@` that starts a word (`@path`, `@"path"`) is
+ * written as a character reference the CLI does not read as a mention.
+ */
+function escapeQuotedMaterial(value: string): string {
+  return escapeXml(value).replace(/(^|\s)@/g, '$1&#64;');
 }
 
 /** First line of every `<referenced_messages>` block. */
@@ -146,7 +156,7 @@ function formatMissingReference(
     ? ` sender="${escapeXml(reference.sender)}"`
     : '';
   const relationAttrs = contentLinkAttributes(reference.contentLink);
-  return `<referenced_message id="${escapeXml(reference.id)}"${senderAttr}${relationAttrs}>${escapeXmlText(body)}</referenced_message>`;
+  return `<referenced_message id="${escapeXml(reference.id)}"${senderAttr}${relationAttrs}>${escapeQuotedMaterial(body)}</referenced_message>`;
 }
 
 /**

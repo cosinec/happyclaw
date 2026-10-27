@@ -118,6 +118,51 @@ async function expectRowFits(page: Page) {
   expect(fits.sendInside).toBe(true);
 }
 
+const sendButton = (page: Page) =>
+  page.locator('[data-composer-toolbar] button[aria-label="发送消息"]');
+
+test.describe('model slot in the composer toolbar', () => {
+  test('sits on the right, just before send', async ({ page }) => {
+    await openHarness(page, {
+      selectedModelConfigId: 'chatgpt',
+      selectedModel: 'gpt-6-astra',
+      selectedEffort: 'high',
+    });
+    const slot = (await page
+      .locator('[data-composer-model-slot]')
+      .boundingBox())!;
+    const model = (await modelButton(page).boundingBox())!;
+    const send = (await sendButton(page).boundingBox())!;
+    const terminal = (await page
+      .getByRole('button', { name: '终端' })
+      .boundingBox())!;
+    // Left: attach, reset, terminal. Right: the model slot, then send.
+    expect(terminal.x + terminal.width).toBeLessThan(slot.x);
+    expect(send.x - (slot.x + slot.width)).toBeLessThan(8);
+    expect(model.x + model.width).toBeLessThanOrEqual(send.x + 0.5);
+  });
+
+  test('a 320px window truncates the model, never the send button', async ({
+    page,
+    hasTouch,
+  }) => {
+    await openHarness(page, {
+      selectedModelConfigId: 'chatgpt',
+      selectedModel: 'gpt-6-astra',
+      selectedEffort: 'high',
+    });
+    await page.setViewportSize({ width: 320, height: 700 });
+    const size = hasTouch ? 40 : 30;
+    await expect
+      .poll(async () => {
+        const box = (await sendButton(page).boundingBox())!;
+        return [Math.round(box.width), Math.round(box.height)];
+      })
+      .toEqual([size, size]);
+    await expectRowFits(page);
+  });
+});
+
 test.describe('model picker', () => {
   test('fits the composer row without pushing the send button off a phone', async ({
     page,

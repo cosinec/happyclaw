@@ -29,7 +29,7 @@ import { SendButton, type SendButtonGlyph } from './cindy/SendButton';
  * hover fill on hover or while its menu is open.
  */
 const COMPOSER_PILL =
-  'size-[30px] rounded-full border border-transparent text-muted-foreground hover:border-surface-border hover:bg-surface-hover hover:text-foreground data-[state=open]:border-surface-border data-[state=open]:bg-surface-hover pointer-coarse:size-10';
+  'size-[30px] shrink-0 rounded-full border border-transparent text-muted-foreground hover:border-surface-border hover:bg-surface-hover hover:text-foreground data-[state=open]:border-surface-border data-[state=open]:bg-surface-hover pointer-coarse:size-10';
 
 interface ComposerToolbarProps {
   canAttach: boolean;
@@ -57,7 +57,11 @@ interface ComposerToolbarProps {
   };
 }
 
-/** Attach, reset, terminal and model on the left; stop and send on the right. */
+/**
+ * cindy's toolbar: attach, reset and terminal on the left; the model, stop
+ * and send on the right. The model trigger gives way first, so a narrow row
+ * truncates it and never squeezes the send button.
+ */
 export function ComposerToolbar({
   canAttach,
   uploading,
@@ -77,7 +81,7 @@ export function ComposerToolbar({
   return (
     <div
       data-composer-toolbar
-      className="mt-1 flex min-w-0 items-center gap-1 select-none"
+      className="mt-[2px] flex min-w-0 items-center gap-1 select-none"
     >
       <div className="flex min-w-0 items-center gap-1">
         {canAttach && (
@@ -129,7 +133,6 @@ export function ComposerToolbar({
             className={COMPOSER_PILL}
           />
         )}
-        {modelSelector}
         {contextLabel && (
           <span
             className="ml-1 inline-flex h-6 max-w-[min(42vw,180px)] min-w-0 items-center rounded-full bg-muted px-2 text-micro font-medium text-muted-foreground"
@@ -141,6 +144,16 @@ export function ComposerToolbar({
       </div>
 
       <div className="flex-1" />
+
+      {modelSelector && (
+        // The padding keeps the triggers' focus rings inside the clip.
+        <div
+          data-composer-model-slot
+          className="-m-0.5 flex min-w-0 items-center justify-end gap-1 overflow-hidden p-0.5"
+        >
+          {modelSelector}
+        </div>
+      )}
 
       {showSideStop && (
         <IconButton

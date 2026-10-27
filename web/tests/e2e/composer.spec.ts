@@ -491,6 +491,79 @@ test.describe('desktop composer', () => {
       .toEqual([{ to: 'main', content: `看看这段日志：${log}`, images: 0 }]);
   });
 
+  test('clicking a long-paste chip turns it back into editable text', async ({
+    page,
+  }) => {
+    await openHarness(page);
+    const log = Array.from({ length: 30 }, (_, i) => `log line ${i + 1}`).join(
+      '\n',
+    );
+    await composer(page).click();
+    await composer(page).evaluate((element, text) => {
+      const transfer = new DataTransfer();
+      transfer.setData('text/plain', text);
+      element.dispatchEvent(
+        new ClipboardEvent('paste', {
+          clipboardData: transfer,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    }, log);
+    await composer(page).locator('[data-pasted-text-chip]').click();
+    await expect(composer(page).locator('[data-pasted-text-chip]')).toHaveCount(
+      0,
+    );
+    await expect(composer(page)).toContainText('log line 30');
+    expect(await composerText(page)).toBe(log);
+  });
+
+  test('an empty conversation centres the composer and docks it after the first message', async ({
+    page,
+  }) => {
+    await page.goto(`${HARNESS_PATH}?empty=1`);
+    const card = page.locator('[data-composer-card]');
+    await expect(card).toBeVisible();
+    const heading = page.getByRole('heading', { name: '今天想做什么？' });
+    await expect(heading).toBeVisible();
+    const starters = page.locator('[data-hc-starter]');
+    await expect(starters).toHaveCount(4);
+
+    const viewport = page.viewportSize()!;
+    const header = (await page.locator('header').first().boundingBox())!;
+    const centred = (await card.boundingBox())!;
+    const columnMiddle =
+      header.y +
+      header.height +
+      (viewport.height - header.y - header.height) / 2;
+    expect(
+      Math.abs(centred.y + centred.height / 2 - columnMiddle),
+    ).toBeLessThan(viewport.height * 0.15);
+    // cindy's new-chat card: about 140px tall before typing.
+    expect(centred.height).toBeGreaterThanOrEqual(140);
+    // Heading above, starters below.
+    expect((await heading.boundingBox())!.y).toBeLessThan(centred.y);
+    expect((await starters.first().boundingBox())!.y).toBeGreaterThan(
+      centred.y + centred.height,
+    );
+
+    // A starter fills the composer in place.
+    await starters.last().click();
+    await expect(composer(page)).toHaveText('帮我定位和修复一个 Bug');
+
+    await callHarness(page, 'pushMessage', '第一条消息');
+    await expect(heading).toHaveCount(0);
+    await expect(starters).toHaveCount(0);
+    await expect
+      .poll(async () => {
+        const docked = (await card.boundingBox())!;
+        return viewport.height - (docked.y + docked.height);
+      })
+      .toBeLessThan(40);
+    // Docking keeps the composer and what it holds.
+    await expect(composer(page)).toHaveText('帮我定位和修复一个 Bug');
+  });
+
   test('/ offers commands and skills; @ inserts a workspace file', async ({
     page,
   }) => {
