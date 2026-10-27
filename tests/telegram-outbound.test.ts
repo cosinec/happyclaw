@@ -10,6 +10,8 @@ const api = vi.hoisted(() => ({
     ) => Promise<any>
   >,
   sendMessage: vi.fn(async () => ({ message_id: 1 })),
+  editMessageText: vi.fn(async () => true),
+  deleteMessage: vi.fn(async () => true),
   stop: null as (() => void) | null,
 }));
 
@@ -22,6 +24,8 @@ vi.mock('grammy', () => ({
       },
       getMe: vi.fn(async () => ({ id: 1, username: 'happy_bot' })),
       sendMessage: api.sendMessage,
+      editMessageText: api.editMessageText,
+      deleteMessage: api.deleteMessage,
     };
     on() {
       return this;
@@ -48,6 +52,7 @@ vi.mock('../src/logger.js', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
+import { DefinitiveChannelDeliveryError } from '../src/channel-outbox-delivery.js';
 import { createTelegramConnection } from '../src/telegram.js';
 import {
   chunkTelegramMarkdown,
@@ -239,5 +244,102 @@ describe('Telegram connection outbound', () => {
     >) {
       expect(call[1].length).toBeLessThanOrEqual(TELEGRAM_MESSAGE_LIMIT);
     }
+  });
+});
+
+describe('Telegram streaming transport', () => {
+  let connection: ReturnType<typeof createTelegramConnection> | null = null;
+
+  afterEach(async () => {
+    await connection?.disconnect();
+    connection = null;
+    api.sendMessage.mockReset();
+    api.sendMessage.mockResolvedValue({ message_id: 1 });
+    api.editMessageText.mockReset();
+    api.deleteMessage.mockReset();
+  }, 8000);
+
+  const grammyError = (code: number, description: string) =>
+    Object.assign(new Error(description), { error_code: code, description });
+
+  test('a topic answer streams with HTML into that topic and cleans up', async () => {
+    connection = createTelegramConnection({ botToken: 'test-token' });
+    await connection.connect({
+      onNewChat: vi.fn(),
+      isChatAuthorized: () => true,
+    } as never);
+    const session = connection.createStreamingSession('-100777#thread:55')!;
+    expect(session).toBeDefined();
+    api.sendMessage
+      .mockResolvedValueOnce({ message_id: 11 })
+      .mockResolvedValueOnce({ message_id: 12 });
+    session.append('**working**');
+    await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(1));
+    expect(api.sendMessage).toHaveBeenLastCalledWith(
+      -100777,
+      '<b>working</b>',
+      {
+        parse_mode: 'HTML',
+        message_thread_id: 55,
+      },
+    );
+    // An unchanged edit is not a failure: the next update still edits.
+    api.editMessageText.mockRejectedValueOnce(
+      grammyError(400, 'Bad Request: message is not modified'),
+    );
+    session.append('**working.**');
+    await vi.waitFor(
+      () => expect(api.editMessageText).toHaveBeenCalledTimes(1),
+      { timeout: 4000 },
+    );
+    session.append('**working..**');
+    await vi.waitFor(
+      () => expect(api.editMessageText).toHaveBeenCalledTimes(2),
+      { timeout: 4000 },
+    );
+    await session.complete('done & dusted');
+    expect(api.sendMessage).toHaveBeenLastCalledWith(
+      -100777,
+      'done &amp; dusted',
+      { parse_mode: 'HTML', message_thread_id: 55 },
+    );
+    expect(api.deleteMessage).toHaveBeenCalledWith(-100777, 11);
+  });
+
+  test('a final Telegram refuses is classified as a definitive rejection', async () => {
+    connection = createTelegramConnection({ botToken: 'test-token' });
+    await connection.connect({
+      onNewChat: vi.fn(),
+      isChatAuthorized: () => true,
+    } as never);
+    const session = connection.createStreamingSession('42')!;
+    api.sendMessage.mockRejectedValueOnce(
+      grammyError(403, 'Forbidden: bot was blocked by the user'),
+    );
+    await expect(session.complete('answer')).rejects.toBeInstanceOf(
+      DefinitiveChannelDeliveryError,
+    );
+  });
+
+  test('an HTML edit Telegram cannot parse falls back to plain text', async () => {
+    connection = createTelegramConnection({ botToken: 'test-token' });
+    await connection.connect({
+      onNewChat: vi.fn(),
+      isChatAuthorized: () => true,
+    } as never);
+    const session = connection.createStreamingSession('42')!;
+    api.sendMessage.mockResolvedValueOnce({ message_id: 21 });
+    session.append('first');
+    await vi.waitFor(() => expect(api.sendMessage).toHaveBeenCalledTimes(1));
+    api.editMessageText.mockRejectedValueOnce(
+      grammyError(400, "Bad Request: can't parse entities"),
+    );
+    session.append('**second**');
+    await vi.waitFor(
+      () => expect(api.editMessageText).toHaveBeenCalledTimes(2),
+      { timeout: 4000 },
+    );
+    expect(api.editMessageText).toHaveBeenLastCalledWith(42, 21, '**second**');
+    session.dispose();
   });
 });

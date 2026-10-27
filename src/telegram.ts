@@ -24,12 +24,21 @@ import {
 import {
   channelConversationJid,
   extractProviderTarget,
+  parseChannelAddress,
 } from './channel-address.js';
 import { resolveAdmittedChannelRoute } from './channel-admission.js';
 import {
   chunkTelegramMarkdown,
+  classifyTelegramSendError,
   createTelegramRateLimitRetry,
+  isTelegramHtmlParseError,
+  telegramApiRejection,
+  type TelegramMessageChunk,
 } from './telegram-outbound.js';
+import {
+  TelegramStreamingController,
+  type TelegramStreamingTransport,
+} from './telegram-streaming.js';
 import {
   groupSenderAdmission,
   type ChannelCommandMention,
@@ -43,12 +52,15 @@ import {
   type ChannelFollowUpConnectOpts,
   type ChannelFollowUpOutcome,
 } from './im-connector-follow-up.js';
-import {
-  PartialChannelDeliveryError,
-  PhysicalDeliveryTracker,
-} from './im-delivery-progress.js';
+import { PhysicalDeliveryTracker } from './im-delivery-progress.js';
 import { DefinitiveChannelDeliveryError } from './channel-outbox-delivery.js';
-import type { ChannelMessageMeta, FollowUpMode, NewMessage } from './types.js';
+import type {
+  ChannelMessageMeta,
+  ChannelReferencedMessage,
+  ChannelTurnContext,
+  FollowUpMode,
+  NewMessage,
+} from './types.js';
 import {
   ExactAsyncIndicatorRegistry,
   processingIndicatorKey,
@@ -293,15 +305,150 @@ interface TelegramMessageLike {
   text?: string;
   caption?: string;
   message_thread_id?: number;
+  is_topic_message?: boolean;
   entities?: TelegramEntityLike[];
   caption_entities?: TelegramEntityLike[];
   from?: { id: number; is_bot?: boolean };
   sender_chat?: unknown;
-  reply_to_message?: {
-    message_id?: number;
-    from?: { id: number; is_bot?: boolean };
-    sender_chat?: unknown;
-    forum_topic_created?: unknown;
+  reply_to_message?: TelegramRepliedMessage;
+}
+
+interface TelegramUserLike {
+  id: number;
+  is_bot?: boolean;
+  first_name?: string;
+  last_name?: string;
+  username?: string;
+}
+
+interface TelegramRepliedMessage {
+  message_id?: number;
+  from?: TelegramUserLike;
+  sender_chat?: unknown;
+  forum_topic_created?: unknown;
+  has_protected_content?: boolean;
+  text?: string;
+  caption?: string;
+  photo?: unknown[];
+  document?: { file_name?: string };
+  voice?: unknown;
+  audio?: { file_name?: string };
+  video?: unknown;
+  video_note?: unknown;
+  animation?: unknown;
+  sticker?: { emoji?: string };
+}
+
+/** Every forum-topic message implicitly replies to the topic's opening one. */
+function isImplicitTopicReply(message: TelegramMessageLike): boolean {
+  const replied = message.reply_to_message;
+  // An ordinary supergroup reply carries message_thread_id too (the reply
+  // chain's root), so only a forum topic message can reply implicitly.
+  return (
+    !!replied?.forum_topic_created ||
+    (message.is_topic_message === true &&
+      replied?.message_id === message.message_thread_id)
+  );
+}
+
+function telegramUserLabel(user: TelegramUserLike | undefined): string {
+  if (!user) return '';
+  const fullName = [user.first_name, user.last_name].filter(Boolean).join(' ');
+  return fullName || (user.username ? `@${user.username}` : String(user.id));
+}
+
+/**
+ * The message a Telegram message explicitly replies to, as prompt-only
+ * reference context: its text (or a placeholder for media), its author, and
+ * whether the author is this bot. Implicit topic replies, service messages
+ * and protected content are not referenced.
+ */
+export function telegramReferencedMessage(
+  message: TelegramMessageLike & { has_protected_content?: boolean },
+  botUserId: number | undefined,
+): ChannelReferencedMessage | null {
+  const replied = message.reply_to_message;
+  if (!replied || replied.message_id === undefined) return null;
+  if (isImplicitTopicReply(message)) return null;
+  // Forwarding-protected content is not copied into the Agent's context.
+  if (replied.has_protected_content || message.has_protected_content) {
+    return null;
+  }
+  const text =
+    replied.text ||
+    replied.caption ||
+    (replied.photo?.length
+      ? '[图片]'
+      : replied.document
+        ? `[文件: ${replied.document.file_name ?? 'document'}]`
+        : replied.voice
+          ? '[语音消息]'
+          : replied.audio
+            ? `[音频: ${replied.audio.file_name ?? 'audio'}]`
+            : replied.video || replied.video_note || replied.animation
+              ? '[视频]'
+              : replied.sticker
+                ? `[贴纸${replied.sticker.emoji ? ` ${replied.sticker.emoji}` : ''}]`
+                : '');
+  if (!text) return null;
+  const author = telegramUserLabel(replied.from);
+  const sender = !replied.from
+    ? ''
+    : botUserId !== undefined && replied.from.id === botUserId
+      ? `${author}（本机器人）`
+      : replied.from.is_bot
+        ? `${author}（机器人）`
+        : author;
+  return {
+    id: String(replied.message_id),
+    ...(sender ? { sender } : {}),
+    text,
+  };
+}
+
+/** Public provider context of one Telegram inbound message. */
+export function buildTelegramChannelTurnContext(input: {
+  sourceJid: string;
+  chat: { id: string | number; type: string; title?: string };
+  message: TelegramMessageLike & {
+    message_id: number;
+    has_protected_content?: boolean;
+  };
+  from?: TelegramUserLike;
+  botUserId?: number;
+}): ChannelTurnContext {
+  const reference = telegramReferencedMessage(input.message, input.botUserId);
+  const threadId = input.message.message_thread_id;
+  const senderImId = telegramSenderImId({
+    from: input.from,
+    sender_chat: input.message.sender_chat,
+  });
+  return {
+    schemaVersion: 1,
+    provider: 'telegram',
+    channelAccountId:
+      parseChannelAddress(input.sourceJid)?.channelAccountId ?? null,
+    sourceJid: input.sourceJid,
+    chat: {
+      id: String(input.chat.id),
+      type: input.chat.type === 'private' ? 'p2p' : 'group',
+      ...(input.chat.title ? { name: input.chat.title } : {}),
+    },
+    message: {
+      id: String(input.message.message_id),
+      ...(threadId ? { threadId: String(threadId) } : {}),
+      ...(reference
+        ? { parentId: reference.id, referencedMessages: [reference] }
+        : {}),
+    },
+    ...(senderImId
+      ? {
+          sender: {
+            userId: senderImId,
+            name: telegramUserLabel(input.from),
+          },
+        }
+      : {}),
   };
 }
 
@@ -375,11 +522,7 @@ export function telegramCommandMentions(
   // In a forum topic every message implicitly replies to the topic's opening
   // message; only an explicit reply names its author.
   const replied = message.reply_to_message;
-  const implicitTopicReply =
-    !!replied?.forum_topic_created ||
-    (message.message_thread_id !== undefined &&
-      replied?.message_id === message.message_thread_id);
-  if (replied && !implicitTopicReply) {
+  if (replied && !isImplicitTopicReply(message)) {
     const id = telegramSenderImId(replied);
     if (id && !replied.from?.is_bot) ids.add(id);
   }
@@ -616,92 +759,12 @@ export interface TelegramConnection {
   ): Promise<void>;
   sendChatAction(chatId: string, action: 'typing'): Promise<void>;
   clearAckReaction(chatId: string, inputMessageId: string): Promise<void>;
+  /** Edit-based streaming of the main answer (final sent fresh). */
+  createStreamingSession(
+    chatId: string,
+    onCardCreated?: (messageId: string) => void,
+  ): TelegramStreamingController | undefined;
   isConnected(): boolean;
-}
-
-// ─── Shared Helpers (pure functions, no instance state) ────────
-
-/**
- * Only real HTML parse failures should fall back to a second plain send.
- * Timeout / 5xx / 429 / other transport errors are wrapped by grammy as
- * HttpError (inner error on `.error`, not `.cause`) and must be rethrown so
- * the already-attempted chunk is not duplicated.
- */
-function isTelegramHtmlParseError(err: unknown): boolean {
-  let current: unknown = err;
-  const seen = new Set<unknown>();
-  while (current && typeof current === 'object' && !seen.has(current)) {
-    seen.add(current);
-    const rec = current as Record<string, unknown>;
-    const code = Number(rec.error_code);
-    const description = String(rec.description ?? rec.message ?? '');
-    if (
-      code === 400 &&
-      /parse entities|unclosed|unsupported start tag|can't find end tag/i.test(
-        description,
-      )
-    ) {
-      return true;
-    }
-    current = rec.cause ?? rec.error;
-  }
-  return false;
-}
-
-/**
- * A Bot API rejection carries a numeric `error_code` because Telegram itself
- * answered `ok=false`: the request was received, refused, and no message
- * became visible. grammY transport failures (HttpError, timeouts) have no
- * `error_code` and must stay untyped — the provider may already have
- * accepted those.
- */
-function telegramApiRejection(
-  err: unknown,
-): { code: number; description: string } | null {
-  let current: unknown = err;
-  const seen = new Set<unknown>();
-  while (current && typeof current === 'object' && !seen.has(current)) {
-    seen.add(current);
-    const rec = current as Record<string, unknown>;
-    if (typeof rec.error_code === 'number' && Number.isFinite(rec.error_code)) {
-      return {
-        code: rec.error_code,
-        description: String(rec.description ?? rec.message ?? ''),
-      };
-    }
-    current = rec.cause ?? rec.error;
-  }
-  return null;
-}
-
-/**
- * Map outbound send errors onto the durable Outbox's failure taxonomy. An
- * acknowledged-prefix partial delivery must stay uncertain even when the tail
- * mutation was explicitly rejected, so it is never re-wrapped here. Only 4xx
- * answers are definitive: a 5xx `ok=false` cannot prove Telegram discarded
- * the mutation before its internal failure, and 408 is commonly synthesized
- * by an intermediary after the upstream may already have accepted it.
- *
- * 429 is a terminal failure as well. Telegram did not deliver the message,
- * and production has no worker that reclaims a `retry_wait` row, so a
- * `retryAt` would strand it; the description keeps `retry after N`.
- */
-function classifyTelegramSendError(err: unknown): unknown {
-  if (err instanceof DefinitiveChannelDeliveryError) return err;
-  if (err instanceof PartialChannelDeliveryError) return err;
-  const rejection = telegramApiRejection(err);
-  if (
-    !rejection ||
-    rejection.code < 400 ||
-    rejection.code >= 500 ||
-    rejection.code === 408
-  ) {
-    return err;
-  }
-  return new DefinitiveChannelDeliveryError(
-    `Telegram Bot API rejected the send (${rejection.code}): ${rejection.description}`,
-    { cause: err },
-  );
 }
 
 // ─── Factory Function ──────────────────────────────────────────
@@ -763,6 +826,92 @@ export function createTelegramConnection(
       clearInterval(pollingWatchdogTimer);
       pollingWatchdogTimer = null;
     }
+  }
+
+  /**
+   * Send one rendered chunk; a real HTML parse failure is resent as plain
+   * text. Any other failure is rethrown so an attempted send is never
+   * duplicated.
+   */
+  async function sendTelegramChunk(
+    activeBot: Bot,
+    chatId: number,
+    chunk: TelegramMessageChunk,
+    threadOptions: { message_thread_id?: number },
+  ): Promise<number> {
+    try {
+      const sent = await activeBot.api.sendMessage(chatId, chunk.html, {
+        parse_mode: 'HTML',
+        ...threadOptions,
+      });
+      return sent.message_id;
+    } catch (err) {
+      if (!isTelegramHtmlParseError(err)) throw err;
+      logger.debug({ err, chatId }, 'HTML parse failed, fallback to plain');
+      const sent = await activeBot.api.sendMessage(
+        chatId,
+        chunk.markdown,
+        threadOptions,
+      );
+      return sent.message_id;
+    }
+  }
+
+  /** Telegram answered that the edit would not change the message. */
+  function isTelegramNotModified(err: unknown): boolean {
+    const rejection = telegramApiRejection(err);
+    return (
+      rejection?.code === 400 && /not modified/i.test(rejection.description)
+    );
+  }
+
+  /** Bot API operations of one streaming answer, bound to its chat/thread. */
+  function telegramStreamingTransport(
+    target: TelegramProviderTarget,
+  ): TelegramStreamingTransport {
+    const threadOptions = target.messageThreadId
+      ? { message_thread_id: target.messageThreadId }
+      : {};
+    return {
+      async send(chunk) {
+        try {
+          return await sendTelegramChunk(
+            requireOutboundBot(),
+            target.chatId,
+            chunk,
+            threadOptions,
+          );
+        } catch (err) {
+          throw classifyTelegramSendError(err);
+        }
+      },
+      async edit(messageId, chunk) {
+        const activeBot = requireOutboundBot();
+        try {
+          await activeBot.api.editMessageText(
+            target.chatId,
+            messageId,
+            chunk.html,
+            { parse_mode: 'HTML' },
+          );
+        } catch (err) {
+          if (isTelegramNotModified(err)) return;
+          if (!isTelegramHtmlParseError(err)) throw err;
+          try {
+            await activeBot.api.editMessageText(
+              target.chatId,
+              messageId,
+              chunk.markdown,
+            );
+          } catch (plainErr) {
+            if (!isTelegramNotModified(plainErr)) throw plainErr;
+          }
+        }
+      },
+      async delete(messageId) {
+        await requireOutboundBot().api.deleteMessage(target.chatId, messageId);
+      },
+    };
   }
 
   /**
@@ -949,24 +1098,50 @@ export function createTelegramConnection(
       jid: string;
       targetJid: string;
       sourceJid: string;
-      senderId: string;
       senderName: string;
       content: string;
       timestamp: string;
       attachmentsJson?: string;
       agentId?: string;
       requestedMode?: FollowUpMode;
+      /** The provider message: its context and any replied-to reference. */
+      provider: {
+        message: Parameters<
+          typeof buildTelegramChannelTurnContext
+        >[0]['message'];
+        chat: TelegramChatDescriptor & { title?: string };
+        from?: TelegramUserLike;
+      };
     },
   ): ChannelFollowUpOutcome {
+    // An unattributable sender (anonymous admin, channel identity) is stored
+    // as such, so no later check can mistake the shared system account for
+    // a person.
+    const senderImId = telegramSenderImId({
+      from: input.provider.from,
+      sender_chat: input.provider.message.sender_chat,
+    });
+    const senderId = senderImId ? `tg:${senderImId}` : 'tg:unknown';
+    const channelContext = buildTelegramChannelTurnContext({
+      sourceJid: input.sourceJid,
+      chat: input.provider.chat,
+      message: input.provider.message,
+      from: input.provider.from,
+      botUserId,
+    });
     storeMessageDirect(
       input.id,
       input.targetJid,
-      input.senderId,
+      senderId,
       input.senderName,
       input.content,
       input.timestamp,
       false,
-      { attachments: input.attachmentsJson, sourceJid: input.sourceJid },
+      {
+        attachments: input.attachmentsJson,
+        sourceJid: input.sourceJid,
+        channelContext,
+      },
     );
     const followUp = projectChannelInbound(
       opts,
@@ -974,11 +1149,12 @@ export function createTelegramConnection(
         id: input.id,
         chat_jid: input.targetJid,
         source_jid: input.sourceJid,
-        sender: input.senderId,
+        sender: senderId,
         sender_name: input.senderName,
         content: input.content,
         timestamp: input.timestamp,
         attachments: input.attachmentsJson,
+        channel_context: channelContext,
         is_from_me: false,
       },
       { agentId: input.agentId, requestedMode: input.requestedMode },
@@ -1427,7 +1603,6 @@ export function createTelegramConnection(
               )
               .catch(() => {});
             const timestamp = new Date(ctx.message.date * 1000).toISOString();
-            const senderId = ctx.from?.id ? `tg:${ctx.from.id}` : 'tg:unknown';
             storeChatMetadata(targetJid, timestamp);
             // The connector owns persistence; the host decides how to project it.
             const followUp = persistTelegramInbound(opts, {
@@ -1435,12 +1610,16 @@ export function createTelegramConnection(
               jid,
               targetJid,
               sourceJid,
-              senderId,
               senderName,
               content,
               timestamp,
               agentId: agentRouting?.agentId ?? undefined,
               requestedMode: requestedFollowUpMode,
+              provider: {
+                message: ctx.message,
+                chat: ctx.chat as TelegramChatDescriptor,
+                from: ctx.from,
+              },
             });
             logger.info(
               {
@@ -1618,20 +1797,23 @@ export function createTelegramConnection(
               )
               .catch(() => {});
             const timestamp = new Date(ctx.message.date * 1000).toISOString();
-            const senderId = ctx.from?.id ? `tg:${ctx.from.id}` : 'tg:unknown';
             storeChatMetadata(targetJid, timestamp);
             persistTelegramInbound(opts, {
               id,
               jid,
               targetJid,
               sourceJid,
-              senderId,
               senderName,
               content: text,
               timestamp,
               attachmentsJson,
               agentId: agentRouting?.agentId ?? undefined,
               requestedMode,
+              provider: {
+                message: ctx.message,
+                chat: ctx.chat as TelegramChatDescriptor,
+                from: ctx.from,
+              },
             });
 
             logger.info(
@@ -1735,7 +1917,6 @@ export function createTelegramConnection(
                 jid,
                 targetJid,
                 sourceJid,
-                senderId: ctx.from?.id ? `tg:${ctx.from.id}` : 'tg:unknown',
                 senderName,
                 content: telegramMediaMessageText(
                   `[文件过大，未下载: ${safeFilename}]`,
@@ -1744,6 +1925,11 @@ export function createTelegramConnection(
                 timestamp: new Date(ctx.message.date * 1000).toISOString(),
                 agentId: agentRouting?.agentId ?? undefined,
                 requestedMode,
+                provider: {
+                  message: ctx.message,
+                  chat: ctx.chat as TelegramChatDescriptor,
+                  from: ctx.from,
+                },
               });
               return;
             }
@@ -1797,19 +1983,22 @@ export function createTelegramConnection(
               )
               .catch(() => {});
             const timestamp = new Date(ctx.message.date * 1000).toISOString();
-            const senderId = ctx.from?.id ? `tg:${ctx.from.id}` : 'tg:unknown';
             storeChatMetadata(targetJid, timestamp);
             persistTelegramInbound(opts, {
               id,
               jid,
               targetJid,
               sourceJid,
-              senderId,
               senderName,
               content: text,
               timestamp,
               agentId: agentRouting?.agentId ?? undefined,
               requestedMode,
+              provider: {
+                message: ctx.message,
+                chat: ctx.chat as TelegramChatDescriptor,
+                from: ctx.from,
+              },
             });
 
             logger.info(
@@ -1955,7 +2144,6 @@ export function createTelegramConnection(
               )
               .catch(() => {});
             const timestamp = new Date(tgMessage.date * 1000).toISOString();
-            const senderId = ctx.from?.id ? `tg:${ctx.from.id}` : 'tg:unknown';
             const { caption, requestedMode } = telegramMediaCaption(
               tgMessage,
               tgChat as TelegramChatDescriptor,
@@ -1970,12 +2158,16 @@ export function createTelegramConnection(
               jid,
               targetJid,
               sourceJid,
-              senderId,
               senderName,
               content: text,
               timestamp,
               agentId: agentRouting?.agentId ?? undefined,
               requestedMode,
+              provider: {
+                message: tgMessage,
+                chat: tgChat as TelegramChatDescriptor,
+                from: ctx.from,
+              },
             });
 
             logger.info(
@@ -2212,28 +2404,14 @@ export function createTelegramConnection(
           chunks.length + (localImagePaths?.length ?? 0),
         );
 
-        for (const { markdown: mdChunk, html } of chunks) {
+        for (const chunk of chunks) {
           await tracker.send(async () => {
-            try {
-              await activeBot.api.sendMessage(target.chatId, html, {
-                parse_mode: 'HTML',
-                ...threadOptions,
-              });
-            } catch (err) {
-              if (!isTelegramHtmlParseError(err)) {
-                throw err;
-              }
-              // HTML parse failed (e.g. unclosed tags), fallback to plain text
-              logger.debug(
-                { err, chatId },
-                'HTML parse failed, fallback to plain',
-              );
-              await activeBot.api.sendMessage(
-                target.chatId,
-                mdChunk,
-                threadOptions,
-              );
-            }
+            await sendTelegramChunk(
+              activeBot,
+              target.chatId,
+              chunk,
+              threadOptions,
+            );
           });
         }
 
@@ -2266,6 +2444,18 @@ export function createTelegramConnection(
 
     clearAckReaction(chatId: string, inputMessageId: string): Promise<void> {
       return ackReactions.clear(processingIndicatorKey(chatId, inputMessageId));
+    },
+
+    createStreamingSession(
+      chatId: string,
+      onCardCreated?: (messageId: string) => void,
+    ): TelegramStreamingController | undefined {
+      const target = parseTelegramProviderTarget(chatId);
+      if (!target || !bot) return undefined;
+      return new TelegramStreamingController(
+        telegramStreamingTransport(target),
+        { onCardCreated },
+      );
     },
 
     async sendImage(

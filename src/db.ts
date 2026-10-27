@@ -4073,6 +4073,34 @@ export function cancelQueuedFollowUp(
 }
 
 /**
+ * Withdraw a queued input together with the late forward root it durably
+ * covers. A user cancel refuses this pair because it counts as admitted, but
+ * an input whose sender left the response audience must not run, and must
+ * not leave its covered root hidden as `subsumed` either.
+ */
+export function withdrawQueuedFollowUp(
+  chatJid: string,
+  messageId: string,
+  updatedAt = new Date().toISOString(),
+): QueuedFollowUp | null {
+  return db.transaction(() => {
+    const item = transitionFollowUp(
+      chatJid,
+      messageId,
+      ['queued', 'promoting'],
+      'cancelled',
+      { updatedAt },
+    );
+    if (!item) return null;
+    prepareCached(`UPDATE messages
+       SET delivery_status = 'cancelled', delivery_updated_at = ?
+       WHERE chat_jid = ? AND delivery_status = 'subsumed'
+         AND delivery_run_id = ?`).run(updatedAt, chatJid, messageId);
+    return item;
+  })();
+}
+
+/**
  * Atomically cancel the durable follow-up cutoff captured by `/break`.
  * Rows arriving after this synchronous transaction are not part of the
  * cutoff and continue through the normal queue. A covered late-forward root

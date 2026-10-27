@@ -69,6 +69,7 @@ import type { DingTalkStreamingCardController } from './dingtalk-streaming-card.
 import type { DiscordStreamingEditController } from './discord-streaming-edit.js';
 import type { QQStreamingController } from './qq-streaming-card.js';
 import type { WeComStreamingController } from './wecom-streaming.js';
+import type { TelegramStreamingController } from './telegram-streaming.js';
 import { CHANNEL_PREFIXES } from './channel-prefixes.js';
 import { loadChannelImplementation } from './channel-registry.js';
 import type {
@@ -88,7 +89,8 @@ export type StreamingSession =
   | DingTalkStreamingCardController
   | DiscordStreamingEditController
   | QQStreamingController
-  | WeComStreamingController;
+  | WeComStreamingController
+  | TelegramStreamingController;
 
 /**
  * Whether a streaming session has settled into a terminal presentation state
@@ -615,7 +617,9 @@ class TypingLeaseExpiry {
 
 export function createTelegramChannel(
   config: TelegramConnectionConfig,
+  opts?: { streamingMode?: 'edit' | 'off' },
 ): IMChannel {
+  const streamingEnabled = opts?.streamingMode !== 'off';
   let inner: TelegramConnection | null = null;
   // A chat may have overlapping warm inputs. Each input owns a lease; the
   // provider pulse stops only after the final lease is released.
@@ -768,6 +772,11 @@ export function createTelegramChannel(
 
     async clearAckReaction(chatId, inputMessageId) {
       await inner?.clearAckReaction(chatId, inputMessageId);
+    },
+
+    async createStreamingSession(chatId, onCardCreated?) {
+      if (!streamingEnabled) return undefined;
+      return inner?.createStreamingSession(chatId, onCardCreated);
     },
 
     isConnected(): boolean {

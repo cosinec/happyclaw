@@ -365,15 +365,36 @@ describe('Telegram audience: the bootstrap and identity gaps', () => {
       undefined,
       [],
     );
+
+    // Admitted by an open audience, it is stored without a person's id, so a
+    // later queue re-admission cannot match the shared system account.
+    await inbound.handlers.get('message:text')!(
+      textCtx({
+        text: 'hello',
+        from: 1087968824,
+        sender_chat: { id: -100777, type: 'supergroup' },
+      }),
+    );
+    expect(inbound.storeMessageDirect).toHaveBeenCalledOnce();
+    expect(inbound.storeMessageDirect.mock.calls[0][2]).toBe('tg:unknown');
   });
 
   test('/allow ignores the implicit reply of a forum topic and channel identities', () => {
     expect(
       telegramCommandMentions({
+        is_topic_message: true,
         message_thread_id: 55,
         reply_to_message: { message_id: 55, from: { id: 4242 } },
       }),
     ).toEqual([]);
+    // An ordinary supergroup reply also carries message_thread_id (the reply
+    // chain root, which is the replied message): it does name its author.
+    expect(
+      telegramCommandMentions({
+        message_thread_id: 100,
+        reply_to_message: { message_id: 100, from: { id: 4242 } },
+      }),
+    ).toEqual([{ imId: '4242' }]);
     expect(
       telegramCommandMentions({
         reply_to_message: {

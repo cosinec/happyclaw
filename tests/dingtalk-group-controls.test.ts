@@ -48,7 +48,7 @@ vi.mock('../src/logger.js', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
-import { storeMessageDirect } from '../src/db.js';
+import { storeChatMetadata, storeMessageDirect } from '../src/db.js';
 import { notifyNewImMessage } from '../src/message-notifier.js';
 import {
   createDingTalkConnection,
@@ -247,6 +247,31 @@ describe('DingTalk group response audience', () => {
     expect(onCommand).toHaveBeenCalledWith(GROUP_JID, 'allow', 'OWNER', [
       { imId: 'MEMBER' },
     ]);
+  });
+
+  test('/owner_mention from outside the audience leaves no chat state behind', async () => {
+    const onNewChat = vi.fn();
+    const { deliver } = await connect(
+      { audience_mode: 'owner_only' },
+      { onNewChat },
+    );
+    await deliver(
+      downstream({ senderId: 'MEMBER', content: '/owner_mention' }),
+    );
+    onCommand.mockResolvedValueOnce(null);
+    await deliver(
+      downstream({ senderId: 'MEMBER', content: '/owner_mention' }),
+    );
+    expect(onCommand).toHaveBeenCalledTimes(2);
+    expect(onNewChat).not.toHaveBeenCalled();
+    expect(storeChatMetadata).not.toHaveBeenCalled();
+    expect(connection!.getLastMessageId(GROUP_JID)).toBeUndefined();
+
+    // Once claimed, the same sender is admitted and the chat is recorded.
+    groups[GROUP_JID].owner_im_id = 'MEMBER';
+    await deliver(downstream({ senderId: 'MEMBER', content: 'hi' }));
+    expect(onNewChat).toHaveBeenCalledOnce();
+    expect(connection!.getLastMessageId(GROUP_JID)).toBeDefined();
   });
 
   test('a multi-line /owner_mention that is not dispatched is dropped', async () => {
