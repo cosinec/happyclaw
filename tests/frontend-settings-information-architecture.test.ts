@@ -148,7 +148,7 @@ describe('settings information architecture', () => {
     expect(providerModel).toContain('CLAUDE_CODE_AUTO_COMPACT_WINDOW');
     // 1M is a per-model switch, both when adding and when managing models.
     expect(wizardModels).toContain('1M 上下文');
-    expect(connectionModels).toContain('1M 上下文');
+    expect(connectionModels).toContain('<OneMillionToggle');
     expect(wizard).toContain('系统预填 Claude Code 运行环境');
     // The default is a deliberate, clearable choice (按钮「默认」), not the
     // old always-present "系统默认" pointer.

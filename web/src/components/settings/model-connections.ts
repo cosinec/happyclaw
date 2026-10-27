@@ -8,7 +8,9 @@ import {
   type ProviderTestRecord,
 } from '@/lib/model-providers';
 import { api } from '../../api/client';
+import { formatSessionTime } from '../../lib/session-presentation';
 import { confirmDialog } from '../../stores/confirm';
+import type { ProviderAuthMode } from '../../utils/provider-env-import';
 import type { UnifiedProviderPublic } from './types';
 
 /**
@@ -59,6 +61,23 @@ export function connectionKind(provider: KindFields): ConnectionKind {
   return getModelPreset(provider.presetId) ? 'preset' : 'custom';
 }
 
+/** Kinds that talk to an Anthropic-compatible address with a key. */
+export function isThirdPartyKind(kind: ConnectionKind | null): boolean {
+  return kind === 'preset' || kind === 'custom';
+}
+
+/**
+ * Kinds that may run without a default model: Claude Code picks one itself,
+ * or a relay routes the names it sends. A preset always has one.
+ */
+export function allowsNoDefaultModel(kind: ConnectionKind | null): boolean {
+  return (
+    kind === 'claude_subscription' ||
+    kind === 'anthropic_api' ||
+    kind === 'custom'
+  );
+}
+
 /** The label a row shows for its kind: a preset is named by its vendor. */
 export function connectionKindLabel(provider: KindFields): string {
   const kind = connectionKind(provider);
@@ -76,23 +95,6 @@ export interface ConnectionStatus {
   hint?: string;
 }
 
-const MINUTE = 60_000;
-
-export function formatTestTime(at: string, now = Date.now()): string {
-  const time = Date.parse(at);
-  if (!Number.isFinite(time)) return '';
-  const elapsed = Math.max(0, now - time);
-  if (elapsed < MINUTE) return '刚刚';
-  if (elapsed < 60 * MINUTE) return `${Math.floor(elapsed / MINUTE)} 分钟前`;
-  if (elapsed < 24 * 60 * MINUTE) {
-    return `${Math.floor(elapsed / (60 * MINUTE))} 小时前`;
-  }
-  if (elapsed < 7 * 24 * 60 * MINUTE) {
-    return `${Math.floor(elapsed / (24 * 60 * MINUTE))} 天前`;
-  }
-  return new Date(time).toLocaleDateString('zh-CN');
-}
-
 export function errorCopy(code: ProviderErrorCode | null | undefined) {
   return PROVIDER_ERROR_COPY[code ?? 'UNKNOWN'] ?? PROVIDER_ERROR_COPY.UNKNOWN;
 }
@@ -106,7 +108,6 @@ export function connectionStatus(
     UnifiedProviderPublic,
     'lastTest' | 'claudeOAuthNeedsReLogin' | 'codexOAuthNeedsReauth'
   >,
-  now = Date.now(),
 ): ConnectionStatus {
   if (provider.claudeOAuthNeedsReLogin || provider.codexOAuthNeedsReauth) {
     return {
@@ -118,7 +119,7 @@ export function connectionStatus(
   const test = provider.lastTest;
   if (!test) return { tone: 'muted', label: '未验证' };
   if (test.ok) {
-    const when = formatTestTime(test.at, now);
+    const when = formatSessionTime(test.at);
     return { tone: 'success', label: when ? `已连接 · ${when}` : '已连接' };
   }
   const copy = errorCopy(test.code);
@@ -126,8 +127,6 @@ export function connectionStatus(
 }
 
 // ─── Requests ──────────────────────────────────────────────────
-
-export type ProviderAuthHeader = 'bearer' | 'x-api-key';
 
 /** Fields a not-yet-saved connection is tested or listed with. */
 export interface ConnectionDraftBody {
@@ -139,7 +138,7 @@ export interface ConnectionDraftBody {
   claudeCredentialInput?: string;
 }
 
-export interface ProviderTestProbe {
+interface ProviderTestProbe {
   model: string;
   ok: boolean;
   status: number | null;
@@ -148,21 +147,21 @@ export interface ProviderTestProbe {
   hint?: string;
 }
 
-export interface ProviderTestResponse {
+interface ProviderTestResponse {
   ok: boolean;
   probes: ProviderTestProbe[];
   code?: ProviderErrorCode | null;
   /** The header the endpoint accepted. */
-  authMode?: ProviderAuthHeader;
+  authMode?: ProviderAuthMode;
   record?: ProviderTestRecord;
 }
 
-export type DiscoverModelsResponse =
+type DiscoverModelsResponse =
   | {
       ok: true;
       models: DiscoveredModel[];
       source: 'endpoint' | 'builtin' | 'catalog';
-      authMode?: ProviderAuthHeader;
+      authMode?: ProviderAuthMode;
     }
   | {
       ok: false;
@@ -170,6 +169,32 @@ export type DiscoverModelsResponse =
       status: number | null;
       message: string;
     };
+
+/** PATCH a connection's fields; protocol edits stop runners, so allow time. */
+export async function updateConnection(
+  id: string,
+  patch: Record<string, unknown>,
+): Promise<UnifiedProviderPublic> {
+  return (
+    await api.patch<{ provider: UnifiedProviderPublic }>(
+      `${PROVIDERS_API}/${encodeURIComponent(id)}`,
+      patch,
+      120_000,
+    )
+  ).provider;
+}
+
+/** Replace an official connection's credential. */
+export function saveConnectionSecrets(
+  id: string,
+  secrets: Record<string, unknown>,
+): Promise<unknown> {
+  return api.put(
+    `${PROVIDERS_API}/${encodeURIComponent(id)}/secrets`,
+    secrets,
+    120_000,
+  );
+}
 
 export function testConnection(
   body:
@@ -200,7 +225,7 @@ export interface TestOutcome {
   model: string | null;
   /** The upstream's own words for a failure (redacted by the server). */
   message: string | null;
-  authMode: ProviderAuthHeader | null;
+  authMode: ProviderAuthMode | null;
 }
 
 export function testOutcome(result: ProviderTestResponse): TestOutcome {
@@ -253,18 +278,17 @@ export async function confirmProtocolChange(provider: {
   });
 }
 
-/** The error message a failed request carries, or the fallback. */
-export function requestError(err: unknown, fallback: string): string {
-  if (typeof err === 'object' && err !== null && 'message' in err) {
-    const message = (err as { message?: unknown }).message;
-    if (typeof message === 'string' && message.trim()) return message;
-  }
-  return fallback;
+/** The `{ code, ... }` body a refused request answered with, if any. */
+function errorBody(err: unknown): Record<string, unknown> | null {
+  const body = (err as { body?: unknown } | null)?.body;
+  return body && typeof body === 'object'
+    ? (body as Record<string, unknown>)
+    : null;
 }
 
 /** Agents named by a 409 MODEL_IN_USE answer, if that is what this is. */
 export function modelInUseAgents(err: unknown): string[] | null {
-  const body = (err as { body?: { code?: unknown; agents?: unknown } })?.body;
+  const body = errorBody(err);
   if (body?.code !== 'MODEL_IN_USE' || !Array.isArray(body.agents)) return null;
   return body.agents
     .map((agent) =>
@@ -273,6 +297,13 @@ export function modelInUseAgents(err: unknown): string[] | null {
         : null,
     )
     .filter((name): name is string => typeof name === 'string');
+}
+
+/** Copy for a pick of a model the connection no longer offers, else null. */
+export function modelBindingErrorMessage(err: unknown): string | null {
+  return errorBody(err)?.code === 'MODEL_NOT_IN_CONNECTION'
+    ? '所选模型已不在该模型配置的模型列表里，请重新选择模型'
+    : null;
 }
 
 // ─── Model names ───────────────────────────────────────────────

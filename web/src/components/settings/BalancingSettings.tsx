@@ -17,8 +17,8 @@ interface BalancingSettingsProps {
   hasDefault: boolean;
   onChange: (updates: Partial<BalancingConfig>) => void;
   /** Connections in the pool, for the weighted strategy's weights. */
-  pool?: ReadonlyArray<{ id: string; name: string; weight: number }>;
-  onWeightChange?: (providerId: string, weight: number) => void;
+  pool: ReadonlyArray<{ id: string; name: string; weight: number }>;
+  onWeightChange: (providerId: string, weight: number) => void;
   disabled: boolean;
   saving: boolean;
 }
@@ -40,7 +40,7 @@ export function BalancingSettings({
   balancing,
   hasDefault,
   onChange,
-  pool = [],
+  pool,
   onWeightChange,
   disabled,
   saving,
@@ -184,9 +184,7 @@ export function BalancingSettings({
                       name={provider.name}
                       weight={provider.weight}
                       disabled={disabled}
-                      onCommit={(weight) =>
-                        onWeightChange?.(provider.id, weight)
-                      }
+                      onCommit={(weight) => onWeightChange(provider.id, weight)}
                     />
                   ))}
                   <p className="px-3 py-2 text-caption leading-5 text-muted-foreground">

@@ -44,8 +44,6 @@ export interface ProviderEnvDraft {
   rows: EnvRow[];
 }
 
-export const EMPTY_PROVIDER_ENV: ProviderEnvDraft = { overrides: {}, rows: [] };
-
 /** Splits a stored `customEnv` into prefilled overrides and free rows. */
 export function splitProviderEnv(
   thirdParty: boolean,

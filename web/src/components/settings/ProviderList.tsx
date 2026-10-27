@@ -52,7 +52,7 @@ interface ProviderListProps {
   onAdd: () => void;
   togglingId: string | null;
   deletingId: string | null;
-  testingId?: string | null;
+  testingId: string | null;
   disabled: boolean;
 }
 
@@ -126,7 +126,7 @@ export function ProviderList({
   onAdd,
   togglingId,
   deletingId,
-  testingId = null,
+  testingId,
   disabled,
 }: ProviderListProps) {
   if (providers.length === 0) {

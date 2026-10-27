@@ -6,11 +6,7 @@ import { api } from '../../api/client';
 import { useAgentProfilesStore } from '../../stores/agent-profiles';
 import { useMcpServersStore } from '../../stores/mcp-servers';
 import { useSkillsStore } from '../../stores/skills';
-import type {
-  AgentEffortLevel,
-  AgentProfileRuntimePolicy,
-  ModelConfigOption,
-} from '../../types';
+import type { AgentEffortLevel, AgentProfileRuntimePolicy } from '../../types';
 import { normalizeMcpPolicyReferences } from '../../utils/mcp-servers';
 import { PolicyResourcePicker } from '../agents/PolicyResourcePicker';
 import { AgentSkillsPolicyEditor } from '../agents/AgentSkillsPolicyEditor';
@@ -34,91 +30,15 @@ import {
 } from '../../utils/agent-runtime-policy';
 import { SettingsGroup, SettingsRow, SettingsSection } from './SettingsLayout';
 import { SettingsFormFooter } from './SettingsFormControls';
+import {
+  AgentModelSelect,
+  hasModelLists,
+  modelBindingChanges,
+} from './AgentModelSelect';
+import { modelBindingErrorMessage } from './model-connections';
 import { getErrorMessage } from './types';
 
 type CapabilityMode = 'inherit' | 'custom' | 'disabled';
-
-const DEFAULT_MODEL_VALUE = '__default__';
-
-/** Whether the server lists the models an Agent may pin; older ones do not. */
-export function hasModelLists(configs: ModelConfigOption[]): boolean {
-  return configs.some((config) => Array.isArray(config.models));
-}
-
-/** Readable copy for a model the configuration does not offer, else null. */
-export function modelBindingErrorMessage(err: unknown): string | null {
-  const code =
-    err && typeof err === 'object'
-      ? (err as { body?: { code?: unknown } }).body?.code
-      : undefined;
-  return code === 'MODEL_NOT_IN_CONNECTION'
-    ? '所选模型已不在该模型配置的模型列表里，请重新选择模型'
-    : null;
-}
-
-/**
- * The model an Agent runs within its configuration: the configuration's
- * default (null) or one of its models. Hidden models stay listed, since a
- * binding may name them, and a bound model the list lacks stays so the select
- * shows what is saved. Nothing to pick while the configuration is automatic.
- */
-export function AgentModelSelect({
-  configs,
-  configId,
-  value,
-  onChange,
-  ariaLabel,
-  className,
-}: {
-  configs: ModelConfigOption[];
-  /** 'inherit' while the configuration is chosen automatically. */
-  configId: string;
-  value: string | null;
-  onChange: (model: string | null) => void;
-  ariaLabel: string;
-  className?: string;
-}) {
-  const config =
-    configId === 'inherit'
-      ? undefined
-      : configs.find((item) => item.id === configId);
-  const defaultModel = config?.anthropic_model ?? '';
-  const models = config?.models ?? [];
-  // The first option already stands for the default model.
-  const listed = models.filter(
-    (model) => model.id !== defaultModel || model.id === value,
-  );
-  const missing = !!config && !!value && !models.some((m) => m.id === value);
-  return (
-    <Select
-      value={value ?? DEFAULT_MODEL_VALUE}
-      onValueChange={(next) =>
-        onChange(next === DEFAULT_MODEL_VALUE ? null : next)
-      }
-      disabled={!config || (listed.length === 0 && !missing)}
-    >
-      <SelectTrigger aria-label={ariaLabel} className={className}>
-        <SelectValue placeholder="选择模型" />
-      </SelectTrigger>
-      <SelectContent>
-        <SelectItem value={DEFAULT_MODEL_VALUE}>
-          {config
-            ? `连接默认（${defaultModel || '由中转站决定'}）`
-            : '由模型配置决定'}
-        </SelectItem>
-        {missing && value && (
-          <SelectItem value={value}>{value}（不在模型列表里）</SelectItem>
-        )}
-        {listed.map((model) => (
-          <SelectItem key={model.id} value={model.id}>
-            {model.id}
-            {model.hidden ? '（已隐藏）' : ''}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
-  );
-}
 
 export function MainAgentCapabilitiesSection() {
   const profiles = useAgentProfilesStore((state) => state.profiles);
@@ -259,8 +179,7 @@ export function MainAgentCapabilitiesSection() {
     try {
       await api.patch(`/api/agent-profiles/${encodeURIComponent(profile.id)}`, {
         model_config_id: persistedModelConfigId,
-        // Only a change is sent, so an older server never sees the field.
-        ...(modelChanged ? { model: persistedModel } : {}),
+        ...modelBindingChanges(profile, persistedModelConfigId, model),
         runtime_policy: {
           reasoning: { effort },
           skills: {

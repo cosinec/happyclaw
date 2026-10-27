@@ -6,6 +6,7 @@ import { createMemoryRouter, RouterProvider } from 'react-router-dom';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
 import type { AgentProfile, ModelConfigOption } from '../types';
+import { choose, combobox } from '../components/settings/test-helpers';
 
 const mocks = vi.hoisted(() => ({
   profiles: [] as unknown[],
@@ -212,25 +213,8 @@ async function renderPage(profiles: AgentProfile[], configs = CONFIGS) {
   );
 }
 
-function combobox(label: string): HTMLButtonElement {
-  const node = container!.querySelector<HTMLButtonElement>(
-    `[role="combobox"][aria-label="${label}"]`,
-  );
-  if (!node) throw new Error(`${label} not rendered`);
-  return node;
-}
-
 const configSelect = () => combobox('智能体模型配置');
 const modelSelect = () => combobox('智能体模型');
-
-async function choose(select: HTMLButtonElement, text: string) {
-  await act(async () => select.click());
-  const option = [
-    ...document.querySelectorAll<HTMLElement>('[role="option"]'),
-  ].find((item) => item.textContent?.includes(text));
-  if (!option) throw new Error(`option ${text} not found`);
-  await act(async () => option.click());
-}
 
 function buttonByText(text: string): HTMLButtonElement {
   const button = [

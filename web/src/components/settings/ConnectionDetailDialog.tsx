@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useState } from 'react';
 import {
   Check,
   Loader2,
@@ -18,29 +18,28 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from '@/components/ui/native-select';
 import { IconButton } from '@/components/common/IconButton';
 import { describeBaseUrlProblem, getModelPreset } from '@/lib/model-providers';
-import { api } from '../../api/client';
 import {
-  codexFallbackEffort,
-  codexModelEfforts,
+  codexDefaultsPatch,
+  storedCodexEffort,
   useCodexCatalog,
 } from './codex-catalog';
+import { CodexModelFields } from './CodexModelFields';
 import { ConnectionModelList } from './ConnectionModelList';
 import { ConnectionTestResult } from './ConnectionTestResult';
 import {
-  PROVIDERS_API,
+  allowsNoDefaultModel,
   confirmProtocolChange,
   connectionKind,
   connectionKindLabel,
   connectionStatus,
-  requestError,
+  isThirdPartyKind,
+  saveConnectionSecrets,
   testConnection,
   testOutcome,
+  updateConnection,
+  type ConnectionKind,
   type TestOutcome,
 } from './model-connections';
 import { OAuthLoginPanel } from './OAuthLoginPanel';
@@ -50,15 +49,21 @@ import {
   splitProviderEnv,
   type ProviderEnvDraft,
 } from './ProviderEnvEditor';
-import { SettingsField } from './SettingsLayout';
-import type { UnifiedProviderPublic } from './types';
+import { SettingsField, SettingsSection } from './SettingsLayout';
+import { getErrorMessage, type UnifiedProviderPublic } from './types';
+
+export type ConnectionUpdate = Pick<UnifiedProviderPublic, 'id'> &
+  Partial<UnifiedProviderPublic>;
 
 interface ConnectionDetailDialogProps {
   /** The connection to manage; null closes the dialog. */
   provider: UnifiedProviderPublic | null;
   onClose: () => void;
-  /** Something was saved or tested: reload the list. */
-  onChanged: () => void;
+  /**
+   * Something was saved or tested. With the fields that changed the list
+   * updates that row in place; without, it reloads.
+   */
+  onChanged: (update?: ConnectionUpdate) => void;
   setNotice: (message: string | null) => void;
   setError: (message: string | null) => void;
 }
@@ -91,12 +96,6 @@ export function ConnectionDetailDialog({
   );
 }
 
-const STATUS_DOT = {
-  success: 'success',
-  error: 'error',
-  muted: 'muted',
-} as const;
-
 function sameEnv(a: Record<string, string>, b: Record<string, string>) {
   const keys = Object.keys(a);
   return (
@@ -118,7 +117,7 @@ function ConnectionDetail({
   provider: UnifiedProviderPublic;
 }) {
   const kind = connectionKind(provider);
-  const thirdParty = kind === 'preset' || kind === 'custom';
+  const thirdParty = isThirdPartyKind(kind);
   const preset = getModelPreset(provider.presetId);
   const status = connectionStatus(provider);
 
@@ -132,11 +131,10 @@ function ConnectionDetail({
       return;
     }
     try {
-      await api.patch(`${PROVIDERS_API}/${provider.id}`, { name: next });
+      onChanged(await updateConnection(provider.id, { name: next }));
       setRenaming(false);
-      onChanged();
     } catch (err) {
-      setError(requestError(err, '重命名失败'));
+      setError(getErrorMessage(err, '重命名失败'));
     }
   };
 
@@ -152,9 +150,14 @@ function ConnectionDetail({
     try {
       const result = await testConnection({ providerId: provider.id });
       setTest({ outcome: testOutcome(result), error: null });
-      onChanged();
+      // The server stored the record as the connection's last test.
+      onChanged(
+        result.record
+          ? { id: provider.id, lastTest: result.record }
+          : undefined,
+      );
     } catch (err) {
-      setTest({ outcome: null, error: requestError(err, '测试连接失败') });
+      setTest({ outcome: null, error: getErrorMessage(err, '测试连接失败') });
     } finally {
       setTesting(false);
     }
@@ -171,15 +174,14 @@ function ConnectionDetail({
   const saveAuthMode = async () => {
     if (!learnedAuthMode || !(await confirmProtocolChange(provider))) return;
     try {
-      await api.patch(
-        `${PROVIDERS_API}/${provider.id}`,
-        { anthropicAuthMode: learnedAuthMode },
-        120_000,
+      onChanged(
+        await updateConnection(provider.id, {
+          anthropicAuthMode: learnedAuthMode,
+        }),
       );
       setNotice('认证方式已保存');
-      onChanged();
     } catch (err) {
-      setError(requestError(err, '保存认证方式失败'));
+      setError(getErrorMessage(err, '保存认证方式失败'));
     }
   };
 
@@ -231,7 +233,7 @@ function ConnectionDetail({
         <DialogDescription asChild>
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant="neutral">{connectionKindLabel(provider)}</Badge>
-            <Badge variant="outline" dot={STATUS_DOT[status.tone]}>
+            <Badge variant="outline" dot={status.tone}>
               {status.label}
             </Badge>
             {thirdParty && provider.anthropicBaseUrl && (
@@ -293,18 +295,18 @@ function ConnectionDetail({
           setError={setError}
         />
       ) : (
-        <Section
+        <SettingsSection
           title="模型"
           description="打开的模型会出现在聊天的模型选择里；默认模型用于没有指定模型的对话。"
         >
           <ConnectionModelList
             provider={provider}
-            allowNoDefault={kind !== 'preset'}
-            onSaved={() => onChanged()}
+            allowNoDefault={allowsNoDefaultModel(kind)}
+            onSaved={onChanged}
             setNotice={setNotice}
             setError={setError}
           />
-        </Section>
+        </SettingsSection>
       )}
 
       <ConnectionSettings
@@ -316,30 +318,6 @@ function ConnectionDetail({
         setError={setError}
       />
     </div>
-  );
-}
-
-function Section({
-  title,
-  description,
-  children,
-}: {
-  title: string;
-  description?: ReactNode;
-  children: ReactNode;
-}) {
-  return (
-    <section className="space-y-3">
-      <div>
-        <h3 className="text-label font-medium text-foreground">{title}</h3>
-        {description && (
-          <p className="mt-0.5 text-caption leading-5 text-muted-foreground">
-            {description}
-          </p>
-        )}
-      </div>
-      {children}
-    </section>
   );
 }
 
@@ -366,110 +344,55 @@ function CodexDefaults({
   setError,
 }: {
   provider: UnifiedProviderPublic;
-  onChanged: () => void;
+  onChanged: (update?: ConnectionUpdate) => void;
   setNotice: (message: string | null) => void;
   setError: (message: string | null) => void;
 }) {
   const catalog = useCodexCatalog(provider.id);
-  const storedEffort =
-    provider.codexDefaultEffort || provider.customEnv?.CODEX_REASONING_EFFORT;
-  const [model, setModel] = useState(
-    provider.anthropicModel || catalog.defaultModel,
+  const [pick, setPick] = useState<{ model: string; effort: string } | null>(
+    null,
   );
-  // The server resolves the effort the gateway really applies, clamped to the
-  // model's catalog entry; prefer it over a raw stored value.
-  const [effort, setEffort] = useState<string | null>(storedEffort || null);
-  const shownEffort = effort ?? catalog.defaultEffort;
+  const model =
+    pick?.model ?? (provider.anthropicModel || catalog.defaultModel);
+  const effort =
+    pick?.effort ?? storedCodexEffort(provider) ?? catalog.defaultEffort;
   const [saving, setSaving] = useState(false);
-  const listed = catalog.models.some((option) => option.value === model);
-  const modelEfforts = codexModelEfforts(catalog, model);
-  const effortChoices = modelEfforts.includes(shownEffort)
-    ? modelEfforts
-    : [shownEffort, ...modelEfforts];
-  const modelDefaultEffort =
-    catalog.models.find((option) => option.value === model)?.defaultEffort ??
-    catalog.defaultEffort;
-  const dirty =
-    model !== provider.anthropicModel ||
-    (effort !== null && effort !== storedEffort);
+  const patch = codexDefaultsPatch(provider, model, effort);
 
   const save = async () => {
     if (!(await confirmProtocolChange(provider))) return;
     setSaving(true);
     try {
-      await api.patch(
-        `${PROVIDERS_API}/${provider.id}`,
-        {
-          anthropicModel: model,
-          // customEnv 为整体替换语义：保留其他既有变量，仅更新推理力度。
-          customEnv: {
-            ...(provider.customEnv ?? {}),
-            CODEX_REASONING_EFFORT: shownEffort,
-          },
-        },
-        120_000,
-      );
+      onChanged(await updateConnection(provider.id, patch));
+      setPick(null);
       setNotice('默认模型已保存');
-      onChanged();
     } catch (err) {
-      setError(requestError(err, '保存默认模型失败'));
+      setError(getErrorMessage(err, '保存默认模型失败'));
     } finally {
       setSaving(false);
     }
   };
 
   return (
-    <Section
+    <SettingsSection
       title="模型"
       description="ChatGPT 订阅的模型来自账号的实时目录，聊天里可以按对话切换；这里设置没有指定时的默认值。"
     >
-      <div className="grid gap-3 sm:grid-cols-2">
-        <SettingsField label="默认模型" htmlFor="codex-model-select">
-          <NativeSelect
-            id="codex-model-select"
-            value={model}
-            onChange={(event) => {
-              const next = event.target.value;
-              setModel(next);
-              setEffort(codexFallbackEffort(catalog, next, shownEffort));
-            }}
-            disabled={saving}
-            className="w-full font-mono"
-          >
-            {/* 当前值不在目录里（如旧目录的模型）时保留为额外选项 */}
-            {!listed && (
-              <NativeSelectOption value={model}>{model}</NativeSelectOption>
-            )}
-            {catalog.models.map((option) => (
-              <NativeSelectOption key={option.value} value={option.value}>
-                {option.value === catalog.defaultModel
-                  ? `${option.value}·默认`
-                  : option.value}
-              </NativeSelectOption>
-            ))}
-          </NativeSelect>
-        </SettingsField>
-        <SettingsField label="默认推理档位" htmlFor="codex-effort-select">
-          <NativeSelect
-            id="codex-effort-select"
-            value={shownEffort}
-            onChange={(event) => setEffort(event.target.value)}
-            disabled={saving}
-            className="w-full font-mono"
-          >
-            {effortChoices.map((level) => (
-              <NativeSelectOption key={level} value={level}>
-                {level === modelDefaultEffort ? `${level}（默认）` : level}
-              </NativeSelectOption>
-            ))}
-          </NativeSelect>
-        </SettingsField>
-      </div>
-      <Button onClick={() => void save()} disabled={!dirty || saving}>
+      <CodexModelFields
+        catalog={catalog}
+        model={model}
+        effort={effort}
+        onChange={setPick}
+        disabled={saving}
+      />
+      <Button
+        onClick={() => void save()}
+        disabled={Object.keys(patch).length === 0 || saving}
+      >
         {saving && <Loader2 className="animate-spin" />}
         保存默认模型
       </Button>
-    </Section>
+    </SettingsSection>
   );
 }
 
@@ -483,13 +406,13 @@ function ConnectionSettings({
   setError,
 }: {
   provider: UnifiedProviderPublic;
-  kind: ReturnType<typeof connectionKind>;
+  kind: ConnectionKind;
   presetName: string | null;
-  onChanged: () => void;
+  onChanged: (update?: ConnectionUpdate) => void;
   setNotice: (message: string | null) => void;
   setError: (message: string | null) => void;
 }) {
-  const thirdParty = kind === 'preset' || kind === 'custom';
+  const thirdParty = isThirdPartyKind(kind);
   const [baseUrl, setBaseUrl] = useState(provider.anthropicBaseUrl);
   const [secret, setSecret] = useState('');
   const initialEnv = splitProviderEnv(
@@ -536,21 +459,19 @@ function ConnectionSettings({
           secrets.claudeCredentialInput = secret.trim();
         }
       }
-      if (Object.keys(patch).length > 0) {
-        await api.patch(`${PROVIDERS_API}/${provider.id}`, patch, 120_000);
-      }
+      const saved =
+        Object.keys(patch).length > 0
+          ? await updateConnection(provider.id, patch)
+          : undefined;
       if (Object.keys(secrets).length > 0) {
-        await api.put(
-          `${PROVIDERS_API}/${provider.id}/secrets`,
-          secrets,
-          120_000,
-        );
+        await saveConnectionSecrets(provider.id, secrets);
       }
       setSecret('');
       setNotice('连接设置已保存；建议测试一次连接');
-      onChanged();
+      // A new credential changes masked fields the PATCH answer lacks.
+      onChanged(Object.keys(secrets).length > 0 ? undefined : saved);
     } catch (err) {
-      setError(requestError(err, '保存连接设置失败'));
+      setError(getErrorMessage(err, '保存连接设置失败'));
     } finally {
       setSaving(false);
     }
@@ -562,7 +483,7 @@ function ConnectionSettings({
   };
 
   return (
-    <Section
+    <SettingsSection
       title="连接设置"
       description="修改地址、密钥或环境变量会停止正在使用它的会话；下一条消息开启新的 SDK 会话，聊天记录保留。"
     >
@@ -732,6 +653,6 @@ function ConnectionSettings({
           </Button>
         </div>
       )}
-    </Section>
+    </SettingsSection>
   );
 }

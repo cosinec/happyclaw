@@ -4,14 +4,12 @@ import { ExternalLink, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { api } from '../../api/client';
-import { requestError } from './model-connections';
-import type { UnifiedProviderPublic } from './types';
+import { getErrorMessage, type UnifiedProviderPublic } from './types';
 
 interface OAuthLoginPanelProps {
   service: 'claude' | 'chatgpt';
   /** Logs an existing connection in again instead of creating one. */
   targetProviderId?: string;
-  disabled?: boolean;
   /** The server saved the login; the provider it answered with, if any. */
   onSuccess: (provider: UnifiedProviderPublic | null) => void;
 }
@@ -54,7 +52,6 @@ const COPY = {
 export function OAuthLoginPanel({
   service,
   targetProviderId,
-  disabled = false,
   onSuccess,
 }: OAuthLoginPanelProps) {
   const copy = COPY[service];
@@ -80,7 +77,7 @@ export function OAuthLoginPanel({
       setCode('');
       window.open(data.authorizeUrl, '_blank', 'noopener,noreferrer');
     } catch (err) {
-      setError(requestError(err, copy.startError));
+      setError(getErrorMessage(err, copy.startError));
     } finally {
       setStarting(false);
     }
@@ -108,7 +105,7 @@ export function OAuthLoginPanel({
         setPendingState(null);
         setCode('');
       }
-      setError(requestError(err, copy.exchangeError));
+      setError(getErrorMessage(err, copy.exchangeError));
     } finally {
       setExchanging(false);
     }
@@ -125,7 +122,7 @@ export function OAuthLoginPanel({
             <Button
               variant={targetProviderId ? 'outline' : 'default'}
               onClick={() => void start()}
-              disabled={disabled || starting}
+              disabled={starting}
             >
               {starting ? (
                 <Loader2 className="animate-spin" />
@@ -139,7 +136,7 @@ export function OAuthLoginPanel({
                 variant="ghost"
                 size="sm"
                 onClick={() => void start('setup_token')}
-                disabled={disabled || starting}
+                disabled={starting}
                 title="与 claude setup-token 相同：1 年有效、仅推理权限，不支持用量查询"
               >
                 改为获取 1 年期 Setup Token

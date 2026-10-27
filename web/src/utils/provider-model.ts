@@ -1,4 +1,7 @@
-import { splitOneMillionSuffix } from '@/lib/model-providers';
+import {
+  splitOneMillionSuffix,
+  withOneMillionSuffix,
+} from '@/lib/model-providers';
 
 export interface DefaultProviderEnvRow {
   key: string;
@@ -22,8 +25,10 @@ export function isOneMillionContextModel(model: string): boolean {
 export function buildDefaultProviderEnv(
   defaultModel: string,
 ): DefaultProviderEnvRow[] {
-  const { model: base, oneMillion } = splitOneMillionSuffix(defaultModel);
-  const model = base && oneMillion ? `${base}[1m]` : base;
+  const model = withOneMillionSuffix(
+    defaultModel,
+    splitOneMillionSuffix(defaultModel).oneMillion,
+  );
   return [
     { key: 'ANTHROPIC_DEFAULT_OPUS_MODEL', value: model, source: 'model' },
     { key: 'ANTHROPIC_DEFAULT_SONNET_MODEL', value: model, source: 'model' },

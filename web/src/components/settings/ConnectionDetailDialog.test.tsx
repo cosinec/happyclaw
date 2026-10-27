@@ -263,10 +263,7 @@ describe('ChatGPT subscription', () => {
     expect(mocks.confirm).toHaveBeenCalledTimes(1);
     expect(mocks.patch).toHaveBeenCalledWith(
       `${PROVIDERS}/chatgpt`,
-      {
-        anthropicModel: 'gpt-6-sol',
-        customEnv: { CODEX_REASONING_EFFORT: 'medium' },
-      },
+      { customEnv: { CODEX_REASONING_EFFORT: 'medium' } },
       120_000,
     );
   });
@@ -511,6 +508,15 @@ describe('model list', () => {
     expect(setNotice).toHaveBeenCalledWith(
       expect.stringContaining('新增 1 个'),
     );
+  });
+
+  test('a model already listed with or without [1m] is not added twice', async () => {
+    await render(legacyProvider);
+    await type('input[aria-label="手动添加模型"]', 'glm-5.2[1m]');
+    await click(button('添加'));
+    await flush();
+    expect(setError).toHaveBeenCalledWith('列表里已经有 glm-5.2');
+    expect(mocks.patch).not.toHaveBeenCalled();
   });
 
   test('a manual model is added visible', async () => {

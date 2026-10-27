@@ -71,7 +71,6 @@ interface ModelPickerProps {
   passThrough: { label: string; hint: string } | null;
   discovery: DiscoveryState;
   onRetryDiscovery: () => void;
-  disabled?: boolean;
 }
 
 const FILTER_THRESHOLD = 12;
@@ -85,13 +84,13 @@ export function ModelPicker({
   passThrough,
   discovery,
   onRetryDiscovery,
-  disabled = false,
 }: ModelPickerProps) {
   const [filter, setFilter] = useState('');
-  const [manual, setManual] = useState('');
-  const [manualError, setManualError] = useState<string | null>(null);
 
   const picked = candidates.filter((candidate) => candidate.picked);
+  const defaultCandidate = candidates.find(
+    (candidate) => candidate.base === defaultBase,
+  );
   const query = filter.trim().toLowerCase();
   const shown = query
     ? candidates.filter(
@@ -115,24 +114,18 @@ export function ModelPicker({
     }
   };
 
-  const addManual = () => {
-    const { model: base, oneMillion } = splitOneMillionSuffix(manual);
-    if (!base || !isValidModelId(base)) {
-      setManualError('模型名不能为空，也不能包含空格');
-      return;
-    }
-    setManualError(null);
-    setManual('');
-    const existing = candidates.find((candidate) => candidate.base === base);
-    if (existing) {
+  const addManual = (raw: string) => {
+    const { model: base, oneMillion } = splitOneMillionSuffix(raw);
+    if (candidates.some((candidate) => candidate.base === base)) {
       update(base, { picked: true, ...(oneMillion ? { oneMillion } : {}) });
-      return;
+      return true;
     }
     onCandidatesChange([
       ...candidates,
       { base, oneMillion, picked: true, origin: 'manual' },
     ]);
     if (!defaultBase && !passThrough) onDefaultChange(base);
+    return true;
   };
 
   return (
@@ -161,7 +154,6 @@ export function ModelPicker({
               name="wizard-default-model"
               checked={defaultBase === ''}
               onChange={() => onDefaultChange('')}
-              disabled={disabled}
               className="size-4 accent-primary"
             />
             <span className="min-w-0">
@@ -189,7 +181,6 @@ export function ModelPicker({
                 onCheckedChange={(next) =>
                   update(candidate.base, { picked: next === true })
                 }
-                disabled={disabled}
                 aria-label={`使用 ${id}`}
               />
               <label
@@ -205,19 +196,13 @@ export function ModelPicker({
                   </span>
                 )}
               </label>
-              <button
-                type="button"
-                aria-pressed={candidate.oneMillion}
-                aria-label={`${id} 使用 1M 上下文`}
-                title="1M 上下文：模型名后加 [1m]"
-                onClick={() =>
+              <OneMillionToggle
+                id={id}
+                on={candidate.oneMillion}
+                onToggle={() =>
                   update(candidate.base, { oneMillion: !candidate.oneMillion })
                 }
-                disabled={disabled}
-                className="inline-flex h-6 shrink-0 items-center rounded-md px-1.5 font-mono text-micro text-muted-foreground ring-1 ring-surface-border transition-colors duration-100 hover:bg-surface-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none aria-pressed:bg-surface-selected aria-pressed:text-foreground pointer-coarse:h-8"
-              >
-                1M
-              </button>
+              />
               <label
                 className={cn(
                   'flex shrink-0 items-center gap-1.5 text-caption',
@@ -231,7 +216,7 @@ export function ModelPicker({
                   name="wizard-default-model"
                   checked={isDefault}
                   onChange={() => onDefaultChange(candidate.base)}
-                  disabled={disabled || !candidate.picked}
+                  disabled={!candidate.picked}
                   aria-label={`把 ${id} 设为默认模型`}
                   className="size-4 accent-primary"
                 />
@@ -247,55 +232,15 @@ export function ModelPicker({
         )}
       </div>
 
-      <div className="space-y-1">
-        <div className="flex gap-2">
-          <Input
-            value={manual}
-            onChange={(event) => {
-              setManual(event.target.value);
-              setManualError(null);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
-                event.preventDefault();
-                addManual();
-              }
-            }}
-            placeholder="手动添加模型名，例如 glm-5.3 或 glm-5.3[1m]"
-            aria-label="手动添加模型"
-            autoComplete="off"
-            disabled={disabled}
-            className="min-w-0 flex-1 font-mono"
-          />
-          <Button
-            variant="outline"
-            onClick={addManual}
-            disabled={disabled || !manual.trim()}
-          >
-            <Plus />
-            添加
-          </Button>
-        </div>
-        {manualError && (
-          <p role="alert" className="text-caption text-error">
-            {manualError}
-          </p>
-        )}
-      </div>
+      <ManualModelInput
+        placeholder="手动添加模型名，例如 glm-5.3 或 glm-5.3[1m]"
+        onAdd={addManual}
+      />
 
       <p className="text-caption text-muted-foreground">
         已选 {picked.length} 个模型
         {defaultBase
-          ? ` · 默认 ${candidateId(
-              candidates.find(
-                (candidate) => candidate.base === defaultBase,
-              ) ?? {
-                base: defaultBase,
-                oneMillion: false,
-                picked: true,
-                origin: 'manual',
-              },
-            )}`
+          ? ` · 默认 ${defaultCandidate ? candidateId(defaultCandidate) : defaultBase}`
           : passThrough
             ? ' · 不指定默认模型'
             : ''}
@@ -357,6 +302,96 @@ function DiscoveryLine({
         <RotateCcw />
         重试
       </Button>
+    </div>
+  );
+}
+
+/** The `[1m]` switch of one model, shared by the wizard and the detail. */
+export function OneMillionToggle({
+  id,
+  on,
+  onToggle,
+  disabled = false,
+}: {
+  id: string;
+  on: boolean;
+  onToggle: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={on}
+      aria-label={`${id} 使用 1M 上下文`}
+      title="1M 上下文：模型名后加 [1m]"
+      onClick={onToggle}
+      disabled={disabled}
+      className="inline-flex h-7 shrink-0 items-center rounded-md px-1.5 font-mono text-micro text-muted-foreground ring-1 ring-surface-border transition-colors duration-100 hover:bg-surface-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none disabled:opacity-50 aria-pressed:bg-surface-selected aria-pressed:text-foreground pointer-coarse:h-9"
+    >
+      1M
+    </button>
+  );
+}
+
+/**
+ * A model name typed by hand. `onAdd` gets a valid id (`[1m]` allowed) and
+ * says whether it was taken; the field clears only then.
+ */
+export function ManualModelInput({
+  placeholder,
+  onAdd,
+  disabled = false,
+}: {
+  placeholder: string;
+  onAdd: (id: string) => boolean | Promise<boolean>;
+  disabled?: boolean;
+}) {
+  const [value, setValue] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const add = async () => {
+    const id = value.trim();
+    if (!isValidModelId(splitOneMillionSuffix(id).model)) {
+      setError('模型名不能为空，也不能包含空格');
+      return;
+    }
+    setError(null);
+    if (await onAdd(id)) setValue('');
+  };
+  return (
+    <div className="min-w-0 flex-1 space-y-1">
+      <div className="flex gap-2">
+        <Input
+          value={value}
+          onChange={(event) => {
+            setValue(event.target.value);
+            setError(null);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              void add();
+            }
+          }}
+          placeholder={placeholder}
+          aria-label="手动添加模型"
+          autoComplete="off"
+          disabled={disabled}
+          className="min-w-0 flex-1 font-mono"
+        />
+        <Button
+          variant="outline"
+          onClick={() => void add()}
+          disabled={disabled || !value.trim()}
+        >
+          <Plus />
+          添加
+        </Button>
+      </div>
+      {error && (
+        <p role="alert" className="text-caption text-error">
+          {error}
+        </p>
+      )}
     </div>
   );
 }

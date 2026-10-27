@@ -176,7 +176,7 @@ async function addDeepSeek(page: Page, shots: string | null) {
   await expectDialogFits(page);
   await shot('1-source');
 
-  await dialog.getByRole('searchbox', { name: '搜索服务商' }).fill('deep');
+  await dialog.getByRole('textbox', { name: '搜索服务商' }).fill('deep');
   await dialog.getByRole('button', { name: /DeepSeek/ }).click();
   await expect(dialog.locator('#wizard-preset-url')).toHaveValue(
     'https://api.deepseek.com/anthropic',

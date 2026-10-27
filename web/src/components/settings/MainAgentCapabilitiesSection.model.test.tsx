@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import type { AgentProfile, ModelConfigOption } from '../../types';
+import { choose, combobox } from './test-helpers';
 
 const mocks = vi.hoisted(() => ({
   patch: vi.fn(),
@@ -156,25 +157,8 @@ async function render() {
   });
 }
 
-function combobox(label: string): HTMLButtonElement {
-  const node = container.querySelector<HTMLButtonElement>(
-    `[role="combobox"][aria-label="${label}"]`,
-  );
-  if (!node) throw new Error(`${label} not rendered`);
-  return node;
-}
-
 const configSelect = () => combobox('主 HappyClaw 模型配置');
 const modelSelect = () => combobox('主 HappyClaw 模型');
-
-async function choose(select: HTMLButtonElement, text: string) {
-  await act(async () => select.click());
-  const option = [
-    ...document.querySelectorAll<HTMLElement>('[role="option"]'),
-  ].find((item) => item.textContent?.includes(text));
-  if (!option) throw new Error(`option ${text} not found`);
-  await act(async () => option.click());
-}
 
 async function optionsOf(select: HTMLButtonElement): Promise<string[]> {
   await act(async () => select.click());

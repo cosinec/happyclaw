@@ -39,7 +39,7 @@ export function makeProvider(
   };
 }
 
-export function setValue(element: Element | null, value: string) {
+function setValue(element: Element | null, value: string) {
   if (!element) throw new Error('field not found');
   const proto =
     element instanceof HTMLTextAreaElement
@@ -79,6 +79,25 @@ export async function flush() {
   await act(async () => {
     for (let i = 0; i < 5; i += 1) await Promise.resolve();
   });
+}
+
+/** A Radix select trigger by its accessible name. */
+export function combobox(label: string): HTMLButtonElement {
+  const node = document.querySelector<HTMLButtonElement>(
+    `[role="combobox"][aria-label="${label}"]`,
+  );
+  if (!node) throw new Error(`${label} not rendered`);
+  return node;
+}
+
+/** Opens a Radix select and picks the option containing `optionText`. */
+export async function choose(select: HTMLButtonElement, optionText: string) {
+  await act(async () => select.click());
+  const option = [
+    ...document.querySelectorAll<HTMLElement>('[role="option"]'),
+  ].find((item) => item.textContent?.includes(optionText));
+  if (!option) throw new Error(`option ${optionText} not found`);
+  await act(async () => option.click());
 }
 
 export function text(): string {

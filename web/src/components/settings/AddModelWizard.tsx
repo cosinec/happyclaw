@@ -2,15 +2,8 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   ArrowLeft,
   Check,
-  ChevronRight,
-  ExternalLink,
-  Key,
   Loader2,
-  MessageSquareText,
   RotateCcw,
-  Search,
-  Server,
-  ShieldCheck,
   TriangleAlert,
 } from 'lucide-react';
 
@@ -24,37 +17,39 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from '@/components/ui/native-select';
 import { Switch } from '@/components/ui/switch';
 import {
   describeBaseUrlProblem,
   findPresetsByBaseUrl,
   getModelPreset,
   normalizeProviderBaseUrl,
-  sortPresetsForRegion,
   type ModelPreset,
 } from '@/lib/model-providers';
 import { cn } from '@/lib/utils';
 import { api } from '../../api/client';
-import type { ProviderEnvImport } from '../../utils/provider-env-import';
-import { isOneMillionContextModel } from '../../utils/provider-model';
+import type {
+  ProviderAuthMode,
+  ProviderEnvImport,
+} from '../../utils/provider-env-import';
+import { buildDefaultProviderEnv } from '../../utils/provider-model';
 import {
+  codexDefaultsPatch,
   codexFallbackEffort,
-  codexModelEfforts,
+  storedCodexEffort,
   useCodexCatalog,
 } from './codex-catalog';
+import { CodexModelFields } from './CodexModelFields';
 import { ConnectionTestResult } from './ConnectionTestResult';
 import {
+  CONNECTION_KIND_LABELS,
   PROVIDERS_API,
+  allowsNoDefaultModel,
   discoverModels,
-  requestError,
+  isThirdPartyKind,
   testConnection,
   testOutcome,
+  updateConnection,
   type ConnectionDraftBody,
-  type ProviderAuthHeader,
   type TestOutcome,
 } from './model-connections';
 import {
@@ -66,20 +61,14 @@ import {
 } from './ModelPicker';
 import { OAuthLoginPanel } from './OAuthLoginPanel';
 import { ProviderEnvImportPanel } from './ProviderEnvImportPanel';
-import {
-  EMPTY_PROVIDER_ENV,
-  buildProviderCustomEnv,
-  type ProviderEnvDraft,
-} from './ProviderEnvEditor';
 import { SettingsField } from './SettingsLayout';
-import type { UnifiedProviderPublic } from './types';
-
-export type WizardSource =
-  | { kind: 'claude' }
-  | { kind: 'chatgpt' }
-  | { kind: 'anthropic_api' }
-  | { kind: 'preset'; presetId: string }
-  | { kind: 'custom' };
+import { getErrorMessage, type UnifiedProviderPublic } from './types';
+import {
+  ExternalAnchor,
+  WizardSourceStep,
+  hostnameOf,
+  type WizardSource,
+} from './WizardSourceStep';
 
 type Step = 'source' | 'connect' | 'models' | 'save';
 
@@ -91,10 +80,10 @@ const STEPS: ReadonlyArray<{ key: Step; label: string }> = [
 ];
 
 /**
- * Model aliases Claude Code resolves to the newest version. A Claude
- * subscription offers these when its model list cannot be read.
+ * Model aliases Claude Code resolves to the newest version. An official
+ * connection offers these when its model list cannot be read.
  */
-export const CLAUDE_MODEL_ALIASES = ['opus', 'sonnet', 'haiku', 'fable'];
+const CLAUDE_MODEL_ALIASES = ['opus', 'sonnet', 'haiku', 'fable'];
 
 const OFFICIAL_PASS_THROUGH = {
   label: '不指定（由 Claude Code 选择）',
@@ -105,52 +94,16 @@ const RELAY_PASS_THROUGH = {
   hint: 'Claude Code 继续请求 Claude 模型名，由中转站自行路由。',
 };
 
-const RECOMMENDED: ReadonlyArray<{
-  source: WizardSource;
-  title: string;
-  description: string;
-  icon: typeof ShieldCheck;
-}> = [
-  {
-    source: { kind: 'claude' },
-    title: 'Claude 订阅',
-    description: '用 Claude Pro / Max 账号登录，或粘贴 setup-token',
-    icon: ShieldCheck,
-  },
-  {
-    source: { kind: 'chatgpt' },
-    title: 'ChatGPT 订阅',
-    description: '用 ChatGPT Plus / Pro 账号登录，经内嵌网关运行',
-    icon: MessageSquareText,
-  },
-  {
-    source: { kind: 'anthropic_api' },
-    title: 'Anthropic API Key',
-    description: '按量计费的 Anthropic 官方 API',
-    icon: Key,
-  },
-];
-
-const PRESETS = sortPresetsForRegion('cn');
-
 function sourceKey(source: WizardSource | null): string {
   if (!source) return '';
   return source.kind === 'preset' ? `preset:${source.presetId}` : source.kind;
 }
 
-function hostnameOf(url: string): string {
-  try {
-    return new URL(url.trim()).hostname;
-  } catch {
-    return '';
-  }
-}
-
-export interface AddModelWizardProps {
-  /** Connections already enabled; decides whether the new one joins the pool. */
+interface AddModelWizardProps {
+  /** Connections already enabled; the new one joins the pool when none is. */
   enabledCount: number;
-  /** Always enable the new connection (first-run setup needs one enabled). */
-  forceEnabled?: boolean;
+  /** Offer the 加入自动池 switch (the first-run page always joins). */
+  showPoolSwitch?: boolean;
   /** The connection was saved; `verified` = its test passed. */
   onDone: (provider: UnifiedProviderPublic, verified: boolean) => void;
   /** An OAuth login created the connection before the wizard finished. */
@@ -159,7 +112,7 @@ export interface AddModelWizardProps {
   onCancel?: () => void;
   /** Inside a dialog the footer sticks to the dialog's bottom edge. */
   layout?: 'dialog' | 'page';
-  /** Reports whether a request is in flight, so a host can hold its close. */
+  /** Reports whether a save is in flight, so a host can hold its close. */
   onBusyChange?: (busy: boolean) => void;
 }
 
@@ -171,7 +124,7 @@ export interface AddModelWizardProps {
  */
 export function AddModelWizard({
   enabledCount,
-  forceEnabled = false,
+  showPoolSwitch = true,
   onDone,
   onConnectionCreated,
   onCancel,
@@ -180,16 +133,16 @@ export function AddModelWizard({
 }: AddModelWizardProps) {
   const [step, setStep] = useState<Step>('source');
   const [source, setSource] = useState<WizardSource | null>(null);
-  const [presetQuery, setPresetQuery] = useState('');
 
   // ─── Connection draft ───
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [credentialInput, setCredentialInput] = useState('');
-  const [env, setEnv] = useState<ProviderEnvDraft>(EMPTY_PROVIDER_ENV);
+  /** Environment a pasted alias carries; edited later in the detail. */
+  const [importedEnv, setImportedEnv] = useState<Record<string, string>>({});
   const [importedName, setImportedName] = useState<string | null>(null);
   const [importedAuthMode, setImportedAuthMode] =
-    useState<ProviderAuthHeader | null>(null);
+    useState<ProviderAuthMode | null>(null);
   /** Made by an OAuth callback; later steps update it instead of creating. */
   const [created, setCreated] = useState<UnifiedProviderPublic | null>(null);
   const [detected, setDetected] = useState<ModelPreset | null>(null);
@@ -202,14 +155,17 @@ export function AddModelWizard({
     status: 'idle',
   });
   const [discoveredAuthMode, setDiscoveredAuthMode] =
-    useState<ProviderAuthHeader | null>(null);
+    useState<ProviderAuthMode | null>(null);
   const discoveredFor = useRef<string | null>(null);
   const discoverySeq = useRef(0);
-  const [codexModel, setCodexModel] = useState('');
-  const [codexEffort, setCodexEffort] = useState('');
   const codexCatalog = useCodexCatalog(
     source?.kind === 'chatgpt' && created ? created.id : null,
   );
+  /** A ChatGPT login starts from what the server gave it until changed. */
+  const [codexPick, setCodexPick] = useState<{
+    model: string;
+    effort: string;
+  } | null>(null);
 
   // ─── Test and save ───
   const [name, setName] = useState('');
@@ -227,7 +183,7 @@ export function AddModelWizard({
   const preset =
     source?.kind === 'preset' ? getModelPreset(source.presetId) : null;
   const kind = source?.kind ?? null;
-  const thirdParty = kind === 'preset' || kind === 'custom';
+  const thirdParty = isThirdPartyKind(kind);
   const effectiveBaseUrl = preset ? preset.baseUrl : baseUrl.trim();
   const baseUrlProblem =
     kind === 'custom' ? describeBaseUrlProblem(baseUrl) : null;
@@ -235,36 +191,40 @@ export function AddModelWizard({
   const defaultCandidate = candidates.find(
     (candidate) => candidate.picked && candidate.base === defaultBase,
   );
+  const codexModel =
+    codexPick?.model ?? (created?.anthropicModel || codexCatalog.defaultModel);
+  const codexEffort =
+    codexPick?.effort ??
+    codexFallbackEffort(
+      codexCatalog,
+      codexModel,
+      (created && storedCodexEffort(created)) || codexCatalog.defaultEffort,
+    );
   const defaultModelId =
     kind === 'chatgpt'
       ? codexModel
       : defaultCandidate
         ? candidateId(defaultCandidate)
         : '';
-  const passThrough =
-    kind === 'claude' || kind === 'anthropic_api'
-      ? OFFICIAL_PASS_THROUGH
-      : kind === 'custom'
-        ? RELAY_PASS_THROUGH
-        : null;
+  const passThrough = !allowsNoDefaultModel(kind)
+    ? null
+    : kind === 'custom'
+      ? RELAY_PASS_THROUGH
+      : OFFICIAL_PASS_THROUGH;
 
   // Whatever identifies the credential and endpoint: a change makes the
   // model list and the test result stale.
   const connectionSignature = JSON.stringify([
     sourceKey(source),
     thirdParty ? effectiveBaseUrl : '',
-    kind === 'claude' ? '' : apiKey.trim(),
-    kind === 'claude' ? credentialInput.trim() : '',
+    kind === 'claude_subscription' ? credentialInput.trim() : apiKey.trim(),
     created?.id ?? '',
   ]);
-  const envResult = thirdParty
-    ? buildProviderCustomEnv(true, env)
-    : { customEnv: {}, error: null };
-  const testSignature = JSON.stringify([
-    connectionSignature,
-    defaultModelId,
-    envResult.customEnv,
-  ]);
+  // A saved connection is tested by id alone, so only the draft's model and
+  // environment make a new test worth sending.
+  const testSignature = created
+    ? connectionSignature
+    : JSON.stringify([connectionSignature, defaultModelId, importedEnv]);
   const latest = useRef({ connectionSignature, testSignature });
   latest.current = { connectionSignature, testSignature };
 
@@ -291,10 +251,8 @@ export function AddModelWizard({
       );
       if (!keepDefault) {
         setDefaultBase(
-          nextPreset
-            ? (nextCandidates.find((candidate) => candidate.origin === 'preset')
-                ?.base ?? '')
-            : '',
+          nextCandidates.find((candidate) => candidate.origin === 'preset')
+            ?.base ?? '',
         );
       }
       setDiscovery({ status: 'idle' });
@@ -327,34 +285,32 @@ export function AddModelWizard({
     if (imported.baseUrl) setBaseUrl(imported.baseUrl);
     if (imported.token) setApiKey(imported.token);
     if (imported.authMode) setImportedAuthMode(imported.authMode);
-    setEnv({
-      overrides: imported.envOverrides,
-      rows: Object.entries(imported.customEnv).map(([key, value]) => ({
-        key,
-        value,
-      })),
+    // Blank prefilled overrides mean "use the default"; never persist them.
+    setImportedEnv({
+      ...imported.customEnv,
+      ...Object.fromEntries(
+        Object.entries(imported.envOverrides).filter(([, value]) =>
+          value.trim(),
+        ),
+      ),
     });
     if (imported.model) {
       const model = imported.model;
-      setCandidates((current) => {
-        const without = current.filter((candidate) => candidate.base !== model);
-        return [
-          ...without,
-          {
-            base: model,
-            oneMillion: imported.oneMillionContext,
-            picked: true,
-            origin: 'manual',
-          },
-        ];
-      });
+      setCandidates((current) => [
+        ...current.filter((candidate) => candidate.base !== model),
+        {
+          base: model,
+          oneMillion: imported.oneMillionContext,
+          picked: true,
+          origin: 'manual',
+        },
+      ]);
       setDefaultBase(model);
     }
   };
 
   // ─── Discovery ───
-  const draftBody = (): ConnectionDraftBody | { providerId: string } => {
-    if (created) return { providerId: created.id };
+  const draftBody = (): ConnectionDraftBody => {
     switch (kind) {
       case 'preset':
         return {
@@ -384,7 +340,7 @@ export function AddModelWizard({
     const seq = ++discoverySeq.current;
     discoveredFor.current = signature;
     setDiscovery({ status: 'loading' });
-    const official = kind === 'claude' || kind === 'anthropic_api';
+    const official = kind === 'claude_subscription' || kind === 'anthropic_api';
     const apply = (next: DiscoveryState, extra: () => void = () => {}) => {
       // A slower answer for an earlier draft must not land on this one.
       if (
@@ -396,7 +352,7 @@ export function AddModelWizard({
       setDiscovery(next);
       extra();
     };
-    discoverModels(draftBody())
+    discoverModels(created ? { providerId: created.id } : draftBody())
       .then((result) => {
         if (result.ok) {
           apply(
@@ -434,7 +390,7 @@ export function AddModelWizard({
                   current,
                   CLAUDE_MODEL_ALIASES.map((id) => ({ id })),
                   'discovered',
-                  kind === 'claude',
+                  kind === 'claude_subscription',
                 ),
               );
             }
@@ -445,7 +401,7 @@ export function AddModelWizard({
         apply({
           status: 'failed',
           code: 'UNKNOWN',
-          message: requestError(err, '获取模型列表失败'),
+          message: getErrorMessage(err, '获取模型列表失败'),
         });
       });
   };
@@ -462,22 +418,6 @@ export function AddModelWizard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, kind, connectionSignature]);
 
-  // A ChatGPT login starts from the model and effort the server gave it.
-  useEffect(() => {
-    if (kind !== 'chatgpt' || !created) return;
-    const model = created.anthropicModel || codexCatalog.defaultModel;
-    setCodexModel(model);
-    setCodexEffort(
-      codexFallbackEffort(
-        codexCatalog,
-        model,
-        created.codexDefaultEffort ||
-          created.customEnv?.CODEX_REASONING_EFFORT ||
-          codexCatalog.defaultEffort,
-      ),
-    );
-  }, [kind, created, codexCatalog]);
-
   // ─── Test ───
   const runTest = () => {
     const signature = testSignature;
@@ -487,9 +427,9 @@ export function AddModelWizard({
     const body = created
       ? { providerId: created.id }
       : {
-          ...(draftBody() as ConnectionDraftBody),
+          ...draftBody(),
           anthropicModel: defaultModelId,
-          ...(thirdParty ? { customEnv: envResult.customEnv } : {}),
+          ...(thirdParty ? { customEnv: importedEnv } : {}),
         };
     const settle = (outcome: TestOutcome | null, error: string | null) => {
       if (
@@ -503,14 +443,13 @@ export function AddModelWizard({
     };
     testConnection(body)
       .then((result) => settle(testOutcome(result), null))
-      .catch((err) => settle(null, requestError(err, '测试连接失败')));
+      .catch((err) => settle(null, getErrorMessage(err, '测试连接失败')));
   };
 
   // One test per draft: entering the last step tests it once, and only a
   // change to the draft (or the user) asks again.
   useEffect(() => {
-    if (step !== 'save' || envResult.error) return;
-    if (test?.signature === testSignature) return;
+    if (step !== 'save' || test?.signature === testSignature) return;
     runTest();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, testSignature]);
@@ -522,22 +461,19 @@ export function AddModelWizard({
   // ─── Save ───
   const defaultName =
     created?.name ??
-    (preset
-      ? preset.name
-      : kind === 'custom'
-        ? importedName || hostnameOf(baseUrl) || '自定义连接'
-        : kind === 'anthropic_api'
-          ? 'Anthropic API'
-          : 'Claude 订阅');
-  const poolDefault = created ? created.enabled : enabledCount === 0;
-  const poolEnabled = forceEnabled ? true : (poolChoice ?? poolDefault);
+    preset?.name ??
+    (kind === 'custom'
+      ? importedName || hostnameOf(baseUrl) || CONNECTION_KIND_LABELS.custom
+      : CONNECTION_KIND_LABELS[kind ?? 'custom']);
+  // Same rule the server applies: join the pool when nothing else is in it.
+  // A connection an OAuth login made already carries the server's choice;
+  // the first-run page, without the switch, always joins.
+  const poolDefault =
+    created && showPoolSwitch ? created.enabled : enabledCount === 0;
+  const poolEnabled = poolChoice ?? poolDefault;
 
   const save = async () => {
     if (authInvalid || testing || saving) return;
-    if (envResult.error) {
-      setSaveError(envResult.error);
-      return;
-    }
     setSaving(true);
     setSaveError(null);
     const trimmedName = name.trim() || defaultName;
@@ -545,35 +481,15 @@ export function AddModelWizard({
     try {
       let provider: UnifiedProviderPublic;
       if (created) {
-        const patch: Record<string, unknown> = {};
+        const patch: Record<string, unknown> =
+          kind === 'chatgpt'
+            ? codexDefaultsPatch(created, codexModel, codexEffort)
+            : { models, anthropicModel: defaultModelId };
         if (trimmedName !== created.name) patch.name = trimmedName;
-        if (kind === 'chatgpt') {
-          if (codexModel && codexModel !== created.anthropicModel) {
-            patch.anthropicModel = codexModel;
-          }
-          const storedEffort =
-            created.codexDefaultEffort ||
-            created.customEnv?.CODEX_REASONING_EFFORT;
-          if (codexEffort && codexEffort !== storedEffort) {
-            patch.customEnv = {
-              ...created.customEnv,
-              CODEX_REASONING_EFFORT: codexEffort,
-            };
-          }
-        } else {
-          patch.models = models;
-          patch.anthropicModel = defaultModelId;
-        }
-        provider = created;
-        if (Object.keys(patch).length > 0) {
-          provider = (
-            await api.patch<{ provider: UnifiedProviderPublic }>(
-              `${PROVIDERS_API}/${created.id}`,
-              patch,
-              120_000,
-            )
-          ).provider;
-        }
+        provider =
+          Object.keys(patch).length > 0
+            ? await updateConnection(created.id, patch)
+            : created;
         if (provider.enabled !== poolEnabled) {
           provider = (
             await api.post<{ provider: UnifiedProviderPublic }>(
@@ -590,15 +506,15 @@ export function AddModelWizard({
           importedAuthMode;
         const body: Record<string, unknown> = {
           name: trimmedName,
-          ...(draftBody() as ConnectionDraftBody),
+          ...draftBody(),
           anthropicModel: defaultModelId,
           models,
+          enabled: poolEnabled,
         };
         if (thirdParty) {
-          body.customEnv = envResult.customEnv;
+          body.customEnv = importedEnv;
           if (authMode) body.anthropicAuthMode = authMode;
         }
-        if (forceEnabled || poolChoice !== null) body.enabled = poolEnabled;
         provider = await api.post<UnifiedProviderPublic>(PROVIDERS_API, body);
         // The draft test was not stored; test the saved connection so its
         // status is on record.
@@ -606,7 +522,7 @@ export function AddModelWizard({
       }
       onDone(provider, verified);
     } catch (err) {
-      setSaveError(requestError(err, '保存模型连接失败'));
+      setSaveError(getErrorMessage(err, '保存模型连接失败'));
     } finally {
       setSaving(false);
     }
@@ -616,7 +532,7 @@ export function AddModelWizard({
   const stepIndex = STEPS.findIndex((item) => item.key === step);
   const canLeaveConnect = (() => {
     switch (kind) {
-      case 'claude':
+      case 'claude_subscription':
         return !!created || !!credentialInput.trim();
       case 'chatgpt':
         return !!created;
@@ -648,6 +564,13 @@ export function AddModelWizard({
     onConnectionCreated?.(provider);
     setStep('models');
   };
+
+  const compactWindow =
+    importedEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW ||
+    buildDefaultProviderEnv(defaultModelId).find(
+      (row) => row.key === 'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
+    )?.value;
+  const importedCount = Object.keys(importedEnv).length;
 
   const footer = (
     <>
@@ -696,15 +619,9 @@ export function AddModelWizard({
     <div className="flex min-w-0 flex-col gap-4">
       <StepIndicator current={stepIndex} />
 
-      {step === 'source' && (
-        <SourceStep
-          query={presetQuery}
-          onQueryChange={setPresetQuery}
-          onChoose={chooseSource}
-        />
-      )}
+      {step === 'source' && <WizardSourceStep onChoose={chooseSource} />}
 
-      {step === 'connect' && kind === 'claude' && (
+      {step === 'connect' && kind === 'claude_subscription' && (
         <div className="space-y-4">
           {created ? (
             <LoggedIn provider={created} />
@@ -891,17 +808,11 @@ export function AddModelWizard({
       )}
 
       {step === 'models' && kind === 'chatgpt' && (
-        <CodexModelStep
+        <CodexModelFields
           catalog={codexCatalog}
           model={codexModel}
           effort={codexEffort}
-          onModelChange={(model) => {
-            setCodexModel(model);
-            setCodexEffort(
-              codexFallbackEffort(codexCatalog, model, codexEffort),
-            );
-          }}
-          onEffortChange={setCodexEffort}
+          onChange={setCodexPick}
         />
       )}
 
@@ -932,9 +843,7 @@ export function AddModelWizard({
           <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 rounded-lg px-3 py-2.5 text-caption ring-1 ring-surface-border">
             <dt className="text-muted-foreground">来源</dt>
             <dd className="truncate text-foreground">
-              {preset?.name ??
-                RECOMMENDED.find((item) => item.source.kind === kind)?.title ??
-                '自定义地址'}
+              {preset?.name ?? CONNECTION_KIND_LABELS[kind ?? 'custom']}
               {thirdParty && (
                 <span className="ml-2 font-mono text-muted-foreground">
                   {effectiveBaseUrl}
@@ -957,22 +866,16 @@ export function AddModelWizard({
                 <dd className="text-foreground">
                   系统预填 Claude Code 运行环境：Opus / Sonnet / Haiku / 子
                   Agent 跟随默认模型，压缩窗口{' '}
-                  {Number(
-                    envResult.customEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW ||
-                      (isOneMillionContextModel(defaultModelId)
-                        ? 1_000_000
-                        : 200_000),
-                  ).toLocaleString('en-US')}{' '}
-                  tokens
-                  {Object.keys(envResult.customEnv).length > 0 &&
-                    `；另有 ${Object.keys(envResult.customEnv).length} 项导入的环境变量`}
+                  {Number(compactWindow).toLocaleString('en-US')} tokens
+                  {importedCount > 0 &&
+                    `；另有 ${importedCount} 项导入的环境变量`}
                   。保存后可在连接设置里调整。
                 </dd>
               </>
             )}
           </dl>
 
-          {!forceEnabled && (
+          {showPoolSwitch && (
             <label
               htmlFor="wizard-pool"
               className="flex cursor-pointer items-start justify-between gap-4 rounded-lg px-3 py-2.5 ring-1 ring-surface-border"
@@ -1015,12 +918,6 @@ export function AddModelWizard({
               </Button>
             )}
           </div>
-
-          {envResult.error && (
-            <p role="alert" className="text-caption text-error">
-              {envResult.error}
-            </p>
-          )}
         </div>
       )}
 
@@ -1084,151 +981,6 @@ function StepIndicator({ current }: { current: number }) {
   );
 }
 
-function SourceStep({
-  query,
-  onQueryChange,
-  onChoose,
-}: {
-  query: string;
-  onQueryChange: (value: string) => void;
-  onChoose: (source: WizardSource) => void;
-}) {
-  const needle = query.trim().toLowerCase();
-  const presets = needle
-    ? PRESETS.filter((preset) =>
-        [preset.name, preset.nameEn, preset.baseUrl].some((text) =>
-          text.toLowerCase().includes(needle),
-        ),
-      )
-    : PRESETS;
-  return (
-    <div className="space-y-5">
-      <section className="space-y-2" aria-labelledby="wizard-recommended">
-        <h3
-          id="wizard-recommended"
-          className="text-label font-medium text-muted-foreground"
-        >
-          推荐
-        </h3>
-        <div className="grid gap-2 sm:grid-cols-3">
-          {RECOMMENDED.map((item) => {
-            const Icon = item.icon;
-            return (
-              <button
-                key={item.source.kind}
-                type="button"
-                onClick={() => onChoose(item.source)}
-                className="flex cursor-pointer items-start gap-3 rounded-lg px-3 py-3 text-left ring-1 ring-surface-border transition-colors duration-100 hover:bg-surface-hover focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none sm:flex-col sm:gap-2"
-              >
-                <Icon
-                  className="mt-0.5 size-4 shrink-0 text-muted-foreground"
-                  aria-hidden="true"
-                />
-                <span className="min-w-0">
-                  <span className="block text-label text-foreground">
-                    {item.title}
-                  </span>
-                  <span className="mt-0.5 block text-caption leading-5 text-muted-foreground">
-                    {item.description}
-                  </span>
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </section>
-
-      <section className="space-y-2" aria-labelledby="wizard-presets">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h3
-            id="wizard-presets"
-            className="text-label font-medium text-muted-foreground"
-          >
-            厂商预设
-          </h3>
-          <div className="relative w-full sm:w-56">
-            <Search
-              className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground"
-              aria-hidden="true"
-            />
-            <Input
-              type="search"
-              value={query}
-              onChange={(event) => onQueryChange(event.target.value)}
-              placeholder="搜索服务商"
-              aria-label="搜索服务商"
-              className="pl-8"
-            />
-          </div>
-        </div>
-        <div className="max-h-[min(18rem,40dvh)] divide-y divide-surface-border overflow-y-auto overscroll-contain rounded-lg ring-1 ring-surface-border">
-          {presets.map((preset) => (
-            <div key={preset.id} className="flex items-center gap-2 pr-3">
-              <button
-                type="button"
-                onClick={() =>
-                  onChoose({ kind: 'preset', presetId: preset.id })
-                }
-                className="flex min-h-11 min-w-0 flex-1 cursor-pointer items-center gap-2 px-3 py-2 text-left transition-colors duration-100 hover:bg-surface-hover focus-visible:bg-surface-hover focus-visible:outline-none"
-              >
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-label text-foreground">
-                    {preset.name}
-                  </span>
-                  <span className="block truncate font-mono text-micro text-muted-foreground">
-                    {hostnameOf(preset.baseUrl)}
-                  </span>
-                </span>
-                <ChevronRight
-                  className="size-4 shrink-0 text-faint-foreground"
-                  aria-hidden="true"
-                />
-              </button>
-              {preset.keyUrl && (
-                <ExternalAnchor
-                  href={preset.keyUrl}
-                  className="shrink-0 text-caption"
-                  label={`获取 ${preset.name} 的 API Key`}
-                >
-                  获取 API Key
-                </ExternalAnchor>
-              )}
-            </div>
-          ))}
-          {presets.length === 0 && (
-            <p className="px-3 py-4 text-caption text-muted-foreground">
-              没有匹配的服务商，可以用下方的自定义兼容地址。
-            </p>
-          )}
-        </div>
-      </section>
-
-      <button
-        type="button"
-        onClick={() => onChoose({ kind: 'custom' })}
-        className="flex w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-3 text-left ring-1 ring-surface-border transition-colors duration-100 hover:bg-surface-hover focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
-      >
-        <Server
-          className="size-4 shrink-0 text-muted-foreground"
-          aria-hidden="true"
-        />
-        <span className="min-w-0 flex-1">
-          <span className="block text-label text-foreground">
-            自定义兼容地址
-          </span>
-          <span className="block text-caption text-muted-foreground">
-            任何 Anthropic Messages 兼容接口，例如自建中转；支持粘贴 alias 导入
-          </span>
-        </span>
-        <ChevronRight
-          className="size-4 shrink-0 text-faint-foreground"
-          aria-hidden="true"
-        />
-      </button>
-    </div>
-  );
-}
-
 function KeyField({
   value,
   onChange,
@@ -1285,97 +1037,6 @@ function LoggedIn({ provider }: { provider: UnifiedProviderPublic }) {
   );
 }
 
-function CodexModelStep({
-  catalog,
-  model,
-  effort,
-  onModelChange,
-  onEffortChange,
-}: {
-  catalog: ReturnType<typeof useCodexCatalog>;
-  model: string;
-  effort: string;
-  onModelChange: (model: string) => void;
-  onEffortChange: (effort: string) => void;
-}) {
-  const listed = catalog.models.some((option) => option.value === model);
-  const efforts = codexModelEfforts(catalog, model);
-  const modelDefaultEffort =
-    catalog.models.find((option) => option.value === model)?.defaultEffort ??
-    catalog.defaultEffort;
-  return (
-    <div className="grid gap-4 sm:grid-cols-2">
-      <SettingsField
-        label="默认模型"
-        htmlFor="wizard-codex-model"
-        description="对话没有指定模型时使用它；聊天里可以随时切换。"
-      >
-        <NativeSelect
-          id="wizard-codex-model"
-          value={model}
-          onChange={(event) => onModelChange(event.target.value)}
-          className="w-full font-mono"
-        >
-          {!listed && model && (
-            <NativeSelectOption value={model}>{model}</NativeSelectOption>
-          )}
-          {catalog.models.map((option) => (
-            <NativeSelectOption key={option.value} value={option.value}>
-              {option.value}
-            </NativeSelectOption>
-          ))}
-        </NativeSelect>
-      </SettingsField>
-      <SettingsField
-        label="默认推理档位"
-        htmlFor="wizard-codex-effort"
-        description="越高越慢但推理越深。"
-      >
-        <NativeSelect
-          id="wizard-codex-effort"
-          value={effort}
-          onChange={(event) => onEffortChange(event.target.value)}
-          className="w-full font-mono"
-        >
-          {efforts.map((level) => (
-            <NativeSelectOption key={level} value={level}>
-              {level === modelDefaultEffort ? `${level}（默认）` : level}
-            </NativeSelectOption>
-          ))}
-        </NativeSelect>
-      </SettingsField>
-    </div>
-  );
-}
-
-function ExternalAnchor({
-  href,
-  children,
-  className,
-  label,
-}: {
-  href: string;
-  children: ReactNode;
-  className?: string;
-  label?: string;
-}) {
-  return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      aria-label={label}
-      className={cn(
-        'inline-flex items-center gap-1 text-primary-text underline-offset-2 hover:underline',
-        className,
-      )}
-    >
-      {children}
-      <ExternalLink className="size-3" aria-hidden="true" />
-    </a>
-  );
-}
-
 interface AddModelWizardDialogProps {
   open: boolean;
   enabledCount: number;
@@ -1390,7 +1051,10 @@ interface AddModelWizardDialogProps {
   }) => void;
 }
 
-/** The wizard in a dialog, as Settings → 模型配置 opens it. */
+/**
+ * The wizard in a dialog, as Settings → 模型配置 opens it. The dialog drops
+ * its content when closed, so every opening starts a fresh draft.
+ */
 export function AddModelWizardDialog({
   open,
   enabledCount,
@@ -1398,18 +1062,14 @@ export function AddModelWizardDialog({
 }: AddModelWizardDialogProps) {
   const [busy, setBusy] = useState(false);
   const created = useRef<UnifiedProviderPublic | null>(null);
-  // A fresh wizard (and draft) each time the dialog opens.
-  const [session, setSession] = useState(0);
-  useEffect(() => {
-    if (open) {
-      created.current = null;
-      setSession((value) => value + 1);
-    }
-  }, [open]);
 
+  const finish = (saved: UnifiedProviderPublic | null, verified: boolean) => {
+    const leftBehind = saved ? null : created.current;
+    created.current = null;
+    onClose({ saved, verified, created: leftBehind });
+  };
   const close = () => {
-    if (busy) return;
-    onClose({ saved: null, verified: false, created: created.current });
+    if (!busy) finish(null, false);
   };
 
   return (
@@ -1422,16 +1082,13 @@ export function AddModelWizardDialog({
           </DialogDescription>
         </DialogHeader>
         <AddModelWizard
-          key={session}
           enabledCount={enabledCount}
           onBusyChange={setBusy}
           onConnectionCreated={(provider) => {
             created.current = provider;
           }}
           onCancel={close}
-          onDone={(provider, verified) =>
-            onClose({ saved: provider, verified, created: null })
-          }
+          onDone={finish}
         />
       </DialogContent>
     </Dialog>

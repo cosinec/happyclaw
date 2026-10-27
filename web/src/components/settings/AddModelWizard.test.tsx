@@ -197,6 +197,7 @@ describe('vendor preset', () => {
       anthropicModel: 'deepseek-flash[1m]',
       models: [{ id: 'deepseek-flash[1m]' }, { id: 'deepseek-v4-pro[1m]' }],
       customEnv: {},
+      enabled: false,
       anthropicAuthMode: 'bearer',
     });
     // The saved connection is tested once more so its status is stored.
@@ -338,6 +339,7 @@ describe('custom address', () => {
         CLAUDE_CODE_AUTO_COMPACT_WINDOW: '786432',
         ANTHROPIC_DEFAULT_HAIKU_MODEL: 'deepseek-v4-flash[1m]',
       },
+      enabled: false,
       anthropicAuthMode: 'bearer',
     });
   });
@@ -517,7 +519,7 @@ describe('official kinds', () => {
       { type: 'official', anthropicApiKey: 'sk-ant-1', anthropicModel: '' },
       60_000,
     );
-    // Nothing else is enabled: the server rule puts it in the pool.
+    // Nothing else is enabled: like the server, it joins the pool.
     const pool = document.querySelector('#wizard-pool') as HTMLElement;
     expect(pool.getAttribute('aria-checked')).toBe('true');
     expect(text()).toContain('目前没有其他启用的连接，默认加入');
@@ -525,7 +527,7 @@ describe('official kinds', () => {
     await click(button('保存'));
     await flush();
     expect(mocks.post).toHaveBeenCalledWith(PROVIDERS, {
-      name: 'Anthropic API',
+      name: 'Anthropic API Key',
       type: 'official',
       anthropicApiKey: 'sk-ant-1',
       anthropicModel: '',
@@ -623,13 +625,21 @@ describe('official kinds', () => {
       { providerId: 'claude-new' },
       60_000,
     );
+    // The saved connection is tested by id: a new default is no reason to
+    // send the same check again.
+    await click(button('上一步'));
+    await click(document.querySelector('[aria-label="把 opus 设为默认模型"]'));
+    await next();
+    expect(
+      mocks.post.mock.calls.filter(([path]) => path === TEST),
+    ).toHaveLength(1);
     await click(button('保存'));
     await flush();
     expect(mocks.patch).toHaveBeenCalledWith(
       `${PROVIDERS}/claude-new`,
       {
         models: [{ id: 'opus' }, { id: 'sonnet' }, { id: 'haiku' }],
-        anthropicModel: '',
+        anthropicModel: 'opus',
       },
       120_000,
     );
@@ -686,7 +696,7 @@ describe('official kinds', () => {
     expect(mocks.get).toHaveBeenCalledWith(
       '/api/config/codex/model-catalog?providerId=gpt',
     );
-    const select = field('#wizard-codex-model') as unknown as HTMLSelectElement;
+    const select = field('#codex-model-select') as unknown as HTMLSelectElement;
     expect(select.value).toBe('gpt-6.1-sol');
     await act(async () => {
       select.value = 'gpt-6-astra';

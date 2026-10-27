@@ -54,8 +54,9 @@ import {
 import {
   AgentModelSelect,
   hasModelLists,
-  modelBindingErrorMessage,
-} from '@/components/settings/MainAgentCapabilitiesSection';
+  modelBindingChanges,
+} from '@/components/settings/AgentModelSelect';
+import { modelBindingErrorMessage } from '@/components/settings/model-connections';
 import { cn } from '@/lib/utils';
 import { confirmDialog } from '@/stores/confirm';
 import {
@@ -892,14 +893,10 @@ export function AgentProfilesPage() {
       if (avatarColor !== selected.avatar_color) {
         changes.avatar_color = avatarColor;
       }
-      if (persistedModelConfigId !== selected.model_config_id) {
-        changes.model_config_id = persistedModelConfigId;
-      }
-      if (persistedModel !== (selected.model ?? null)) {
-        changes.model = persistedModel;
-        // A pinned model is checked against the configuration sent with it.
-        if (persistedModel) changes.model_config_id = persistedModelConfigId;
-      }
+      Object.assign(
+        changes,
+        modelBindingChanges(selected, persistedModelConfigId, model),
+      );
       if (!sameRuntimePolicy(currentRuntimePolicy, selected.runtime_policy)) {
         changes.runtime_policy = currentRuntimePolicy;
       }

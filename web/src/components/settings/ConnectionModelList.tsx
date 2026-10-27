@@ -1,12 +1,5 @@
 import { useEffect, useState } from 'react';
-import {
-  Loader2,
-  MoreHorizontal,
-  Plus,
-  RefreshCw,
-  Star,
-  Trash2,
-} from 'lucide-react';
+import { Loader2, MoreHorizontal, RefreshCw, Star, Trash2 } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -17,7 +10,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { Input } from '@/components/ui/input';
 import {
   NativeSelect,
   NativeSelectOption,
@@ -27,7 +19,6 @@ import {
   MODEL_EFFORTS,
   effectiveProviderModels,
   getModelPreset,
-  isValidModelId,
   mergeDiscoveredModels,
   splitOneMillionSuffix,
   withOneMillionSuffix,
@@ -35,17 +26,16 @@ import {
   type ProviderModelEntry,
 } from '@/lib/model-providers';
 import { cn } from '@/lib/utils';
-import { api } from '../../api/client';
 import {
-  PROVIDERS_API,
   confirmProtocolChange,
   discoverModels,
   errorCopy,
   modelInUseAgents,
   presetModelName,
-  requestError,
+  updateConnection,
 } from './model-connections';
-import type { UnifiedProviderPublic } from './types';
+import { ManualModelInput, OneMillionToggle } from './ModelPicker';
+import { getErrorMessage, type UnifiedProviderPublic } from './types';
 
 interface ConnectionModelListProps {
   provider: UnifiedProviderPublic;
@@ -73,7 +63,6 @@ export function ConnectionModelList({
   );
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [manual, setManual] = useState('');
   const preset = getModelPreset(provider.presetId);
   const defaultModel = provider.anthropicModel;
 
@@ -95,16 +84,12 @@ export function ConnectionModelList({
     setModels(next);
     setBusy(true);
     try {
-      const result = await api.patch<{ provider: UnifiedProviderPublic }>(
-        `${PROVIDERS_API}/${encodeURIComponent(provider.id)}`,
-        {
-          models: next,
-          ...(defaultChanged ? { anthropicModel: nextDefault } : {}),
-        },
-        120_000,
-      );
-      setModels(effectiveProviderModels(result.provider));
-      onSaved(result.provider);
+      const saved = await updateConnection(provider.id, {
+        models: next,
+        ...(defaultChanged ? { anthropicModel: nextDefault } : {}),
+      });
+      setModels(effectiveProviderModels(saved));
+      onSaved(saved);
       return true;
     } catch (err) {
       setModels(previous);
@@ -112,7 +97,7 @@ export function ConnectionModelList({
       setError(
         agents
           ? `这个模型正被智能体「${agents.join('」「')}」使用。先在智能体设置里改用其他模型，再删除或改名。`
-          : requestError(err, '保存模型列表失败'),
+          : getErrorMessage(err, '保存模型列表失败'),
       );
       return false;
     } finally {
@@ -134,10 +119,6 @@ export function ConnectionModelList({
   const toggleOneMillion = (entry: ProviderModelEntry) => {
     const { model: base, oneMillion } = splitOneMillionSuffix(entry.id);
     const nextId = withOneMillionSuffix(base, !oneMillion);
-    if (models.some((other) => other.id === nextId)) {
-      setError(`列表里已经有 ${nextId}`);
-      return;
-    }
     void save(
       models.map((other) =>
         other.id === entry.id ? { ...other, id: nextId } : other,
@@ -146,20 +127,23 @@ export function ConnectionModelList({
     );
   };
 
-  const addManual = async () => {
-    const id = manual.trim();
-    if (!isValidModelId(id)) {
-      setError('模型名不能为空，也不能包含空格');
-      return;
+  /** Same model with or without `[1m]` counts as already listed. */
+  const listed = (id: string) => {
+    const base = splitOneMillionSuffix(id).model;
+    return models.find(
+      (entry) => splitOneMillionSuffix(entry.id).model === base,
+    );
+  };
+
+  const addManual = async (id: string) => {
+    const existing = listed(id);
+    if (existing) {
+      setError(`列表里已经有 ${existing.id}`);
+      return false;
     }
-    if (models.some((entry) => entry.id === id)) {
-      setError(`列表里已经有 ${id}`);
-      return;
-    }
-    if (await save([...models, { id }])) {
-      setManual('');
-      setNotice(`已添加模型 ${id}`);
-    }
+    const added = await save([...models, { id }]);
+    if (added) setNotice(`已添加模型 ${id}`);
+    return added;
   };
 
   const refresh = async () => {
@@ -185,7 +169,7 @@ export function ConnectionModelList({
         );
       }
     } catch (err) {
-      setError(requestError(err, '获取模型列表失败'));
+      setError(getErrorMessage(err, '获取模型列表失败'));
     } finally {
       setRefreshing(false);
     }
@@ -274,17 +258,12 @@ export function ConnectionModelList({
                       </NativeSelectOption>
                     ))}
                   </NativeSelect>
-                  <button
-                    type="button"
-                    aria-pressed={oneMillion}
-                    aria-label={`${entry.id} 使用 1M 上下文`}
-                    title="1M 上下文：模型名后加 [1m]"
-                    onClick={() => toggleOneMillion(entry)}
+                  <OneMillionToggle
+                    id={entry.id}
+                    on={oneMillion}
+                    onToggle={() => toggleOneMillion(entry)}
                     disabled={disabled}
-                    className="inline-flex h-7 items-center rounded-md px-1.5 font-mono text-micro text-muted-foreground ring-1 ring-surface-border transition-colors duration-100 hover:bg-surface-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none disabled:opacity-50 aria-pressed:bg-surface-selected aria-pressed:text-foreground pointer-coarse:h-9"
-                  >
-                    1M
-                  </button>
+                  />
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button
@@ -348,32 +327,12 @@ export function ConnectionModelList({
         </ul>
       )}
 
-      <div className="flex flex-col gap-2 sm:flex-row">
-        <div className="flex min-w-0 flex-1 gap-2">
-          <Input
-            value={manual}
-            onChange={(event) => setManual(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
-                event.preventDefault();
-                void addManual();
-              }
-            }}
-            placeholder="手动添加模型名"
-            aria-label="手动添加模型"
-            autoComplete="off"
-            disabled={disabled}
-            className="min-w-0 flex-1 font-mono"
-          />
-          <Button
-            variant="outline"
-            onClick={() => void addManual()}
-            disabled={disabled || !manual.trim()}
-          >
-            <Plus />
-            添加
-          </Button>
-        </div>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
+        <ManualModelInput
+          placeholder="手动添加模型名"
+          onAdd={addManual}
+          disabled={disabled}
+        />
         <Button
           variant="ghost"
           onClick={() => void refresh()}

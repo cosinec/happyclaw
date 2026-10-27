@@ -6,7 +6,7 @@ import { api } from '../../api/client';
 // 目录唯一真相源在后端 src/codex-gateway/model-catalog.ts（对齐上游 codex
 // CLI 的 models.json），通过 GET /api/config/codex/model-catalog 获取；
 // 下面这份只在目录接口不可用时兜底，保证界面离线也能渲染。
-export const CODEX_FULL_EFFORTS = [
+const CODEX_FULL_EFFORTS = [
   'low',
   'medium',
   'high',
@@ -17,7 +17,7 @@ export const CODEX_FULL_EFFORTS = [
 const CODEX_CAPPED_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 const CODEX_LEGACY_EFFORTS = ['low', 'medium', 'high', 'xhigh'] as const;
 
-export interface CodexCatalogModel {
+interface CodexCatalogModel {
   value: string;
   label: string;
   efforts: readonly string[];
@@ -85,7 +85,7 @@ const CODEX_FALLBACK_MODELS: ReadonlyArray<CodexCatalogModel> = [
 ];
 const CODEX_FALLBACK_DEFAULT_MODEL = 'gpt-6.1-sol';
 
-export const CODEX_FALLBACK_CATALOG: CodexCatalog = {
+const CODEX_FALLBACK_CATALOG: CodexCatalog = {
   models: CODEX_FALLBACK_MODELS,
   defaultModel: CODEX_FALLBACK_DEFAULT_MODEL,
   // 与目录接口一致：目录级默认档就是默认模型自己的默认档。
@@ -146,6 +146,17 @@ export function codexModelEfforts(
   );
 }
 
+/** The effort a model runs at when none is picked. */
+export function codexModelDefaultEffort(
+  catalog: CodexCatalog,
+  model: string,
+): string {
+  return (
+    catalog.models.find((option) => option.value === model)?.defaultEffort ??
+    catalog.defaultEffort
+  );
+}
+
 /** The effort a model falls back to when the picked one is not offered. */
 export function codexFallbackEffort(
   catalog: CodexCatalog,
@@ -155,8 +166,42 @@ export function codexFallbackEffort(
   const efforts = codexModelEfforts(catalog, model);
   if (efforts.includes(current)) return current;
   // 归位优先该模型自己的上游默认档，缺省用全局默认。
-  const preferred =
-    catalog.models.find((option) => option.value === model)?.defaultEffort ??
-    catalog.defaultEffort;
+  const preferred = codexModelDefaultEffort(catalog, model);
   return efforts.includes(preferred) ? preferred : efforts[0];
+}
+
+/**
+ * The default effort a ChatGPT connection has stored. The server resolves the
+ * effort the gateway really applies, clamped to the model's catalog entry;
+ * prefer it over the raw env value.
+ */
+export function storedCodexEffort(provider: {
+  codexDefaultEffort?: string | null;
+  customEnv?: Record<string, string>;
+}): string | undefined {
+  return (
+    provider.codexDefaultEffort ||
+    provider.customEnv?.CODEX_REASONING_EFFORT ||
+    undefined
+  );
+}
+
+/**
+ * The PATCH fields for a new default model and effort. `customEnv` is
+ * replaced whole, so the connection's other variables are carried over.
+ */
+export function codexDefaultsPatch(
+  provider: { anthropicModel: string; customEnv?: Record<string, string> },
+  model: string,
+  effort: string,
+): Record<string, unknown> {
+  const patch: Record<string, unknown> = {};
+  if (model !== provider.anthropicModel) patch.anthropicModel = model;
+  if (effort !== storedCodexEffort(provider)) {
+    patch.customEnv = {
+      ...(provider.customEnv ?? {}),
+      CODEX_REASONING_EFFORT: effort,
+    };
+  }
+  return patch;
 }

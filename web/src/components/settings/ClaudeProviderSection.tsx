@@ -13,13 +13,16 @@ import type {
 import { getErrorMessage } from './types';
 import { ProviderList } from './ProviderList';
 import { AddModelWizardDialog } from './AddModelWizard';
-import { ConnectionDetailDialog } from './ConnectionDetailDialog';
+import {
+  ConnectionDetailDialog,
+  type ConnectionUpdate,
+} from './ConnectionDetailDialog';
 import { BalancingSettings } from './BalancingSettings';
 import {
-  PROVIDERS_API,
   errorCopy,
   testConnection,
   testOutcome,
+  updateConnection,
 } from './model-connections';
 import { useVisibleInterval } from '../../hooks/useVisibleInterval';
 import { SettingsSection } from './SettingsLayout';
@@ -276,43 +279,61 @@ export function ClaudeProviderSection({
     [loadProviders, setNotice, setError],
   );
 
+  // ─── 单个连接的变更：带字段时就地更新该行，否则整体重新加载 ─────
+  const handleConnectionChanged = useCallback(
+    (update?: ConnectionUpdate) => {
+      if (!update) {
+        void loadProviders();
+        return;
+      }
+      setProviders((prev) =>
+        prev.map((provider) =>
+          provider.id === update.id ? { ...provider, ...update } : provider,
+        ),
+      );
+    },
+    [loadProviders],
+  );
+
   // ─── 测试连接（服务端记录 lastTest）────────────────────────────
   const handleTest = useCallback(
     async (provider: ProviderWithHealth) => {
       setTestingId(provider.id);
       try {
-        const outcome = testOutcome(
-          await testConnection({ providerId: provider.id }),
-        );
+        const result = await testConnection({ providerId: provider.id });
+        const outcome = testOutcome(result);
         if (outcome.ok) {
           setNotice(`「${provider.name}」连接成功`);
         } else {
           const copy = errorCopy(outcome.code);
           setError(`「${provider.name}」${copy.title}：${copy.hint}`);
         }
+        handleConnectionChanged(
+          result.record
+            ? { id: provider.id, lastTest: result.record }
+            : undefined,
+        );
       } catch (err) {
         setError(getErrorMessage(err, '测试连接失败'));
       } finally {
         setTestingId(null);
-        await loadProviders().catch(() => {});
       }
     },
-    [loadProviders, setNotice, setError],
+    [handleConnectionChanged, setNotice, setError],
   );
 
   // ─── 加权轮询的权重 ───────────────────────────────────────────
   const handleWeightChange = useCallback(
     async (providerId: string, weight: number) => {
       try {
-        await api.patch(`${PROVIDERS_API}/${providerId}`, { weight }, 120_000);
-        await loadProviders();
+        handleConnectionChanged(await updateConnection(providerId, { weight }));
         setNotice('权重已更新');
       } catch (err) {
         await loadProviders().catch(() => {});
         setError(getErrorMessage(err, '更新权重失败'));
       }
     },
-    [loadProviders, setNotice, setError],
+    [handleConnectionChanged, loadProviders, setNotice, setError],
   );
 
   const handleAdd = useCallback(() => setWizardOpen(true), []);
@@ -397,7 +418,7 @@ export function ClaudeProviderSection({
       <ConnectionDetailDialog
         provider={managing}
         onClose={() => setManagingId(null)}
-        onChanged={() => void loadProviders()}
+        onChanged={handleConnectionChanged}
         setNotice={setNotice}
         setError={setError}
       />

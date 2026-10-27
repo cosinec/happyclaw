@@ -147,7 +147,7 @@ export function SetupProvidersPage() {
                 <AddModelWizard
                   layout="page"
                   enabledCount={0}
-                  forceEnabled
+                  showPoolSwitch={false}
                   onConnectionCreated={(provider) =>
                     setConnection({
                       provider,

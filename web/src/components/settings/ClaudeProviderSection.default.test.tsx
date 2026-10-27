@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import type { ProviderWithHealth } from './types';
+import { makeProvider } from './test-helpers';
 
 (
   globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
@@ -70,25 +71,14 @@ afterEach(async () => {
 });
 
 function provider(id: string, enabled: boolean): ProviderWithHealth {
-  return {
+  return makeProvider({
     id,
     name: `配置 ${id}`,
-    type: 'third_party',
     enabled,
-    weight: 1,
     anthropicBaseUrl: `https://${id}.example.test`,
     anthropicModel: `${id}-model`,
-    anthropicAuthMode: 'bearer',
-    hasAnthropicAuthToken: true,
-    hasAnthropicApiKey: false,
-    hasClaudeCodeOauthToken: false,
-    hasClaudeOAuthCredentials: false,
-    hasCodexOAuthCredentials: false,
     models: [{ id: `${id}-model` }],
-    presetId: null,
-    lastTest: null,
-    health: null,
-  } as ProviderWithHealth;
+  });
 }
 
 function listing(defaultModelConfigId: string | null) {
@@ -335,6 +325,56 @@ describe('ClaudeProviderSection connections', () => {
     expect(mocks.setError).toHaveBeenCalledWith(
       expect.stringContaining('「配置 a」余额或额度不足'),
     );
+  });
+
+  test('a stored test result and a saved field update the row without a reload', async () => {
+    mocks.get.mockResolvedValue(listing(null));
+    mocks.post.mockResolvedValue({
+      ok: true,
+      probes: [],
+      code: null,
+      record: {
+        ok: true,
+        code: null,
+        status: 200,
+        model: 'a-model',
+        latencyMs: 30,
+        at: new Date().toISOString(),
+      },
+    });
+    await render();
+    mocks.get.mockClear();
+    await act(async () =>
+      document
+        .querySelectorAll<HTMLButtonElement>('button[aria-label="更多操作"]')[0]
+        .dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+        ),
+    );
+    await act(async () =>
+      [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')]
+        .find((node) => node.textContent?.includes('测试连接'))!
+        .click(),
+    );
+    const rows = () =>
+      [...document.querySelectorAll('[data-slot="list-row"]')].map(
+        (row) => row.textContent ?? '',
+      );
+    expect(rows()[0]).toContain('已连接');
+
+    // What the detail saved comes back as fields of that connection.
+    await act(async () =>
+      (lastProps(mocks.detail).onChanged as (update: unknown) => void)({
+        id: 'b',
+        name: '改过的名字',
+      }),
+    );
+    expect(rows()[1]).toContain('改过的名字');
+    expect(mocks.get).not.toHaveBeenCalled();
+
+    // Without fields (a new credential) the list is read again.
+    await act(async () => (lastProps(mocks.detail).onChanged as () => void)());
+    expect(mocks.get).toHaveBeenCalledWith('/api/config/claude/providers');
   });
 
   test('weights are editable under the weighted strategy and saved per connection', async () => {

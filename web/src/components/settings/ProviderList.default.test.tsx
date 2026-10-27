@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import type { ProviderWithHealth } from './types';
+import { makeProvider } from './test-helpers';
 
 // Subscription rows load their usage; keep that off the network.
 vi.mock('../../api/client', () => ({
@@ -37,26 +38,14 @@ function provider(
   id: string,
   overrides: Partial<ProviderWithHealth> = {},
 ): ProviderWithHealth {
-  return {
+  return makeProvider({
     id,
     name: `配置 ${id}`,
-    type: 'third_party',
-    enabled: true,
-    weight: 1,
     anthropicBaseUrl: `https://${id}.example.test`,
     anthropicModel: `${id}-model`,
-    anthropicAuthMode: 'bearer',
-    hasAnthropicAuthToken: true,
-    hasAnthropicApiKey: false,
-    hasClaudeCodeOauthToken: false,
-    hasClaudeOAuthCredentials: false,
-    hasCodexOAuthCredentials: false,
     models: [],
-    presetId: null,
-    lastTest: null,
-    health: null,
     ...overrides,
-  } as ProviderWithHealth;
+  });
 }
 
 async function render(
@@ -79,6 +68,7 @@ async function render(
         onAdd={vi.fn()}
         togglingId={null}
         deletingId={null}
+        testingId={null}
         disabled={false}
       />,
     );
@@ -223,6 +213,7 @@ describe('ProviderList connection status', () => {
           onAdd={vi.fn()}
           togglingId={null}
           deletingId={null}
+          testingId={null}
           disabled={false}
         />,
       );
