@@ -290,7 +290,7 @@ export async function probeProviderModel(
 ): Promise<ProviderConnectivityProbe> {
   // Claude Code strips the [1m] suffix before calling the API.
   const model =
-    input.model.replace(/\[1m\]$/i, '').trim() || PASS_THROUGH_PROBE_MODEL;
+    splitOneMillionSuffix(input.model).model || PASS_THROUGH_PROBE_MODEL;
   const answer = await requestUpstream(
     buildMessagesUrl(input.baseUrl),
     {
@@ -364,7 +364,8 @@ export function connectionTestResult(
     record: {
       ok: result.ok,
       code,
-      status: failed?.status ?? main?.status ?? null,
+      // A failure without an answer (a timeout) has no status.
+      status: failed ? failed.status : (main?.status ?? null),
       model: options.model,
       latencyMs: main?.latencyMs ?? null,
       at: new Date().toISOString(),

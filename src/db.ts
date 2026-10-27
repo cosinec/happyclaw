@@ -10565,27 +10565,23 @@ function deleteSessionsByProviderIdInCurrentTransaction(
     : '';
   const params = [providerId, ...includeUnboundFolders];
   if (options?.previousDefaultModel !== undefined) {
-    const doomed = db
-      .prepare(
-        `SELECT group_folder, agent_id FROM sessions
-         WHERE (provider_id = ?${unboundClause})
-           AND (model IS NULL OR model = '' OR model = ?)`,
-      )
-      .all(...params, options.previousDefaultModel) as Array<{
-      group_folder: string;
-      agent_id: string;
-    }>;
-    for (const row of doomed) {
-      db.prepare(
-        'DELETE FROM sessions WHERE group_folder = ? AND agent_id = ?',
-      ).run(row.group_folder, row.agent_id);
-      db.prepare(
-        'DELETE FROM workspace_runtime_sessions WHERE group_folder = ? AND runtime_agent_id = ?',
-      ).run(row.group_folder, row.agent_id);
-    }
+    const doomed = `(provider_id = ?${unboundClause})
+         AND (model IS NULL OR model = '' OR model = ?)`;
+    const doomedParams = [...params, options.previousDefaultModel];
+    const folders = db
+      .prepare(`SELECT DISTINCT group_folder FROM sessions WHERE ${doomed}`)
+      .all(...doomedParams) as Array<{ group_folder: string }>;
+    db.prepare(
+      `DELETE FROM workspace_runtime_sessions
+       WHERE (group_folder, runtime_agent_id) IN (
+         SELECT group_folder, agent_id FROM sessions WHERE ${doomed})`,
+    ).run(...doomedParams);
+    const result = db
+      .prepare(`DELETE FROM sessions WHERE ${doomed}`)
+      .run(...doomedParams);
     return {
-      deletedCount: doomed.length,
-      affectedFolders: [...new Set(doomed.map((row) => row.group_folder))],
+      deletedCount: result.changes,
+      affectedFolders: folders.map((row) => row.group_folder),
     };
   }
   const rows = db

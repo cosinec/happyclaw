@@ -95,6 +95,7 @@ import {
   getBalancingConfig,
   saveBalancingConfig,
   createProvider,
+  findProviderModel,
   nextProviderModelList,
   providerModels,
   recordProviderTest,
@@ -656,32 +657,27 @@ function newConnectionJoinsPool(): boolean {
   return getEnabledProviders().length === 0;
 }
 
-/** The models a connection edit leaves out of the connection's list. */
-function removedProviderModels(
+/** The models a connection offers once an edit is saved. */
+function providerModelsAfterEdit(
   previous: UnifiedProvider,
   patch: {
     anthropicBaseUrl?: string;
     anthropicModel?: string;
     models?: ProviderModelEntry[];
   },
-): string[] {
+): ProviderModelEntry[] {
   const anthropicModel =
     patch.anthropicModel !== undefined
       ? patch.anthropicModel.trim()
       : previous.anthropicModel;
-  const kept = new Set(
-    providerModels({
-      anthropicBaseUrl: patch.anthropicBaseUrl ?? previous.anthropicBaseUrl,
+  return providerModels({
+    anthropicBaseUrl: patch.anthropicBaseUrl ?? previous.anthropicBaseUrl,
+    anthropicModel,
+    models: nextProviderModelList(previous, {
       anthropicModel,
-      models: nextProviderModelList(previous, {
-        anthropicModel,
-        models: patch.models,
-      }),
-    }).map((entry) => entry.id),
-  );
-  return providerModels(previous)
-    .map((entry) => entry.id)
-    .filter((model) => !kept.has(model));
+      models: patch.models,
+    }),
+  });
 }
 
 /**
@@ -1744,8 +1740,16 @@ configRoutes.patch(
           customEnvChanged ||
           tokenChanged ||
           authModeChanged;
+        const nextModels = providerModelsAfterEdit(previous, providerPatch);
         // Toggling 1M renames a model, so it counts as a removal too.
-        const removedModels = removedProviderModels(previous, providerPatch);
+        const removedModels = providerModels(previous)
+          .map((entry) => entry.id)
+          .filter((model) => !nextModels.some((entry) => entry.id === model));
+        // A runner on the default model was launched with its effort.
+        const defaultEffortChanged =
+          findProviderModel(previous, previous.anthropicModel)?.effort !==
+          nextModels.find((entry) => entry.id === previous.anthropicModel)
+            ?.effort;
         const agentsUsingRemoved = listAgentProfilesUsingModels(
           id,
           removedModels,
@@ -1811,20 +1815,21 @@ configRoutes.patch(
           return updated;
         };
 
-        // Showing, hiding, re-tuning or adding models reaches a runner at its
-        // next launch, as the default model's effort does; nothing running
-        // has to stop for it. Every other change keeps quiescing as before.
-        const runnersUnaffected =
-          !protocolFieldChanged &&
-          !pendingInvalidation &&
-          removedModels.length === 0 &&
-          (providerPatch.name === undefined ||
-            providerPatch.name.trim() === previous.name) &&
-          (providerPatch.weight === undefined ||
-            providerPatch.weight === previous.weight);
+        // Only what a running runner was launched with stops it: the endpoint,
+        // the key and its header style, the env, the default model and its
+        // effort, or a model a session may be running. A name, a weight, a
+        // model's visibility, an added model or the preset reach the next
+        // pick or launch by themselves.
+        const runnerEnvironmentChanged =
+          protocolFieldChanged ||
+          defaultEffortChanged ||
+          removedModels.length > 0;
 
         let mutation: ClaudeMutationResult<ReturnType<typeof updateProvider>>;
-        if (providerMayHaveRunners(previous) && !runnersUnaffected) {
+        if (
+          providerMayHaveRunners(previous) &&
+          (runnerEnvironmentChanged || !!pendingInvalidation)
+        ) {
           mutation = await mutateClaudeConfigForAllGroups(
             actor,
             metadata,
@@ -2418,9 +2423,15 @@ async function checkSubscriptionAccount(
       ) {
         return unreachedTest('AUTH_INVALID', 'Claude 登录已失效，请重新登录');
       }
-      token =
-        getProviderById(connection.providerId)?.claudeOAuthCredentials
-          ?.accessToken ?? token;
+      const renewed = getProviderById(
+        connection.providerId,
+      )?.claudeOAuthCredentials;
+      // A renewal that failed for now (network, 5xx, backoff) says nothing
+      // about the login; an expired token would only be refused for age.
+      if (!renewed || renewed.expiresAt <= Date.now()) {
+        return unreachedTest('UPSTREAM_ERROR', '续期失败，稍后再试');
+      }
+      token = renewed.accessToken;
     }
   } else if (connection.oauth && connection.oauth.expiresAt <= Date.now()) {
     return unreachedTest(
@@ -2565,7 +2576,11 @@ configRoutes.post(
     if (!validation.success) {
       return c.json({ error: 'Invalid request body' }, 400);
     }
-    const resolved = resolveCheckedConnection(validation.data);
+    // A saved connection lists models with its own env.
+    const { customEnv, ...draft } = validation.data;
+    const resolved = resolveCheckedConnection(
+      draft.providerId ? draft : { ...draft, customEnv },
+    );
     if ('error' in resolved) {
       return c.json({ error: resolved.error }, resolved.status);
     }
