@@ -2350,6 +2350,47 @@ export function createDingTalkConnection(
           }
         }
 
+        /** Run a slash command; true when it was consumed (answered or failed). */
+        const runSlashCommand = async (text: string): Promise<boolean> => {
+          const slashMatch = text.match(/^\/(\S+)(?:\s+(.*))?$/i);
+          if (!slashMatch || !opts.onCommand) return false;
+          const cmdBody = (
+            slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
+          ).trim();
+          try {
+            const reply = await opts.onCommand(
+              jid,
+              cmdBody,
+              data.senderId,
+              isGroup ? dingTalkCommandMentions(data) : [],
+            );
+            assertInboundGeneration(generation, signal);
+            if (!reply) return false;
+            if (data.sessionWebhook) {
+              await sendViaSessionWebhook(
+                data.sessionWebhook,
+                markdownToPlainText(reply),
+                isGroup,
+                signal,
+              );
+              assertInboundGeneration(generation, signal);
+            }
+            return true;
+          } catch (err) {
+            assertInboundGeneration(generation, signal);
+            logger.error({ jid, err }, 'DingTalk slash command failed');
+            return true;
+          }
+        };
+
+        // A sender outside the audience is only heard as `/owner_mention`:
+        // run that command now, before any registration, cache write or
+        // download, and drop the message whether or not it was consumed.
+        if (audience === 'bootstrap') {
+          await runSlashCommand(admissionText);
+          return;
+        }
+
         const resolvedRoute = resolveAdmittedChannelRoute(
           jid,
           opts.resolveEffectiveChatJid,
@@ -2900,40 +2941,7 @@ export function createDingTalkConnection(
         // ── Authorized: process message ──
 
         // Handle slash commands
-        const slashMatch = content.match(/^\/(\S+)(?:\s+(.*))?$/i);
-        if (slashMatch && opts.onCommand && steerText === undefined) {
-          const cmdBody = (
-            slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
-          ).trim();
-          try {
-            const reply = await opts.onCommand(
-              jid,
-              cmdBody,
-              data.senderId,
-              isGroup ? dingTalkCommandMentions(data) : [],
-            );
-            assertInboundGeneration(generation, signal);
-            if (reply) {
-              const plainText = markdownToPlainText(reply);
-              if (data.sessionWebhook) {
-                await sendViaSessionWebhook(
-                  data.sessionWebhook,
-                  plainText,
-                  isGroup,
-                  signal,
-                );
-                assertInboundGeneration(generation, signal);
-              }
-              return;
-            }
-          } catch (err) {
-            assertInboundGeneration(generation, signal);
-            logger.error({ jid, err }, 'DingTalk slash command failed');
-            return;
-          }
-        }
-        // Admitted only as `/owner_mention`, and not consumed as it.
-        if (audience === 'bootstrap') return;
+        if (steerText === undefined && (await runSlashCommand(content))) return;
 
         // Route was resolved before registration and media download.
         const id = crypto.randomUUID();
