@@ -8746,8 +8746,9 @@ export function setSessionProviderId(
 
 /**
  * The upstream model the SDK session of a logical Session last ran on, or null
- * when none was recorded. Only ChatGPT-gateway runs record it: it is what
- * tells a launch that the model changed under a session it could resume.
+ * when none was recorded (a session from before models were tracked, or a
+ * pass-through relay that names none). It is what tells a launch that the
+ * model changed under a session it could resume.
  */
 export function getSessionModel(
   groupFolder: string,
