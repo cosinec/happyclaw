@@ -178,15 +178,18 @@ export function formatMessages(
       .filter((reference): reference is string => !!reference);
     // Quoted bodies are escaped like every other text, so a forged
     // `</referenced_messages>` or `<message>` inside them stays plain text.
-    const referenceBlock =
+    // The body always starts a line (after the opening tag or the reference
+    // block): CLI syntax such as `@"path"` mentions only counts after
+    // whitespace, so a message that begins with one still attaches the file.
+    const bodyStart =
       references.length > 0
         ? `<referenced_messages>\n${REFERENCED_MESSAGES_NOTE}\n${references.join('\n')}\n</referenced_messages>\n`
-        : '';
+        : '\n';
 
     const formatted =
       `<message id="${escapeXml(message.id)}" sender="${escapeXml(message.sender_name)}"` +
       `${sourceAttr}${replyAttr}${relationAttrs} time="${escapeXml(message.timestamp)}">` +
-      `${referenceBlock}${escapeXmlText(message.content)}</message>`;
+      `${bodyStart}${escapeXmlText(message.content)}</message>`;
     knownMessageIds.add(message.id);
     return `${formatted}${defaultForwardRequest(
       message,

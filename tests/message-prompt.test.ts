@@ -91,6 +91,23 @@ describe('message prompt projection', () => {
     expect(prompt).not.toContain('&quot;docs');
   });
 
+  test('every body starts a line, so a leading @"path" mention still counts', () => {
+    const plain = formatMessages([
+      replyMessage({
+        channel_context: undefined,
+        content: '@"notes/hello.txt" 总结一下',
+      }),
+    ]);
+    expect(plain).toContain(
+      'time="2026-07-28T03:23:06.358Z">\n@"notes/hello.txt" 总结一下</message>',
+    );
+
+    // After a reference block the body already starts a line: no blank one.
+    const quoted = formatMessages([replyMessage()]);
+    expect(quoted).toContain('</referenced_messages>\n重新调研</message>');
+    expect(quoted).not.toContain('</referenced_messages>\n\n');
+  });
+
   test('a body with quotes still cannot forge message boundaries', () => {
     const prompt = formatMessages([
       replyMessage({
