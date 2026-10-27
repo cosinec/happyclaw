@@ -590,15 +590,18 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const currentContextWaiting = sessionTab ? activeAgentWaiting : isWaiting;
   // Loaded and nothing to show yet: the conversation opens on its empty
   // state, with the composer centred between heading and starters on a wide
-  // screen (a phone keeps it docked above the keyboard).
+  // screen with a mouse. A touch screen of any size (a phone, a landscape
+  // phone, a tablet) keeps it docked above its software keyboard.
   const shownMessages = sessionTab ? activeAgentMessages : groupMessages;
   const emptyConversation =
     !currentContextWaiting &&
     !!shownMessages &&
     !shownMessages.some(isMessageVisibleInTimeline);
-  const wideEmptyState = useMediaQuery('(min-width: 640px)');
+  const centersEmptyState = useMediaQuery(
+    '(min-width: 640px) and (hover: hover) and (pointer: fine)',
+  );
   const composerKey = sessionTab ? followUpChatJid : groupJid;
-  const heroCentered = emptyConversation && wideEmptyState;
+  const heroCentered = emptyConversation && centersEmptyState;
   const agentProfileLabel = group?.agent_profile_name
     ? getAgentProfileDisplayName(group.agent_profile_name)
     : group?.is_home

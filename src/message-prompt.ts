@@ -50,7 +50,8 @@ export function splitLegacyEmbeddedReferenceContent(
 /**
  * Escape the user's own message body. Quotes only matter inside attribute
  * values; keeping them literal leaves CLI syntax such as `@"path"` mentions
- * intact. Quoted or forwarded material goes through `escapeQuotedMaterial`.
+ * intact. Quoted bodies and forwarded material go through
+ * `escapeQuotedMaterial`.
  */
 function escapeXmlText(value: string): string {
   return value
@@ -180,9 +181,14 @@ export function formatMessages(
       : '';
     const replyTo = message.channel_context?.message.parentId;
     const replyAttr = replyTo ? ` reply_to="${escapeXml(replyTo)}"` : '';
-    const relationAttrs = contentLinkAttributes(
-      message.channel_context?.message.contentLink,
-    );
+    const contentLink = message.channel_context?.message.contentLink;
+    const relationAttrs = contentLinkAttributes(contentLink);
+    // A forward carries someone else's text: escaped like a quoted body. The
+    // forwarder's own note is the user's message.
+    const escapeBody =
+      contentLink?.role === 'forwarded_content'
+        ? escapeQuotedMaterial
+        : escapeXmlText;
     const references = referencedMessages(message)
       .map((reference) => formatMissingReference(reference, knownMessageIds))
       .filter((reference): reference is string => !!reference);
@@ -199,12 +205,9 @@ export function formatMessages(
     const formatted =
       `<message id="${escapeXml(message.id)}" sender="${escapeXml(message.sender_name)}"` +
       `${sourceAttr}${replyAttr}${relationAttrs} time="${escapeXml(message.timestamp)}">` +
-      `${bodyStart}${escapeXmlText(message.content)}</message>`;
+      `${bodyStart}${escapeBody(message.content)}</message>`;
     knownMessageIds.add(message.id);
-    return `${formatted}${defaultForwardRequest(
-      message,
-      message.channel_context?.message.contentLink,
-    )}`;
+    return `${formatted}${defaultForwardRequest(message, contentLink)}`;
   });
   return `<messages>\n${lines.join('\n')}\n</messages>`;
 }
