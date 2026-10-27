@@ -73,13 +73,15 @@ export function FeishuRegistrationPanel({
   }, [active, onActiveChange]);
 
   // Leaving the dialog mid-scan abandons the code on the server too.
-  useEffect(
-    () => () => {
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
       const id = pendingIdRef.current;
       if (id) void cancelFeishuRegistration(id).catch(() => undefined);
-    },
-    [cancelFeishuRegistration],
-  );
+    };
+  }, [cancelFeishuRegistration]);
 
   const start = async () => {
     succeededRef.current = false;
@@ -89,6 +91,12 @@ export function FeishuRegistrationPanel({
         brand,
         ...(name.trim() ? { name: name.trim() } : {}),
       });
+      // Closed while the code was being requested: nobody will scan it, so
+      // free the server's slot instead of letting it poll until expiry.
+      if (!mountedRef.current) {
+        void cancelFeishuRegistration(started.id).catch(() => undefined);
+        return;
+      }
       setNow(Date.now());
       setState({ phase: 'live', registration: started });
     } catch (err) {
@@ -202,7 +210,7 @@ export function FeishuRegistrationPanel({
       {registration?.status === 'pending' && registration.qr_data_url && (
         <div className="flex flex-col items-center gap-3 rounded-lg px-4 py-5 ring-1 ring-surface-border">
           {/* QR codes need a white quiet zone to scan in dark mode too. */}
-          <div className="size-60 max-w-full overflow-hidden rounded-lg bg-white p-2 ring-1 ring-surface-border">
+          <div className="size-60 max-w-full overflow-hidden rounded-lg bg-qr-quiet-zone p-2 ring-1 ring-surface-border">
             <img
               src={registration.qr_data_url}
               alt={spacedLabel(appName, '创建应用二维码')}

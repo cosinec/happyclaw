@@ -126,6 +126,20 @@ describe('FeishuRegistrationPanel', () => {
     expect(mocks.getFeishuRegistration).toHaveBeenCalledTimes(1);
   });
 
+  test('closing while the code is being requested cancels it once it arrives', async () => {
+    let resolveBegin!: (value: typeof pending) => void;
+    mocks.beginFeishuRegistration.mockReturnValue(
+      new Promise((resolve) => (resolveBegin = resolve)),
+    );
+    await renderAndStart();
+    expect(container!.textContent).toContain('正在生成二维码');
+    await act(async () => root?.unmount());
+    root = null;
+    expect(mocks.cancelFeishuRegistration).not.toHaveBeenCalled();
+    await act(async () => resolveBegin(pending));
+    expect(mocks.cancelFeishuRegistration).toHaveBeenCalledWith('reg-1');
+  });
+
   test('overlapping slow status reads report success once', async () => {
     await renderAndStart();
     const resolvers: Array<(value: unknown) => void> = [];
