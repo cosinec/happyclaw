@@ -44,7 +44,7 @@ vi.mock('../src/middleware/auth.ts', async (importOriginal) => {
         id: `connections-admin-${currentUser.n}`,
         username: 'connections-admin',
         display_name: 'Admin',
-        role: 'admin',
+        role: currentUser.role,
         status: 'active',
         permissions: [],
         must_change_password: false,
@@ -55,7 +55,7 @@ vi.mock('../src/middleware/auth.ts', async (importOriginal) => {
 });
 
 // Each test is its own admin, so the per-minute check budget never carries over.
-const currentUser = vi.hoisted(() => ({ n: 0 }));
+const currentUser = vi.hoisted(() => ({ n: 0, role: 'admin' }));
 
 const web = await import('../src/web.js');
 const db = await import('../src/db.js');
@@ -141,6 +141,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   currentUser.n += 1;
+  currentUser.role = 'admin';
   fs.rmSync(path.join(tmpDir, 'config'), { recursive: true, force: true });
   seen.length = 0;
   reply = () => ({ status: 200, body: {} });
@@ -316,6 +317,20 @@ describe('creating a connection', () => {
       ],
       lastTest: null,
     });
+  });
+
+  test('a preset connection may leave its address to the preset', async () => {
+    const created = await request('POST', '/providers', {
+      name: 'DeepSeek',
+      type: 'third_party',
+      presetId: 'deepseek',
+      anthropicAuthToken: 'ds-secret-123456',
+      anthropicModel: 'deepseek-flash[1m]',
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.anthropicBaseUrl).toBe(
+      'https://api.deepseek.com/anthropic',
+    );
   });
 
   test('refuses an unknown preset and a model Claude Code cannot take', async () => {
@@ -906,5 +921,20 @@ describe('GET /providers/:id/impact', () => {
     expect((await request('GET', '/providers/missing/impact')).status).toBe(
       404,
     );
+  });
+});
+
+describe('who may check connections', () => {
+  test('only manage_system_config reaches tests, model lists and impact', async () => {
+    const provider = thirdParty();
+    currentUser.role = 'member';
+    for (const [method, url, body] of [
+      ['POST', '/providers/test', { providerId: provider.id }],
+      ['POST', '/providers/discover-models', { providerId: provider.id }],
+      ['GET', `/providers/${provider.id}/impact`, undefined],
+    ] as const) {
+      expect((await request(method, url, body)).status).toBe(403);
+    }
+    expect(seen).toEqual([]);
   });
 });

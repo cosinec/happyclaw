@@ -1621,6 +1621,12 @@ configRoutes.post(
       const provider = createProvider({
         ...createInput,
         ...pasted,
+        // A preset connection may leave its address to the preset.
+        anthropicBaseUrl:
+          createInput.anthropicBaseUrl?.trim() ||
+          (createInput.type === 'third_party'
+            ? getModelPreset(createInput.presetId)?.baseUrl
+            : undefined),
         enabled: createInput.enabled ?? newConnectionJoinsPool(),
       });
       appendClaudeConfigAudit(actor, 'create_provider', [
