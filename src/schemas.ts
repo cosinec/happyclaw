@@ -1241,13 +1241,14 @@ export const ProviderDiscoverModelsSchema = z.object({
   anthropicApiKey: z.string().max(2000).optional(),
   /** A pasted setup-token or .credentials.json; checked, never saved. */
   claudeCredentialInput: ClaudeCredentialInputSchema.optional(),
+  /** A draft's env; its ANTHROPIC_CUSTOM_HEADERS go with every request. */
+  customEnv: z.record(z.string().max(256), z.string().max(4096)).optional(),
 });
 
-/** A connection to test: as for listing models, plus what the test runs. */
+/** A connection to test: as for listing models, plus the model it runs. */
 export const ProviderConnectivityTestSchema =
   ProviderDiscoverModelsSchema.extend({
     anthropicModel: ProviderDefaultModelSchema.optional(),
-    customEnv: z.record(z.string().max(256), z.string().max(4096)).optional(),
   });
 export type ProviderConnectivityTestInput = z.infer<
   typeof ProviderConnectivityTestSchema

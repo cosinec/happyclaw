@@ -535,8 +535,9 @@ Provider（模型连接：一份凭据和一个端点，提供一组模型）：
   可同时携带 `anthropicAuthToken` / `clearAnthropicAuthToken`，与其他字段在同一
   请求内提交；删除 ChatGPT 订阅型 Provider 后在后台尽力吊销其 refresh token，
   吊销结果不影响响应。PATCH 的 `models` 是完整的新列表（未列出的即移除），
-  `presetId: null` 清除预设；只改模型的显示/隐藏、推理档位或新增模型时不停
-  Runner、不清会话；改 `anthropicModel` 仍按协议字段处理（停 Runner），未带
+  `presetId: null` 清除预设；改名称、权重、预设、模型的显示/隐藏、非默认模型的推理
+  档位或新增模型时不停 Runner、不清会话；端点、凭据、认证方式、环境变量、默认模型及
+  其推理档位变更或移除模型时停 Runner；改 `anthropicModel` 仍按协议字段处理，未带
   `models` 时旧默认模型保留在列表中（列表已满 100 个时返回 400）；只改默认模型时
   只清除跑在旧默认模型上或没有记录模型的会话，选了该连接其他模型的会话保留，只切换
   `[1m]` 不清会话。移除（含切换 1M 改名）仍被智能体使用的模型返回 409
@@ -580,7 +581,8 @@ Provider（模型连接：一份凭据和一个端点，提供一组模型）：
   的旧连接同时记下端点接受的方式，与原先推断的不同时只排空该连接的 Runner。
   与 `discover-models` 共用每用户每分钟 10 次的限额，超出返回 429
 - `POST /api/config/claude/providers/discover-models`，获取连接的模型列表，
-  请求体同上（不含 `anthropicModel`、`customEnv`）。第三方端点读
+  请求体同上（不含 `anthropicModel`；`customEnv` 只用于草稿，其
+  `ANTHROPIC_CUSTOM_HEADERS` 随请求发送，已保存的连接用自己的环境变量）。第三方端点读
   `modelsUrlFor(地址, 预设)`（自定义地址恰好匹配一个预设时用该预设的列表地址），
   认证方式回退同测试；官方 API Key 读 `https://api.anthropic.com/v1/models`；
   Claude 订阅不发请求，返回内置别名；ChatGPT 订阅返回其模型目录。成功为

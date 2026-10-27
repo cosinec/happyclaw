@@ -403,20 +403,64 @@ describe('editing a model list', () => {
       name: 'Relay',
       weight: 1,
       models: [
-        { id: 'glm-5.3', effort: 'high' },
-        { id: 'glm-5.2', hidden: true },
+        { id: 'glm-5.3' },
+        { id: 'glm-5.2', hidden: true, effort: 'high' },
         { id: 'glm-5.1' },
       ],
     });
     expect(patched.status).toBe(200);
     expect(patched.body.applied).toMatchObject({ stoppedCount: 0 });
     expect(patched.body.provider.models).toEqual([
-      { id: 'glm-5.3', effort: 'high' },
-      { id: 'glm-5.2', hidden: true },
+      { id: 'glm-5.3' },
+      { id: 'glm-5.2', hidden: true, effort: 'high' },
       { id: 'glm-5.1' },
     ]);
     expect(queue.pauseGroupsForMutation).not.toHaveBeenCalled();
     expect(db.getSession('connections-folder')).toBe('sdk-session-1');
+  });
+
+  test('a rename, a weight or a preset change stops no runner', async () => {
+    const provider = thirdParty({
+      enabled: true,
+      anthropicBaseUrl: 'https://api.deepseek.com/anthropic',
+    });
+    for (const patch of [
+      { name: 'Renamed' },
+      { weight: 7 },
+      { presetId: 'deepseek' },
+    ]) {
+      const patched = await request(
+        'PATCH',
+        `/providers/${provider.id}`,
+        patch,
+      );
+      expect(patched.status).toBe(200);
+      expect(patched.body.applied).toMatchObject({ stoppedCount: 0 });
+    }
+    expect(queue.pauseGroupsForMutation).not.toHaveBeenCalled();
+    expect(runtimeConfig.getProviderById(provider.id)).toMatchObject({
+      name: 'Renamed',
+      weight: 7,
+      presetId: 'deepseek',
+    });
+  });
+
+  test("the default model's effort and a removed model reach runners: they stop", async () => {
+    const provider = thirdParty({
+      enabled: true,
+      models: [{ id: 'glm-5.3' }, { id: 'glm-5.2' }],
+    });
+    const retuned = await request('PATCH', `/providers/${provider.id}`, {
+      models: [{ id: 'glm-5.3', effort: 'low' }, { id: 'glm-5.2' }],
+    });
+    expect(retuned.status).toBe(200);
+    expect(queue.pauseGroupsForMutation).toHaveBeenCalledTimes(1);
+
+    const removed = await request('PATCH', `/providers/${provider.id}`, {
+      models: [{ id: 'glm-5.3', effort: 'low' }],
+    });
+    expect(removed.status).toBe(200);
+    expect(queue.pauseGroupsForMutation).toHaveBeenCalledTimes(2);
   });
 
   test('a new default model is still a protocol change', async () => {
@@ -437,6 +481,15 @@ describe('editing a model list', () => {
 
   test('a new default model drops only the sessions that ran the old one', async () => {
     const folder = 'default-change-folder';
+    const workspaceJid = 'web:default-change-folder';
+    // A workspace, so each session also has its runtime projection row.
+    db.setRegisteredGroup(workspaceJid, {
+      name: folder,
+      folder,
+      added_at: new Date().toISOString(),
+      executionMode: 'container',
+      created_by: 'connections-admin',
+    } as never);
     const provider = thirdParty({
       enabled: true,
       models: [{ id: 'glm-5.3' }, { id: 'glm-5.2' }, { id: 'glm-5.1' }],
@@ -462,6 +515,11 @@ describe('editing a model list', () => {
     expect(db.getSession(folder)).toBe('sdk-main');
     expect(db.getSession(folder, 'on-default')).toBeUndefined();
     expect(db.getSession(folder, 'unrecorded')).toBeUndefined();
+    expect(
+      db
+        .listWorkspaceRuntimeSessionsByWorkspace(workspaceJid)
+        .map((row) => [row.runtime_agent_id, row.sdk_session_id]),
+    ).toEqual([['', 'sdk-main']]);
 
     // The pinned conversation resumes the session it ran on glm-5.2.
     expect(runner.willClearSessionOnProviderSwitch(folder, null)).toBe(false);
@@ -636,6 +694,42 @@ describe('POST /providers/discover-models', () => {
     });
     expect(seen[0].url).toBe('/api/v4/models');
     expect(seen[0].headers['x-tenant']).toBe('acme');
+  });
+
+  test('a draft lists models with its custom headers, keeping their values out of errors', async () => {
+    reply = (request) =>
+      request.headers['x-relay-key'] === 'relay-header-secret'
+        ? { status: 200, body: { data: [{ id: 'relay-1' }] } }
+        : {
+            status: 401,
+            body: {
+              error: {
+                message: `bad x-relay-key ${request.headers['x-relay-key']}`,
+              },
+            },
+          };
+    const customEnv = {
+      ANTHROPIC_CUSTOM_HEADERS: 'X-Relay-Key: relay-header-secret',
+    };
+    const { body } = await request('POST', '/providers/discover-models', {
+      anthropicBaseUrl: upstream,
+      anthropicAuthToken: 'relay-secret-123456',
+      customEnv,
+    });
+    expect(body).toMatchObject({ ok: true, models: [{ id: 'relay-1' }] });
+
+    // A saved connection uses its own env, not one sent with the request.
+    const saved = thirdParty({
+      customEnv: {
+        ANTHROPIC_CUSTOM_HEADERS: 'X-Relay-Key: stale-header-value',
+      },
+    });
+    const refused = await request('POST', '/providers/discover-models', {
+      providerId: saved.id,
+      customEnv,
+    });
+    expect(refused.body).toMatchObject({ ok: false, code: 'AUTH_INVALID' });
+    expect(refused.body.message).not.toContain('stale-header-value');
   });
 
   test('explains failures without the key', async () => {
@@ -1106,6 +1200,34 @@ describe('POST /providers/test', () => {
       });
       expect(body).toMatchObject({ ok: false, code: 'AUTH_FORBIDDEN' });
     }
+  });
+
+  test('a saved login whose renewal fails for now is not called a bad key', async () => {
+    const provider = runtimeConfig.createProvider({
+      name: 'Claude',
+      type: 'official',
+      claudeOAuthCredentials: {
+        accessToken: 'sk-ant-oat01-expired-access-token',
+        refreshToken: 'sk-ant-ort01-refresh-token-abcdef',
+        expiresAt: Date.now() - 1_000,
+        scopes: ['user:inference', 'user:profile'],
+      },
+    });
+    // The token endpoint is unreachable here; the usage endpoint would
+    // refuse the expired token.
+    anthropic.mockReturnValue({ status: 401, body: { error: 'expired' } });
+    const { body } = await request('POST', '/providers/test', {
+      providerId: provider.id,
+    });
+    expect(body).toMatchObject({
+      ok: false,
+      code: 'UPSTREAM_ERROR',
+      probes: [{ message: '续期失败，稍后再试' }],
+    });
+    expect(anthropic).not.toHaveBeenCalled();
+    expect(runtimeConfig.getProviderById(provider.id)!.lastTest).toMatchObject({
+      code: 'UPSTREAM_ERROR',
+    });
   });
 
   test('a pasted login whose access token expired is not renewed here', async () => {
