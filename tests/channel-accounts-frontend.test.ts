@@ -184,6 +184,73 @@ describe('channel account frontend behavior', () => {
     expect(JSON.stringify(feishu)).not.toContain('ownerOpenId');
   });
 
+  test('the Feishu guide lists every subscribed event and the scopes behind the calls', () => {
+    const guide = providerDefinition('feishu').setupGuide;
+    const [events, permissions] = guide.checklists ?? [];
+    expect(events.items.map((item) => item.name)).toEqual([
+      'im.message.receive_v1',
+      'card.action.trigger',
+      'im.message.recalled_v1',
+      'im.chat.member.bot.added_v1',
+      'im.chat.member.bot.deleted_v1',
+      'im.chat.disbanded_v1',
+    ]);
+    expect(permissions.items.map((item) => item.name)).toEqual(
+      expect.arrayContaining([
+        'im:message',
+        'im:resource',
+        'im:chat:readonly',
+        'cardkit:card:write',
+        'im:chat.members:read',
+        'contact:user.base:readonly',
+      ]),
+    );
+    for (const item of [...events.items, ...permissions.items]) {
+      expect(item.effect.length).toBeGreaterThan(0);
+    }
+  });
+
+  test('scan-to-create uses the registration endpoints and keeps the new account', async () => {
+    const registration = {
+      id: 'reg/1',
+      status: 'success',
+      brand: 'lark',
+      expires_at: '2026-10-27T00:05:00.000Z',
+      interval: 5,
+      account_id: 'account-new',
+    };
+    vi.mocked(api.post).mockResolvedValueOnce({ registration });
+    await expect(
+      useChannelAccountsStore
+        .getState()
+        .beginFeishuRegistration({ brand: 'lark', name: 'Bot' }),
+    ).resolves.toEqual(registration);
+    expect(api.post).toHaveBeenCalledWith(
+      '/api/channel-accounts/feishu/registrations',
+      { brand: 'lark', name: 'Bot' },
+      20_000,
+    );
+
+    const created = account({
+      id: 'account-new',
+      options: { domain: 'lark' },
+    });
+    vi.mocked(api.get).mockResolvedValueOnce({
+      registration,
+      account: created,
+    });
+    await useChannelAccountsStore.getState().getFeishuRegistration('reg/1');
+    expect(api.get).toHaveBeenCalledWith(
+      '/api/channel-accounts/feishu/registrations/reg%2F1',
+    );
+    expect(useChannelAccountsStore.getState().accounts).toEqual([created]);
+
+    await useChannelAccountsStore.getState().cancelFeishuRegistration('reg/1');
+    expect(api.delete).toHaveBeenCalledWith(
+      '/api/channel-accounts/feishu/registrations/reg%2F1',
+    );
+  });
+
   test('models WeCom credentials and pairing explicitly', () => {
     const wecom = providerDefinition('wecom');
     expect(wecom.authMode).toBe('credentials');
