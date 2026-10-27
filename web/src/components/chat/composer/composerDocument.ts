@@ -8,16 +8,12 @@ import { Fragment, Slice, type Node as PMNode } from '@tiptap/pm/model';
 import { Selection, type EditorState } from '@tiptap/pm/state';
 import type { EditorView } from '@tiptap/pm/view';
 
+import { composerDocIsEmpty } from './cindy/composerDocState';
 import { detectComposerTrigger } from './cindy/composerPalette';
 import { plainTextToComposerDocument } from './cindy/composerListDocument';
 import type { ComposerTriggerSnapshot } from './cindy/composerRenderGate';
 
 const NO_TRIGGER: ComposerTriggerSnapshot = { kind: 'none' };
-
-/** A composer document holding `text`, Markdown list rows made structural. */
-export function composerDocFromText(text: string): JSONContent {
-  return plainTextToComposerDocument(text);
-}
 
 const COMPOSER_NODE_TYPES = new Set([
   'doc',
@@ -42,6 +38,19 @@ export function isComposerDocJSON(doc: JSONContent): boolean {
   return (doc.content ?? []).every(isComposerDocJSON);
 }
 
+/**
+ * The editor document for a draft: its stored document when this editor can
+ * load it (chips kept), otherwise one built from its text.
+ */
+export function composerDocFor(
+  text: string,
+  doc?: JSONContent | null,
+): JSONContent {
+  return doc && isComposerDocJSON(doc)
+    ? doc
+    : plainTextToComposerDocument(text);
+}
+
 /** Inline nodes for `text`: line breaks become hard breaks, as when typed. */
 function inlineNodesFor(view: EditorView, text: string): PMNode[] {
   const { schema } = view.state;
@@ -64,16 +73,6 @@ export function insertPlainText(view: EditorView, text: string): void {
   );
 }
 
-/** Insert one line break at the caret. */
-export function insertHardBreak(view: EditorView): void {
-  const { schema } = view.state;
-  view.dispatch(
-    view.state.tr
-      .replaceSelectionWith(schema.nodes.hardBreak.create(), false)
-      .scrollIntoView(),
-  );
-}
-
 /**
  * Append `text` after what the composer holds, `gap` empty lines apart
  * (none when the composer is empty), with the caret at the end; `focus`
@@ -82,14 +81,14 @@ export function insertHardBreak(view: EditorView): void {
 export function appendComposerText(
   editor: Editor,
   text: string,
-  { gap, isEmpty, focus }: { gap: number; isEmpty: boolean; focus: boolean },
+  { gap, focus }: { gap: number; focus: boolean },
 ): void {
-  if (isEmpty) {
-    editor.commands.setContent(composerDocFromText(text));
+  if (composerDocIsEmpty(editor.state.doc)) {
+    editor.commands.setContent(plainTextToComposerDocument(text));
   } else {
     const blocks = [
       ...Array.from({ length: gap }, () => ({ type: 'paragraph' })),
-      ...(composerDocFromText(text).content ?? []),
+      ...(plainTextToComposerDocument(text).content ?? []),
     ];
     editor.commands.insertContentAt(editor.state.doc.content.size, blocks);
   }

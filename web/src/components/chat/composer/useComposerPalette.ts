@@ -86,9 +86,9 @@ export function useComposerPalette({
     setDismissedFrom((current) => (current === triggerFrom ? current : null));
   }, [triggerFrom]);
 
-  const commands = useMemo(
-    () => (allowReset ? [...HAPPYCLAW_COMMANDS] : []),
-    [allowReset],
+  const roster = useMemo(
+    () => [...(allowReset ? HAPPYCLAW_COMMANDS : []), ...skills.value],
+    [allowReset, skills.value],
   );
 
   const skillsReady = skills.status === 'ready';
@@ -106,8 +106,14 @@ export function useComposerPalette({
 
   // Typed commands and Skills light up as pills once their names are known.
   useEffect(() => {
-    setSlashCommandRoster(editor, [...commands, ...skills.value]);
-  }, [editor, commands, skills.value]);
+    setSlashCommandRoster(editor, roster);
+  }, [editor, roster]);
+
+  // Listings are kept while the palette is open; the next `@` lists again
+  // (the source caches briefly), so new files show up.
+  useEffect(() => {
+    if (!open) setDirectories({});
+  }, [open]);
 
   useEffect(() => {
     if (!open || kind !== 'at' || !workspaceJid) return;
@@ -147,14 +153,8 @@ export function useComposerPalette({
   );
   const slashItems = useMemo(
     () =>
-      kind === 'slash'
-        ? filterSlashCommands(
-            [...commands, ...skills.value],
-            query,
-            RESULT_LIMIT,
-          )
-        : [],
-    [kind, commands, skills.value, query],
+      kind === 'slash' ? filterSlashCommands(roster, query, RESULT_LIMIT) : [],
+    [kind, roster, query],
   );
 
   const items: PaletteItem[] = useMemo(

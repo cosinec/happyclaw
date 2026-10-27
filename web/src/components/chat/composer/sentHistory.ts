@@ -1,7 +1,7 @@
 import type { Message } from '../../../stores/chat';
 
 const AGENT_MARKER = '#agent:';
-export const SENT_HISTORY_LIMIT = 50;
+const SENT_HISTORY_LIMIT = 50;
 
 /** The session id inside a conversation draft key, if it names one. */
 function sessionIdOf(draftKey: string): string | null {

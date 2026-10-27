@@ -51,12 +51,11 @@ import {
   handleStructuredListBackspace,
 } from './composer/cindy/ComposerListNodes';
 import { applyListBackspace } from './composer/cindy/composerListContinuation';
+import { plainTextToComposerDocument } from './composer/cindy/composerListDocument';
 import { restoreComposerDocument } from './composer/cindy/restoreComposerDocument';
 import {
   appendComposerText,
-  composerDocFromText,
-  insertHardBreak,
-  isComposerDocJSON,
+  composerDocFor,
 } from './composer/composerDocument';
 import { AttachmentTray } from './composer/AttachmentTray';
 import { ComposerPalette, paletteOptionId } from './composer/ComposerPalette';
@@ -142,14 +141,16 @@ function initialDraft(
   key: string | undefined,
   stored: string | undefined,
   owner: string | undefined,
-): { text: string; doc: JSONContent | null } {
-  if (!key) return { text: '', doc: null };
-  if (stored !== undefined)
-    return { text: stored, doc: draftDocFor(key, stored) };
-  const persisted = owner ? readPersistedDraft(owner, key) : null;
-  return persisted
-    ? { text: persisted.text, doc: persisted.doc ?? null }
-    : { text: '', doc: null };
+): { text: string; doc: JSONContent } {
+  const draft = !key
+    ? null
+    : stored !== undefined
+      ? { text: stored, doc: draftDocFor(key, stored) }
+      : owner
+        ? readPersistedDraft(owner, key)
+        : null;
+  const text = draft?.text ?? '';
+  return { text, doc: composerDocFor(text, draft?.doc) };
 }
 
 // Memoized: ChatView re-renders for dialogs, panels and run status; the
@@ -217,15 +218,15 @@ export const MessageInput = memo(function MessageInput({
   const knownDraftRef = useRef(storedDraft ?? '');
   const adoptedContentRef = useRef(initial.text);
   const compositionEndAtRef = useRef(0);
-  // ↑/↓ recall: the entry shown (-1 = the user's own draft), the document it
-  // put in the editor, and the draft it replaced.
-  const historyIndexRef = useRef(-1);
-  const recalledDocRef = useRef<PMNode | null>(null);
-  const draftBeforeRecallRef = useRef<JSONContent | null>(null);
+  // ↑/↓ recall while browsing: the entry shown, the document it put in the
+  // editor, and the user's own draft it replaced.
+  const recallRef = useRef<{
+    index: number;
+    doc: PMNode;
+    draftBefore: JSONContent;
+  } | null>(null);
 
   const paletteListId = useId();
-  // Filled in once the palette state exists (it needs the editor).
-  const [popupAria, setPopupAria] = useState<Record<string, string>>({});
 
   const showSendError = useCallback((message: string, ms = 4000) => {
     setSendError(message);
@@ -318,14 +319,10 @@ export const MessageInput = memo(function MessageInput({
     [persistDraft],
   );
 
-  const { editor, snapshot } = useComposerEditor({
-    content:
-      initial.doc && isComposerDocJSON(initial.doc)
-        ? initial.doc
-        : composerDocFromText(initial.text),
+  const { editor, snapshot, setPopupAria } = useComposerEditor({
+    content: initial.doc,
     placeholder,
     editable: !disabled,
-    popupAria,
     handlers: {
       onKeyDown: (view, event) => handleEditorKeyDown(view, event),
       onPasteImages: (files) => void attachments.addPastedImages(files),
@@ -333,13 +330,8 @@ export const MessageInput = memo(function MessageInput({
         noteComposerInput();
         latestTextRef.current = serializeEditorContent(current).text;
         // Editing a recalled message makes it the user's own draft.
-        if (
-          historyIndexRef.current >= 0 &&
-          !recalledDocRef.current?.eq(current.state.doc)
-        ) {
-          historyIndexRef.current = -1;
-          recalledDocRef.current = null;
-          draftBeforeRecallRef.current = null;
+        if (!recallRef.current?.doc.eq(current.state.doc)) {
+          recallRef.current = null;
         }
         debouncedSaveDraft(current);
       },
@@ -349,13 +341,13 @@ export const MessageInput = memo(function MessageInput({
     },
   });
 
-  /** Replace what the composer holds without counting it as typing. */
+  /**
+   * Replace what the composer holds and adopt it as the draft. The change
+   * handler updates the text (and saves it) synchronously.
+   */
   const setEditorText = (text: string, doc?: JSONContent | null) => {
-    restoreComposerDocument(
-      editor,
-      doc && isComposerDocJSON(doc) ? doc : composerDocFromText(text),
-    );
-    latestTextRef.current = serializeEditorContent(editor).text;
+    restoreComposerDocument(editor, composerDocFor(text, doc));
+    adoptedContentRef.current = latestTextRef.current;
   };
 
   // "New conversation" (sidebar / ⌘⇧O / ⌘K) asks the composer for focus.
@@ -405,8 +397,7 @@ export const MessageInput = memo(function MessageInput({
     const next = initialDraft(draftTarget, storedDraft, userIdRef.current);
     knownDraftRef.current = storedDraft ?? '';
     setEditorText(next.text, next.doc);
-    adoptedContentRef.current = latestTextRef.current;
-    historyIndexRef.current = -1;
+    recallRef.current = null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draftTarget]);
 
@@ -419,7 +410,6 @@ export const MessageInput = memo(function MessageInput({
     knownDraftRef.current = next;
     if (latestTextRef.current !== adoptedContentRef.current) return;
     setEditorText(next, draftTarget ? draftDocFor(draftTarget, next) : null);
-    adoptedContentRef.current = latestTextRef.current;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storedDraft]);
 
@@ -448,7 +438,6 @@ export const MessageInput = memo(function MessageInput({
     handledDraftRequestNonce = composerDraftRequest.nonce;
     appendComposerText(editor, composerDraftRequest.text, {
       gap: 0,
-      isEmpty: !latestTextRef.current.trim(),
       focus: true,
     });
     // Only a new request inserts text; typing must not re-run this.
@@ -488,14 +477,12 @@ export const MessageInput = memo(function MessageInput({
           }
         : {},
     );
-  }, [palette.open, paletteActive, paletteListId]);
+  }, [palette.open, paletteActive, paletteListId, setPopupAria]);
 
   /** ↑ (older) / ↓ (newer) through this conversation's sent messages. */
   const recallHistory = (view: EditorView, step: 1 | -1): boolean => {
-    const index = historyIndexRef.current;
-    const browsing =
-      index >= 0 && recalledDocRef.current?.eq(view.state.doc) === true;
-    if (!browsing && !composerDocIsEmpty(view.state.doc)) return false;
+    const recall = recallRef.current;
+    if (!recall && !composerDocIsEmpty(view.state.doc)) return false;
     const key = draftTargetRef.current;
     if (!key) return false;
     const history = sentMessageHistory(
@@ -503,25 +490,21 @@ export const MessageInput = memo(function MessageInput({
       key,
       userIdRef.current,
     );
-    const next = index + step;
-    if (next >= history.length || (next < 0 && index < 0)) return false;
-    if (index < 0) draftBeforeRecallRef.current = view.state.doc.toJSON();
-    const doc =
-      next < 0
-        ? view.state.schema.nodeFromJSON(
-            draftBeforeRecallRef.current ?? composerDocFromText(''),
-          )
-        : view.state.schema.nodeFromJSON(composerDocFromText(history[next]));
+    const next = (recall?.index ?? -1) + step;
+    if (next >= history.length || (next < 0 && !recall)) return false;
+    const draftBefore = recall?.draftBefore ?? view.state.doc.toJSON();
+    const doc = view.state.schema.nodeFromJSON(
+      next < 0 ? draftBefore : plainTextToComposerDocument(history[next]),
+    );
     const tr = view.state.tr.replaceWith(
       0,
       view.state.doc.content.size,
       doc.content,
     );
     tr.setSelection(Selection.atEnd(tr.doc));
-    historyIndexRef.current = next;
     // Set before dispatching: the change handler compares against it.
-    recalledDocRef.current = next < 0 ? null : tr.doc;
-    if (next < 0) draftBeforeRecallRef.current = null;
+    recallRef.current =
+      next < 0 ? null : { index: next, doc: tr.doc, draftBefore };
     view.dispatch(tr.scrollIntoView());
     return true;
   };
@@ -568,17 +551,10 @@ export const MessageInput = memo(function MessageInput({
       );
       return true;
     }
-    const newlineKey = event.shiftKey || event.altKey;
-    if (newlineKey || enterInsertsNewline) {
+    if (event.shiftKey || event.altKey || enterInsertsNewline) {
       // Newline keys continue or leave a list, otherwise break the line.
-      if (
-        !handleComposerListEnter(
-          view,
-          event,
-          newlineKey ? 'enter' : 'modifier-enter',
-        )
-      ) {
-        insertHardBreak(view);
+      if (!handleComposerListEnter(view, event, 'modifier-enter')) {
+        editor.commands.setHardBreak();
       }
       return true;
     }
@@ -655,9 +631,8 @@ export const MessageInput = memo(function MessageInput({
       );
       if (stillHere && remaining !== latestTextRef.current) {
         setEditorText(remaining);
-        adoptedContentRef.current = latestTextRef.current;
       }
-      historyIndexRef.current = -1;
+      recallRef.current = null;
       attachments.releaseSent(sentFiles, sentImages, stillHere);
     } else {
       // 失败：保留输入、保留附件；同步保存草稿，切换会话后也能恢复。
@@ -744,11 +719,7 @@ export const MessageInput = memo(function MessageInput({
     editingFollowUpContentRef.current = '';
 
     if (!recovered || recovered === initialContent) return;
-    appendComposerText(editor, recovered, {
-      gap: 1,
-      isEmpty: !latestTextRef.current.trim(),
-      focus: false,
-    });
+    appendComposerText(editor, recovered, { gap: 1, focus: false });
     showSendError('这条消息已开始处理，未保存的修改已移到输入框', 5000);
   }, [
     editor,

@@ -10,7 +10,7 @@
  */
 import type { JSONContent } from '@tiptap/core';
 
-export interface PersistedDraft {
+interface PersistedDraft {
   text: string;
   doc?: JSONContent;
 }

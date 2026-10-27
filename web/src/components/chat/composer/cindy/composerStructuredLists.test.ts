@@ -4,7 +4,8 @@
  * (commit 7be4c57d7b, Apache-2.0; see THIRD_PARTY_NOTICES.md).
  * Modified for HappyClaw: adapted against cindy 7be4c57d7b and runs on
  * Tiptap 3.30.6.
- * Dropped: quote, deep-link and agent-reference cases; globals.css source check.
+ * Dropped: quote, deep-link and agent-reference cases; globals.css source check;
+ * pasted-text range assertions (the port serializes text only).
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { Editor } from '@tiptap/core';
@@ -1125,13 +1126,6 @@ describe('composer structured list serialization', () => {
 
     const serialized = serializeEditorContent(editor);
     expect(serialized.text).toBe('- prefix first\n  second');
-    expect(serialized.pastedTextRanges).toEqual([
-      {
-        start: '- prefix '.length,
-        end: serialized.text.length,
-        display: 'Pasted text (2 lines)',
-      },
-    ]);
   });
 
   it('preserves indentation on an empty nested list item', () => {
@@ -1433,14 +1427,5 @@ describe('composer structured list serialization', () => {
     expect(serialized.text).toBe(
       '- parent\n  3) open @"src/" then pasted text\n- read @"docs/guide.md"',
     );
-
-    const pastedStart = serialized.text.indexOf('pasted text');
-    expect(serialized.pastedTextRanges).toEqual([
-      {
-        start: pastedStart,
-        end: pastedStart + 'pasted text'.length,
-        display: 'Pasted text (1 line)',
-      },
-    ]);
   });
 });

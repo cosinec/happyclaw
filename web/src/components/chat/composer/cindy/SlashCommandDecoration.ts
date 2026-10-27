@@ -16,12 +16,7 @@
  */
 import { Extension, type Editor } from '@tiptap/core';
 import type { Node as PMNode, Schema } from '@tiptap/pm/model';
-import {
-  Plugin,
-  PluginKey,
-  type EditorState,
-  type Transaction,
-} from '@tiptap/pm/state';
+import { Plugin, PluginKey, type Transaction } from '@tiptap/pm/state';
 import { Decoration, DecorationSet } from '@tiptap/pm/view';
 
 const PLUGIN_KEY = new PluginKey<SlashCommandPluginState>(
@@ -148,28 +143,6 @@ export function setSlashCommandRoster(
   const current = PLUGIN_KEY.getState(editor.state);
   if (current && current.commands === commands) return;
   editor.view.dispatch(editor.state.tr.setMeta(META_KEY, commands));
-}
-
-/** Return the command roster currently used by the decoration plugin. */
-export function getSlashCommandRoster(state: EditorState): SlashCommandRoster {
-  return PLUGIN_KEY.getState(state)?.commands ?? [];
-}
-
-/** Return a roster update carried by this transaction, if present. */
-export function getSlashCommandRosterUpdate(
-  tr: Transaction,
-): SlashCommandRoster | undefined {
-  return tr.getMeta(META_KEY) as SlashCommandRoster | undefined;
-}
-
-/** Return the exact slash runs currently decorated by this editor's roster. */
-export function getDecoratedSlashCommandMatches(
-  editor: Editor,
-): SlashCommandMatch[] {
-  return findSlashCommandMatches(
-    editor.state.doc,
-    getSlashCommandRoster(editor.state),
-  );
 }
 
 /** 导出供 ProseMirror state 层测试 roster 与退格。 */

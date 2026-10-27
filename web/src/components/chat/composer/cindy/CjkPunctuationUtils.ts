@@ -65,14 +65,3 @@ export function isCjkContextPunctuation(
   while (after < text.length && isContextSeparator(text[after])) after += 1;
   return after < text.length && isCjkChar(text[after]);
 }
-
-export function hasCjkContextPunctuation(
-  text: string,
-  from = 0,
-  to = text.length,
-): boolean {
-  for (let index = from; index < to; index += 1) {
-    if (isCjkContextPunctuation(text, index, from, to)) return true;
-  }
-  return false;
-}

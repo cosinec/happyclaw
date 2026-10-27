@@ -4,7 +4,7 @@
  * Modified for HappyClaw: adapted against cindy 7be4c57d7b and runs on
  * Tiptap 3.30.6. HappyClaw's composer only holds text, structured lists,
  * workspace file/directory chips and long-paste chips, so quote blocks, agent
- * references, deep links and slash ranges are dropped; blocks join with one
+ * references, deep links and inline ranges are dropped; blocks join with one
  * newline as in cindy's text-only path.
  */
 import type { Editor } from '@tiptap/core';
@@ -18,20 +18,8 @@ import { EditorState } from '@tiptap/pm/state';
 import type { MentionChipAttrs } from './MentionChipNode';
 import type { PastedTextChipAttrs } from './PastedTextChipNode';
 
-export interface PastedTextRange {
-  start: number;
-  end: number;
-  display: string;
-}
-
 export interface SerializedComposerContent {
   text: string;
-  pastedTextRanges: PastedTextRange[];
-}
-
-interface SerializedBlock {
-  text: string;
-  pastedTextRanges: PastedTextRange[];
 }
 
 type OrderedMarker = '.' | ')' | '、';
@@ -93,49 +81,17 @@ export function serializeMentionChip(attrs: MentionChipAttrs): string {
 }
 
 /**
- * Join text blocks with one newline and trim the message, keeping a trailing
- * empty list marker the user typed on purpose.
- */
-function joinBlocks(
-  blocks: readonly SerializedBlock[],
-  preserveTrailingWhitespace: boolean,
-): SerializedComposerContent {
-  let serialized = '';
-  const ranges: PastedTextRange[] = [];
-  blocks.forEach((block, index) => {
-    if (index > 0) serialized += '\n';
-    const blockStart = serialized.length;
-    serialized += block.text;
-    for (const range of block.pastedTextRanges) {
-      ranges.push({
-        ...range,
-        start: blockStart + range.start,
-        end: blockStart + range.end,
-      });
-    }
-  });
-  const leadingTrim = serialized.length - serialized.trimStart().length;
-  const text = preserveTrailingWhitespace
-    ? serialized.trimStart()
-    : serialized.trim();
-  const pastedTextRanges = ranges.flatMap((range) => {
-    const start = Math.max(0, range.start - leadingTrim);
-    const end = Math.min(text.length, range.end - leadingTrim);
-    return end > start ? [{ ...range, start, end }] : [];
-  });
-  return { text, pastedTextRanges };
-}
-
-/**
  * Convert the composer's structured document into the Markdown wire format.
  *
- * List markers are editor structure rather than paragraph text, so their
- * serialized width is included when projecting inline ranges.
+ * List markers are editor structure rather than paragraph text; continuation
+ * lines are indented by the marker's width. Blocks join with one newline and
+ * the message is trimmed, keeping a trailing empty list marker the user typed
+ * on purpose.
  */
 function serializeComposerDocument(
   doc: ProseMirrorNode,
 ): SerializedComposerContent {
-  const blocks: SerializedBlock[] = [];
+  const blocks: string[] = [];
 
   const serializeParagraph = (
     paragraph: ProseMirrorNode,
@@ -143,7 +99,6 @@ function serializeComposerDocument(
     continuationIndent = '',
   ) => {
     let buffer = prefix;
-    const pastedTextRanges: PastedTextRange[] = [];
 
     paragraph.forEach((child) => {
       if (child.type.name === 'mentionChip') {
@@ -152,16 +107,10 @@ function serializeComposerDocument(
       }
 
       if (child.type.name === 'pastedTextChip') {
-        const attrs = child.attrs as PastedTextChipAttrs;
-        const start = buffer.length;
+        const { text } = child.attrs as PastedTextChipAttrs;
         buffer += continuationIndent
-          ? attrs.text.replace(/\n/g, `\n${continuationIndent}`)
-          : attrs.text;
-        pastedTextRanges.push({
-          start,
-          end: buffer.length,
-          display: attrs.display,
-        });
+          ? text.replace(/\n/g, `\n${continuationIndent}`)
+          : text;
         return;
       }
 
@@ -174,7 +123,7 @@ function serializeComposerDocument(
     });
 
     // Empty paragraphs are kept as line breaks.
-    blocks.push({ text: buffer, pastedTextRanges });
+    blocks.push(buffer);
   };
 
   const serializeList = (listNode: ProseMirrorNode, indent: string) => {
@@ -228,24 +177,20 @@ function serializeComposerDocument(
     }
   });
 
+  const serialized = blocks.join('\n');
   const lastBlock = blocks.at(-1);
-  return joinBlocks(
-    blocks,
-    !!lastBlock && EMPTY_LIST_ITEM_MARKER_RE.test(lastBlock.text),
-  );
+  return {
+    text:
+      lastBlock !== undefined && EMPTY_LIST_ITEM_MARKER_RE.test(lastBlock)
+        ? serialized.trimStart()
+        : serialized.trim(),
+  };
 }
 
 export function serializeEditorContent(
   editor: Editor,
 ): SerializedComposerContent {
   return serializeComposerDocument(editor.state.doc);
-}
-
-/** Serialize a bare document (drafts restored without an editor, tests). */
-export function serializeComposerDoc(
-  doc: ProseMirrorNode,
-): SerializedComposerContent {
-  return serializeComposerDocument(doc);
 }
 
 /**

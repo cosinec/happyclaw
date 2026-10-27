@@ -5,7 +5,9 @@
  * does not refetch them.
  */
 import { api } from '../../../api/client';
+import { listWorkspaceFiles } from '../../../stores/files';
 import type { Skill } from '../../../stores/skills';
+import type { AgentCapabilityPreview } from '../../../types';
 
 export interface SlashCommandItem {
   name: string;
@@ -70,10 +72,20 @@ export function clearPaletteSourceCache(): void {
   directoryCache.clear();
 }
 
-interface CapabilityPreviewResponse {
-  preview: {
-    skills: { entries: Array<{ id: string; available: boolean }> };
-  };
+/** Forget a workspace's listings, e.g. after uploading into it. */
+export function forgetWorkspaceListings(workspaceJid: string): void {
+  for (const key of directoryCache.keys()) {
+    if (key.startsWith(`${workspaceJid}|`)) directoryCache.delete(key);
+  }
+}
+
+/** What the workspace's Agent actually loads (owners only). */
+function capabilityPreview(agentProfileId: string, workspaceJid: string) {
+  const path = `/api/agent-profiles/${encodeURIComponent(agentProfileId)}`;
+  return api.post<{ preview: AgentCapabilityPreview }>(
+    `${path}/effective-capabilities`,
+    { workspace_jid: workspaceJid },
+  );
 }
 
 /**
@@ -94,12 +106,7 @@ export function loadWorkspaceSkills(
       const [listed, preview] = await Promise.all([
         api.get<{ skills: Skill[] }>('/api/skills').catch(() => null),
         agentProfileId
-          ? api
-              .post<CapabilityPreviewResponse>(
-                `/api/agent-profiles/${encodeURIComponent(agentProfileId)}/effective-capabilities`,
-                { workspace_jid: workspaceJid },
-              )
-              .catch(() => null)
+          ? capabilityPreview(agentProfileId, workspaceJid).catch(() => null)
           : Promise.resolve(null),
       ]);
       if (!listed && !preview) throw new Error('技能列表加载失败');
@@ -131,25 +138,13 @@ export function loadWorkspaceSkills(
   );
 }
 
-interface FileListResponse {
-  files: Array<{
-    name: string;
-    path: string;
-    type: 'file' | 'directory';
-    isSystem?: boolean;
-  }>;
-}
-
 /** One directory level of the workspace, directories first. */
 export function loadWorkspaceDirectory(
   workspaceJid: string,
   dir: string,
 ): Promise<WorkspaceEntry[]> {
   return cached(directoryCache, `${workspaceJid}|${dir}`, 15_000, async () => {
-    const query = dir ? `?path=${encodeURIComponent(dir)}` : '';
-    const data = await api.get<FileListResponse>(
-      `/api/groups/${encodeURIComponent(workspaceJid)}/files${query}`,
-    );
+    const data = await listWorkspaceFiles(workspaceJid, dir);
     return data.files
       .filter((file) => !file.isSystem)
       .map((file) => ({

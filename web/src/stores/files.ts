@@ -110,6 +110,15 @@ export function formatUploadRetryStatus(
   return null;
 }
 
+/** One directory level of a workspace (`dir` is workspace-relative). */
+export function listWorkspaceFiles(jid: string, dir: string) {
+  const params = new URLSearchParams();
+  if (dir) params.set('path', dir);
+  return api.get<{ files: FileEntry[]; currentPath: string }>(
+    `/api/groups/${encodeURIComponent(jid)}/files?${params}`,
+  );
+}
+
 /**
  * Workspace directory an upload of `file` lands in when the batch targets
  * `basePath`: folder uploads keep their structure below it.
@@ -183,12 +192,7 @@ export const useFileStore = create<FileState>((set, get) => ({
     try {
       const targetPath =
         path !== undefined ? path : get().currentPath[jid] || '';
-      const params = new URLSearchParams();
-      if (targetPath) params.set('path', targetPath);
-
-      const data = await api.get<{ files: FileEntry[]; currentPath: string }>(
-        `/api/groups/${encodeURIComponent(jid)}/files?${params}`,
-      );
+      const data = await listWorkspaceFiles(jid, targetPath);
 
       set((s) => ({
         files: { ...s.files, [jid]: data.files },

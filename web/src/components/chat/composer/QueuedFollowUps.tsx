@@ -33,7 +33,7 @@ import {
   type QueuedImagePreview,
 } from '../composer-helpers';
 
-export interface QueuedFollowUpsPanelProps {
+interface QueuedFollowUpsPanelProps {
   queuedFollowUps: QueuedFollowUp[];
   /** Coarse pointer: one row per item, secondary actions in a menu. */
   touch: boolean;
@@ -438,7 +438,7 @@ function QueuedFollowUpContent({
         )}
         title={text || undefined}
       >
-        {text || (images.length > 0 ? '[图片]' : '')}
+        {queuedFollowUpLabel(content, images.length)}
       </span>
     </div>
   );

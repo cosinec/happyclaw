@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Editor, JSONContent } from '@tiptap/core';
 import { useEditor } from '@tiptap/react';
 import Document from '@tiptap/extension-document';
@@ -47,7 +47,7 @@ import { SlashCommandDecoration } from './cindy/SlashCommandDecoration';
 import { WindowsSelectionReplacement } from './cindy/WindowsSelectionReplacement';
 import { insertPlainText, readComposerTrigger } from './composerDocument';
 
-export interface ComposerEditorHandlers {
+interface ComposerEditorHandlers {
   /** Keys the composer acts on; return true to consume the event. */
   onKeyDown: (view: EditorView, event: KeyboardEvent) => boolean;
   /** Images pasted from the clipboard. */
@@ -63,8 +63,6 @@ interface ComposerEditorOptions {
   placeholder: string;
   editable: boolean;
   handlers: ComposerEditorHandlers;
-  /** ARIA attributes tying the editor to an open suggestion list. */
-  popupAria: Record<string, string>;
 }
 
 const isWindows = () =>
@@ -81,14 +79,13 @@ export function useComposerEditor({
   placeholder,
   editable,
   handlers,
-  popupAria,
 }: ComposerEditorOptions) {
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
   const placeholderRef = useRef(placeholder);
   placeholderRef.current = placeholder;
-  const popupAriaRef = useRef(popupAria);
-  popupAriaRef.current = popupAria;
+  // ARIA attributes tying the editor to an open suggestion list.
+  const popupAriaRef = useRef<Record<string, string>>({});
   const [snapshot, setSnapshot] = useState<ComposerRenderSnapshot | null>(null);
   const snapshotRef = useRef<ComposerRenderSnapshot | null>(null);
   // Typing a list marker through IME or paste skips input rules; promote it
@@ -206,14 +203,30 @@ export function useComposerEditor({
     if (editor.isEditable !== editable) editor.setEditable(editable, false);
   }, [editor, editable]);
 
-  // The placeholder, accessible name and popup attributes are read from
-  // refs; an empty transaction re-renders them.
-  const popupAriaKey = JSON.stringify(popupAria);
-  useEffect(() => {
+  // Attributes are read from refs; an empty transaction re-renders them.
+  const refreshAttributes = useCallback(() => {
     if (!editor.isDestroyed) {
       editor.view.dispatch(editor.state.tr.setMeta('addToHistory', false));
     }
-  }, [editor, placeholder, popupAriaKey]);
+  }, [editor]);
+  useEffect(refreshAttributes, [refreshAttributes, placeholder]);
+
+  /** Point the editor at an open suggestion list, or at none. */
+  const setPopupAria = useCallback(
+    (attrs: Record<string, string>) => {
+      const current = popupAriaRef.current;
+      const keys = Object.keys(attrs);
+      if (
+        keys.length === Object.keys(current).length &&
+        keys.every((key) => current[key] === attrs[key])
+      ) {
+        return;
+      }
+      popupAriaRef.current = attrs;
+      refreshAttributes();
+    },
+    [refreshAttributes],
+  );
 
   function handlePaste(view: EditorView, event: ClipboardEvent): boolean {
     const data = event.clipboardData;
@@ -243,6 +256,7 @@ export function useComposerEditor({
 
   return {
     editor,
+    setPopupAria,
     snapshot:
       snapshot ??
       composerRenderSnapshot(

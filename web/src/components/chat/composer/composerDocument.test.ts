@@ -15,9 +15,10 @@ import {
 } from './cindy/ComposerListNodes';
 import { serializeEditorContent } from './cindy/composerContentSerialization';
 import { MentionChipNode } from './cindy/MentionChipNode';
+import { plainTextToComposerDocument } from './cindy/composerListDocument';
 import {
   appendComposerText,
-  composerDocFromText,
+  composerDocFor,
   isComposerDocJSON,
   readComposerTrigger,
 } from './composerDocument';
@@ -43,7 +44,7 @@ function create(text: string): Editor {
       ComposerOrderedList,
       MentionChipNode,
     ],
-    content: composerDocFromText(text),
+    content: plainTextToComposerDocument(text),
   });
   return editor;
 }
@@ -110,31 +111,37 @@ describe('readComposerTrigger', () => {
 describe('appendComposerText', () => {
   it('adds a new line, or a blank line between, after existing text', () => {
     const ed = create('已有');
-    appendComposerText(ed, '追加', { gap: 0, isEmpty: false, focus: false });
+    appendComposerText(ed, '追加', { gap: 0, focus: false });
     expect(serializeEditorContent(ed).text).toBe('已有\n追加');
-    appendComposerText(ed, '恢复的修改', {
-      gap: 1,
-      isEmpty: false,
-      focus: false,
-    });
+    appendComposerText(ed, '恢复的修改', { gap: 1, focus: false });
     expect(serializeEditorContent(ed).text).toBe('已有\n追加\n\n恢复的修改');
   });
 
   it('fills an empty composer', () => {
     const ed = create('');
-    appendComposerText(ed, '- 一\n- 二', {
-      gap: 1,
-      isEmpty: true,
-      focus: false,
-    });
+    appendComposerText(ed, '- 一\n- 二', { gap: 1, focus: false });
     expect(ed.state.doc.firstChild?.type.name).toBe('bulletList');
     expect(serializeEditorContent(ed).text).toBe('- 一\n- 二');
   });
 });
 
+describe('composerDocFor', () => {
+  it('keeps a loadable stored document and rebuilds a foreign one', () => {
+    const stored = plainTextToComposerDocument('a');
+    expect(composerDocFor('ignored', stored)).toBe(stored);
+    expect(
+      composerDocFor('b', {
+        type: 'doc',
+        content: [{ type: 'composerQuote' }],
+      }),
+    ).toEqual(plainTextToComposerDocument('b'));
+    expect(composerDocFor('c', null)).toEqual(plainTextToComposerDocument('c'));
+  });
+});
+
 describe('isComposerDocJSON', () => {
   it('accepts composer documents and rejects foreign nodes or marks', () => {
-    expect(isComposerDocJSON(composerDocFromText('a\n- b'))).toBe(true);
+    expect(isComposerDocJSON(plainTextToComposerDocument('a\n- b'))).toBe(true);
     expect(
       isComposerDocJSON({
         type: 'doc',

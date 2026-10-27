@@ -28,7 +28,7 @@ import { SendButton, type SendButtonGlyph } from './cindy/SendButton';
  * Composer toolbar pill (cindy's dropdown tier): bare at rest, an outline and
  * hover fill on hover or while its menu is open.
  */
-export const COMPOSER_PILL =
+const COMPOSER_PILL =
   'size-[30px] rounded-full border border-transparent text-muted-foreground hover:border-surface-border hover:bg-surface-hover hover:text-foreground data-[state=open]:border-surface-border data-[state=open]:bg-surface-hover pointer-coarse:size-10';
 
 interface ComposerToolbarProps {
@@ -82,21 +82,15 @@ export function ComposerToolbar({
       <div className="flex min-w-0 items-center gap-1">
         {canAttach && (
           <DropdownMenu>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <DropdownMenuTrigger asChild>
-                  <button
-                    type="button"
-                    disabled={uploading}
-                    aria-label="添加文件"
-                    className={`flex shrink-0 cursor-pointer items-center justify-center transition-colors disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none ${COMPOSER_PILL}`}
-                  >
-                    <Plus className="size-4" />
-                  </button>
-                </DropdownMenuTrigger>
-              </TooltipTrigger>
-              <TooltipContent side="top">添加图片或文件</TooltipContent>
-            </Tooltip>
+            <DropdownMenuTrigger asChild>
+              <IconButton
+                label="添加文件"
+                icon={<Plus />}
+                disabled={uploading}
+                tooltipSide="top"
+                className={COMPOSER_PILL}
+              />
+            </DropdownMenuTrigger>
             <DropdownMenuContent align="start" side="top" className="w-44">
               <DropdownMenuItem onClick={onPickImages}>
                 <ImageIcon />

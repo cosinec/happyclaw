@@ -47,14 +47,6 @@ export function splitLegacyEmbeddedReferenceContent(
   };
 }
 
-export function escapeXml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
 /**
  * Escape element content. Quotes only matter inside attribute values; keeping
  * them literal in bodies leaves CLI syntax such as `@"path"` mentions intact.
@@ -64,6 +56,11 @@ function escapeXmlText(value: string): string {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
+}
+
+/** Escape for XML, quotes included: safe in attribute values too. */
+export function escapeXml(value: string): string {
+  return escapeXmlText(value).replace(/"/g, '&quot;');
 }
 
 /** First line of every `<referenced_messages>` block. */
@@ -181,7 +178,6 @@ export function formatMessages(
       .filter((reference): reference is string => !!reference);
     // Quoted bodies are escaped like every other text, so a forged
     // `</referenced_messages>` or `<message>` inside them stays plain text.
-    // Attribute values keep `escapeXml`, which also escapes quotes.
     const referenceBlock =
       references.length > 0
         ? `<referenced_messages>\n${REFERENCED_MESSAGES_NOTE}\n${references.join('\n')}\n</referenced_messages>\n`

@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { useStableCallback } from '@/hooks/useStableCallback';
 import { prepareImageForUpload } from '../../../lib/image-upload';
 import { uploadedFilePath, useFileStore } from '../../../stores/files';
+import { forgetWorkspaceListings } from './paletteSources';
 
 export interface PendingFile {
   /** Workspace-relative path the upload landed at; told to the agent. */
@@ -92,40 +93,25 @@ export function useComposerAttachments({
   const uploadFiles = useFileStore((s) => s.uploadFiles);
   const uploading = useFileStore((s) => s.uploading);
 
-  // The conversation async attachment work may still stage into. Cleared on
-  // unmount, so results that resolve after a switch are dropped.
+  // The conversation attachments are staged for. Leaving it (a parent that
+  // reuses this instance, or unmount) drops what was staged there and
+  // releases the previews; async work that resolves later is dropped too
+  // (会话隔离).
   const stagingTargetRef = useRef<string | null>(null);
   useEffect(() => {
     stagingTargetRef.current = draftTarget ?? '';
     return () => {
       stagingTargetRef.current = null;
+      pendingImagesRef.current.forEach((img) =>
+        URL.revokeObjectURL(img.preview),
+      );
+      setPendingImages([]);
+      setPendingFiles([]);
+      setPreviewIndex(null);
     };
   }, [draftTarget]);
   const isCurrentTarget = (target: string | undefined) =>
     stagingTargetRef.current === (target ?? '');
-
-  // A parent that reuses one instance across conversations: attachments
-  // staged for the previous one must not leak into this one (会话隔离).
-  const prevTargetRef = useRef(draftTarget);
-  useEffect(() => {
-    if (prevTargetRef.current === draftTarget) return;
-    prevTargetRef.current = draftTarget;
-    setPendingImages((prev) => {
-      prev.forEach((img) => URL.revokeObjectURL(img.preview));
-      return [];
-    });
-    setPendingFiles([]);
-    setPreviewIndex(null);
-  }, [draftTarget]);
-
-  // Release the previews of attachments that were never sent.
-  useEffect(
-    () => () =>
-      pendingImagesRef.current.forEach((img) =>
-        URL.revokeObjectURL(img.preview),
-      ),
-    [],
-  );
 
   /** Add attachments for `target` unless the composer has moved on. */
   const stageImages = (target: string | undefined, images: PendingImage[]) => {
@@ -177,6 +163,7 @@ export function useComposerAttachments({
     const basePath = useFileStore.getState().currentPath[workspaceJid] || '';
     const ok = await uploadFiles(workspaceJid, files, basePath);
     if (!ok) return;
+    forgetWorkspaceListings(workspaceJid);
     stageFiles(
       target,
       files.map((file) => ({

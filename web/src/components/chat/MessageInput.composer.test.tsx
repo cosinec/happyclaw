@@ -108,7 +108,7 @@ import { useAuthStore } from '../../stores/auth';
 import { useChatStore, type QueuedFollowUp } from '../../stores/chat';
 import { useFileStore } from '../../stores/files';
 import { serializeEditorContent } from './composer/cindy/composerContentSerialization';
-import { composerDocFromText } from './composer/composerDocument';
+import { plainTextToComposerDocument } from './composer/cindy/composerListDocument';
 import { clearPaletteSourceCache } from './composer/paletteSources';
 import { MessageInput } from './MessageInput';
 
@@ -192,7 +192,7 @@ async function render(ui: React.ReactNode) {
 /** Replace the composer content, as typing it would. */
 async function type(value: string) {
   await act(async () => {
-    editor().commands.setContent(composerDocFromText(value));
+    editor().commands.setContent(plainTextToComposerDocument(value));
   });
 }
 
