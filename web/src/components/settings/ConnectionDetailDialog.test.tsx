@@ -371,6 +371,32 @@ describe('third-party connection settings', () => {
     expect(text()).toContain('「DeepSeek」预设的地址');
   });
 
+  test('the select follows a header a test stored, unless the user picked one', async () => {
+    await render(legacyProvider);
+    const select = () =>
+      document.querySelector('#connection-auth-mode') as HTMLSelectElement;
+    expect(select().value).toBe('auto');
+    // The test stored the header it proved; the reload brings it in.
+    await render({
+      ...legacyProvider,
+      anthropicAuthMode: 'x-api-key',
+      updatedAt: 'after-test',
+    });
+    expect(select().value).toBe('x-api-key');
+    // Nothing to save: the stored header is not wiped back to automatic.
+    expect(button('保存连接设置').disabled).toBe(true);
+
+    // A header the user picked stays picked across another reload.
+    await choose('#connection-auth-mode', 'bearer');
+    await render({
+      ...legacyProvider,
+      anthropicAuthMode: 'x-api-key',
+      updatedAt: 'again',
+    });
+    expect(select().value).toBe('bearer');
+    expect(button('保存连接设置').disabled).toBe(false);
+  });
+
   test('the auth header can be set, or handed back to the automatic fallback', async () => {
     await render(legacyProvider);
     const select = () =>
@@ -426,8 +452,9 @@ describe('model list', () => {
     );
   });
 
-  test('an effort is saved per model', async () => {
+  test('an effort is saved per model, without asking, from the next launch', async () => {
     await render(legacyProvider);
+    expect(text()).toContain('推理档位下次启动会话时生效');
     await choose('select[aria-label="glm-5.2 的推理档位"]', 'high');
     await flush();
     expect(mocks.patch).toHaveBeenCalledWith(
@@ -440,6 +467,7 @@ describe('model list', () => {
       },
       120_000,
     );
+    expect(mocks.confirm).not.toHaveBeenCalled();
   });
 
   test('a new default model is a protocol change and asks first', async () => {
