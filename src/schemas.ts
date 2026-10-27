@@ -2,7 +2,6 @@
 
 import { z } from 'zod';
 import { AGENT_EFFORT_LEVELS } from './agent-effort.js';
-import { MAX_PROVIDER_MODEL_ID_LENGTH } from './model-providers.js';
 import { ALL_PERMISSIONS } from './permissions.js';
 import type { Permission } from './types.js';
 import { MAX_GROUP_NAME_LEN } from './group-constants.js';
