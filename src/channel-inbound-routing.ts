@@ -24,13 +24,14 @@ export interface ChannelInboundRoutingDeps {
     jid: string,
     group: RegisteredGroup,
   ) => RegisteredGroup | null;
+  /** The topic's Session; a lookup-only router returns null for a new one. */
   resolveOrCreateNativeThreadAgent: (
     jid: string,
     workspaceJid: string,
     workspace: RegisteredGroup,
     group: RegisteredGroup,
     thread: NativeThreadContext,
-  ) => { effectiveJid: string; agentId: string; sourceJid: string };
+  ) => { effectiveJid: string; agentId: string; sourceJid: string } | null;
 }
 
 export function hasExplicitChannelBinding(

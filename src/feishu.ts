@@ -1,8 +1,26 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { fenceFeishuWebSocketLifecycle } from './feishu-ws-lifecycle.js';
+import {
+  createFeishuConflictMonitor,
+  type FeishuTransportIssue,
+} from './feishu-connection-conflict.js';
+import { createFeishuPermissionNotifier } from './feishu-permission-notice.js';
+import {
+  answerQuestionMessage,
+  CARD_ACTION_ANSWER_QUESTION,
+  CARD_ACTION_INTERRUPT_STREAM,
+  parseCardActionValue,
+  type AnswerQuestionPayload,
+} from './feishu-card-actions.js';
+import { FeishuDualDeliveryCoordinator } from './feishu-dual-delivery.js';
+import {
+  feishuSdkDomain,
+  normalizeFeishuBrand,
+  type FeishuBrand,
+} from './feishu-domain.js';
 import {
   cancelAwaitingForwardBundleRoot,
   findForwardBundleCommentTail,
@@ -39,10 +57,7 @@ import {
   prepareFeishuPostTextPages,
   prepareFeishuPlainTextPages,
 } from './feishu-message-capacity.js';
-import {
-  buildAgentReplyCard,
-  buildFollowUpActionResultCard,
-} from './feishu-cards/builder.js';
+import { buildAgentReplyCard } from './feishu-cards/builder.js';
 import {
   evaluateMentionGate,
   isBotMentioned,
@@ -61,6 +76,7 @@ import {
 import {
   classifyFeishuError,
   feishuErrorCode,
+  feishuErrorMessageText,
   isFeishuMissingScopeError,
   neutralizeFeishuMentions,
 } from './feishu-errors.js';
@@ -99,7 +115,10 @@ import {
   PhysicalDeliveryTracker,
 } from './im-delivery-progress.js';
 import { preAcceptImDeliveryError } from './im-send-retry-policy.js';
-import { enrichFeishuInboundContent } from './feishu-rich-content.js';
+import {
+  enrichFeishuInboundContent,
+  sliceFeishuText,
+} from './feishu-rich-content.js';
 import { createFeishuSenderNameResolver } from './feishu-sender-name.js';
 import {
   FeishuForwardBundleResolver,
@@ -115,6 +134,7 @@ import {
   deleteChannelCursor,
   failChannelInbox,
   getChannelCursor,
+  getChannelInboxByExternalMessage,
   getChannelInboxItem,
   ignoreDeferredChannelInbox,
   ignoreChannelInbox,
@@ -135,7 +155,6 @@ import type {
   ChannelReferencedMessage,
   ChannelTurnContext,
   FeishuMessageMeta,
-  FollowUpAction,
   FollowUpActionResult,
   FollowUpDisposition,
   FollowUpMode,
@@ -146,6 +165,9 @@ import type {
 // HA/reconnect race where one connection handles the root while another
 // handles its authored note — both always share one topic.
 const feishuInboundTailByRoute = new Map<string, Promise<void>>();
+// Pairs a thread reply with its 「同时发送到群聊」 main-feed copy. Shared like the
+// intake lanes: both events may reach different connections of one account.
+const feishuDualDelivery = new FeishuDualDeliveryCoordinator();
 
 // ─── FeishuConnection Interface ────────────────────────────────
 
@@ -154,12 +176,21 @@ export interface FeishuConnectionConfig {
   appSecret: string;
   /** Optional HappyClaw account id. The scoped source JID remains authoritative. */
   channelAccountId?: string;
+  /** Feishu (default) or Lark: picks the OpenAPI and long-connection host. */
+  domain?: FeishuBrand;
 }
 
 /** 飞书文件信息（用于下载到工作区） */
 interface FeishuFileInfo {
   fileKey: string;
   filename: string;
+  /** Placeholder in the message text that the download result replaces. */
+  marker: string;
+  /**
+   * Voice and video: what the attachment reads as (`语音消息: 3s`). A failed
+   * download leaves the marker in place.
+   */
+  mediaLabel?: string;
 }
 
 export interface ConnectOptions {
@@ -230,15 +261,6 @@ export interface ConnectOptions {
     /** Native chat type of the command message, when known. */
     chatType?: 'p2p' | 'group';
   }) => Promise<string>;
-  /** Handle buttons from legacy queued-message cards sent by older versions. */
-  onFollowUpCardAction?: (input: {
-    sourceJid: string;
-    targetJid: string;
-    messageId: string;
-    action: FollowUpAction;
-    expectedRunId: string;
-    operatorImId: string;
-  }) => Promise<FollowUpActionResult> | FollowUpActionResult;
   /** Bot 被添加到群聊时调用（自动注册群组） */
   onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
   /** Bot 被移出群聊或群被解散时调用（自动解绑 IM 绑定） */
@@ -275,6 +297,19 @@ export interface ConnectOptions {
     chatJid: string,
     messageId: string,
   ) => void | Promise<void>;
+  /**
+   * The long connection is held elsewhere (certain: Feishu refused it as over
+   * the app's limit) or keeps dropping (possibly held elsewhere, possibly an
+   * outage); called once per incident, again only to upgrade a suspicion to
+   * the certain text, and with `null` once the connection is ready again.
+   * Never called while connect() is still pending.
+   */
+  onTransportIssue?: (issue: FeishuTransportIssue | null) => void;
+  /**
+   * open_id of the account owner (learned from the first private chat), the
+   * only recipient of missing-permission notices. Read on every notice.
+   */
+  getOwnerOpenId?: () => string | undefined;
 }
 
 export interface FeishuChatInfo {
@@ -418,6 +453,27 @@ const FEISHU_RESOURCE_STREAM_TIMEOUT_MS = 30_000;
 const FEISHU_CLIENT_HTTP_TIMEOUT_MS = 60_000;
 let feishuClientHttpTimeoutApplied = false;
 const FEISHU_ACK_REACTION_TIMEOUT_MS = 10_000;
+// Feishu waits about 3s for a card callback reply. An answer that is still in
+// intake this long after the click is acknowledged as sent and finishes in the
+// background; the card lookup gets a share of that budget.
+const FEISHU_CARD_ANSWER_ACK_MS = 2_500;
+const FEISHU_CARD_LOOKUP_TIMEOUT_MS = 1_500;
+const CARD_EXPIRED_TOAST = '这张卡片已过期';
+
+type CardToast = { toast: { type: 'success' | 'warning'; content: string } };
+
+function cardToast(type: 'success' | 'warning', content: string): CardToast {
+  return { toast: { type, content } };
+}
+/** Why the intake pipeline did not take a card answer (Inbox ignore reason). */
+const CARD_ANSWER_REJECTIONS: Record<string, string> = {
+  audience_rejected: '你不在这个会话的响应范围内，答案未发送。',
+  unbound_channel: '这个聊天还没有绑定工作区，答案未发送。',
+  binding_rejected: '找不到这个聊天绑定的会话，答案未发送。',
+  inbound_principal_rejected: '这个机器人连接已停用，答案未发送。',
+  'mention_gate:disabled': '这个会话已暂停响应，答案未发送。',
+  'mention_gate:not_owner': '这个会话只响应主人，答案未发送。',
+};
 const FEISHU_CURSOR_SCOPE = 'chat_messages';
 const FEISHU_THREAD_CURSOR_SCOPE = 'thread_messages';
 const FEISHU_INBOUND_MESSAGE_CHAT_CACHE = 5_000;
@@ -1076,6 +1132,59 @@ function feishuRouteToJid(
 }
 
 /**
+ * Where a message of `chatId` routes: the meta the binding resolver sees and
+ * the provider target replies go to. Intake and the card callbacks share it,
+ * so a card resolves to the same session its messages did.
+ */
+function planFeishuRoute(
+  chatId: string,
+  meta: FeishuMessageMeta,
+  plan: FeishuConversationPlan | undefined,
+): {
+  routedMeta: FeishuMessageMeta;
+  deliveryRootMessageId?: string;
+  target: FeishuRouteTarget;
+} {
+  const { threadId, rootId, messageId } = meta;
+  const routedMeta: FeishuMessageMeta = {
+    ...meta,
+    nativeContextType:
+      plan?.independentContext || (!plan && !!threadId) ? 'thread' : undefined,
+    contextId: plan?.contextId || threadId,
+    rootId: plan?.rootMessageId || rootId,
+  };
+  const deliveryRootMessageId = plan?.independentContext
+    ? plan.rootMessageId
+    : threadId
+      ? plan?.rootMessageId || rootId || messageId
+      : rootId;
+  // A quote-reply in an ordinary (non-topic) group or a private chat has
+  // root_id = parent_id but no thread_id. It still yields a root target,
+  // so the answer is posted with reply_in_thread under the quoted message
+  // (Feishu falls back to a plain reply where threads are unsupported).
+  // This is the current product behaviour, kept deliberately.
+  return {
+    routedMeta,
+    deliveryRootMessageId,
+    target: buildFeishuRouteTarget(chatId, threadId, deliveryRootMessageId),
+  };
+}
+
+/** The source JID a routed message is stored and answered under. */
+function feishuRouteSourceJid(
+  target: FeishuRouteTarget,
+  chatJid: string,
+  routing: { sourceJid?: string } | null | undefined,
+): string {
+  return (
+    routing?.sourceJid ??
+    (target.threadId || target.rootMessageId
+      ? feishuRouteToJid(target, chatJid)
+      : chatJid)
+  );
+}
+
+/**
  * Extract message content from Feishu message.
  * Returns text content, optional image keys, and optional file infos for download.
  */
@@ -1087,6 +1196,31 @@ function unwrapFeishuParagraphText(text: string): string {
     .replace(/<\/p>\s*<p>/gi, '\n')
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/p>$/i, '');
+}
+
+/** Longest text kept per item when a merged forward is rendered locally. */
+const MERGE_FORWARD_FALLBACK_ITEM_CHARS = 500;
+const MERGE_FORWARD_FALLBACK_MAX_ITEMS = 20;
+
+/** Only web links survive as Markdown links; other schemes keep the text. */
+function postLinkText(text: string, href: unknown): string {
+  if (typeof href !== 'string' || !/^https?:\/\//i.test(href.trim())) {
+    return text;
+  }
+  return `[${text}](${href.trim()})`;
+}
+
+/** What a downloaded (or failed) voice, video or file attachment reads as. */
+function fileAttachmentText(
+  fi: FeishuFileInfo,
+  relPath: string | null,
+): string {
+  if (fi.mediaLabel) {
+    return relPath ? `[${fi.mediaLabel}，文件: ${relPath}]` : fi.marker;
+  }
+  return relPath
+    ? `[文件: ${relPath}]`
+    : `[文件下载失败: ${sanitizeImFilename(fi.filename || fi.fileKey)}]`;
 }
 
 function extractMessageContent(
@@ -1107,7 +1241,7 @@ function extractMessageContent(
       return { text: '[合并转发消息]' };
     }
     const lines: string[] = ['[合并转发消息]:'];
-    for (const item of items.slice(0, 20)) {
+    for (const item of items.slice(0, MERGE_FORWARD_FALLBACK_MAX_ITEMS)) {
       const sender = item.sender_name || item.sender || '未知';
       const body = item.body?.content || item.content || '';
       let text = '';
@@ -1118,11 +1252,17 @@ function extractMessageContent(
       } catch {
         text = typeof body === 'string' ? body : '';
       }
+      text = text.trim();
       if (text) {
-        lines.push(`> ${sender}: ${text.split('\n')[0].slice(0, 200)}`);
+        // Keep the item's own lines; quote each so the bundle stays readable.
+        const clipped =
+          text.length > MERGE_FORWARD_FALLBACK_ITEM_CHARS
+            ? `${sliceFeishuText(text, MERGE_FORWARD_FALLBACK_ITEM_CHARS - 1)}…`
+            : text;
+        lines.push(`> ${sender}: ${clipped.replace(/\n/g, '\n> ')}`);
       }
     }
-    if (items.length > 20) {
+    if (items.length > MERGE_FORWARD_FALLBACK_MAX_ITEMS) {
       lines.push(`> ... 共 ${items.length} 条消息`);
     }
     return { text: lines.join('\n') };
@@ -1189,7 +1329,7 @@ function extractMessageContent(
           if (segment.tag === 'text' && typeof segment.text === 'string') {
             parts.push(segment.text);
           } else if (segment.tag === 'a' && typeof segment.text === 'string') {
-            parts.push(segment.text);
+            parts.push(postLinkText(segment.text, segment.href));
           } else if (segment.tag === 'at') {
             const mentionName =
               typeof segment.user_name === 'string'
@@ -1240,10 +1380,8 @@ function extractMessageContent(
         // 使用清洗后的文件名构造占位符，下方 replace 也用同一份清洗结果，
         // 任何上下文（成功/失败/解析失败）都不会让原始 filename 进入 prompt。
         const safeFilename = sanitizeImFilename(filename || fileKey);
-        return {
-          text: `[文件: ${safeFilename}]`,
-          fileInfos: [{ fileKey, filename }],
-        };
+        const marker = `[文件: ${safeFilename}]`;
+        return { text: marker, fileInfos: [{ fileKey, filename, marker }] };
       }
     }
 
@@ -1256,7 +1394,17 @@ function extractMessageContent(
       const duration = parsed.duration
         ? `${Math.round(parsed.duration / 1000)}s`
         : '';
-      return { text: `[语音消息${duration ? ': ' + duration : ''}]` };
+      const mediaLabel = `语音消息${duration ? ': ' + duration : ''}`;
+      const marker = `[${mediaLabel}]`;
+      const fileKey =
+        typeof parsed.file_key === 'string' ? parsed.file_key : '';
+      if (!fileKey) return { text: marker };
+      // Feishu voice messages are Opus audio.
+      const filename = `feishu_voice_${fileKey.slice(-8)}.opus`;
+      return {
+        text: marker,
+        fileInfos: [{ fileKey, filename, marker, mediaLabel }],
+      };
     }
 
     if (messageType === 'share_chat') {
@@ -1308,7 +1456,19 @@ function extractMessageContent(
     }
 
     if (messageType === 'media') {
-      return { text: '[视频消息]' };
+      const mediaLabel = '视频消息';
+      const marker = `[${mediaLabel}]`;
+      const fileKey =
+        typeof parsed.file_key === 'string' ? parsed.file_key : '';
+      if (!fileKey) return { text: marker };
+      const filename =
+        typeof parsed.file_name === 'string' && parsed.file_name.trim()
+          ? parsed.file_name
+          : `feishu_video_${fileKey.slice(-8)}.mp4`;
+      return {
+        text: marker,
+        fileInfos: [{ fileKey, filename, marker, mediaLabel }],
+      };
     }
 
     if (messageType === 'location') {
@@ -1394,6 +1554,7 @@ export function createFeishuConnection(
   // Per-instance state
   const reliabilityAccountId =
     config.channelAccountId?.trim() || `app:${config.appId}`;
+  const brand = normalizeFeishuBrand(config.domain);
   const inboxOwner = `feishu:${reliabilityAccountId}:${randomUUID()}`;
   const lastMessageIdByChat = new Map<string, string>();
   // Inbound message → chat, so a reply anchor named by the host is only used
@@ -1415,6 +1576,60 @@ export function createFeishuConnection(
   let wsClient: lark.WSClient | null = null;
   let wsConnectionGeneration = 0;
 
+  const permissionNotices = createFeishuPermissionNotifier({
+    brand,
+    appId: config.appId,
+    accountKey: reliabilityAccountId,
+    getOwnerOpenId: () => connectOptions?.getOwnerOpenId?.(),
+    // An `ou_` target is sent by open_id: the owner's private chat.
+    send: (ownerOpenId, text) =>
+      sendToFeishu(ownerOpenId, 'text', JSON.stringify({ text })),
+  });
+
+  // The host marks an account connected once connect() resolves. Reports
+  // made while connect() is pending are held back; the incident still open
+  // then is delivered on the next macrotask, after the host's "connected".
+  let connectInFlight = false;
+  function deliverTransportIssue(issue: FeishuTransportIssue | null): void {
+    if (issue) {
+      logger.warn(
+        { accountId: reliabilityAccountId },
+        'Feishu long connection is held by another program',
+      );
+    } else {
+      logger.info(
+        { accountId: reliabilityAccountId },
+        'Feishu long connection conflict cleared',
+      );
+    }
+    try {
+      connectOptions?.onTransportIssue?.(issue);
+    } catch (err) {
+      logger.warn({ err }, 'Feishu transport issue callback failed');
+    }
+  }
+  const conflictMonitor = createFeishuConflictMonitor({
+    brand,
+    report: (issue) => {
+      if (!connectInFlight) deliverTransportIssue(issue);
+    },
+    reconnectAttempts: () =>
+      wsClient?.getConnectionStatus?.().reconnectAttempts ?? 0,
+  });
+  function releaseTransportIssues(): void {
+    connectInFlight = false;
+    if (!conflictMonitor.current()) return;
+    const opts = connectOptions;
+    setTimeout(() => {
+      const issue = conflictMonitor.current();
+      if (issue && connectOptions === opts) deliverTransportIssue(issue);
+    }, 0).unref?.();
+  }
+  function resetTransportIssues(): void {
+    connectInFlight = false;
+    conflictMonitor.stop();
+  }
+
   // WSClient.start() resolves before the endpoint pull and WS handshake
   // finish, and close() does not cancel that in-flight start attempt. A
   // stop() or reconnect that retires the client inside the handshake window
@@ -1425,18 +1640,34 @@ export function createFeishuConnection(
     const created: lark.WSClient = new lark.WSClient({
       appId: config.appId,
       appSecret: config.appSecret,
+      domain: feishuSdkDomain(brand),
       loggerLevel: lark.LoggerLevel.info,
       // Detect silently-dead long connections instead of hanging on a
       // stale-but-OPEN socket (see FEISHU_WS_PING_TIMEOUT_SEC).
       wsConfig: { pingTimeout: FEISHU_WS_PING_TIMEOUT_SEC },
       onReady: () => {
-        if (wsClient === created) return;
+        if (wsClient === created) {
+          conflictMonitor.ready();
+          return;
+        }
         logger.warn(
           'Closing Feishu WS client that finished connecting after it was retired',
         );
         created.close({ force: true });
       },
+      onReconnecting: () => {
+        if (wsClient === created) conflictMonitor.reconnecting();
+      },
+      onReconnected: () => {
+        if (wsClient === created) conflictMonitor.ready();
+      },
+      onError: (error) => {
+        if (wsClient !== created) return;
+        logger.warn({ err: error }, 'Feishu long connection gave up');
+        conflictMonitor.failed(error);
+      },
     });
+    conflictMonitor.starting();
     return fenceFeishuWebSocketLifecycle(created);
   }
   let eventDispatcher: lark.EventDispatcher | null = null;
@@ -1455,10 +1686,15 @@ export function createFeishuConnection(
   let unsubscribeInboundGate: (() => void) | null = null;
   const forwardBundles = new FeishuForwardBundleResolver(async (messageId) => {
     if (!client) return undefined;
-    return client.im.v1.message.get({
-      path: { message_id: messageId },
-      params: { card_msg_content_type: 'user_card_content' },
-    });
+    try {
+      return await client.im.v1.message.get({
+        path: { message_id: messageId },
+        params: { card_msg_content_type: 'user_card_content' },
+      });
+    } catch (err) {
+      permissionNotices.report('message_lookup', err);
+      throw err;
+    }
   });
   // botOpenId 自愈状态：lastBotInfoFetchAt 防止 lazy refetch 高频骚扰 OAPI；
   // botInfoRefetchInFlight 防止并发拉取
@@ -1520,6 +1756,25 @@ export function createFeishuConnection(
     return outcome;
   }
 
+  /**
+   * 「同时发送到群聊」 turns one thread reply into two group events; the one
+   * that arrived first runs. Returns the message this event is a copy of.
+   */
+  function dualDeliveryTwin(
+    payload: IncomingMessagePayload,
+  ): string | undefined {
+    if (payload.chatType !== 'group' || payload.origin) return undefined;
+    return feishuDualDelivery.copyOf({
+      accountKey: reliabilityAccountId,
+      chatId: payload.chatId,
+      messageId: payload.messageId,
+      senderOpenId: payload.senderOpenId,
+      createTimeMs: payload.createTimeMs,
+      messageType: payload.messageType,
+      content: payload.content,
+    });
+  }
+
   function rememberChatProgress(
     chatId: string,
     createTimeMs: number,
@@ -1576,6 +1831,9 @@ export function createFeishuConnection(
     claim?: Pick<ClaimedChannelInboxItem, 'createdAt'>,
     topicActivity = false,
   ): void {
+    // Cursors track Feishu's own message stream for backfill; a synthetic
+    // input (card answer) is not part of it.
+    if (!isFeishuMessageId(payload.messageId)) return;
     const position = inboundPosition(payload, claim);
     try {
       advanceChannelCursor({
@@ -2124,6 +2382,7 @@ export function createFeishuConnection(
         mimeType,
       };
     } catch (err) {
+      permissionNotices.report('message_resource', err);
       logger.warn(
         { err, messageId, fileKey },
         'Failed to download Feishu image',
@@ -2189,6 +2448,7 @@ export function createFeishuConnection(
         throw err;
       }
     } catch (err) {
+      permissionNotices.report('message_resource', err);
       logger.warn(
         { err, messageId, fileKey },
         'Failed to download Feishu file to disk',
@@ -2206,13 +2466,6 @@ export function createFeishuConnection(
       new Error(`${operation} failed: ${response.code} ${response.msg ?? ''}`),
       { code: response.code },
     );
-  }
-
-  function feishuErrorMessage(err: unknown): string | undefined {
-    const body = (err as { response?: { data?: { msg?: unknown } } })?.response
-      ?.data;
-    if (typeof body?.msg === 'string') return body.msg;
-    return err instanceof Error ? err.message : undefined;
   }
 
   const senderNames = createFeishuSenderNameResolver({
@@ -2257,9 +2510,14 @@ export function createFeishuConnection(
         : 'definitive';
     },
     onMissingScope: (source, err) => {
+      permissionNotices.report(source, err);
       // Feishu's msg names the scopes to grant and links to the console.
       logger.warn(
-        { source, code: feishuErrorCode(err), msg: feishuErrorMessage(err) },
+        {
+          source,
+          code: feishuErrorCode(err),
+          msg: feishuErrorMessageText(err),
+        },
         source === 'contact'
           ? 'Feishu app lacks a contact scope (e.g. contact:user.base:readonly); senders outside group member lists show their open_id'
           : 'Feishu app lacks a chat member scope (e.g. im:chat.members:read); group senders are named through the contact directory only',
@@ -2315,6 +2573,8 @@ export function createFeishuConnection(
     messageId: string,
     emojiType: string,
   ): Promise<string | null> {
+    // A synthetic input (card answer) has no Feishu message to react to.
+    if (!isFeishuMessageId(messageId)) return null;
     try {
       const request = client!.im.messageReaction.create({
         path: { message_id: messageId },
@@ -2325,6 +2585,7 @@ export function createFeishuConnection(
       };
       return res.data?.reaction_id || null;
     } catch (err) {
+      permissionNotices.report('reaction', err);
       logger.debug({ err, messageId, emojiType }, 'Failed to add reaction');
       return null;
     }
@@ -2358,6 +2619,7 @@ export function createFeishuConnection(
         : null;
     } catch (err) {
       if (!(err instanceof FeishuAckReactionTimeoutError)) {
+        permissionNotices.report('reaction', err);
         logger.debug({ err, messageId }, 'Failed to add OnIt reaction');
         return null;
       }
@@ -2842,12 +3104,13 @@ export function createFeishuConnection(
     );
   }
 
+  /** Returns the durable Inbox row id once the event has been recorded. */
   async function handleIncomingMessage(
     payload: IncomingMessagePayload,
     source: 'ws' | 'backfill',
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     const { chatId, messageId } = payload;
-    if (!chatId || !messageId) return;
+    if (!chatId || !messageId) return undefined;
     const rawChatJid = `feishu:${chatId}`;
     const deferring = isInboundDeferred();
     const admittedJid = admitIncomingJid(rawChatJid);
@@ -2858,7 +3121,7 @@ export function createFeishuConnection(
         { messageId, chatId, source },
         'Rejected Feishu message: inbound principal is not admitted',
       );
-      return;
+      return undefined;
     }
     // While paused/deferred the host normalizer refuses every JID; the Inbox
     // route snapshot then uses this connection's own account scope.
@@ -2911,7 +3174,7 @@ export function createFeishuConnection(
         { messageId, inboxStatus: recorded.item.status, source },
         'Duplicate terminal Feishu message, skipping execution',
       );
-      return;
+      return recorded.item.id;
     }
 
     if (deferring) {
@@ -2922,7 +3185,7 @@ export function createFeishuConnection(
         { inboxId: recorded.item.id, messageId, source },
         'Deferred durable Feishu Inbox until recovery gate opens',
       );
-      return;
+      return recorded.item.id;
     }
 
     const claim = claimChannelInboxById(
@@ -2935,9 +3198,19 @@ export function createFeishuConnection(
         { messageId, inboxStatus: recorded.item.status, source },
         'Feishu message already claimed or awaiting retry',
       );
-      return;
+      return recorded.item.id;
+    }
+    const twin = dualDeliveryTwin(payload);
+    if (twin) {
+      logger.info(
+        { messageId, twinMessageId: twin, chatId, source },
+        'Suppressed the second copy of a Feishu thread reply also sent to the chat',
+      );
+      ignoreClaimedInbound(claim, payload, `dual_delivery_copy:${twin}`);
+      return recorded.item.id;
     }
     await processClaimedInboundSerialized(payload, source, claim);
+    return recorded.item.id;
   }
 
   async function processClaimedIncomingMessage(
@@ -3100,6 +3373,9 @@ export function createFeishuConnection(
     // Rows recorded before the REST shape was normalized (string mention ids)
     // are fixed here as well.
     const mentions = normalizeFeishuMentions(payload.mentions);
+    // A card answer is addressed to the Bot by the click itself, so the
+    // gates treat it as mentioned; it is never parsed as a command.
+    const cardAnswer = payload.origin === 'card_answer';
     const forwardCandidate: FeishuForwardCandidate = {
       messageId,
       messageType,
@@ -3177,10 +3453,9 @@ export function createFeishuConnection(
         }
       }
 
-      const mentionedBot = isBotMentioned(
-        botOpenId,
-        mentions as MentionGateMention[] | undefined,
-      );
+      const mentionedBot =
+        cardAnswer ||
+        isBotMentioned(botOpenId, mentions as MentionGateMention[] | undefined);
       const rawMessageMeta: FeishuMessageMeta = {
         provider: 'feishu',
         chatType: normalizedChatType,
@@ -3195,33 +3470,11 @@ export function createFeishuConnection(
         chatJid,
         rawMessageMeta,
       );
-      const routedMessageMeta: FeishuMessageMeta = {
-        ...rawMessageMeta,
-        nativeContextType:
-          conversationPlan?.independentContext ||
-          (!conversationPlan && !!threadId)
-            ? 'thread'
-            : undefined,
-        contextId: conversationPlan?.contextId || threadId,
-        rootId: conversationPlan?.rootMessageId || rootId,
-      };
-      const rootMessageId =
-        conversationPlan?.rootMessageId || rootId || messageId;
-      const deliveryRootMessageId = conversationPlan?.independentContext
-        ? conversationPlan.rootMessageId
-        : threadId
-          ? rootMessageId
-          : rootId;
-      // A quote-reply in an ordinary (non-topic) group or a private chat has
-      // root_id = parent_id but no thread_id. It still yields a root target,
-      // so the answer is posted with reply_in_thread under the quoted message
-      // (Feishu falls back to a plain reply where threads are unsupported).
-      // This is the current product behaviour, kept deliberately.
-      const messageRouteTarget = buildFeishuRouteTarget(
-        chatId,
-        threadId,
+      const {
+        routedMeta: routedMessageMeta,
         deliveryRootMessageId,
-      );
+        target: messageRouteTarget,
+      } = planFeishuRoute(chatId, rawMessageMeta, conversationPlan);
       const cachedChatInfo = chatInfoById.get(chatId);
       // A placeholder name is only for first registration. Passing it for an
       // already registered chat would rename it (e.g. every P2P chat back to
@@ -3291,6 +3544,7 @@ export function createFeishuConnection(
         chatType: normalizedChatType,
         botOpenId,
         mentions: mentions as MentionGateMention[] | undefined,
+        addressedToBot: cardAnswer,
         chatJid,
         senderOpenId,
         shouldProcessGroupMessage,
@@ -3305,7 +3559,8 @@ export function createFeishuConnection(
       // (/steer /break /clear /fresh) also need the activation gate. Private
       // chats keep direct commands, but a disabled one ignores runtime
       // controls too.
-      const commandEligible = chatType !== 'group' || mentionedBot;
+      const commandEligible =
+        !cardAnswer && (chatType !== 'group' || mentionedBot);
       const runtimeControl = parseRuntimeControl({
         commandText: textForSlash,
         eligible: commandEligible && runtimeControlGate.allow,
@@ -3646,6 +3901,7 @@ export function createFeishuConnection(
           chatType: normalizedChatType,
           botOpenId,
           mentions: mentions as MentionGateMention[] | undefined,
+          addressedToBot: cardAnswer,
           chatJid,
           senderOpenId,
           shouldProcessGroupMessage,
@@ -3919,7 +4175,10 @@ export function createFeishuConnection(
       if (chatType === 'p2p' && senderOpenId && onP2pSender) {
         onP2pSender(senderOpenId);
       }
-      lastMessageIdByChat.set(chatId, messageId);
+      // Only a real Feishu message can anchor a later reply.
+      if (isFeishuMessageId(messageId)) {
+        lastMessageIdByChat.set(chatId, messageId);
+      }
       const resolvedCreateTimeMs = createTimeMs > 0 ? createTimeMs : Date.now();
       let timestamp = new Date(resolvedCreateTimeMs).toISOString();
 
@@ -4167,26 +4426,17 @@ export function createFeishuConnection(
             'Cannot resolve group folder for file download',
           );
           for (const fi of extracted.fileInfos) {
-            const safeFilename = sanitizeImFilename(fi.filename || fi.fileKey);
-            const placeholder = `[文件: ${safeFilename}]`;
-            text = text.replace(placeholder, `[文件下载失败: ${safeFilename}]`);
+            text = text.replace(fi.marker, fileAttachmentText(fi, null));
           }
         } else {
           for (const fi of extracted.fileInfos) {
-            const safeFilename = sanitizeImFilename(fi.filename || fi.fileKey);
             const relPath = await downloadFeishuFileToDisk(
               messageId,
               fi.fileKey,
               fi.filename,
               groupFolder,
             );
-            const placeholder = `[文件: ${safeFilename}]`;
-            text = text.replace(
-              placeholder,
-              relPath
-                ? `[文件: ${relPath}]`
-                : `[文件下载失败: ${safeFilename}]`,
-            );
+            text = text.replace(fi.marker, fileAttachmentText(fi, relPath));
           }
         }
       }
@@ -4211,11 +4461,11 @@ export function createFeishuConnection(
         return 'done';
       }
 
-      const routeSourceJid =
-        agentRouting?.sourceJid ??
-        (messageRouteTarget.threadId || messageRouteTarget.rootMessageId
-          ? feishuRouteToJid(messageRouteTarget, chatJid)
-          : chatJid);
+      const routeSourceJid = feishuRouteSourceJid(
+        messageRouteTarget,
+        chatJid,
+        agentRouting,
+      );
 
       // Store message and broadcast to WebSocket clients
       const targetJid = admittedRoute.targetJid;
@@ -5099,6 +5349,7 @@ export function createFeishuConnection(
           // retried next round, cursors untouched.
           throw err;
         }
+        permissionNotices.report('message_history', err);
         logger.warn(
           { err, chatId, threadId },
           'Feishu refused a topic backfill; skipping that topic',
@@ -5297,6 +5548,7 @@ export function createFeishuConnection(
               budget,
             );
           } catch (err) {
+            permissionNotices.report('message_history', err);
             logger.warn({ err, chatId, reason }, 'Feishu chat backfill failed');
           }
         }
@@ -5435,6 +5687,226 @@ export function createFeishuConnection(
     }
   }
 
+  /**
+   * Where a card message lives. The callback names the chat; the thread only
+   * comes from the message itself. Without a readable message the chat alone
+   * is used, which a topic group's router then refuses.
+   */
+  async function locateCardMessage(
+    cardMessageId: string,
+    chatIdHint: string | undefined,
+  ): Promise<{
+    chatId: string;
+    chatType?: 'p2p' | 'group';
+    threadId?: string;
+    rootId?: string;
+  } | null> {
+    let item:
+      | { chat_id?: string; thread_id?: string; root_id?: string }
+      | undefined;
+    if (client) {
+      try {
+        const response = await withTimeout(
+          client.im.v1.message.get({ path: { message_id: cardMessageId } }),
+          FEISHU_CARD_LOOKUP_TIMEOUT_MS,
+          'Feishu card message lookup',
+        );
+        item = response?.data?.items?.[0];
+      } catch (err) {
+        permissionNotices.report('message_lookup', err);
+        logger.debug({ err, cardMessageId }, 'Feishu card lookup failed');
+      }
+    }
+    const chatId = item?.chat_id || chatIdHint;
+    if (!chatId) return null;
+    const chatType = await resolveBackfillChatType(chatId, {
+      remaining: 1,
+      exhausted: false,
+    });
+    // Main-feed cards reply to their input without a thread; only a thread
+    // places the card (and its session) inside a topic.
+    return item?.thread_id
+      ? {
+          chatId,
+          chatType,
+          threadId: item.thread_id,
+          rootId: item.root_id || cardMessageId,
+        }
+      : { chatId, chatType };
+  }
+
+  /**
+   * The session a streaming card belongs to once its in-memory mapping is
+   * gone (after a restart): routed like a message in the card's chat or
+   * topic, in the same JID shape the live mapping uses. A topic without a
+   * session resolves to nothing; no session is created for a click.
+   */
+  async function resolveCardSessionJid(
+    cardMessageId: string,
+    chatIdHint: string | undefined,
+  ): Promise<string | undefined> {
+    const location = await locateCardMessage(cardMessageId, chatIdHint);
+    const opts = connectOptions;
+    if (!location || !opts) return undefined;
+    const chatJid = admitIncomingJid(`feishu:${location.chatId}`);
+    if (!chatJid || (opts.isChatBound && !opts.isChatBound(chatJid))) {
+      return undefined;
+    }
+    const meta: FeishuMessageMeta = {
+      provider: 'feishu',
+      chatType: location.chatType,
+      mentionedBot: false,
+      threadId: location.threadId,
+      rootId: location.rootId,
+      messageId: cardMessageId,
+    };
+    const plan = opts.resolveFeishuConversationPlan?.(chatJid, meta);
+    if (plan?.reason === 'new_native_topic') return undefined;
+    const { routedMeta, target } = planFeishuRoute(location.chatId, meta, plan);
+    const route = resolveAdmittedChannelRoute<FeishuMessageMeta>(
+      chatJid,
+      opts.resolveEffectiveChatJid,
+      routedMeta,
+    );
+    if (!route) return undefined;
+    const sourceJid = feishuRouteSourceJid(target, chatJid, route.routing);
+    return route.routing?.agentId
+      ? `${sourceJid}#agent:${route.routing.agentId}`
+      : sourceJid;
+  }
+
+  async function handleCardInterrupt(
+    cardMessageId: string,
+    chatIdHint: string | undefined,
+    operatorImId: string,
+  ): Promise<CardToast | undefined> {
+    const chatJid =
+      resolveJidByMessageId(cardMessageId) ??
+      (await resolveCardSessionJid(cardMessageId, chatIdHint));
+    if (!chatJid) {
+      logger.debug(
+        { cardMessageId },
+        'Card interrupt: the card no longer maps to a session',
+      );
+      return cardToast('warning', CARD_EXPIRED_TOAST);
+    }
+    const result = connectOptions?.onCardInterrupt?.(chatJid, operatorImId);
+    // The active streaming session owns its terminal card update. Replacing
+    // this card with a follow-up receipt would erase the generated answer and
+    // race the session's CardKit finalization. Return promptly so Feishu can
+    // release the interaction lock.
+    if (!result) return undefined;
+    return cardToast(result.ok ? 'success' : 'warning', result.message);
+  }
+
+  /** The toast for a card answer whose Inbox row is `item`. */
+  function cardAnswerToast(
+    item: { status: string; error: string | null } | undefined,
+    answer: AnswerQuestionPayload,
+  ): CardToast {
+    if (!item) return cardToast('warning', '答案未能发送，请稍后重试。');
+    if (item.status === 'ignored') {
+      return cardToast(
+        'warning',
+        CARD_ANSWER_REJECTIONS[item.error ?? ''] ?? '答案未发送。',
+      );
+    }
+    if (item.status === 'failed') {
+      return cardToast('warning', '答案处理失败，请直接在聊天中回复。');
+    }
+    return cardToast('success', `已发送：${answer.answer}`);
+  }
+
+  /**
+   * An answer button is the clicking user's next message in the card's chat
+   * or topic. It enters the normal intake (durable Inbox, audience, owner and
+   * activation checks) under a synthetic id, so repeated clicks of one answer
+   * are a single message and report the first click's outcome.
+   */
+  async function handleCardAnswer(
+    answer: AnswerQuestionPayload,
+    input: {
+      cardMessageId: string;
+      cardChatId?: string;
+      operatorOpenId: string;
+      operatorUserId?: string;
+      operatorUnionId?: string;
+    },
+  ): Promise<CardToast> {
+    const ackDeadline = Date.now() + FEISHU_CARD_ANSWER_ACK_MS;
+    if (!input.operatorOpenId) {
+      return cardToast('warning', '无法确认点击者身份，答案未发送。');
+    }
+    const answerHash = createHash('sha256')
+      .update(`${answer.question}\u0000${answer.answer}`)
+      .digest('hex')
+      .slice(0, 16);
+    const messageId = `card_answer:${input.cardMessageId}:${input.operatorOpenId}:${answerHash}`;
+    const earlier = getChannelInboxByExternalMessage({
+      provider: 'feishu',
+      accountId: reliabilityAccountId,
+      externalMessageId: messageId,
+    });
+    if (earlier) return cardAnswerToast(earlier, answer);
+
+    const location = await locateCardMessage(
+      input.cardMessageId,
+      input.cardChatId,
+    );
+    if (!location) return cardToast('warning', CARD_EXPIRED_TOAST);
+    if (!location.chatType) {
+      return cardToast('warning', '无法确认会话类型，答案未发送。');
+    }
+    const intake = handleIncomingMessage(
+      {
+        chatId: location.chatId,
+        messageId,
+        ...(location.threadId
+          ? { threadId: location.threadId, rootId: location.rootId }
+          : {}),
+        createTimeMs: Date.now(),
+        messageType: 'text',
+        content: JSON.stringify({ text: answerQuestionMessage(answer) }),
+        chatType: location.chatType,
+        senderOpenId: input.operatorOpenId,
+        senderUserId: input.operatorUserId,
+        senderUnionId: input.operatorUnionId,
+        senderType: 'user',
+        origin: 'card_answer',
+      },
+      'ws',
+    );
+    let inboxId: string | undefined;
+    let pending = false;
+    try {
+      inboxId = await withTimeout(
+        intake,
+        Math.max(0, ackDeadline - Date.now()),
+        'Feishu card answer intake',
+        () => {
+          pending = true;
+        },
+      );
+    } catch (err) {
+      if (!pending) {
+        logger.error({ err, messageId }, 'Feishu card answer intake failed');
+        return cardToast('warning', '答案未能发送，请稍后重试。');
+      }
+      // Still in intake: acknowledge now; the durable Inbox row finishes it.
+      void intake.catch((intakeErr) =>
+        logger.error(
+          { err: intakeErr, messageId },
+          'Feishu card answer intake failed',
+        ),
+      );
+      return cardToast('success', `已发送：${answer.answer}`);
+    }
+    return cardAnswerToast(
+      inboxId ? getChannelInboxItem(inboxId) : undefined,
+      answer,
+    );
+  }
+
   const connection: FeishuConnection = {
     async connect(opts: ConnectOptions): Promise<boolean> {
       const { onReady } = opts;
@@ -5476,6 +5948,7 @@ export function createFeishuConnection(
         appId: config.appId,
         appSecret: config.appSecret,
         appType: lark.AppType.SelfBuild,
+        domain: feishuSdkDomain(brand),
       });
 
       // Fetch bot open_id for mention detection — 带 retry 的 best-effort 拉取。
@@ -5601,79 +6074,38 @@ export function createFeishuConnection(
             const value = data?.action?.value ?? {};
             const action = value.action;
             const cardMessageId = data?.context?.open_message_id;
+            const cardChatId =
+              typeof data?.context?.open_chat_id === 'string'
+                ? data.context.open_chat_id
+                : undefined;
             const operatorImId =
               data?.operator?.open_id ?? data?.operator?.openId ?? '';
             if (!cardMessageId || !action) return;
 
-            let result: FollowUpActionResult | undefined;
-            if (action === 'interrupt_stream') {
-              const chatJid = resolveJidByMessageId(cardMessageId);
-              if (!chatJid) {
-                logger.debug(
-                  { cardMessageId },
-                  'Card action: no mapping for messageId',
-                );
-                return;
-              }
-              result = connectOptions?.onCardInterrupt?.(chatJid, operatorImId);
-              // The active streaming session owns its terminal card update.
-              // Replacing this card with a follow-up receipt would erase the
-              // generated answer and race the session's CardKit finalization.
-              // Return promptly so Feishu can release the interaction lock.
-              if (!result) return;
-              return {
-                toast: {
-                  type: result.ok ? 'success' : 'warning',
-                  content: result.message,
-                },
-              };
-            } else if (
-              action === 'steer_queued' ||
-              action === 'cancel_queued' ||
-              action === 'interrupt_and_run'
-            ) {
-              const mappedAction: FollowUpAction =
-                action === 'steer_queued'
-                  ? 'steer'
-                  : action === 'cancel_queued'
-                    ? 'cancel'
-                    : 'interrupt_and_run';
-              if (
-                typeof value.sourceJid !== 'string' ||
-                typeof value.targetJid !== 'string' ||
-                typeof value.messageId !== 'string' ||
-                typeof value.expectedRunId !== 'string'
-              ) {
-                return;
-              }
-              result = await connectOptions?.onFollowUpCardAction?.({
-                sourceJid: value.sourceJid,
-                targetJid: value.targetJid,
-                messageId: value.messageId,
-                action: mappedAction,
-                expectedRunId: value.expectedRunId,
+            const payload = parseCardActionValue(value);
+            if (payload?.action === CARD_ACTION_INTERRUPT_STREAM) {
+              return await handleCardInterrupt(
+                cardMessageId,
+                cardChatId,
                 operatorImId,
+              );
+            }
+            if (payload?.action === CARD_ACTION_ANSWER_QUESTION) {
+              return await handleCardAnswer(payload, {
+                cardMessageId,
+                cardChatId,
+                operatorOpenId: operatorImId,
+                operatorUserId: data?.operator?.user_id,
+                operatorUnionId: data?.operator?.union_id,
               });
             }
 
-            if (!result) return;
-            if (!result.ok) {
-              return {
-                toast: {
-                  type: 'warning',
-                  content: result.message,
-                },
-              };
-            }
-            if (!client) return;
-            await client.im.v1.message.patch({
-              path: { message_id: cardMessageId },
-              data: {
-                content: JSON.stringify(
-                  buildFollowUpActionResultCard(result.message, result.ok),
-                ),
-              },
-            });
+            // Any other button (e.g. queued-message controls on cards older
+            // releases sent) no longer has a handler: say so instead of
+            // leaving Feishu's interaction spinner to time out.
+            return {
+              toast: { type: 'info', content: '这张卡片上的按钮已失效。' },
+            };
           } catch (err) {
             logger.error({ err }, 'Error handling card action trigger');
           }
@@ -5682,6 +6114,7 @@ export function createFeishuConnection(
 
       // stop() can retire this connect while REST inventory is still loading.
       if (generation !== wsConnectionGeneration) return false;
+      connectInFlight = true;
       const nextWsClient = createWsClient();
       wsClient = nextWsClient;
 
@@ -5701,6 +6134,7 @@ export function createFeishuConnection(
         if (generation !== wsConnectionGeneration) return false;
         onReady();
         startBackfill('startup');
+        releaseTransportIssues();
         return true;
       } catch (err) {
         logger.error(
@@ -5709,6 +6143,7 @@ export function createFeishuConnection(
         );
         nextWsClient.close({ force: true });
         if (generation !== wsConnectionGeneration) return false;
+        resetTransportIssues();
         // Clean up partially initialized state
         stopHealthMonitor();
         stopInboundGateWait();
@@ -5748,6 +6183,7 @@ export function createFeishuConnection(
         clearInterval(timer);
       }
       inboxHeartbeatByClaim.clear();
+      resetTransportIssues();
       connectOptions = null;
       eventDispatcher = null;
       reconnecting = false;
@@ -6124,6 +6560,7 @@ export function createFeishuConnection(
         });
         return info;
       } catch (err) {
+        permissionNotices.report('chat_info', err);
         logger.warn({ err, chatId }, 'Failed to get Feishu chat info');
         return null;
       }
@@ -6200,6 +6637,7 @@ export function createFeishuConnection(
 
         logger.info('Feishu group sync completed');
       } catch (err) {
+        permissionNotices.report('chat_info', err);
         logger.error({ err }, 'Failed to sync Feishu groups');
         throw err;
       }

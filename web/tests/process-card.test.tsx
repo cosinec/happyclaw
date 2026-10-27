@@ -332,6 +332,29 @@ describe('ProcessCard, live', () => {
     expect(windowEl()).toBeNull();
     expect(text()).toContain('用哪个方案？');
   });
+
+  it('keeps the question with the settled reply, after its call returned', async () => {
+    const asked = tool('q', 'AskUserQuestion', {
+      status: 'done',
+      questions: [{ question: '周末去哪？', options: ['爬山', '看展'] }],
+    });
+    await render(
+      <ProcessCard
+        {...props({ mode: 'settled', steps: [tool('a', 'Read'), asked] })}
+      />,
+    );
+    expect(text()).toContain('周末去哪？');
+    expect(text()).toContain('爬山');
+    expect(text()).toContain('看展');
+
+    // With nothing else to show, the question is still there.
+    await render(null);
+    await render(
+      <ProcessCard {...props({ mode: 'settled', steps: [asked] })} />,
+    );
+    expect(header()).toBeNull();
+    expect(text()).toContain('周末去哪？');
+  });
 });
 
 describe('ProcessCard, manual open comes first', () => {

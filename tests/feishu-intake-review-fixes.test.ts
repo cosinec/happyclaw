@@ -46,6 +46,7 @@ vi.mock('../src/config.js', async (importOriginal) => ({
 
 vi.mock('@larksuiteoapi/node-sdk', () => ({
   AppType: { SelfBuild: 'SelfBuild' },
+  Domain: { Feishu: 0, Lark: 1 },
   LoggerLevel: { info: 'info' },
   defaultHttpInstance: { defaults: { timeout: 0 } },
   Client: class {

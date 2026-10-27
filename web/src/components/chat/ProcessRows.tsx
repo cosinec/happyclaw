@@ -50,6 +50,7 @@ import {
 } from '../../lib/process-steps';
 import {
   TIMELINE_ROWS,
+  readStepQuestions,
   summarizeSteps,
   type StreamingStep,
 } from '../../lib/stream-steps';
@@ -915,8 +916,9 @@ export const ProcessTimeline = memo(function ProcessTimeline({
 // ── a question for the reader ───────────────────────────────────────────
 
 /**
- * The questions the model has put to the reader and waits on. They are not
- * rows: a card the reader has to answer must not scroll away or fold shut.
+ * The questions the model has put to the reader. They are not rows: a card
+ * the reader has to answer must not scroll away or fold shut. The step keeps
+ * them once the call returns, so they stay with the settled reply.
  */
 export function QuestionCards({
   steps,
@@ -929,15 +931,19 @@ export function QuestionCards({
     .filter(isQuestionStep)
     .map((step) => ({
       id: step.id,
-      input: activeTools.find((tool) => tool.toolUseId === step.toolUseId)
-        ?.toolInput,
+      questions:
+        step.questions ??
+        readStepQuestions(
+          activeTools.find((tool) => tool.toolUseId === step.toolUseId)
+            ?.toolInput,
+        ),
     }))
-    .filter((card) => card.input);
+    .filter((card) => card.questions);
   if (cards.length === 0) return null;
   return (
     <div className="mt-1 space-y-1.5">
       {cards.map((card) => (
-        <AskUserQuestionCard key={card.id} toolInput={card.input ?? {}} />
+        <AskUserQuestionCard key={card.id} questions={card.questions ?? []} />
       ))}
     </div>
   );

@@ -47,7 +47,12 @@ import {
   neutralizeRejectedCardMarkdown,
   withFeishuRateLimitRetry,
 } from './feishu-card-delivery.js';
-import type { CardStatus, ToolCallStat } from './feishu-cards/types.js';
+import type {
+  AskCardInput,
+  AskQuestionView,
+  CardStatus,
+  ToolCallStat,
+} from './feishu-cards/types.js';
 import {
   formatFeishuUsageNote,
   type FeishuUsageNoteInput,
@@ -68,7 +73,8 @@ import {
   buildProgressListText,
   buildToolsTimelineText,
   buildThinkingBlockquote,
-  buildAskQuestionText,
+  buildAskQuestionElements,
+  ASK_BLOCK_ELEMENT_ID,
   collectAskQuestions,
   buildTimelineText,
   buildStreamingDetails,
@@ -962,6 +968,7 @@ function buildStreamingCard(
   text: string,
   state: 'streaming' | 'completed' | 'aborted',
   footerNote?: string,
+  ask?: AskCardInput,
 ): object {
   // Terminal states delegate to the structured v2 builder, which drives the
   // header off status: `done` drops the header so short replies aren't reduced
@@ -973,6 +980,7 @@ function buildStreamingCard(
       status: 'done',
       text,
       footer: footerNote,
+      ask,
     });
   }
   if (state === 'aborted') {
@@ -995,6 +1003,7 @@ function buildStreamingCard(
       content: optimized,
       element_id: CARD_ELEMENT_IDS.MAIN_CONTENT,
     },
+    ...buildAskQuestionElements(ask),
     { ...INTERRUPT_BUTTON_V2, element_id: CARD_ELEMENT_IDS.INTERRUPT_BTN },
     {
       tag: 'markdown',
@@ -1050,6 +1059,7 @@ function buildSchema2Card(
   overrideTitle?: string,
   auxiliaryState?: AuxiliaryState,
   footerNote?: string,
+  ask?: AskCardInput,
 ): object {
   const { title, contentElements } = buildCardContent(
     text,
@@ -1069,17 +1079,16 @@ function buildSchema2Card(
   }
   const displayTitle = titlePrefix ? `${titlePrefix}${title}` : title;
 
-  // Build final elements array with auxiliary sections
-  const elements: Array<Record<string, unknown>> = [];
-
-  if (auxiliaryState) {
-    const { before, after } = buildAuxiliaryElements(auxiliaryState);
-    elements.push(...before);
-    elements.push(...contentElements);
-    elements.push(...after);
-  } else {
-    elements.push(...contentElements);
-  }
+  // Answer, open questions, then the auxiliary sections around them.
+  const { before, after } = auxiliaryState
+    ? buildAuxiliaryElements(auxiliaryState)
+    : { before: [], after: [] };
+  const elements: Array<Record<string, unknown>> = [
+    ...before,
+    ...contentElements,
+    ...buildAskQuestionElements(ask),
+    ...after,
+  ];
 
   if (state === 'streaming') {
     elements.push(INTERRUPT_BUTTON_V2);
@@ -1717,6 +1726,11 @@ class CardKitBackend {
 
 // ─── Streaming Mode Backend ───────────────────────────────────
 
+const NO_ASK_BLOCK: { ids: string[]; hash: string } = {
+  ids: [],
+  hash: quickHash('[]'),
+};
+
 const DETAIL_CONTENT_IDS: Set<string> = new Set([
   CARD_ELEMENT_IDS.PROGRESS_CONTENT,
   CARD_ELEMENT_IDS.TASK_CONTENT,
@@ -1748,6 +1762,8 @@ class StreamingModeBackend {
    * after enabling; content pushes renew it shortly before that.
    */
   private streamingEnabledAt: number | null = null;
+  /** The AskUserQuestion block currently on the card. */
+  private askBlock = NO_ASK_BLOCK;
 
   hasRuntimeDetails(): boolean {
     return this.richSlotHashes.has(CARD_ELEMENT_IDS.PROGRESS_CONTENT);
@@ -1848,8 +1864,75 @@ class StreamingModeBackend {
       ? Date.now()
       : null;
     collectElementContentHashes(cardJson, this.richSlotHashes);
+    this.trackAskBlock(cardJson);
     logger.debug({ cardId }, 'Streaming mode card created');
     return cardId;
+  }
+
+  private trackAskBlock(cardJson: object): void {
+    const elements = (cardJson as { body?: { elements?: unknown } }).body
+      ?.elements;
+    const block = (Array.isArray(elements) ? elements : []).filter(
+      (element: { element_id?: unknown }) =>
+        typeof element?.element_id === 'string' &&
+        ASK_BLOCK_ELEMENT_ID.test(element.element_id),
+    );
+    this.askBlock = {
+      ids: block.map((element) => String(element.element_id)),
+      hash: quickHash(JSON.stringify(block)),
+    };
+  }
+
+  private async batchUpdate(operation: string, actions: object[]) {
+    const data = JSON.stringify(actions);
+    const mutation = this.mutationIdentity(operation, quickHash(data));
+    const response = await this.mutations.request(() =>
+      this.client.cardkit.v1.card.batchUpdate({
+        path: { card_id: this.cardId! },
+        data: { actions: data, ...mutation },
+      }),
+    );
+    assertCardKitAcknowledged(response, operation);
+    this.acknowledgedSequence = mutation.sequence;
+  }
+
+  /**
+   * Show `elements` as the AskUserQuestion block: after the answer, before
+   * the execution details and the stop button. A changed block is removed
+   * and inserted again as two separate mutations.
+   */
+  async syncAskBlock(elements: Array<Record<string, unknown>>): Promise<void> {
+    if (!this.cardId) return;
+    return this.enqueue(async () => {
+      const hash = quickHash(JSON.stringify(elements));
+      if (hash === this.askBlock.hash) return;
+      if (this.askBlock.ids.length) {
+        await this.batchUpdate('card.batchUpdate:ask-remove', [
+          {
+            action: 'delete_elements',
+            params: { element_ids: this.askBlock.ids },
+          },
+        ]);
+        this.askBlock = NO_ASK_BLOCK;
+      }
+      if (!elements.length) return;
+      await this.batchUpdate('card.batchUpdate:ask-insert', [
+        {
+          action: 'add_elements',
+          params: {
+            type: 'insert_before',
+            target_element_id: this.hasRuntimeDetails()
+              ? CARD_ELEMENT_IDS.DETAILS_PANEL
+              : CARD_ELEMENT_IDS.INTERRUPT_BTN,
+            elements,
+          },
+        },
+      ]);
+      this.askBlock = {
+        ids: elements.map((element) => String(element.element_id)),
+        hash,
+      };
+    }, true);
   }
 
   /**
@@ -1916,19 +1999,7 @@ class StreamingModeBackend {
           params: { element_ids: removed },
         });
       if (!actions.length) return;
-      const data = JSON.stringify(actions);
-      const mutation = this.mutationIdentity(
-        'card.batchUpdate:body-slots',
-        quickHash(data),
-      );
-      const response = await this.mutations.request(() =>
-        this.client.cardkit.v1.card.batchUpdate({
-          path: { card_id: this.cardId! },
-          data: { actions: data, ...mutation },
-        }),
-      );
-      assertCardKitAcknowledged(response, 'card.batchUpdate:body-slots');
-      this.acknowledgedSequence = mutation.sequence;
+      await this.batchUpdate('card.batchUpdate:body-slots', actions);
       for (const element of missing)
         this.richSlotHashes.set(String(element.element_id), quickHash(''));
       for (const id of removed) this.richSlotHashes.delete(id);
@@ -2284,6 +2355,7 @@ class StreamingModeBackend {
         : null;
       this.richSlotHashes.clear();
       collectElementContentHashes(cardJson, this.richSlotHashes);
+      this.trackAskBlock(cardJson);
     });
   }
 
@@ -2403,6 +2475,7 @@ class MultiCardManager {
     auxiliaryState?: AuxiliaryState,
     footerNote?: string,
     contentMode: 'normal' | 'neutral' = 'normal',
+    ask?: AskCardInput,
   ): Promise<void> {
     // Serialize: rollover's frozenPrefixChars RMW must not interleave with
     // another flush or a terminal patchCard.
@@ -2413,6 +2486,7 @@ class MultiCardManager {
         auxiliaryState,
         footerNote,
         contentMode,
+        ask,
       ),
     );
     this.commitChain = run.then(
@@ -2452,6 +2526,7 @@ class MultiCardManager {
     auxiliaryState?: AuxiliaryState,
     footerNote?: string,
     contentMode: 'normal' | 'neutral' = 'normal',
+    ask?: AskCardInput,
   ): Promise<void> {
     const render = (value: string) =>
       contentMode === 'neutral' ? neutralizeRejectedCardMarkdown(value) : value;
@@ -2468,6 +2543,7 @@ class MultiCardManager {
           this.terminalTail.overrideTitle,
           undefined,
           footerNote,
+          ask,
         ),
       );
       return;
@@ -2479,7 +2555,7 @@ class MultiCardManager {
     // CJK >30KB zombie-card case). rollover() freezes prior cards and leaves
     // the unfrozen tail for the current card; the terminal render below then
     // applies `state` only to that bounded tail.
-    if (this.needsRollover(text, auxiliaryState, footerNote)) {
+    if (this.needsRollover(text, auxiliaryState, footerNote, ask)) {
       await this.rollover(text);
     }
 
@@ -2509,6 +2585,7 @@ class MultiCardManager {
         overrideTitle,
         footerNote,
         render,
+        ask,
       );
       return;
     }
@@ -2520,6 +2597,7 @@ class MultiCardManager {
       overrideTitle,
       auxiliaryState,
       footerNote,
+      ask,
     );
     await currentCard.updateCard(cardJson);
     if (state !== 'streaming')
@@ -2529,7 +2607,7 @@ class MultiCardManager {
   /**
    * Render an over-budget terminal tail across multiple cards: the current card
    * + fresh continuation cards, each within FREEZE_SLICE_BYTES, only the last
-   * carrying the real terminal `state`.
+   * carrying the real terminal `state` and the open questions.
    */
   private async renderTerminalTail(
     tail: string,
@@ -2538,6 +2616,7 @@ class MultiCardManager {
     overrideTitle: string | undefined,
     footerNote: string | undefined,
     render: (value: string) => string,
+    ask: AskCardInput | undefined,
   ): Promise<void> {
     const chunks = splitCodeBlockSafe(tail, CARD_MD_LIMIT).flatMap((chunk) =>
       splitByTableLimit(chunk),
@@ -2579,6 +2658,7 @@ class MultiCardManager {
         titleOverride,
         undefined,
         isLast ? footerNote : undefined,
+        isLast ? ask : undefined,
       );
       if (i === 0) {
         const currentCard = this.cards[this.cards.length - 1];
@@ -2605,6 +2685,7 @@ class MultiCardManager {
     fullText: string,
     auxiliaryState?: AuxiliaryState,
     footerNote?: string,
+    ask?: AskCardInput,
   ): boolean {
     const activeText = this.activeView(fullText);
     const { contentElements } = buildCardContent(
@@ -2617,8 +2698,9 @@ class MultiCardManager {
           return before.length + after.length;
         })()
       : 0;
-    // button + note + optional footer
-    const fixedCount = 2 + (footerNote ? 1 : 0);
+    // button + note + optional footer + open questions
+    const fixedCount =
+      2 + (footerNote ? 1 : 0) + buildAskQuestionElements(ask).length;
     if (contentElements.length + auxCount + fixedCount > this.MAX_ELEMENTS) {
       return true;
     }
@@ -2633,6 +2715,7 @@ class MultiCardManager {
       undefined,
       auxiliaryState,
       footerNote,
+      ask,
     );
     return (
       Buffer.byteLength(JSON.stringify(cardJson), 'utf-8') > CARD_SIZE_LIMIT
@@ -2840,6 +2923,14 @@ export class StreamingCardController {
   private toolTotals = new Map<string, number>();
   private countedToolIds = new Set<string>();
   private tasks = new Map<string, TaskRunState>();
+  /**
+   * The last AskUserQuestion call's questions. They stay open after the tool
+   * ends: the runner has no answer channel, so the user answers with the next
+   * message, usually after this turn ends. The completed card keeps them.
+   */
+  private askQuestions: AskQuestionView[] = [];
+  /** Lowered when Feishu refuses the live block: buttons, then text, then none. */
+  private askRendering: 'buttons' | 'text' | 'off' = 'buttons';
   private startTime = 0;
   private backendMode: 'streaming' | 'v1' | 'legacy' = 'v1';
 
@@ -3092,7 +3183,14 @@ export class StreamingCardController {
     if (!tc) return;
     if (meta.skillName !== undefined) tc.skillName = meta.skillName;
     if (meta.isNested !== undefined) tc.isNested = meta.isNested;
-    if (meta.toolInput !== undefined) tc.toolInput = meta.toolInput;
+    if (meta.toolInput !== undefined) {
+      tc.toolInput = meta.toolInput;
+      const questions =
+        tc.name === 'AskUserQuestion'
+          ? collectAskQuestions(meta.toolInput)
+          : [];
+      if (questions.length) this.askQuestions = questions;
+    }
     this.stateVersion++;
     if (this.state === 'streaming') {
       this.backendMode === 'streaming'
@@ -3788,6 +3886,27 @@ export class StreamingCardController {
     return this.traceUrl ? `[查看完整运行轨迹](${this.traceUrl})` : undefined;
   }
 
+  /**
+   * The open questions for a card. An interrupted card drops them (the run
+   * stopped; the card says why); a neutral rendering (after Feishu refused a
+   * card body) lists the options as text.
+   */
+  private openQuestions(
+    state: 'streaming' | 'completed' | 'aborted' = 'streaming',
+    neutral = false,
+  ): AskCardInput | undefined {
+    if (
+      state === 'aborted' ||
+      !this.askQuestions.length ||
+      this.askRendering === 'off'
+    )
+      return undefined;
+    return {
+      questions: this.askQuestions,
+      buttons: this.askRendering === 'buttons' && !neutral,
+    };
+  }
+
   private mergeFooterNote(note?: string): string | undefined {
     const trace = this.traceFooterLink();
     if (note && trace) return `${note}\n${trace}`;
@@ -3961,7 +4080,11 @@ export class StreamingCardController {
     }
     const budget =
       Math.floor(CARDKIT_JSON_MAX_BYTES * this.nativeCapacityScale) - 3000;
-    const card = buildStreamingAgentCard({ initialText: text, panels });
+    const card = buildStreamingAgentCard({
+      initialText: text,
+      panels,
+      ask: this.openQuestions(),
+    });
     const body = card.body as { elements: Array<Record<string, unknown>> };
     for (let attempt = 0; attempt < 7; attempt++) {
       if (attempt === 6) {
@@ -4004,6 +4127,7 @@ export class StreamingCardController {
         const live = buildStreamingAgentCard({
           initialText: pageText,
           panels: this.nativePanelPatches(pageText),
+          ask: this.openQuestions(),
         });
         const final = this.buildStructuredFinalCard(
           'completed',
@@ -4094,9 +4218,14 @@ export class StreamingCardController {
           entry.streaming = false;
         }
         if (terminal || wasStreaming || entry.text !== page.text) {
-          const buildCard = (text: string) =>
+          const buildCard = (text: string, neutral?: boolean) =>
             tail && terminal
-              ? this.buildStructuredFinalCard(terminal, undefined, text)
+              ? this.buildStructuredFinalCard(
+                  terminal,
+                  undefined,
+                  text,
+                  neutral,
+                )
               : buildAgentReplyCard({
                   text,
                   status:
@@ -4123,6 +4252,7 @@ export class StreamingCardController {
         const card = buildStreamingAgentCard({
           initialText: page.text,
           panels: this.nativePanelPatches(page.text),
+          ask: this.openQuestions(),
         });
         if (this.nativeFullUpdates) {
           (card.config as Record<string, unknown>).streaming_mode = false;
@@ -4213,7 +4343,7 @@ export class StreamingCardController {
     backend: StreamingModeBackend,
     page: CardPage,
     terminal: 'completed' | 'aborted',
-    buildCard: (text: string) => object,
+    buildCard: (text: string, neutral?: boolean) => object,
   ): Promise<void> {
     try {
       await backend.updateCardFull(buildCard(page.text));
@@ -4226,7 +4356,7 @@ export class StreamingCardController {
       );
       try {
         await backend.updateCardFull(
-          buildCard(neutralizeRejectedCardMarkdown(page.text)),
+          buildCard(neutralizeRejectedCardMarkdown(page.text), true),
         );
         return;
       } catch (neutralError) {
@@ -4344,7 +4474,6 @@ export class StreamingCardController {
     taskContent: string;
     toolsContent: string;
     thinkingContent?: string;
-    askContent?: string;
     timelineContent?: string;
     footerNote: string;
   } {
@@ -4412,7 +4541,7 @@ export class StreamingCardController {
             .join('\n')
         : '';
 
-    // Filter out AskUserQuestion from the tools timeline — it gets its own panel.
+    // Filter out AskUserQuestion from the tools timeline — it gets its own block.
     const toolViews: ToolCallView[] = Array.from(this.toolCalls.values())
       .filter((tc) => tc.name !== 'AskUserQuestion')
       .map((tc) => ({
@@ -4430,16 +4559,6 @@ export class StreamingCardController {
     const thinkingContent = this.thinkingText
       ? buildThinkingBlockquote(this.thinkingText)
       : undefined;
-
-    // AskUserQuestion: gather every running tool of that name and flatten to
-    // a question list (mirrors web AskUserQuestionCard).
-    const askQuestions = Array.from(this.toolCalls.values())
-      .filter((tc) => tc.name === 'AskUserQuestion' && tc.status === 'running')
-      .flatMap((tc) => collectAskQuestions(tc.toolInput));
-    const askContent =
-      askQuestions.length > 0
-        ? `**❓ 等待你的回复**\n${buildAskQuestionText(askQuestions)}`
-        : undefined;
 
     const timelineContent =
       this.recentEvents.length > 0
@@ -4467,7 +4586,6 @@ export class StreamingCardController {
       taskContent: card(bounded(taskContent)),
       toolsContent: card(bounded(toolsContent)),
       thinkingContent: card(bounded(thinkingContent)),
-      askContent: askContent ? card(askContent) : askContent,
       timelineContent: card(bounded(timelineContent)),
       footerNote: card(footerNote),
     };
@@ -4488,6 +4606,7 @@ export class StreamingCardController {
         this.backendTransition
       )
         return;
+      if (!(await this.syncLiveAskBlock(this.streamingBackend))) return;
       const visibleText =
         this.nativeCards.find(
           (entry) => entry.backend === this.streamingBackend,
@@ -4502,10 +4621,6 @@ export class StreamingCardController {
             {
               elementId: CARD_ELEMENT_IDS.STATUS_BANNER,
               content: patches.statusBanner,
-            },
-            {
-              elementId: CARD_ELEMENT_IDS.ASK_CONTENT,
-              content: patches.askContent ?? '',
             },
             {
               elementId: CARD_ELEMENT_IDS.PROGRESS_CONTENT,
@@ -4579,6 +4694,40 @@ export class StreamingCardController {
         );
       }
     });
+  }
+
+  /**
+   * Keep the live card's AskUserQuestion block current. A refused block is
+   * simplified (buttons, then text, then none) without counting toward
+   * degradation. Returns false once the card has been fenced.
+   */
+  private async syncLiveAskBlock(
+    backend: StreamingModeBackend,
+  ): Promise<boolean> {
+    try {
+      await backend.syncAskBlock(
+        buildAskQuestionElements(this.openQuestions()),
+      );
+      return true;
+    } catch (error) {
+      if (!definitiveCardNonAcceptance(error)) {
+        this.fenceVisibleCardMutation(error);
+        return false;
+      }
+      // Anything but a refused block is retried by the next flush/heartbeat.
+      if (
+        !isCardContentRejection(error) &&
+        !isNativeCardCapacityRejection(error)
+      )
+        return true;
+      this.askRendering = this.askRendering === 'buttons' ? 'text' : 'off';
+      logger.warn(
+        { err: error, chatId: this.chatId, askRendering: this.askRendering },
+        'Feishu refused the AskUserQuestion block; simplifying it',
+      );
+      this.scheduleAuxFlush();
+      return true;
+    }
   }
 
   /**
@@ -4662,6 +4811,7 @@ export class StreamingCardController {
       modelUsage?: Record<string, { outputTokens?: number }>;
     },
     text = this.accumulatedText,
+    neutral = false,
   ): object {
     const status: CardStatus = finalState === 'aborted' ? 'warning' : 'done';
     const toolCalls: ToolCallStat[] = Array.from(
@@ -4669,42 +4819,51 @@ export class StreamingCardController {
       ([name, count]) => ({ name, count }),
     );
     const thinking = this.thinkingText.trim() || undefined;
-    const card = buildAgentReplyCard({
-      status,
-      text: text || '> ⚠️ 本次运行没有生成可展示的最终内容。',
-      thinking,
-
-      meta: {
-        toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-        durationMs: usage?.durationMs,
-        model: pickPrimaryModel(usage?.modelUsage),
-        inputTokens: usage?.inputTokens,
-        outputTokens: usage?.outputTokens,
-        cacheReadInputTokens: usage?.cacheReadInputTokens,
-        cacheCreationInputTokens: usage?.cacheCreationInputTokens,
-        reasoningTokens: usage?.reasoningTokens,
-        costUSD: usage?.costUSD,
-        numTurns: usage?.numTurns,
-      },
-    });
-    (card.body as { elements: object[] }).elements.push({
-      tag: 'markdown',
-      element_id: CARD_ELEMENT_IDS.FOOTER_NOTE,
-      text_size: 'notation',
-      content: this.traceFooterLink() ?? '',
-    });
-    const budget =
-      Math.floor(CARDKIT_JSON_MAX_BYTES * this.nativeCapacityScale) - 3000;
-    if (
-      this.nativeSuppressDetails ||
-      !fitsCardCapacity(card, { maxBytes: budget })
-    ) {
+    const ask = this.openQuestions(finalState, neutral);
+    const build = (askInput: AskCardInput | undefined) => {
+      const card = buildAgentReplyCard({
+        status,
+        text: text || '> ⚠️ 本次运行没有生成可展示的最终内容。',
+        thinking,
+        ask: askInput,
+        meta: {
+          toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+          durationMs: usage?.durationMs,
+          model: pickPrimaryModel(usage?.modelUsage),
+          inputTokens: usage?.inputTokens,
+          outputTokens: usage?.outputTokens,
+          cacheReadInputTokens: usage?.cacheReadInputTokens,
+          cacheCreationInputTokens: usage?.cacheCreationInputTokens,
+          reasoningTokens: usage?.reasoningTokens,
+          costUSD: usage?.costUSD,
+          numTurns: usage?.numTurns,
+        },
+      });
+      (card.body as { elements: object[] }).elements.push({
+        tag: 'markdown',
+        element_id: CARD_ELEMENT_IDS.FOOTER_NOTE,
+        text_size: 'notation',
+        content: this.traceFooterLink() ?? '',
+      });
+      return card;
+    };
+    const dropDetails = (card: ReturnType<typeof build>) => {
       const body = card.body as { elements: Array<Record<string, unknown>> };
       body.elements = body.elements.filter(
         (element) => element.element_id !== CARD_ELEMENT_IDS.DETAILS_PANEL,
       );
-    }
-    return card;
+      return card;
+    };
+    const budget =
+      Math.floor(CARDKIT_JSON_MAX_BYTES * this.nativeCapacityScale) - 3000;
+    const fits = (card: object) => fitsCardCapacity(card, { maxBytes: budget });
+    const card = build(ask);
+    if (!this.nativeSuppressDetails && fits(card)) return card;
+    // Optional details go first; answer buttons then fall back to text.
+    dropDetails(card);
+    return !ask?.buttons || fits(card)
+      ? card
+      : dropDetails(build({ ...ask, buttons: false }));
   }
 
   /**
@@ -4840,6 +4999,7 @@ export class StreamingCardController {
       displayState === 'streaming'
         ? this.liveDisplayText()
         : this.accumulatedText;
+    const ask = this.openQuestions(displayState, contentMode === 'neutral');
     if (this.useCardKit && this.multiCard) {
       // CardKit v1 path — pass auxiliary state for rich display
       const auxState =
@@ -4851,6 +5011,7 @@ export class StreamingCardController {
           auxState,
           footerNote,
           contentMode,
+          ask,
         );
         this.flushCtrl.markFlushed(this.accumulatedText.length);
         this.patchFailCount = 0;
@@ -4881,6 +5042,7 @@ export class StreamingCardController {
           : displayText,
         displayState,
         footerNote,
+        ask,
       );
 
       try {

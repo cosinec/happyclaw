@@ -14,7 +14,10 @@ import {
   openTextStep,
   openThinkingStep,
   patchToolStep,
+  progressToolStep,
+  QUESTION_DEFERRED_MARK,
   railSteps,
+  readStepQuestions,
   rebuildSteps,
   setTaskStepStatus,
   startToolStep,
@@ -491,5 +494,107 @@ describe('rebuilding after a reconnect', () => {
     expect(list.steps[2].status).toBe('running');
     expect(list.steps[0].title).toBe('计划');
     expect(answerStart(list.steps, 0)).toBe(0);
+  });
+});
+
+describe('question steps', () => {
+  const input = {
+    questions: [
+      {
+        question: '午饭吃什么？',
+        header: '午饭',
+        multiSelect: false,
+        options: [
+          { label: '面条', description: '汤面' },
+          { label: '米饭', description: '盖饭' },
+        ],
+      },
+    ],
+  };
+
+  it('reads both input shapes and bounds what the model streamed', () => {
+    expect(readStepQuestions(input)).toEqual([
+      { question: '午饭吃什么？', options: ['面条', '米饭'] },
+    ]);
+    expect(
+      readStepQuestions({
+        question: '用哪个方案？',
+        options: [{ value: '窄 selector' }, '宽 selector', { label: ' ' }],
+      }),
+    ).toEqual([
+      { question: '用哪个方案？', options: ['窄 selector', '宽 selector'] },
+    ]);
+    const many = readStepQuestions({
+      questions: Array.from({ length: 6 }, (_, i) => ({
+        question: `问题 ${i}`,
+        multiSelect: true,
+        options: Array.from({ length: 12 }, (_, j) => `选项 ${j}`),
+      })),
+    });
+    expect(many).toHaveLength(4);
+    expect(many?.[0]).toMatchObject({ multiSelect: true });
+    expect(many?.[0].options).toHaveLength(10);
+    expect(readStepQuestions({ questions: [{ question: '  ' }] })).toBe(
+      undefined,
+    );
+    expect(readStepQuestions(undefined)).toBe(undefined);
+  });
+
+  it('keeps the questions after the deferred call returns, which is no failure', () => {
+    let list = startToolStep(
+      empty(),
+      { toolUseId: 'q', toolName: 'AskUserQuestion' },
+      10,
+    );
+    list = progressToolStep(
+      list,
+      { toolUseId: 'q', questions: readStepQuestions(input) },
+      20,
+    );
+    list = endToolStep(
+      list,
+      'q',
+      30,
+      `${QUESTION_DEFERRED_MARK} The answer is the next message.`,
+      { isError: true },
+    );
+    expect(list.steps[0]).toMatchObject({
+      status: 'done',
+      endedAt: 30,
+      questions: [{ question: '午饭吃什么？', options: ['面条', '米饭'] }],
+    });
+    expect(list.steps[0].resultPreview).toBeUndefined();
+    expect(summarizeSteps(list.steps).failed).toBe(0);
+  });
+
+  it('drops the questions of a call refused for another reason', () => {
+    let list = startToolStep(
+      empty(),
+      {
+        toolUseId: 'q',
+        toolName: 'AskUserQuestion',
+        questions: readStepQuestions(input),
+      },
+      10,
+    );
+    list = endToolStep(list, 'q', 30, 'InputValidationError: too few options', {
+      isError: true,
+    });
+    expect(list.steps[0]).toMatchObject({
+      status: 'error',
+      resultPreview: 'InputValidationError: too few options',
+    });
+    expect(list.steps[0].questions).toBeUndefined();
+  });
+
+  it('keeps questions only on an AskUserQuestion step', () => {
+    const questions = readStepQuestions(input);
+    let list = startToolStep(
+      empty(),
+      { toolUseId: 'b', toolName: 'Bash', questions },
+      10,
+    );
+    list = patchToolStep(list, 'b', { questions });
+    expect(list.steps[0].questions).toBeUndefined();
   });
 });

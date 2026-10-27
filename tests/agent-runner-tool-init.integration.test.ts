@@ -7,7 +7,10 @@ import { pathToFileURL } from 'node:url';
 import { afterAll, describe, expect, test } from 'vitest';
 
 import { createMcpTools } from '../container/agent-runner/src/mcp-tools.js';
-import { RUNNER_DISALLOWED_BUILTIN_TOOLS } from '../container/agent-runner/src/builtin-tool-policy.js';
+import {
+  RUNNER_DISALLOWED_BUILTIN_TOOLS,
+  runnerCanUseTool,
+} from '../container/agent-runner/src/builtin-tool-policy.js';
 import { buildClaudeRuntimeEnv } from '../container/agent-runner/src/claude-runtime-env.js';
 import { hasBackgroundTaskTools } from '../container/agent-runner/src/prompt-plan.js';
 
@@ -277,13 +280,21 @@ describe('HappyClaw tool initialization', () => {
     expect(hasBackgroundTaskTools(initializedTools ?? [])).toBe(true);
   }, 20_000);
 
-  test('the runner deny list names real CLI tools and keeps Workflow, and its environment drops native cron', async () => {
+  test('the runner deny list names real CLI tools and keeps Workflow and AskUserQuestion, and its environment drops native cron', async () => {
     const initTools = async (
       disallowedTools: string[],
       runtimeEnv: Record<string, string> = {},
     ) => {
       const stream = runnerSdk.query({
-        prompt: 'Reply with OK.',
+        // canUseTool needs streaming input, as the runner uses.
+        prompt: (async function* () {
+          yield {
+            type: 'user' as const,
+            message: { role: 'user' as const, content: 'Reply with OK.' },
+            parent_tool_use_id: null,
+            session_id: '',
+          };
+        })(),
         options: {
           pathToClaudeCodeExecutable: runnerClaudeExecutable,
           cwd,
@@ -300,6 +311,7 @@ describe('HappyClaw tool initialization', () => {
           disallowedTools,
           permissionMode: 'bypassPermissions',
           allowDangerouslySkipPermissions: true,
+          canUseTool: runnerCanUseTool,
           settingSources: [],
         },
       });
@@ -312,7 +324,8 @@ describe('HappyClaw tool initialization', () => {
       return [];
     };
     // A deny list naming tools the CLI no longer ships would silently stop
-    // applying, so every entry must exist without it.
+    // applying, so every entry must exist without it (with the runner's
+    // permission handler, which is what registers the plan-mode tools).
     const unrestricted = await initTools([]);
     expect(unrestricted).toEqual(
       expect.arrayContaining([...RUNNER_DISALLOWED_BUILTIN_TOOLS]),
@@ -322,6 +335,8 @@ describe('HappyClaw tool initialization', () => {
       expect(restricted).not.toContain(tool);
     }
     expect(restricted).toContain('Workflow');
+    // Registered only because the runner answers permission requests.
+    expect(restricted).toContain('AskUserQuestion');
     // The runner's environment also turns off the CLI's own cron
     // (CLAUDE_CODE_DISABLE_CRON), which the deny list alone would leave on.
     const runnerEnvTools = await initTools([], buildClaudeRuntimeEnv({}));

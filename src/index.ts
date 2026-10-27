@@ -253,6 +253,8 @@ import {
   updateChannelAccountStatus,
   cancelQueuedFollowUpsAtCutoff,
   cancelQueuedFollowUp,
+  withdrawQueuedFollowUp,
+  listQueuedChannelFollowUps,
   claimNextQueuedFollowUpBatch,
   getQueuedFollowUp,
   getQueuedFollowUpChatJids,
@@ -468,6 +470,7 @@ import {
   isOwnerProfileOwnerInput,
   OWNER_PROFILE_TRUSTED_CLAIM_SOURCES,
   ownerImIdFromDirectConversationJid,
+  ownerImIdFromPersistedSender,
   resolveTrustedDirectOwnerUpgrade,
 } from './agent-builder-turn-auth.js';
 import {
@@ -611,11 +614,14 @@ import {
   type ActiveFeishuContext,
   type FeishuConversationPlan,
 } from './feishu-conversation-policy.js';
+import { isUnknownFeishuSenderAllowed } from './im-audience-policy.js';
+import { applyFeishuTransportIssue } from './channel-account-transport.js';
 import {
-  effectiveAudienceMode,
-  isSenderAllowedByAudience,
-  isUnknownFeishuSenderAllowed,
-} from './im-audience-policy.js';
+  isSenderAdmittedByGroupPolicy,
+  mentionImId,
+  type ChannelCommandMention,
+} from './im-group-audience.js';
+import { normalizeFeishuBrand } from './feishu-domain.js';
 import { logger } from './logger.js';
 import { resolveTaskOwner } from './task-utils.js';
 import { checkOwnerActive } from './owner-gate.js';
@@ -1654,6 +1660,21 @@ function injectPreparedFollowUp(
           : 'main',
       )
     : undefined;
+  // The same Feishu CLI identity a cold start would bind (the turn's Feishu
+  // account, else the workspace's), so a batch never inherits the identity of
+  // whichever Bot happened to start the warm container.
+  const feishuCliRequirement = runtime
+    ? {
+        feishuCliAccountId:
+          (runtime.effectiveGroup.executionMode || 'container') === 'container'
+            ? resolveFeishuCliBoundAccountId({
+                channelContext,
+                workspaceChannelAccountId:
+                  runtime.effectiveGroup.channel_account_id,
+              })
+            : null,
+      }
+    : {};
   // A claimed mixed-mode batch is released intact to the durable cold reader,
   // which selects a compatible prefix without consuming the remainder.
   const result = interactionBatch?.hasDeferredMessages
@@ -1714,8 +1735,13 @@ function injectPreparedFollowUp(
                 runtime.agentId ?? undefined,
               )
             : false,
-        interactionBatch
-          ? { interactionMode: interactionBatch.interactionMode }
+        runtime || interactionBatch
+          ? {
+              ...feishuCliRequirement,
+              ...(interactionBatch
+                ? { interactionMode: interactionBatch.interactionMode }
+                : {}),
+            }
           : undefined,
       );
 
@@ -1789,9 +1815,68 @@ function broadcastFollowUpBatchUpdate(
   }
 }
 
+/**
+ * Re-admit group inputs that waited in the durable queue: a `/disallow`, an
+ * owner change or a switch to owner_only made while they waited applies to
+ * them too. A withdrawn input is cancelled and leaves the visible queue
+ * exactly like a user cancel. Private chats are not audience-gated.
+ */
+function withdrawQueuedInputsOutsideAudience(chatJid: string): void {
+  for (const item of listQueuedChannelFollowUps(chatJid)) {
+    const sender = queuedInputImSender(item);
+    if (!sender) continue;
+    const sourceJid = item.source_jid!;
+    const conversationJid = channelConversationJid(
+      stripVirtualJidSuffix(sourceJid),
+    );
+    const group =
+      registeredGroups[conversationJid] ?? getRegisteredGroup(conversationJid);
+    if (isDirectImConversation(conversationJid, group)) continue;
+    if (isSenderAllowedInGroup(sourceJid, sender.imId)) continue;
+    const deliveryUpdatedAt = new Date().toISOString();
+    // The input and any forward root it covers leave the queue together.
+    const withdrawn = withdrawQueuedFollowUp(
+      chatJid,
+      item.id,
+      deliveryUpdatedAt,
+    );
+    if (withdrawn) {
+      for (const input of [withdrawn.item, ...withdrawn.coveredRoots]) {
+        settleCancelledFollowUp(chatJid, input, deliveryUpdatedAt);
+      }
+    }
+    logger.info(
+      { chatJid, messageId: item.id, withdrawn: !!withdrawn },
+      'Queued input withdrawn: its sender is no longer in the response audience',
+    );
+  }
+}
+
+/**
+ * The channel sender of a queued input, or null when it is not one (Web,
+ * scheduled task, system input). Decided by what was persisted with it, not
+ * by the chat JID a Web user may also post to: its ChannelTurnContext names
+ * the provider; without one only a sender in the provider's own format
+ * (`tg:42`, `qq:…`) is a channel sender. Feishu inputs always carry one.
+ */
+function queuedInputImSender(
+  item: QueuedFollowUp,
+): { imId: string | undefined } | null {
+  const sourceJid = item.source_jid;
+  const provider = sourceJid ? getChannelType(sourceJid) : null;
+  if (!sourceJid || !provider) return null;
+  const imId =
+    ownerImIdFromPersistedSender(sourceJid, item.sender) ?? undefined;
+  if (item.channel_context) {
+    return item.channel_context.provider === provider ? { imId } : null;
+  }
+  return provider !== 'feishu' && imId ? { imId } : null;
+}
+
 async function dispatchNextQueuedFollowUp(chatJid: string): Promise<void> {
   const reservedRunId = queue.reserveNextQuery(chatJid);
   if (!reservedRunId) return;
+  withdrawQueuedInputsOutsideAudience(chatJid);
   const items = claimNextQueuedFollowUpBatch(chatJid, reservedRunId);
   if (items.length === 0) {
     queue.releaseQueryReservation(chatJid, reservedRunId);
@@ -1959,13 +2044,23 @@ function cancelFollowUp(
   const deliveryUpdatedAt = new Date().toISOString();
   const item = cancelQueuedFollowUp(chatJid, messageId, deliveryUpdatedAt);
   if (!item) return { ok: false, message: '这条排队消息已被处理或取消。' };
+  settleCancelledFollowUp(chatJid, item, deliveryUpdatedAt);
+  return { ok: true, state: 'cancelled', message: '已取消排队消息。', item };
+}
+
+/** Close, announce and un-indicate an input that left the durable queue. */
+function settleCancelledFollowUp(
+  chatJid: string,
+  item: QueuedFollowUp,
+  deliveryUpdatedAt: string,
+): void {
   closeRetryWaitTurnsForWithdrawnInputs(
     channelTurnScopeForInput(chatJid, item.source_jid),
-    [messageId],
+    [item.id],
     'Queued input cancelled',
   );
   broadcastFollowUpUpdate(chatJid, {
-    id: messageId,
+    id: item.id,
     delivery_status: 'cancelled',
     delivery_run_id: item.delivery_run_id,
     delivery_updated_at: deliveryUpdatedAt,
@@ -1977,9 +2072,8 @@ function cancelFollowUp(
         ? chatJid
         : null;
   if (indicatorJid) {
-    void clearStandaloneProcessingIndicator(chatJid, indicatorJid, messageId);
+    void clearStandaloneProcessingIndicator(chatJid, indicatorJid, item.id);
   }
-  return { ok: true, state: 'cancelled', message: '已取消排队消息。', item };
 }
 
 function editFollowUp(
@@ -2103,6 +2197,7 @@ function steerQueuedFollowUpBatch(
 
 function recoverDurableFollowUps(): void {
   for (const chatJid of getQueuedFollowUpChatJids()) {
+    withdrawQueuedInputsOutsideAudience(chatJid);
     const recoveryRunId = `recovery:${crypto.randomUUID()}`;
     const items = claimNextQueuedFollowUpBatch(chatJid, recoveryRunId);
     if (items.length === 0) continue;
@@ -4653,7 +4748,7 @@ async function handleCommand(
   chatJid: string,
   command: string,
   senderImId?: string,
-  mentions?: Array<{ key?: string; name?: string; id?: { open_id?: string } }>,
+  mentions?: ChannelCommandMention[],
   /** Routed native metadata (topic/thread) of the command message, if known. */
   messageMeta?: ChannelMessageMeta,
 ): Promise<string | null> {
@@ -5280,7 +5375,7 @@ function handleReleaseOwnerCommand(chatJid: string): string {
 function handleAllowCommand(
   chatJid: string,
   senderImId?: string,
-  mentions?: Array<{ key?: string; name?: string; id?: { open_id?: string } }>,
+  mentions?: ChannelCommandMention[],
 ): string {
   if (!senderImId) return '无法识别发送者身份';
   let group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
@@ -5307,14 +5402,16 @@ function handleAllowCommand(
   }
 
   if (!group.owner_im_id) {
-    return '尚未识别到 owner，请先向机器人发一条私信以完成身份识别';
+    return getChannelType(chatJid) === 'feishu'
+      ? '尚未识别到 owner，请先向机器人发一条私信以完成身份识别'
+      : '尚未认领 owner，请 owner 先在群内发送 /owner_mention 认领';
   }
   if (group.owner_im_id !== senderImId) {
     return '只有 bot owner 才能修改白名单';
   }
 
   const toAdd = (mentions ?? [])
-    .map((m) => m.id?.open_id)
+    .map(mentionImId)
     .filter((id): id is string => !!id && id !== senderImId);
 
   if (toAdd.length === 0) {
@@ -5341,7 +5438,7 @@ function handleAllowCommand(
 function handleDisallowCommand(
   chatJid: string,
   senderImId?: string,
-  mentions?: Array<{ key?: string; name?: string; id?: { open_id?: string } }>,
+  mentions?: ChannelCommandMention[],
 ): string {
   if (!senderImId) return '无法识别发送者身份';
   const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
@@ -5355,7 +5452,7 @@ function handleDisallowCommand(
   }
 
   const toRemove = (mentions ?? [])
-    .map((m) => m.id?.open_id)
+    .map(mentionImId)
     .filter((id): id is string => !!id);
 
   if (toRemove.length === 0) {
@@ -5392,7 +5489,11 @@ function handleAllowlistCommand(chatJid: string): string {
     return '当前群组未启用白名单模式（所有人均可触发）';
   }
   if (allowlist.length === 0) {
-    return `白名单模式已启用，当前无人可触发。\nOwner: ${group.owner_im_id ?? '未识别（请先向机器人发一条私信）'}`;
+    const ownerHint =
+      getChannelType(chatJid) === 'feishu'
+        ? '未识别（请先向机器人发一条私信）'
+        : '未认领（请在群内发送 /owner_mention）';
+    return `白名单模式已启用，当前无人可触发。\nOwner: ${group.owner_im_id ?? ownerHint}`;
   }
 
   const ownerMark = (id: string) =>
@@ -21528,6 +21629,48 @@ function buildResolveEffectiveChatJid() {
 }
 
 /**
+ * The same routing, read-only: the target a chat or native topic already
+ * has. A topic container not yet mapped to threads, or a topic without a
+ * Session, has none, and nothing is created or upgraded to find out.
+ * Runtime controls (/break, /steer) resolve their target with it.
+ */
+function buildLookupEffectiveChatJid() {
+  return createChannelInboundRouter({
+    ...channelInboundRoutingDeps(),
+    ensureNativeContextChannelMount: (_chatJid, group) =>
+      group.binding_mode === 'thread_map' ? group : null,
+    resolveOrCreateNativeThreadAgent: findNativeThreadAgent,
+  });
+}
+
+/** The existing Session of a native topic, or null. */
+function findNativeThreadAgent(
+  chatJid: string,
+  workspaceJid: string,
+  _workspace: RegisteredGroup,
+  _group: RegisteredGroup,
+  nativeContext: NativeThreadContext,
+): { effectiveJid: string; agentId: string; sourceJid: string } | null {
+  const binding = getImContextBinding(
+    chatJid,
+    'thread',
+    nativeContext.contextId,
+  );
+  const agent =
+    binding?.agent_id != null ? getAgent(binding.agent_id) : undefined;
+  if (!binding || !agent || agent.chat_jid !== workspaceJid) return null;
+  return {
+    effectiveJid: `${workspaceJid}#agent:${binding.agent_id}`,
+    agentId: binding.agent_id,
+    sourceJid: buildNativeThreadRouteJid(
+      chatJid,
+      nativeContext.contextId,
+      nativeContext.rootMessageId,
+    ),
+  };
+}
+
+/**
  * Build callback that triggers processAgentConversation when an IM message is routed to an agent.
  */
 function buildOnAgentMessage(): (baseChatJid: string, agentId: string) => void {
@@ -21762,21 +21905,11 @@ function isSenderAllowedInGroup(
 
   // The explicit response audience is evaluated for p2p, ordinary groups and
   // every topic message. It is deliberately independent from mention policy.
-  if (effectiveAudienceMode(group) === 'owner_only') {
-    return isSenderAllowedByAudience(group, senderImId);
-  }
-
-  // v58 Feishu uses the explicit two-state audience policy as the source of
-  // truth. Legacy allowlists are retained only for migration/audit and for
-  // other connectors that still expose multi-member allowlists.
-  if (getChannelType(conversationJid) === 'feishu') return true;
-
-  // Keep the legacy multi-member allowlist as an additional restriction for
-  // existing installations. New UI only exposes everyone/owner-only.
-  const allowlist = group.sender_allowlist;
-  if (allowlist === undefined || allowlist === null) return true;
-  if (!senderImId) return false;
-  return allowlist.includes(senderImId);
+  return isSenderAdmittedByGroupPolicy(
+    group,
+    senderImId,
+    getChannelType(conversationJid),
+  );
 }
 
 function handleIncomingFollowUp(input: {
@@ -21833,38 +21966,59 @@ function handleIncomingFollowUp(input: {
   };
 }
 
-async function handleFollowUpCardAction(input: {
-  sourceJid: string;
-  targetJid: string;
-  messageId: string;
-  action: import('./types.js').FollowUpAction;
-  expectedRunId: string;
-  operatorImId: string;
-}): Promise<FollowUpActionResult> {
-  const item = getQueuedFollowUp(input.targetJid, input.messageId);
-  if (!item) return { ok: false, message: '这条排队消息已被处理或取消。' };
-  if (
-    !input.operatorImId ||
-    item.sender !== input.operatorImId ||
-    !isSenderAllowedInGroup(input.sourceJid, input.operatorImId)
-  ) {
-    return { ok: false, message: '只有这条消息的发送者可以操作它。' };
+/** Serialization key of a queue JID: one per Session of a workspace folder. */
+function queueSerializationKey(groupJid: string): string {
+  // Agent virtual JIDs: {chatJid}#agent:{agentId} → separate serialization key
+  const agentSep = groupJid.indexOf('#agent:');
+  if (agentSep >= 0) {
+    const baseJid = groupJid.slice(0, agentSep);
+    const agentId = groupJid.slice(agentSep + 7);
+    const group = registeredGroups[baseJid];
+    const folder = group?.folder || baseJid;
+    return `${folder}#${agentId}`;
   }
-  if (input.action === 'cancel') {
-    return cancelFollowUp(input.targetJid, input.messageId);
+  // Task virtual JIDs: {chatJid}#task:{taskId} → separate serialization key
+  const taskSep = groupJid.indexOf('#task:');
+  if (taskSep >= 0) {
+    const baseJid = groupJid.slice(0, taskSep);
+    const taskId = groupJid.slice(taskSep + 6);
+    const group = registeredGroups[baseJid];
+    return `${group?.folder || baseJid}#task:${taskId}`;
   }
-  if (input.action === 'steer') {
-    return promoteFollowUp(
-      input.targetJid,
-      input.messageId,
-      input.expectedRunId,
-    );
+  const group = registeredGroups[groupJid];
+  return group?.folder || groupJid;
+}
+
+/**
+ * The queue JID of the Session a card answers for. The card is keyed by its
+ * reply route (topic and root included) and the chat's own folder is not the
+ * bound workspace's, so resolve the Session as `/break` does: an `#agent:`
+ * route names its Session, any other route answers for the chat's bound main
+ * Session. Null when that Session is gone.
+ */
+function cardSessionJid(
+  cardJid: string,
+  conversationJid: string,
+): string | null {
+  const agentSep = cardJid.indexOf('#agent:');
+  if (agentSep >= 0) {
+    const agentId = cardJid.slice(agentSep + 7);
+    const agent = getAgent(agentId);
+    return agent?.chat_jid ? `${agent.chat_jid}#agent:${agentId}` : null;
   }
-  return interruptAndRunFollowUp(
-    input.targetJid,
-    input.messageId,
-    input.expectedRunId,
+  const lookup = (jid: string) =>
+    registeredGroups[jid] ?? getRegisteredGroup(jid);
+  const group = lookup(conversationJid);
+  if (!group) return null;
+  const target = resolveBoundChatTarget(
+    conversationJid,
+    group,
+    lookup,
+    getAgent,
+    findGroupNameByFolder,
+    resolveWorkspaceJid,
   );
+  return target && target.agentId === null ? target.targetChatJid : null;
 }
 
 /**
@@ -21885,7 +22039,8 @@ function handleCardInterrupt(
   ) {
     return { ok: false, message: '你没有中断这个会话的权限。' };
   }
-  const interrupted = queue.interruptQuery(chatJid);
+  const sessionJid = cardSessionJid(chatJid, sourceChatJid);
+  const interrupted = sessionJid ? queue.interruptQuery(sessionJid) : false;
   if (!interrupted) {
     return { ok: false, message: '当前回复已经结束，无需中断。' };
   }
@@ -22454,7 +22609,7 @@ async function discardWithdrawnTurnCardsAfterConnect(
 }
 
 /**
- * Feishu `/break` is a session cutoff, not a message for the Agent. Cancel
+ * `/break` (every IM channel) is a session cutoff, not a message for the Agent. Cancel
  * everything that was already durably queued, then interrupt the exact active
  * query. Messages admitted after this synchronous cutoff remain runnable.
  */
@@ -22744,10 +22899,19 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
     scopeIncomingJids: !account.is_legacy_default,
     ignoreMessagesBefore: Date.now(),
     onMessagePersisted: broadcastNewMessage,
+    // Every connector offers its inputs to the durable follow-up queue and
+    // parses `/steer` and `/break` (CLAUDE.md §4, §6.4).
+    onFollowUpMessage: handleIncomingFollowUp,
     onFollowUpsChanged: broadcastFollowUpUpdate,
+    onSessionBreak: handleSessionBreak,
+    // Group response audience; Feishu replaces the gate with its own owner
+    // discovery, and 1:1-only WeChat never consults it.
+    isSenderAllowedInGroup,
+    resolveRegisteredGroup: getRegisteredGroup,
     onCommand: handleCommand,
     resolveGroupFolder: (jid: string) => resolveEffectiveFolder(jid),
     resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
+    lookupEffectiveChatJid: buildLookupEffectiveChatJid(),
     onAgentMessage: buildOnAgentMessage(),
     onNativeContextDetected: buildOnNativeContextDetected(),
     onBotRemovedFromGroup: buildOnBotRemovedFromGroup(),
@@ -22761,6 +22925,7 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
         {
           appId: secret.appId || '',
           appSecret: secret.appSecret || '',
+          domain: normalizeFeishuBrand(secret.domain),
           enabled: true,
         },
         onNewChat,
@@ -22778,13 +22943,21 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
               sender,
               () => secret.ownerOpenId || undefined,
             ),
-          onFollowUpMessage: handleIncomingFollowUp,
-          onSessionBreak: handleSessionBreak,
           onSessionClear: handleFeishuSessionClear,
           onSessionFresh: handleFeishuSessionFresh,
           onMessageRecalled: handleChannelMessageRecalled,
-          onFollowUpCardAction: handleFollowUpCardAction,
           onCardInterrupt: handleCardInterrupt,
+          // The same mutable secret onP2pSender fills on the first DM claim.
+          getOwnerOpenId: () => secret.ownerOpenId || undefined,
+          onTransportIssue: (issue) => {
+            const latest = applyFeishuTransportIssue(account.id, issue);
+            if (!latest) return;
+            broadcastChannelAccountStatus(account.owner_user_id, account.id, {
+              transportStatus: latest.transport_status,
+              lastError: latest.last_error,
+              connectedAt: latest.connected_at,
+            });
+          },
           onP2pSender: (senderOpenId: string) => {
             // First valid DM claims this bot. Never let a later arbitrary DM
             // replace the account owner.
@@ -22815,6 +22988,7 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
           botToken: secret.botToken || '',
           proxyUrl: secret.proxyUrl,
           enabled: true,
+          streamingMode: secret.streamingMode === 'off' ? 'off' : 'edit',
         },
         onNewChat,
         buildIsChatAuthorized(
@@ -22828,7 +23002,10 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
           workspace.jid,
           account.is_legacy_default,
         ),
-        { ...common, onBotAddedToGroup: onNewChat },
+        {
+          ...common,
+          onBotAddedToGroup: onNewChat,
+        },
       );
     } else if (account.provider === 'qq') {
       connected = await imManager.connectUserQQ(
@@ -22846,14 +23023,7 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
           workspace.jid,
           account.is_legacy_default,
         ),
-        // Not added to `common`: the remaining channels do not forward the
-        // callback to their connector, so enabling it there would only look
-        // like queue support without providing it.
-        {
-          ...common,
-          onFollowUpMessage: handleIncomingFollowUp,
-          onSessionBreak: handleSessionBreak,
-        },
+        common,
       );
     } else if (account.provider === 'wechat') {
       const bypassProxy = secret.bypassProxy !== 'false';
@@ -22979,8 +23149,6 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
           ),
           shouldProcessGroupMessage,
           isGroupOwnerMessage,
-          isSenderAllowedInGroup,
-          resolveRegisteredGroup: getRegisteredGroup,
           onConnectionStateChange: (state) => {
             if (state.status === 'connected') {
               updateChannelAccountAuthStatus(account.id, 'authorized');
@@ -23034,7 +23202,6 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
           onBotAddedToGroup: onNewChat,
           shouldProcessGroupMessage,
           isGroupOwnerMessage,
-          resolveRegisteredGroup: getRegisteredGroup,
         },
       );
     } else if (account.provider === 'discord') {
@@ -23188,6 +23355,10 @@ function syncLegacyConfigToDefaultChannelAccount(
             appId: value.appId,
             appSecret: value.appSecret,
             ownerOpenId: value.ownerOpenId,
+            domain:
+              value.domain === undefined
+                ? undefined
+                : normalizeFeishuBrand(value.domain),
           },
         })
       : null;
@@ -24073,27 +24244,7 @@ async function main(): Promise<void> {
     const { effectiveGroup } = resolveEffectiveGroup(group);
     return effectiveGroup.executionMode === 'host';
   });
-  queue.setSerializationKeyResolver((groupJid: string) => {
-    // Agent virtual JIDs: {chatJid}#agent:{agentId} → separate serialization key
-    const agentSep = groupJid.indexOf('#agent:');
-    if (agentSep >= 0) {
-      const baseJid = groupJid.slice(0, agentSep);
-      const agentId = groupJid.slice(agentSep + 7);
-      const group = registeredGroups[baseJid];
-      const folder = group?.folder || baseJid;
-      return `${folder}#${agentId}`;
-    }
-    // Task virtual JIDs: {chatJid}#task:{taskId} → separate serialization key
-    const taskSep = groupJid.indexOf('#task:');
-    if (taskSep >= 0) {
-      const baseJid = groupJid.slice(0, taskSep);
-      const taskId = groupJid.slice(taskSep + 6);
-      const group = registeredGroups[baseJid];
-      return `${group?.folder || baseJid}#task:${taskId}`;
-    }
-    const group = registeredGroups[groupJid];
-    return group?.folder || groupJid;
-  });
+  queue.setSerializationKeyResolver(queueSerializationKey);
   queue.setOnMaxRetriesExceeded(
     async (groupJid: string, snapshot: MessageRetrySnapshot | null) => {
       try {

@@ -3735,6 +3735,21 @@ export function listQueuedFollowUps(chatJid: string): QueuedFollowUp[] {
   return rows.map(normalizeQueuedFollowUpRow);
 }
 
+/**
+ * Queued inputs that arrived from a channel chat, in queue order: the only
+ * ones whose sender can leave a group's response audience. A Web-only
+ * Session has none, so its queue drain does no per-input work.
+ */
+export function listQueuedChannelFollowUps(chatJid: string): QueuedFollowUp[] {
+  const rows = prepareCached(`${FOLLOW_UP_SELECT}
+       WHERE chat_jid = ? AND delivery_status IN ('queued', 'promoting')
+         AND source_jid IS NOT NULL AND source_jid NOT LIKE 'web:%'
+       ORDER BY delivery_priority ASC, ingest_sequence ASC`).all(
+    chatJid,
+  ) as Array<Record<string, unknown>>;
+  return rows.map(normalizeQueuedFollowUpRow);
+}
+
 export function getQueuedFollowUp(
   chatJid: string,
   messageId: string,
@@ -4070,6 +4085,41 @@ export function cancelQueuedFollowUp(
     'cancelled',
     { updatedAt },
   );
+}
+
+/**
+ * Withdraw a queued input together with the late forward root it durably
+ * covers. A user cancel refuses this pair because it counts as admitted, but
+ * an input whose sender left the response audience must not run, and must
+ * not leave its covered root hidden as `subsumed` either.
+ */
+export function withdrawQueuedFollowUp(
+  chatJid: string,
+  messageId: string,
+  updatedAt = new Date().toISOString(),
+): { item: QueuedFollowUp; coveredRoots: QueuedFollowUp[] } | null {
+  return db.transaction(() => {
+    const item = transitionFollowUp(
+      chatJid,
+      messageId,
+      ['queued', 'promoting'],
+      'cancelled',
+      { updatedAt },
+    );
+    if (!item) return null;
+    const coveredRoots = (
+      prepareCached(`${FOLLOW_UP_SELECT}
+         WHERE chat_jid = ? AND delivery_status = 'subsumed'
+           AND delivery_run_id = ?`).all(chatJid, messageId) as Array<
+        Record<string, unknown>
+      >
+    ).map(normalizeQueuedFollowUpRow);
+    prepareCached(`UPDATE messages
+       SET delivery_status = 'cancelled', delivery_updated_at = ?
+       WHERE chat_jid = ? AND delivery_status = 'subsumed'
+         AND delivery_run_id = ?`).run(updatedAt, chatJid, messageId);
+    return { item, coveredRoots };
+  })();
 }
 
 /**

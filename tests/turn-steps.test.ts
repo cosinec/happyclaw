@@ -4,7 +4,11 @@ import type {
   StreamEvent,
   StreamEventType,
 } from '../src/stream-event.types.js';
-import { MAX_STEPS, type StreamingStep } from '../src/stream-steps.js';
+import {
+  MAX_STEPS,
+  QUESTION_DEFERRED_MARK,
+  type StreamingStep,
+} from '../src/stream-steps.js';
 import { capTailByBytes } from '../src/stream-trace.js';
 import { THINKING_OMITTED_MARKER } from '../src/thinking-text.js';
 import {
@@ -1239,5 +1243,62 @@ describe('parseStoredSteps', () => {
         ]),
       ).map((s) => s.id),
     ).toEqual(['ok']);
+  });
+});
+
+describe('a question for the reader', () => {
+  const toolInput = {
+    questions: [
+      {
+        question: '周末去哪？',
+        header: '周末',
+        multiSelect: false,
+        options: [{ label: '爬山' }, { label: '看展' }],
+      },
+    ],
+  };
+  const turn: Array<[number, StreamEvent]> = [
+    [10, ev('tool_use_start', { toolUseId: 'q', toolName: 'AskUserQuestion' })],
+    [
+      20,
+      ev('tool_progress', {
+        toolUseId: 'q',
+        toolName: 'AskUserQuestion',
+        toolInput,
+      }),
+    ],
+    [
+      30,
+      ev('tool_result', {
+        toolUseId: 'q',
+        toolResult: `${QUESTION_DEFERRED_MARK} The answer is the next message.`,
+        toolIsError: true,
+      }),
+    ],
+  ];
+
+  test('is stored with its questions and read back with them', () => {
+    const steps = record(turn, 40);
+    expect(steps[0]).toMatchObject({
+      toolName: 'AskUserQuestion',
+      status: 'done',
+      questions: [{ question: '周末去哪？', options: ['爬山', '看展'] }],
+    });
+    const stored = parseStoredSteps(JSON.stringify(steps));
+    expect(stored[0].questions).toEqual(steps[0].questions);
+    // A stored row cannot attach questions to another tool.
+    const forged = parseStoredSteps(
+      JSON.stringify([{ ...steps[0], toolName: 'Bash' }]),
+    );
+    expect(forged[0].questions).toBeUndefined();
+  });
+
+  test('is not shown by a proactive Workspace, which never sends tool input', () => {
+    const steps = record(turn, 40);
+    const [shown] = viewSteps(steps, {
+      includeThinking: true,
+      proactive: true,
+    });
+    expect(shown.questions).toBeUndefined();
   });
 });

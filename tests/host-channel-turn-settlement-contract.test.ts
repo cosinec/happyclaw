@@ -83,6 +83,7 @@ describe('retry_wait is never left for a consumed input (prod P1-2)', () => {
     for (const name of [
       'channelTurnScopeForInput',
       'closeRetryWaitTurnsForWithdrawnInputs',
+      'settleCancelledFollowUp',
       'cancelFollowUp',
     ]) {
       harness.install(name);

@@ -39,6 +39,8 @@ import {
   openTextStep,
   openThinkingStep,
   progressToolStep,
+  QUESTION_TOOL_NAME,
+  readStepQuestions,
   setTaskStepStatus,
   startToolStep,
   type StepKind,
@@ -486,6 +488,7 @@ export class TurnStepRecorder {
           toolName: event.toolName || 'unknown',
           skillName: event.skillName,
           summary: event.toolInputSummary,
+          questions: readStepQuestions(event.toolInput),
         },
         now,
       );
@@ -541,6 +544,7 @@ export class TurnStepRecorder {
           toolName: event.toolName,
           skillName: event.skillName,
           summary: event.toolInputSummary,
+          questions: readStepQuestions(event.toolInput),
         },
         now,
       );
@@ -693,6 +697,12 @@ export function viewSteps(
         shown.resultFacts !== undefined
       ) {
         const { resultPreview: _preview, resultFacts: _facts, ...rest } = shown;
+        shown = rest;
+      }
+      // Nor the questions a call would put to the reader: its Web events
+      // never carry a tool's input.
+      if (shown.questions !== undefined) {
+        const { questions: _questions, ...rest } = shown;
         shown = rest;
       }
     }
@@ -880,6 +890,12 @@ function readStep(raw: unknown): StreamingStep | null {
   }
   const facts = readResultFacts(row.resultFacts);
   if (facts) step.resultFacts = facts;
+  // Stored questions are re-read with the same bounds as live input.
+  const questions =
+    step.toolName === QUESTION_TOOL_NAME
+      ? readStepQuestions({ questions: row.questions })
+      : undefined;
+  if (questions) step.questions = questions;
   return boundStep(step);
 }
 
