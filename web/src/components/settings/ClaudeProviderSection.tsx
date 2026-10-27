@@ -12,8 +12,15 @@ import type {
 } from './types';
 import { getErrorMessage } from './types';
 import { ProviderList } from './ProviderList';
-import { ProviderEditor } from './ProviderEditor';
+import { AddModelWizardDialog } from './AddModelWizard';
+import { ConnectionDetailDialog } from './ConnectionDetailDialog';
 import { BalancingSettings } from './BalancingSettings';
+import {
+  PROVIDERS_API,
+  errorCopy,
+  testConnection,
+  testOutcome,
+} from './model-connections';
 import { useVisibleInterval } from '../../hooks/useVisibleInterval';
 import { SettingsSection } from './SettingsLayout';
 
@@ -57,11 +64,13 @@ export function ClaudeProviderSection({
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [balancingSaving, setBalancingSaving] = useState(false);
+  const [testingId, setTestingId] = useState<string | null>(null);
 
-  // 编辑器状态
-  const [editorOpen, setEditorOpen] = useState(false);
-  const [editingProvider, setEditingProvider] =
-    useState<ProviderWithHealth | null>(null);
+  // 添加向导与连接详情；详情跟随列表刷新，按 id 取最新数据
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [managingId, setManagingId] = useState<string | null>(null);
+  const managing =
+    providers.find((provider) => provider.id === managingId) ?? null;
 
   // 确认对话框
   const [pendingDeleteProvider, setPendingDeleteProvider] =
@@ -215,10 +224,9 @@ export function ClaudeProviderSection({
           `/api/config/claude/providers/${provider.id}/duplicate`,
         );
         await loadProviders();
-        setNotice(`已复制模型配置「${provider.name}」，可直接修改模型后启用`);
-        // Same vendor, different model is the common case: open the copy.
-        setEditingProvider({ ...copy, health: null });
-        setEditorOpen(true);
+        setNotice(`已复制模型配置「${provider.name}」，可直接修改后启用`);
+        // Same vendor, different settings is the common case: open the copy.
+        setManagingId(copy.id);
       } catch (err) {
         setError(getErrorMessage(err, '复制模型配置失败'));
       }
@@ -268,22 +276,46 @@ export function ClaudeProviderSection({
     [loadProviders, setNotice, setError],
   );
 
-  // ─── 编辑器回调 ───────────────────────────────────────────────
-  const handleEditorSave = useCallback(() => {
-    setEditorOpen(false);
-    setEditingProvider(null);
-    loadProviders();
-  }, [loadProviders]);
+  // ─── 测试连接（服务端记录 lastTest）────────────────────────────
+  const handleTest = useCallback(
+    async (provider: ProviderWithHealth) => {
+      setTestingId(provider.id);
+      try {
+        const outcome = testOutcome(
+          await testConnection({ providerId: provider.id }),
+        );
+        if (outcome.ok) {
+          setNotice(`「${provider.name}」连接成功`);
+        } else {
+          const copy = errorCopy(outcome.code);
+          setError(`「${provider.name}」${copy.title}：${copy.hint}`);
+        }
+      } catch (err) {
+        setError(getErrorMessage(err, '测试连接失败'));
+      } finally {
+        setTestingId(null);
+        await loadProviders().catch(() => {});
+      }
+    },
+    [loadProviders, setNotice, setError],
+  );
 
-  const handleEditorCancel = useCallback(() => {
-    setEditorOpen(false);
-    setEditingProvider(null);
-  }, []);
+  // ─── 加权轮询的权重 ───────────────────────────────────────────
+  const handleWeightChange = useCallback(
+    async (providerId: string, weight: number) => {
+      try {
+        await api.patch(`${PROVIDERS_API}/${providerId}`, { weight }, 120_000);
+        await loadProviders();
+        setNotice('权重已更新');
+      } catch (err) {
+        await loadProviders().catch(() => {});
+        setError(getErrorMessage(err, '更新权重失败'));
+      }
+    },
+    [loadProviders, setNotice, setError],
+  );
 
-  const handleAdd = useCallback(() => {
-    setEditingProvider(null);
-    setEditorOpen(true);
-  }, []);
+  const handleAdd = useCallback(() => setWizardOpen(true), []);
 
   const busy =
     loading || togglingId !== null || deletingId !== null || balancingSaving;
@@ -300,13 +332,13 @@ export function ClaudeProviderSection({
     <div className="space-y-6">
       {/* 提供商列表 */}
       <SettingsSection
-        title="模型配置列表"
-        description={`${providers.length} 个模型配置`}
+        title="模型连接"
+        description={`${providers.length} 个连接；每个连接可以提供多个模型，聊天和智能体按「连接 · 模型」选择。`}
         actions={
           providers.length > 0 && (
             <Button onClick={handleAdd} disabled={busy}>
               <Plus />
-              添加模型配置
+              添加模型连接
             </Button>
           )
         }
@@ -314,10 +346,9 @@ export function ClaudeProviderSection({
         <ProviderList
           providers={providers}
           defaultModelConfigId={defaultModelConfigId}
-          onEdit={(p) => {
-            setEditingProvider(p);
-            setEditorOpen(true);
-          }}
+          onManage={(p) => setManagingId(p.id)}
+          onTest={(p) => void handleTest(p)}
+          testingId={testingId}
           onDelete={(p) => setPendingDeleteProvider(p)}
           onToggle={handleToggle}
           onSetDefault={handleSetDefault}
@@ -335,18 +366,38 @@ export function ClaudeProviderSection({
             balancing={balancing}
             hasDefault={defaultModelConfigId !== null}
             onChange={handleBalancingChange}
+            pool={providers.filter((provider) => provider.enabled)}
+            onWeightChange={(id, weight) => void handleWeightChange(id, weight)}
             disabled={busy}
             saving={balancingSaving}
           />
         )}
       </SettingsSection>
 
-      {/* 编辑器弹窗 */}
-      <ProviderEditor
-        open={editorOpen}
-        provider={editingProvider}
-        onSave={handleEditorSave}
-        onCancel={handleEditorCancel}
+      <AddModelWizardDialog
+        open={wizardOpen}
+        enabledCount={enabledCount}
+        onClose={({ saved, verified, created }) => {
+          setWizardOpen(false);
+          if (saved) {
+            setNotice(
+              verified
+                ? `已添加模型连接「${saved.name}」`
+                : `已添加模型连接「${saved.name}」，尚未验证`,
+            );
+          } else if (created) {
+            setNotice(
+              `已创建模型连接「${created.name}」，可以在列表里继续配置`,
+            );
+          }
+          if (saved || created) void loadProviders();
+        }}
+      />
+
+      <ConnectionDetailDialog
+        provider={managing}
+        onClose={() => setManagingId(null)}
+        onChanged={() => void loadProviders()}
         setNotice={setNotice}
         setError={setError}
       />

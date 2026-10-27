@@ -1,4 +1,8 @@
-import { buildDefaultProviderEnv, parseProviderModel } from './provider-model';
+import {
+  splitOneMillionSuffix,
+  withOneMillionSuffix,
+} from '@/lib/model-providers';
+import { buildDefaultProviderEnv } from './provider-model';
 
 export type ProviderAuthMode = 'bearer' | 'x-api-key';
 
@@ -274,9 +278,9 @@ export function parseProviderEnvImport(input: string): ProviderEnvImport {
 
   const modelValue = env.get('ANTHROPIC_MODEL') ?? collected.commandModel;
   if (modelValue) {
-    const selection = parseProviderModel(modelValue);
+    const selection = splitOneMillionSuffix(modelValue);
     result.model = selection.model;
-    result.oneMillionContext = selection.oneMillionContext;
+    result.oneMillionContext = selection.oneMillion;
   }
   if (!env.has('ANTHROPIC_DEFAULT_HAIKU_MODEL')) {
     const smallFast = env.get('ANTHROPIC_SMALL_FAST_MODEL');
@@ -284,9 +288,9 @@ export function parseProviderEnvImport(input: string): ProviderEnvImport {
   }
 
   const defaults = new Map(
-    buildDefaultProviderEnv(result.model ?? '', result.oneMillionContext).map(
-      (row) => [row.key, row.value],
-    ),
+    buildDefaultProviderEnv(
+      withOneMillionSuffix(result.model ?? '', result.oneMillionContext),
+    ).map((row) => [row.key, row.value]),
   );
 
   for (const [key, value] of env) {

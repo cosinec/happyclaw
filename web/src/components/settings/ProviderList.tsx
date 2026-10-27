@@ -4,27 +4,35 @@ import {
   Loader2,
   MessageSquareText,
   MoreHorizontal,
-  Pencil,
+  PlugZap,
   Plus,
   RotateCcw,
   Server,
+  Settings2,
   ShieldCheck,
   Star,
   Trash2,
 } from 'lucide-react';
 
-import { Badge, type BadgeDot } from '@/components/ui/badge';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Switch } from '@/components/ui/switch';
 import { IconButton } from '@/components/common/IconButton';
 import { ListGroup, ListRow } from '@/components/common/ListRow';
+import { effectiveProviderModels } from '@/lib/model-providers';
 import { cn } from '@/lib/utils';
+import {
+  connectionKind,
+  connectionKindLabel,
+  connectionStatus,
+} from './model-connections';
 import type { ProviderWithHealth, ProviderHealthStatus } from './types';
 import { UsageBars } from './UsageBars';
 
@@ -32,7 +40,9 @@ interface ProviderListProps {
   providers: ProviderWithHealth[];
   /** The configuration unselected conversations run on; null = automatic pool. */
   defaultModelConfigId: string | null;
-  onEdit: (provider: ProviderWithHealth) => void;
+  /** Open the connection's detail: models, test, settings. */
+  onManage: (provider: ProviderWithHealth) => void;
+  onTest: (provider: ProviderWithHealth) => void;
   onDelete: (provider: ProviderWithHealth) => void;
   onToggle: (provider: ProviderWithHealth) => void;
   /** Make the provider the default, or clear it when it already is. */
@@ -42,10 +52,11 @@ interface ProviderListProps {
   onAdd: () => void;
   togglingId: string | null;
   deletingId: string | null;
+  testingId?: string | null;
   disabled: boolean;
 }
 
-/** 健康指示灯颜色 */
+/** 健康指示灯颜色：运行时健康，与连接测试结果是两回事 */
 function healthDotClass(
   health: ProviderHealthStatus | null,
   enabled: boolean,
@@ -57,10 +68,11 @@ function healthDotClass(
 
 /** 类型图标 + 健康指示灯 */
 function ProviderMedia({ provider }: { provider: ProviderWithHealth }) {
+  const kind = connectionKind(provider);
   const Icon =
-    provider.type === 'official'
+    kind === 'claude_subscription' || kind === 'anthropic_api'
       ? ShieldCheck
-      : provider.hasCodexOAuthCredentials
+      : kind === 'chatgpt'
         ? MessageSquareText
         : Server;
   return (
@@ -77,92 +89,35 @@ function ProviderMedia({ provider }: { provider: ProviderWithHealth }) {
   );
 }
 
-/** 格式化 OAuth 过期时间 */
-function formatOAuthExpiry(expiresAt: number | null): string | null {
-  if (expiresAt == null) return null;
-  if (expiresAt <= Date.now()) return '已过期';
+function hasCredential(provider: ProviderWithHealth): boolean {
   return (
-    '过期时间: ' +
-    new Date(expiresAt).toLocaleString('zh-CN', {
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false,
-    })
+    provider.hasClaudeOAuthCredentials ||
+    provider.hasCodexOAuthCredentials ||
+    provider.hasClaudeCodeOauthToken ||
+    provider.hasAnthropicApiKey ||
+    provider.hasAnthropicAuthToken
   );
 }
 
-/** 凭据标签：显示认证方式 + OAuth 过期时间 */
-function CredentialBadges({ provider }: { provider: ProviderWithHealth }) {
-  const badges: { label: string; dot: BadgeDot; detail?: string }[] = [];
-
-  if (provider.hasClaudeOAuthCredentials) {
-    const expiry = formatOAuthExpiry(provider.claudeOAuthCredentialsExpiresAt);
-    // Host-side renewal keeps the access token fresh, so an elapsed expiry
-    // alone is not a failure; a refused renewal is.
-    badges.push({
-      label: provider.claudeOAuthNeedsReLogin
-        ? 'OAuth · 需重新登录'
-        : provider.claudeOAuthSubscriptionType
-          ? `Claude ${provider.claudeOAuthSubscriptionType}`
-          : 'OAuth',
-      dot: provider.claudeOAuthNeedsReLogin ? 'error' : 'success',
-      detail:
-        provider.claudeOAuthAccountEmail ??
-        (provider.claudeOAuthNeedsReLogin ? undefined : (expiry ?? undefined)),
-    });
+/** Where the connection's models come from, in one short line. */
+function sourceText(provider: ProviderWithHealth): string | null {
+  const kind = connectionKind(provider);
+  if (kind === 'chatgpt') {
+    return (
+      provider.codexOAuthCredentialsEmail ?? 'ChatGPT 订阅网关（服务内嵌）'
+    );
   }
-  if (provider.hasCodexOAuthCredentials) {
-    // The gateway refreshes an elapsed access token on demand; only a refused
-    // refresh needs the user.
-    const expiry = formatOAuthExpiry(provider.codexOAuthCredentialsExpiresAt);
-    badges.push({
-      label: provider.codexOAuthNeedsReauth
-        ? 'ChatGPT · 需重新登录'
-        : provider.codexOAuthCredentialsPlanType
-          ? `ChatGPT ${provider.codexOAuthCredentialsPlanType}`
-          : 'ChatGPT',
-      dot: provider.codexOAuthNeedsReauth ? 'error' : 'success',
-      detail: provider.codexOAuthCredentialsEmail ?? expiry ?? undefined,
-    });
+  if (kind === 'claude_subscription') {
+    return provider.claudeOAuthAccountEmail ?? null;
   }
-  if (provider.hasClaudeCodeOauthToken) {
-    badges.push({ label: 'Setup Token', dot: 'muted' });
-  }
-  if (provider.hasAnthropicApiKey) {
-    badges.push({ label: 'API Key', dot: 'muted' });
-  }
-  if (provider.hasAnthropicAuthToken) {
-    badges.push({ label: 'Auth Token', dot: 'muted' });
-  }
-
-  if (badges.length === 0) {
-    return <span className="text-warning">未配置凭据</span>;
-  }
-
-  return (
-    <>
-      {badges.map((b) => (
-        <span key={b.label} className="inline-flex items-center gap-1">
-          <Badge variant="outline" dot={b.dot}>
-            {b.label}
-          </Badge>
-          {b.detail && (
-            <span className="text-micro text-faint-foreground">{b.detail}</span>
-          )}
-        </span>
-      ))}
-    </>
-  );
+  return kind === 'anthropic_api' ? null : provider.anthropicBaseUrl || null;
 }
 
 export function ProviderList({
   providers,
   defaultModelConfigId,
-  onEdit,
+  onManage,
+  onTest,
   onDelete,
   onToggle,
   onSetDefault,
@@ -171,17 +126,19 @@ export function ProviderList({
   onAdd,
   togglingId,
   deletingId,
+  testingId = null,
   disabled,
 }: ProviderListProps) {
   if (providers.length === 0) {
     return (
       <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-surface-border px-6 py-10 text-center">
         <p className="text-body text-muted-foreground">
-          暂无模型配置，请点击下方按钮添加。
+          还没有模型连接。添加一个 Claude / ChatGPT 订阅、API Key
+          或兼容地址即可开始对话。
         </p>
         <Button onClick={onAdd} disabled={disabled}>
           <Plus />
-          添加模型配置
+          添加模型连接
         </Button>
       </div>
     );
@@ -192,12 +149,17 @@ export function ProviderList({
       {providers.map((provider) => {
         const toggling = togglingId === provider.id;
         const deleting = deletingId === provider.id;
+        const testing = testingId === provider.id;
         const rowDisabled = disabled || toggling || deleting;
         const health = provider.health;
-        const canDuplicate =
-          provider.type === 'third_party' && !provider.hasCodexOAuthCredentials;
+        const kind = connectionKind(provider);
+        const canDuplicate = kind === 'preset' || kind === 'custom';
         const canResetHealth = !!health && !health.healthy && provider.enabled;
         const isDefault = provider.id === defaultModelConfigId;
+        const status = connectionStatus(provider);
+        const modelCount =
+          kind === 'chatgpt' ? 0 : effectiveProviderModels(provider).length;
+        const source = sourceText(provider);
         const defaultTitle = isDefault
           ? '取消默认：未手动选择模型的对话恢复为在已启用配置间自动轮换'
           : provider.enabled
@@ -208,6 +170,8 @@ export function ProviderList({
           <div key={provider.id} className="min-w-0">
             <ListRow
               media={<ProviderMedia provider={provider} />}
+              onClick={() => onManage(provider)}
+              aria-label={`管理「${provider.name}」`}
               title={
                 <span
                   className={cn(!provider.enabled && 'text-muted-foreground')}
@@ -217,12 +181,8 @@ export function ProviderList({
               }
               badges={
                 <>
-                  <Badge variant="neutral">
-                    {provider.type === 'official'
-                      ? '官方'
-                      : provider.hasCodexOAuthCredentials
-                        ? 'ChatGPT 订阅'
-                        : '第三方'}
+                  <Badge variant="neutral" className="max-sm:hidden">
+                    {connectionKindLabel(provider)}
                   </Badge>
                   {isDefault && <Badge variant="info">默认</Badge>}
                   {health && provider.enabled && !health.healthy && (
@@ -232,23 +192,28 @@ export function ProviderList({
               }
               description={
                 <span className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
-                  {provider.hasCodexOAuthCredentials ? (
-                    <span>ChatGPT 订阅网关（服务内嵌）</span>
-                  ) : (
-                    provider.type === 'third_party' &&
-                    provider.anthropicBaseUrl && (
-                      <span
-                        className="max-w-60 truncate font-mono"
-                        title={provider.anthropicBaseUrl}
-                      >
-                        {provider.anthropicBaseUrl}
-                      </span>
-                    )
+                  <Badge
+                    variant="outline"
+                    dot={status.tone}
+                    title={status.hint}
+                  >
+                    {testing ? '测试中…' : status.label}
+                  </Badge>
+                  {source && (
+                    <span
+                      className="max-w-60 truncate font-mono"
+                      title={source}
+                    >
+                      {source}
+                    </span>
                   )}
                   {provider.anthropicModel && (
                     <span className="font-mono">{provider.anthropicModel}</span>
                   )}
-                  <CredentialBadges provider={provider} />
+                  {modelCount > 1 && <span>{modelCount} 个模型</span>}
+                  {!hasCredential(provider) && (
+                    <span className="text-warning">未配置凭据</span>
+                  )}
                   {health &&
                     provider.enabled &&
                     health.consecutiveErrors > 0 && (
@@ -297,20 +262,13 @@ export function ProviderList({
                     title={
                       isDefault
                         ? '默认模型不能禁用，请先取消默认或改选其他默认模型'
-                        : undefined
+                        : '是否加入自动池'
                     }
                     onCheckedChange={() => onToggle(provider)}
                     aria-label={
                       provider.enabled ? '禁用模型配置' : '启用模型配置'
                     }
                     className="mx-1.5"
-                  />
-                  <IconButton
-                    label="编辑"
-                    icon={<Pencil />}
-                    onClick={() => onEdit(provider)}
-                    disabled={rowDisabled}
-                    className="max-sm:hidden"
                   />
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
@@ -321,7 +279,7 @@ export function ProviderList({
                         aria-label="更多操作"
                         disabled={rowDisabled}
                       >
-                        {deleting ? (
+                        {deleting || testing ? (
                           <Loader2 className="animate-spin" />
                         ) : (
                           <MoreHorizontal />
@@ -329,14 +287,18 @@ export function ProviderList({
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end" className="w-36">
-                      {/* 窄屏把行内按钮收进菜单，给名称留出空间 */}
-                      <DropdownMenuItem
-                        className="sm:hidden"
-                        onSelect={() => onEdit(provider)}
-                      >
-                        <Pencil />
-                        编辑
+                      <DropdownMenuItem onSelect={() => onManage(provider)}>
+                        <Settings2 />
+                        管理
                       </DropdownMenuItem>
+                      <DropdownMenuItem
+                        disabled={testing}
+                        onSelect={() => onTest(provider)}
+                      >
+                        <PlugZap />
+                        测试连接
+                      </DropdownMenuItem>
+                      {/* 窄屏把行内按钮收进菜单，给名称留出空间 */}
                       <DropdownMenuItem
                         className="sm:hidden"
                         onSelect={() => onSetDefault(provider)}
@@ -362,6 +324,7 @@ export function ProviderList({
                           复制
                         </DropdownMenuItem>
                       )}
+                      <DropdownMenuSeparator />
                       <DropdownMenuItem
                         variant="destructive"
                         onSelect={() => onDelete(provider)}

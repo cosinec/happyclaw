@@ -4,8 +4,14 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
-import { ProviderList } from './ProviderList';
 import type { ProviderWithHealth } from './types';
+
+// Subscription rows load their usage; keep that off the network.
+vi.mock('../../api/client', () => ({
+  api: { get: () => new Promise(() => {}) },
+}));
+
+const { ProviderList } = await import('./ProviderList');
 
 (
   globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
@@ -45,6 +51,9 @@ function provider(
     hasClaudeCodeOauthToken: false,
     hasClaudeOAuthCredentials: false,
     hasCodexOAuthCredentials: false,
+    models: [],
+    presetId: null,
+    lastTest: null,
     health: null,
     ...overrides,
   } as ProviderWithHealth;
@@ -60,7 +69,8 @@ async function render(
       <ProviderList
         providers={providers}
         defaultModelConfigId={defaultModelConfigId}
-        onEdit={vi.fn()}
+        onManage={vi.fn()}
+        onTest={vi.fn()}
         onDelete={vi.fn()}
         onToggle={vi.fn()}
         onSetDefault={onSetDefault}
@@ -141,5 +151,89 @@ describe('ProviderList default model', () => {
 
     expect(defaultButtons()[1].getAttribute('title')).toContain('同时启用');
     expect(defaultButtons()[0].getAttribute('title')).not.toContain('同时启用');
+  });
+});
+
+describe('ProviderList connection status', () => {
+  test('shows the last test, not the presence of a key', async () => {
+    await render(
+      [
+        provider('saved'),
+        provider('passed', {
+          lastTest: {
+            ok: true,
+            code: null,
+            status: 200,
+            model: 'm',
+            latencyMs: 90,
+            at: new Date(Date.now() - 5 * 60_000).toISOString(),
+          },
+        }),
+        provider('refused', {
+          lastTest: {
+            ok: false,
+            code: 'AUTH_INVALID',
+            status: 401,
+            model: 'm',
+            latencyMs: 40,
+            at: new Date().toISOString(),
+          },
+        }),
+        provider('expired', {
+          type: 'official',
+          hasClaudeOAuthCredentials: true,
+          claudeOAuthNeedsReLogin: true,
+          lastTest: {
+            ok: true,
+            code: null,
+            status: 200,
+            model: null,
+            latencyMs: 90,
+            at: new Date().toISOString(),
+          },
+        }),
+      ],
+      null,
+    );
+    const rows = [...document.querySelectorAll('[data-slot="list-row"]')].map(
+      (row) => row.textContent ?? '',
+    );
+    expect(rows[0]).toContain('未验证');
+    expect(rows[1]).toContain('已连接 · 5 分钟前');
+    expect(rows[2]).toContain('失败 · 密钥无效');
+    // A refused login outranks an older passed test.
+    expect(rows[3]).toContain('需重新登录');
+  });
+
+  test('clicking a row opens the connection', async () => {
+    const onManage = vi.fn();
+    const providers = [provider('a')];
+    await act(async () => {
+      root?.render(
+        <ProviderList
+          providers={providers}
+          defaultModelConfigId={null}
+          onManage={onManage}
+          onTest={vi.fn()}
+          onDelete={vi.fn()}
+          onToggle={vi.fn()}
+          onSetDefault={vi.fn()}
+          onResetHealth={vi.fn()}
+          onDuplicate={vi.fn()}
+          onAdd={vi.fn()}
+          togglingId={null}
+          deletingId={null}
+          disabled={false}
+        />,
+      );
+    });
+    await act(async () => {
+      (document.querySelector('[data-slot="list-row"]') as HTMLElement).click();
+    });
+    expect(onManage).toHaveBeenCalledWith(providers[0]);
+    // The row's own controls do not open it.
+    onManage.mockClear();
+    await act(async () => switches()[0].click());
+    expect(onManage).not.toHaveBeenCalled();
   });
 });

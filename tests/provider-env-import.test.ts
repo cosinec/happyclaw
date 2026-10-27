@@ -4,7 +4,7 @@ import {
   parseProviderEnvImport,
   splitShellWords,
 } from '../web/src/utils/provider-env-import.js';
-import { describeBaseUrlProblem } from '../web/src/utils/provider-presets.js';
+import { describeBaseUrlProblem } from '../web/src/lib/model-providers.js';
 
 const KIMI_ALIAS = `alias kcc="CLAUDE_CODE_NO_FLICKER=1 CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000 ANTHROPIC_BASE_URL=https://api.kimi.com/coding/ ANTHROPIC_AUTH_TOKEN=sk-kimi-fake API_TIMEOUT_MS=3000000 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 ANTHROPIC_MODEL=kimi-for-coding[1m] ANTHROPIC_DEFAULT_OPUS_MODEL=kimi-for-coding[1m] ANTHROPIC_DEFAULT_SONNET_MODEL=kimi-for-coding[1m] ANTHROPIC_DEFAULT_HAIKU_MODEL=kimi-for-coding[1m] CLAUDE_CODE_SUBAGENT_MODEL=kimi-for-coding[1m] CLAUDE_CODE_EFFORT_LEVEL=max claude --teammate-mode in-process --dangerously-skip-permissions"`;
 
