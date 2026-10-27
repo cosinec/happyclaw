@@ -95,6 +95,11 @@ export function parseCustomHeaders(
   return headers;
 }
 
+/** Custom header values can carry credentials of their own. */
+function customHeaderValues(raw: string | undefined): string[] {
+  return parseCustomHeaders(raw).map(([, value]) => value);
+}
+
 /** Same URL Claude Code builds: the SDK appends `/v1/messages` to the base. */
 export function buildMessagesUrl(baseUrl: string): string {
   return `${baseUrl.trim().replace(/\/+$/, '')}/v1/messages`;
@@ -103,7 +108,11 @@ export function buildMessagesUrl(baseUrl: string): string {
 export function redact(text: string, secrets: string[]): string {
   let out = text;
   for (const secret of secrets) {
-    if (secret.length >= 6) out = out.split(secret).join('***');
+    if (secret.length < 6) continue;
+    // A raw JSON body escapes `/` as `\/`.
+    for (const form of new Set([secret, secret.replace(/\//g, '\\/')])) {
+      out = out.split(form).join('***');
+    }
   }
   // Long opaque tokens that might be echoed back by a gateway.
   out = out.replace(/\b(sk|ak|key|tok)[-_][A-Za-z0-9_-]{12,}\b/gi, '***');
@@ -298,7 +307,11 @@ export async function probeProviderModel(
     },
     options,
   );
-  const probe = answerProbe(answer, [input.token], model);
+  const probe = answerProbe(
+    answer,
+    [input.token, ...customHeaderValues(input.customHeaders)],
+    model,
+  );
   return probe.ok
     ? probe
     : {
@@ -347,10 +360,7 @@ export function connectionTestResult(
   return {
     ...result,
     code,
-    // A header style the endpoint refused did not work.
-    ...(options.authMode && code !== 'AUTH_INVALID' && code !== 'AUTH_FORBIDDEN'
-      ? { authMode: options.authMode }
-      : {}),
+    ...(options.authMode ? { authMode: options.authMode } : {}),
     record: {
       ok: result.ok,
       code,
@@ -368,25 +378,55 @@ function refusedCredential(status: number | null | undefined): boolean {
 }
 
 /**
+ * Failures an endpoint reports only once it has accepted the credential:
+ * it then judged the model or the request itself.
+ */
+const AFTER_AUTH_CODES: ReadonlySet<ProviderErrorCode> = new Set([
+  'MODEL_NOT_FOUND',
+  'CONTEXT_TOO_LONG',
+  'WIRE_INCOMPATIBLE',
+]);
+
+/** Whether a probe proves the endpoint took the credential as sent. */
+function probeAcceptedCredential(
+  probe: ProviderConnectivityProbe | undefined,
+): boolean {
+  return !!probe && (probe.ok || AFTER_AUTH_CODES.has(probe.code!));
+}
+
+/**
  * Run `attempt` with `first`, and once more with the other header style when
- * the endpoint refused the credential and nobody chose a style. The second
- * answer counts only if it was not refused as well.
+ * the endpoint refused the credential and nobody chose a style. A style is
+ * reported only when its attempt proves the credential was accepted; a retry
+ * that times out, is throttled or fails otherwise proves nothing, so the
+ * first answer stands and no style is reported.
  */
 export async function withAuthModeFallback<T>(
   first: ProviderAuthMode,
   explicit: boolean,
   attempt: (mode: ProviderAuthMode) => Promise<T>,
-  refused: (result: T) => boolean,
-): Promise<{ result: T; authMode: ProviderAuthMode; bothRefused: boolean }> {
+  outcome: {
+    refused: (result: T) => boolean;
+    accepted: (result: T) => boolean;
+  },
+): Promise<{
+  result: T;
+  authMode: ProviderAuthMode | undefined;
+  bothRefused: boolean;
+}> {
   const result = await attempt(first);
-  if (explicit || !refused(result)) {
-    return { result, authMode: first, bothRefused: false };
+  if (explicit || !outcome.refused(result)) {
+    return {
+      result,
+      authMode: outcome.accepted(result) ? first : undefined,
+      bothRefused: false,
+    };
   }
   const other: ProviderAuthMode = first === 'bearer' ? 'x-api-key' : 'bearer';
   const retry = await attempt(other);
-  return refused(retry)
-    ? { result, authMode: first, bothRefused: true }
-    : { result: retry, authMode: other, bothRefused: false };
+  return outcome.accepted(retry)
+    ? { result: retry, authMode: other, bothRefused: false }
+    : { result, authMode: undefined, bothRefused: outcome.refused(retry) };
 }
 
 /** Third-party endpoint: the runner's own request, header style found by trial. */
@@ -403,7 +443,10 @@ export async function testThirdPartyConnection(
     input.authMode,
     explicitAuthMode,
     (mode) => run({ ...probeInput, authMode: mode }),
-    (outcome) => refusedCredential(outcome.probes[0]?.status),
+    {
+      refused: (outcome) => refusedCredential(outcome.probes[0]?.status),
+      accepted: (outcome) => probeAcceptedCredential(outcome.probes[0]),
+    },
   );
   if (bothRefused && result.probes[0]) {
     result.probes[0].hint =
@@ -477,8 +520,11 @@ export async function checkClaudeAccount(
     },
     options,
   );
+  // Only a refusal that names the missing scope says the token is fine; any
+  // other 403 (an organization that disallows OAuth, say) is a failure.
   const scopeOnly =
-    answer.status === 403 && /scope|permission/i.test(answer.bodyText);
+    answer.status === 403 &&
+    /\bscopes?\b|\buser:[a-z_:]+/i.test(upstreamMessage(answer.bodyText));
   return connectionTestResult(
     {
       ok: answer.ok || scopeOnly,
@@ -534,7 +580,10 @@ export async function discoverEndpointModels(
         },
         { ...options, maxBytes: MAX_MODEL_LIST_BYTES },
       ),
-    (outcome) => refusedCredential(outcome.status),
+    {
+      refused: (outcome) => refusedCredential(outcome.status),
+      accepted: (outcome) => outcome.ok,
+    },
   );
   let models: DiscoveredModel[] | null = null;
   if (answer.ok) {
@@ -553,7 +602,10 @@ export async function discoverEndpointModels(
       message: '返回的内容不是模型列表',
     };
   }
-  const probe = answerProbe(answer, [input.credential]);
+  const probe = answerProbe(answer, [
+    input.credential,
+    ...customHeaderValues(input.customHeaders),
+  ]);
   return {
     ok: false,
     code: answer.status === 404 ? 'ENDPOINT_NOT_FOUND' : probe.code!,
