@@ -615,7 +615,6 @@ import {
 } from './feishu-conversation-policy.js';
 import { isUnknownFeishuSenderAllowed } from './im-audience-policy.js';
 import { applyFeishuTransportIssue } from './channel-account-transport.js';
-import { syncLegacyFeishuDefaultAccount } from './legacy-default-account-sync.js';
 import {
   isSenderAdmittedByGroupPolicy,
   mentionImId,
@@ -23224,7 +23223,23 @@ function syncLegacyConfigToDefaultChannelAccount(
 ): ChannelAccount | null {
   if (channel === 'feishu') {
     const value = getUserFeishuConfig(userId);
-    return value ? syncLegacyFeishuDefaultAccount(userId, value) : null;
+    return value
+      ? syncDefaultChannelAccountCredentials({
+          ownerUserId: userId,
+          provider: channel,
+          name: '默认飞书',
+          enabled: value.enabled !== false,
+          secret: {
+            appId: value.appId,
+            appSecret: value.appSecret,
+            ownerOpenId: value.ownerOpenId,
+            domain:
+              value.domain === undefined
+                ? undefined
+                : normalizeFeishuBrand(value.domain),
+          },
+        })
+      : null;
   }
   if (channel === 'telegram') {
     const value = getUserTelegramConfig(userId);
