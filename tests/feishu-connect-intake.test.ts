@@ -252,7 +252,9 @@ function axios400(code: number, msg: string) {
 describe('Lark brand', () => {
   test('Lark accounts use the Lark SDK domain for OpenAPI and the long connection', async () => {
     await connect({}, { domain: 'lark' });
-    expect(controls.clientParams.at(-1)?.domain).toBe('https://open.larksuite.com');
+    expect(controls.clientParams.at(-1)?.domain).toBe(
+      'https://open.larksuite.com',
+    );
     expect(controls.wsParams.at(-1)?.domain).toBe('https://open.larksuite.com');
   });
 
