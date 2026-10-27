@@ -24,6 +24,7 @@ import {
 import {
   channelConversationJid,
   extractProviderTarget,
+  parseChannelAddress,
 } from './channel-address.js';
 import { resolveAdmittedChannelRoute } from './channel-admission.js';
 import {
@@ -48,7 +49,13 @@ import {
   PhysicalDeliveryTracker,
 } from './im-delivery-progress.js';
 import { DefinitiveChannelDeliveryError } from './channel-outbox-delivery.js';
-import type { ChannelMessageMeta, FollowUpMode, NewMessage } from './types.js';
+import type {
+  ChannelMessageMeta,
+  ChannelReferencedMessage,
+  ChannelTurnContext,
+  FollowUpMode,
+  NewMessage,
+} from './types.js';
 import {
   ExactAsyncIndicatorRegistry,
   processingIndicatorKey,
@@ -297,11 +304,143 @@ interface TelegramMessageLike {
   caption_entities?: TelegramEntityLike[];
   from?: { id: number; is_bot?: boolean };
   sender_chat?: unknown;
-  reply_to_message?: {
-    message_id?: number;
-    from?: { id: number; is_bot?: boolean };
-    sender_chat?: unknown;
-    forum_topic_created?: unknown;
+  reply_to_message?: TelegramRepliedMessage;
+}
+
+interface TelegramUserLike {
+  id: number;
+  is_bot?: boolean;
+  first_name?: string;
+  last_name?: string;
+  username?: string;
+}
+
+interface TelegramRepliedMessage {
+  message_id?: number;
+  from?: TelegramUserLike;
+  sender_chat?: unknown;
+  forum_topic_created?: unknown;
+  has_protected_content?: boolean;
+  text?: string;
+  caption?: string;
+  photo?: unknown[];
+  document?: { file_name?: string };
+  voice?: unknown;
+  audio?: { file_name?: string };
+  video?: unknown;
+  video_note?: unknown;
+  animation?: unknown;
+  sticker?: { emoji?: string };
+}
+
+/** Every forum-topic message implicitly replies to the topic's opening one. */
+function isImplicitTopicReply(message: TelegramMessageLike): boolean {
+  const replied = message.reply_to_message;
+  return (
+    !!replied?.forum_topic_created ||
+    (message.message_thread_id !== undefined &&
+      replied?.message_id === message.message_thread_id)
+  );
+}
+
+function telegramUserLabel(user: TelegramUserLike | undefined): string {
+  if (!user) return '';
+  const fullName = [user.first_name, user.last_name].filter(Boolean).join(' ');
+  return fullName || (user.username ? `@${user.username}` : String(user.id));
+}
+
+/**
+ * The message a Telegram message explicitly replies to, as prompt-only
+ * reference context: its text (or a placeholder for media), its author, and
+ * whether the author is this bot. Implicit topic replies, service messages
+ * and protected content are not referenced.
+ */
+export function telegramReferencedMessage(
+  message: TelegramMessageLike & { has_protected_content?: boolean },
+  botUserId: number | undefined,
+): ChannelReferencedMessage | null {
+  const replied = message.reply_to_message;
+  if (!replied || replied.message_id === undefined) return null;
+  if (isImplicitTopicReply(message)) return null;
+  // Forwarding-protected content is not copied into the Agent's context.
+  if (replied.has_protected_content || message.has_protected_content) {
+    return null;
+  }
+  const text =
+    replied.text ||
+    replied.caption ||
+    (replied.photo?.length
+      ? '[图片]'
+      : replied.document
+        ? `[文件: ${replied.document.file_name ?? 'document'}]`
+        : replied.voice
+          ? '[语音消息]'
+          : replied.audio
+            ? `[音频: ${replied.audio.file_name ?? 'audio'}]`
+            : replied.video || replied.video_note || replied.animation
+              ? '[视频]'
+              : replied.sticker
+                ? `[贴纸${replied.sticker.emoji ? ` ${replied.sticker.emoji}` : ''}]`
+                : '');
+  if (!text) return null;
+  const author = telegramUserLabel(replied.from);
+  const sender = !replied.from
+    ? ''
+    : botUserId !== undefined && replied.from.id === botUserId
+      ? `${author}（本机器人）`
+      : replied.from.is_bot
+        ? `${author}（机器人）`
+        : author;
+  return {
+    id: String(replied.message_id),
+    ...(sender ? { sender } : {}),
+    text,
+  };
+}
+
+/** Public provider context of one Telegram inbound message. */
+export function buildTelegramChannelTurnContext(input: {
+  sourceJid: string;
+  chat: { id: string | number; type: string; title?: string };
+  message: TelegramMessageLike & {
+    message_id: number;
+    has_protected_content?: boolean;
+  };
+  from?: TelegramUserLike;
+  botUserId?: number;
+}): ChannelTurnContext {
+  const reference = telegramReferencedMessage(input.message, input.botUserId);
+  const threadId = input.message.message_thread_id;
+  const senderImId = telegramSenderImId({
+    from: input.from,
+    sender_chat: input.message.sender_chat,
+  });
+  return {
+    schemaVersion: 1,
+    provider: 'telegram',
+    channelAccountId:
+      parseChannelAddress(input.sourceJid)?.channelAccountId ?? null,
+    sourceJid: input.sourceJid,
+    chat: {
+      id: String(input.chat.id),
+      type: input.chat.type === 'private' ? 'p2p' : 'group',
+      ...(input.chat.title ? { name: input.chat.title } : {}),
+    },
+    message: {
+      id: String(input.message.message_id),
+      ...(threadId ? { threadId: String(threadId) } : {}),
+      ...(reference
+        ? { parentId: reference.id, referencedMessages: [reference] }
+        : {}),
+    },
+    ...(senderImId
+      ? {
+          sender: {
+            userId: senderImId,
+            name: telegramUserLabel(input.from),
+          },
+        }
+      : {}),
   };
 }
 
@@ -375,11 +514,7 @@ export function telegramCommandMentions(
   // In a forum topic every message implicitly replies to the topic's opening
   // message; only an explicit reply names its author.
   const replied = message.reply_to_message;
-  const implicitTopicReply =
-    !!replied?.forum_topic_created ||
-    (message.message_thread_id !== undefined &&
-      replied?.message_id === message.message_thread_id);
-  if (replied && !implicitTopicReply) {
+  if (replied && !isImplicitTopicReply(message)) {
     const id = telegramSenderImId(replied);
     if (id && !replied.from?.is_bot) ids.add(id);
   }
@@ -956,8 +1091,23 @@ export function createTelegramConnection(
       attachmentsJson?: string;
       agentId?: string;
       requestedMode?: FollowUpMode;
+      /** The provider message: its context and any replied-to reference. */
+      provider: {
+        message: Parameters<
+          typeof buildTelegramChannelTurnContext
+        >[0]['message'];
+        chat: TelegramChatDescriptor & { title?: string };
+        from?: TelegramUserLike;
+      };
     },
   ): ChannelFollowUpOutcome {
+    const channelContext = buildTelegramChannelTurnContext({
+      sourceJid: input.sourceJid,
+      chat: input.provider.chat,
+      message: input.provider.message,
+      from: input.provider.from,
+      botUserId,
+    });
     storeMessageDirect(
       input.id,
       input.targetJid,
@@ -966,7 +1116,11 @@ export function createTelegramConnection(
       input.content,
       input.timestamp,
       false,
-      { attachments: input.attachmentsJson, sourceJid: input.sourceJid },
+      {
+        attachments: input.attachmentsJson,
+        sourceJid: input.sourceJid,
+        channelContext,
+      },
     );
     const followUp = projectChannelInbound(
       opts,
@@ -979,6 +1133,7 @@ export function createTelegramConnection(
         content: input.content,
         timestamp: input.timestamp,
         attachments: input.attachmentsJson,
+        channel_context: channelContext,
         is_from_me: false,
       },
       { agentId: input.agentId, requestedMode: input.requestedMode },
@@ -1441,6 +1596,11 @@ export function createTelegramConnection(
               timestamp,
               agentId: agentRouting?.agentId ?? undefined,
               requestedMode: requestedFollowUpMode,
+              provider: {
+                message: ctx.message,
+                chat: ctx.chat as TelegramChatDescriptor,
+                from: ctx.from,
+              },
             });
             logger.info(
               {
@@ -1632,6 +1792,11 @@ export function createTelegramConnection(
               attachmentsJson,
               agentId: agentRouting?.agentId ?? undefined,
               requestedMode,
+              provider: {
+                message: ctx.message,
+                chat: ctx.chat as TelegramChatDescriptor,
+                from: ctx.from,
+              },
             });
 
             logger.info(
@@ -1744,6 +1909,11 @@ export function createTelegramConnection(
                 timestamp: new Date(ctx.message.date * 1000).toISOString(),
                 agentId: agentRouting?.agentId ?? undefined,
                 requestedMode,
+                provider: {
+                  message: ctx.message,
+                  chat: ctx.chat as TelegramChatDescriptor,
+                  from: ctx.from,
+                },
               });
               return;
             }
@@ -1810,6 +1980,11 @@ export function createTelegramConnection(
               timestamp,
               agentId: agentRouting?.agentId ?? undefined,
               requestedMode,
+              provider: {
+                message: ctx.message,
+                chat: ctx.chat as TelegramChatDescriptor,
+                from: ctx.from,
+              },
             });
 
             logger.info(
@@ -1976,6 +2151,11 @@ export function createTelegramConnection(
               timestamp,
               agentId: agentRouting?.agentId ?? undefined,
               requestedMode,
+              provider: {
+                message: tgMessage,
+                chat: tgChat as TelegramChatDescriptor,
+                from: ctx.from,
+              },
             });
 
             logger.info(
