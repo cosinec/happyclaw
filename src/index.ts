@@ -22863,6 +22863,7 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
           botToken: secret.botToken || '',
           proxyUrl: secret.proxyUrl,
           enabled: true,
+          streamingMode: secret.streamingMode === 'off' ? 'off' : 'edit',
         },
         onNewChat,
         buildIsChatAuthorized(

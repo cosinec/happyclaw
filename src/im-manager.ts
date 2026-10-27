@@ -105,6 +105,8 @@ export interface TelegramConnectConfig {
   botToken: string;
   proxyUrl?: string;
   enabled?: boolean;
+  /** Edit-based answer streaming; on unless the account opts out. */
+  streamingMode?: 'edit' | 'off';
 }
 
 export interface QQConnectConfig {
@@ -1509,10 +1511,10 @@ export class IMConnectionManager {
       return false;
     }
 
-    const channel = createTelegramChannel({
-      botToken: config.botToken,
-      proxyUrl: config.proxyUrl,
-    });
+    const channel = createTelegramChannel(
+      { botToken: config.botToken, proxyUrl: config.proxyUrl },
+      { streamingMode: config.streamingMode },
+    );
 
     return this.connectChannel(
       userId,

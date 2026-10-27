@@ -5,6 +5,8 @@
  */
 import type { Transformer } from 'grammy';
 
+import { DefinitiveChannelDeliveryError } from './channel-outbox-delivery.js';
+import { PartialChannelDeliveryError } from './im-delivery-progress.js';
 import { splitMarkdownWithCodeFences } from './markdown-fence-split.js';
 
 /** Bot API cap for the text of one message. */
@@ -166,4 +168,107 @@ export function createTelegramRateLimitRetry(
     }
     return response;
   };
+}
+
+/**
+ * Only real HTML parse failures should fall back to a second plain send.
+ * Timeout / 5xx / 429 / other transport errors are wrapped by grammy as
+ * HttpError (inner error on `.error`, not `.cause`) and must be rethrown so
+ * the already-attempted chunk is not duplicated.
+ */
+export function isTelegramHtmlParseError(err: unknown): boolean {
+  let current: unknown = err;
+  const seen = new Set<unknown>();
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current);
+    const rec = current as Record<string, unknown>;
+    const code = Number(rec.error_code);
+    const description = String(rec.description ?? rec.message ?? '');
+    if (
+      code === 400 &&
+      /parse entities|unclosed|unsupported start tag|can't find end tag/i.test(
+        description,
+      )
+    ) {
+      return true;
+    }
+    current = rec.cause ?? rec.error;
+  }
+  return false;
+}
+
+/**
+ * A Bot API rejection carries a numeric `error_code` because Telegram itself
+ * answered `ok=false`: the request was received, refused, and no message
+ * became visible. grammY transport failures (HttpError, timeouts) have no
+ * `error_code` and must stay untyped — the provider may already have
+ * accepted those.
+ */
+export function telegramApiRejection(
+  err: unknown,
+): { code: number; description: string } | null {
+  let current: unknown = err;
+  const seen = new Set<unknown>();
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current);
+    const rec = current as Record<string, unknown>;
+    if (typeof rec.error_code === 'number' && Number.isFinite(rec.error_code)) {
+      return {
+        code: rec.error_code,
+        description: String(rec.description ?? rec.message ?? ''),
+      };
+    }
+    current = rec.cause ?? rec.error;
+  }
+  return null;
+}
+
+/**
+ * Wait Telegram asked for when it refused a call with 429 (grammY keeps the
+ * answer's `parameters` on the error), or null for any other failure.
+ */
+export function telegramRateLimitWaitMs(err: unknown): number | null {
+  let current: unknown = err;
+  const seen = new Set<unknown>();
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current);
+    const rec = current as Record<string, unknown>;
+    if (rec.error_code === 429) {
+      return telegramRetryAfterMs(
+        rec as { parameters?: { retry_after?: unknown } },
+      );
+    }
+    current = rec.cause ?? rec.error;
+  }
+  return null;
+}
+
+/**
+ * Map outbound send errors onto the durable Outbox's failure taxonomy. An
+ * acknowledged-prefix partial delivery must stay uncertain even when the tail
+ * mutation was explicitly rejected, so it is never re-wrapped here. Only 4xx
+ * answers are definitive: a 5xx `ok=false` cannot prove Telegram discarded
+ * the mutation before its internal failure, and 408 is commonly synthesized
+ * by an intermediary after the upstream may already have accepted it.
+ *
+ * 429 is a terminal failure as well. Telegram did not deliver the message,
+ * and production has no worker that reclaims a `retry_wait` row, so a
+ * `retryAt` would strand it; the description keeps `retry after N`.
+ */
+export function classifyTelegramSendError(err: unknown): unknown {
+  if (err instanceof DefinitiveChannelDeliveryError) return err;
+  if (err instanceof PartialChannelDeliveryError) return err;
+  const rejection = telegramApiRejection(err);
+  if (
+    !rejection ||
+    rejection.code < 400 ||
+    rejection.code >= 500 ||
+    rejection.code === 408
+  ) {
+    return err;
+  }
+  return new DefinitiveChannelDeliveryError(
+    `Telegram Bot API rejected the send (${rejection.code}): ${rejection.description}`,
+    { cause: err },
+  );
 }

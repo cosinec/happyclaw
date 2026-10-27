@@ -171,6 +171,18 @@ describe('the durable follow-up queue and runtime controls reach every connector
   );
 });
 
+describe('Telegram account wiring', () => {
+  test.each([
+    [{}, 'edit'],
+    [{ streamingMode: 'edit' }, 'edit'],
+    [{ streamingMode: 'off' }, 'off'],
+  ] as const)('secret %o streams in mode %s', async (extra, mode) => {
+    const h = reloadHarness('telegram', { botToken: 'token', ...extra });
+    const { config } = await h.connect();
+    expect(config.streamingMode).toBe(mode);
+  });
+});
+
 describe('Feishu account wiring', () => {
   test('brand from the secret, lazy owner and the conflict status mapping', async () => {
     const secret: Record<string, string> = {

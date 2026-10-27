@@ -29,8 +29,16 @@ import {
 import { resolveAdmittedChannelRoute } from './channel-admission.js';
 import {
   chunkTelegramMarkdown,
+  classifyTelegramSendError,
   createTelegramRateLimitRetry,
+  isTelegramHtmlParseError,
+  telegramApiRejection,
+  type TelegramMessageChunk,
 } from './telegram-outbound.js';
+import {
+  TelegramStreamingController,
+  type TelegramStreamingTransport,
+} from './telegram-streaming.js';
 import {
   groupSenderAdmission,
   type ChannelCommandMention,
@@ -44,10 +52,7 @@ import {
   type ChannelFollowUpConnectOpts,
   type ChannelFollowUpOutcome,
 } from './im-connector-follow-up.js';
-import {
-  PartialChannelDeliveryError,
-  PhysicalDeliveryTracker,
-} from './im-delivery-progress.js';
+import { PhysicalDeliveryTracker } from './im-delivery-progress.js';
 import { DefinitiveChannelDeliveryError } from './channel-outbox-delivery.js';
 import type {
   ChannelMessageMeta,
@@ -751,92 +756,12 @@ export interface TelegramConnection {
   ): Promise<void>;
   sendChatAction(chatId: string, action: 'typing'): Promise<void>;
   clearAckReaction(chatId: string, inputMessageId: string): Promise<void>;
+  /** Edit-based streaming of the main answer (final sent fresh). */
+  createStreamingSession(
+    chatId: string,
+    onCardCreated?: (messageId: string) => void,
+  ): TelegramStreamingController | undefined;
   isConnected(): boolean;
-}
-
-// ─── Shared Helpers (pure functions, no instance state) ────────
-
-/**
- * Only real HTML parse failures should fall back to a second plain send.
- * Timeout / 5xx / 429 / other transport errors are wrapped by grammy as
- * HttpError (inner error on `.error`, not `.cause`) and must be rethrown so
- * the already-attempted chunk is not duplicated.
- */
-function isTelegramHtmlParseError(err: unknown): boolean {
-  let current: unknown = err;
-  const seen = new Set<unknown>();
-  while (current && typeof current === 'object' && !seen.has(current)) {
-    seen.add(current);
-    const rec = current as Record<string, unknown>;
-    const code = Number(rec.error_code);
-    const description = String(rec.description ?? rec.message ?? '');
-    if (
-      code === 400 &&
-      /parse entities|unclosed|unsupported start tag|can't find end tag/i.test(
-        description,
-      )
-    ) {
-      return true;
-    }
-    current = rec.cause ?? rec.error;
-  }
-  return false;
-}
-
-/**
- * A Bot API rejection carries a numeric `error_code` because Telegram itself
- * answered `ok=false`: the request was received, refused, and no message
- * became visible. grammY transport failures (HttpError, timeouts) have no
- * `error_code` and must stay untyped — the provider may already have
- * accepted those.
- */
-function telegramApiRejection(
-  err: unknown,
-): { code: number; description: string } | null {
-  let current: unknown = err;
-  const seen = new Set<unknown>();
-  while (current && typeof current === 'object' && !seen.has(current)) {
-    seen.add(current);
-    const rec = current as Record<string, unknown>;
-    if (typeof rec.error_code === 'number' && Number.isFinite(rec.error_code)) {
-      return {
-        code: rec.error_code,
-        description: String(rec.description ?? rec.message ?? ''),
-      };
-    }
-    current = rec.cause ?? rec.error;
-  }
-  return null;
-}
-
-/**
- * Map outbound send errors onto the durable Outbox's failure taxonomy. An
- * acknowledged-prefix partial delivery must stay uncertain even when the tail
- * mutation was explicitly rejected, so it is never re-wrapped here. Only 4xx
- * answers are definitive: a 5xx `ok=false` cannot prove Telegram discarded
- * the mutation before its internal failure, and 408 is commonly synthesized
- * by an intermediary after the upstream may already have accepted it.
- *
- * 429 is a terminal failure as well. Telegram did not deliver the message,
- * and production has no worker that reclaims a `retry_wait` row, so a
- * `retryAt` would strand it; the description keeps `retry after N`.
- */
-function classifyTelegramSendError(err: unknown): unknown {
-  if (err instanceof DefinitiveChannelDeliveryError) return err;
-  if (err instanceof PartialChannelDeliveryError) return err;
-  const rejection = telegramApiRejection(err);
-  if (
-    !rejection ||
-    rejection.code < 400 ||
-    rejection.code >= 500 ||
-    rejection.code === 408
-  ) {
-    return err;
-  }
-  return new DefinitiveChannelDeliveryError(
-    `Telegram Bot API rejected the send (${rejection.code}): ${rejection.description}`,
-    { cause: err },
-  );
 }
 
 // ─── Factory Function ──────────────────────────────────────────
@@ -904,6 +829,92 @@ export function createTelegramConnection(
    * 通过 Telegram Bot API 下载文件到工作区磁盘。
    * 返回工作区相对路径，失败返回 null。
    */
+  /**
+   * Send one rendered chunk; a real HTML parse failure is resent as plain
+   * text. Any other failure is rethrown so an attempted send is never
+   * duplicated.
+   */
+  async function sendTelegramChunk(
+    activeBot: Bot,
+    chatId: number,
+    chunk: TelegramMessageChunk,
+    threadOptions: { message_thread_id?: number },
+  ): Promise<number> {
+    try {
+      const sent = await activeBot.api.sendMessage(chatId, chunk.html, {
+        parse_mode: 'HTML',
+        ...threadOptions,
+      });
+      return sent.message_id;
+    } catch (err) {
+      if (!isTelegramHtmlParseError(err)) throw err;
+      logger.debug({ err, chatId }, 'HTML parse failed, fallback to plain');
+      const sent = await activeBot.api.sendMessage(
+        chatId,
+        chunk.markdown,
+        threadOptions,
+      );
+      return sent.message_id;
+    }
+  }
+
+  /** Telegram answered that the edit would not change the message. */
+  function isTelegramNotModified(err: unknown): boolean {
+    const rejection = telegramApiRejection(err);
+    return (
+      rejection?.code === 400 && /not modified/i.test(rejection.description)
+    );
+  }
+
+  /** Bot API operations of one streaming answer, bound to its chat/thread. */
+  function telegramStreamingTransport(
+    target: TelegramProviderTarget,
+  ): TelegramStreamingTransport {
+    const threadOptions = target.messageThreadId
+      ? { message_thread_id: target.messageThreadId }
+      : {};
+    return {
+      async send(chunk) {
+        try {
+          return await sendTelegramChunk(
+            requireOutboundBot(),
+            target.chatId,
+            chunk,
+            threadOptions,
+          );
+        } catch (err) {
+          throw classifyTelegramSendError(err);
+        }
+      },
+      async edit(messageId, chunk) {
+        const activeBot = requireOutboundBot();
+        try {
+          await activeBot.api.editMessageText(
+            target.chatId,
+            messageId,
+            chunk.html,
+            { parse_mode: 'HTML' },
+          );
+        } catch (err) {
+          if (isTelegramNotModified(err)) return;
+          if (!isTelegramHtmlParseError(err)) throw err;
+          try {
+            await activeBot.api.editMessageText(
+              target.chatId,
+              messageId,
+              chunk.markdown,
+            );
+          } catch (plainErr) {
+            if (!isTelegramNotModified(plainErr)) throw plainErr;
+          }
+        }
+      },
+      async delete(messageId) {
+        await requireOutboundBot().api.deleteMessage(target.chatId, messageId);
+      },
+    };
+  }
+
   async function downloadTelegramFile(
     fileId: string,
     originalFilename: string,
@@ -2392,28 +2403,14 @@ export function createTelegramConnection(
           chunks.length + (localImagePaths?.length ?? 0),
         );
 
-        for (const { markdown: mdChunk, html } of chunks) {
+        for (const chunk of chunks) {
           await tracker.send(async () => {
-            try {
-              await activeBot.api.sendMessage(target.chatId, html, {
-                parse_mode: 'HTML',
-                ...threadOptions,
-              });
-            } catch (err) {
-              if (!isTelegramHtmlParseError(err)) {
-                throw err;
-              }
-              // HTML parse failed (e.g. unclosed tags), fallback to plain text
-              logger.debug(
-                { err, chatId },
-                'HTML parse failed, fallback to plain',
-              );
-              await activeBot.api.sendMessage(
-                target.chatId,
-                mdChunk,
-                threadOptions,
-              );
-            }
+            await sendTelegramChunk(
+              activeBot,
+              target.chatId,
+              chunk,
+              threadOptions,
+            );
           });
         }
 
@@ -2446,6 +2443,18 @@ export function createTelegramConnection(
 
     clearAckReaction(chatId: string, inputMessageId: string): Promise<void> {
       return ackReactions.clear(processingIndicatorKey(chatId, inputMessageId));
+    },
+
+    createStreamingSession(
+      chatId: string,
+      onCardCreated?: (messageId: string) => void,
+    ): TelegramStreamingController | undefined {
+      const target = parseTelegramProviderTarget(chatId);
+      if (!target || !bot) return undefined;
+      return new TelegramStreamingController(
+        telegramStreamingTransport(target),
+        { onCardCreated },
+      );
     },
 
     async sendImage(
