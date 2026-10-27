@@ -113,6 +113,8 @@ const { createWhatsAppConnection, whatsAppCommandMentions } =
   await import('../src/whatsapp.js');
 const { groupAudienceHost } = await import('./helpers/group-audience.js');
 const { followUpHost } = await import('./helpers/follow-up-host.js');
+const { STEER_TARGET_MISSING_REPLY } =
+  await import('../src/im-connector-follow-up.js');
 type AudienceGroup = import('./helpers/group-audience.js').AudienceGroup;
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsapp-group-'));
@@ -409,6 +411,39 @@ describe('WhatsApp durable queue and runtime controls', () => {
       text: 'Current task stopped.',
     });
     expect(db.storeMessageDirect).toHaveBeenCalledTimes(1);
+  });
+
+  test('a control for a chat without a Session only looks it up', async () => {
+    const host = followUpHost('queued');
+    const resolveEffectiveChatJid = vi.fn((jid: string) => ({
+      effectiveJid: jid,
+      agentId: null,
+    }));
+    const lookupEffectiveChatJid = vi.fn(() => null);
+    const { socket, deliver } = await connect(host, {
+      resolveEffectiveChatJid,
+      lookupEffectiveChatJid,
+    });
+    await deliver(dm('/break'));
+    expect(host.onSessionBreak).toHaveBeenCalledWith(
+      expect.objectContaining({ targetJid: undefined }),
+    );
+    await deliver(dm('/steer go'));
+    expect(socket.sendMessage).toHaveBeenLastCalledWith(OUTSIDER, {
+      text: STEER_TARGET_MISSING_REPLY,
+    });
+    expect(lookupEffectiveChatJid).toHaveBeenCalledWith(`whatsapp:${OUTSIDER}`);
+    expect(resolveEffectiveChatJid).not.toHaveBeenCalled();
+    expect(db.storeMessageDirect).not.toHaveBeenCalled();
+
+    lookupEffectiveChatJid.mockReturnValue({
+      effectiveJid: 'web:home',
+      agentId: null,
+    } as never);
+    await deliver(dm('/break'));
+    expect(host.onSessionBreak).toHaveBeenLastCalledWith(
+      expect.objectContaining({ targetJid: 'web:home' }),
+    );
   });
 
   test('a group control needs the bot in mentionedJid', async () => {

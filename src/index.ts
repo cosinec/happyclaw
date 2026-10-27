@@ -21606,6 +21606,48 @@ function buildResolveEffectiveChatJid() {
 }
 
 /**
+ * The same routing, read-only: the target a chat or native topic already
+ * has. A topic container not yet mapped to threads, or a topic without a
+ * Session, has none, and nothing is created or upgraded to find out.
+ * Runtime controls (/break, /steer) resolve their target with it.
+ */
+function buildLookupEffectiveChatJid() {
+  return createChannelInboundRouter({
+    ...channelInboundRoutingDeps(),
+    ensureNativeContextChannelMount: (_chatJid, group) =>
+      group.binding_mode === 'thread_map' ? group : null,
+    resolveOrCreateNativeThreadAgent: findNativeThreadAgent,
+  });
+}
+
+/** The existing Session of a native topic, or null. */
+function findNativeThreadAgent(
+  chatJid: string,
+  workspaceJid: string,
+  _workspace: RegisteredGroup,
+  _group: RegisteredGroup,
+  nativeContext: NativeThreadContext,
+): { effectiveJid: string; agentId: string; sourceJid: string } | null {
+  const binding = getImContextBinding(
+    chatJid,
+    'thread',
+    nativeContext.contextId,
+  );
+  const agent =
+    binding?.agent_id != null ? getAgent(binding.agent_id) : undefined;
+  if (!binding || !agent || agent.chat_jid !== workspaceJid) return null;
+  return {
+    effectiveJid: `${workspaceJid}#agent:${binding.agent_id}`,
+    agentId: binding.agent_id,
+    sourceJid: buildNativeThreadRouteJid(
+      chatJid,
+      nativeContext.contextId,
+      nativeContext.rootMessageId,
+    ),
+  };
+}
+
+/**
  * Build callback that triggers processAgentConversation when an IM message is routed to an agent.
  */
 function buildOnAgentMessage(): (baseChatJid: string, agentId: string) => void {
@@ -22790,6 +22832,7 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
     onCommand: handleCommand,
     resolveGroupFolder: (jid: string) => resolveEffectiveFolder(jid),
     resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
+    lookupEffectiveChatJid: buildLookupEffectiveChatJid(),
     onAgentMessage: buildOnAgentMessage(),
     onNativeContextDetected: buildOnNativeContextDetected(),
     onBotRemovedFromGroup: buildOnBotRemovedFromGroup(),

@@ -85,6 +85,7 @@ import {
   discordCommandMentions,
   type DiscordConnectOpts,
 } from '../src/discord.js';
+import { STEER_TARGET_MISSING_REPLY } from '../src/im-connector-follow-up.js';
 import { followUpHost } from './helpers/follow-up-host.js';
 import {
   groupAudienceHost,
@@ -385,13 +386,12 @@ describe('Discord durable queue and runtime controls', () => {
     overrides: Partial<DiscordConnectOpts> = {},
   ) {
     connection = createDiscordConnection({ botToken: 'test-token' });
+    const route = (jid: string) => ({ effectiveJid: jid, agentId: null });
     const opts = {
       onNewChat: vi.fn(),
       isChatAuthorized: () => true,
-      resolveEffectiveChatJid: (jid: string) => ({
-        effectiveJid: jid,
-        agentId: null,
-      }),
+      resolveEffectiveChatJid: vi.fn(route),
+      lookupEffectiveChatJid: vi.fn(route),
       onCommand: vi.fn(async () => null),
       onMessagePersisted: vi.fn(),
       ...host,
@@ -404,6 +404,24 @@ describe('Discord durable queue and runtime controls', () => {
       deliver: (msg: ReturnType<typeof guildMsg>) => handler(msg),
     };
   }
+
+  test('a control for a chat without a Session only looks it up', async () => {
+    const host = followUpHost('queued');
+    const { opts, deliver } = await connect(host, {
+      lookupEffectiveChatJid: vi.fn(() => null),
+    });
+    await deliver(guildMsg({ author: '5', content: '/break', dm: true }));
+    expect(host.onSessionBreak).toHaveBeenCalledWith(
+      expect.objectContaining({ targetJid: undefined }),
+    );
+    await deliver(guildMsg({ author: '5', content: '/steer go', dm: true }));
+    expect(discord.sentChannel.send).toHaveBeenLastCalledWith(
+      STEER_TARGET_MISSING_REPLY,
+    );
+    expect(opts.lookupEffectiveChatJid).toHaveBeenCalledWith('discord:dm:5');
+    expect(opts.resolveEffectiveChatJid).not.toHaveBeenCalled();
+    expect(storeMessageDirect).not.toHaveBeenCalled();
+  });
 
   test('an input arriving during a run waits in the durable queue', async () => {
     const host = followUpHost('queued');

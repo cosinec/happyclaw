@@ -8,6 +8,10 @@ import type {
   OnChannelFollowUpsChanged,
   OnChannelMessagePersisted,
 } from './channel-contracts.js';
+import {
+  resolveAdmittedChannelRoute,
+  type ChannelRouteTarget,
+} from './channel-admission.js';
 import { parseRuntimeControl } from './follow-up-policy.js';
 import { logger } from './logger.js';
 import type { FollowUpDisposition, FollowUpMode, NewMessage } from './types.js';
@@ -162,6 +166,26 @@ export function parseConnectorRuntimeControl(input: {
 }
 
 /** Run `/break` on the host, or explain that this runtime cannot. */
+/** Reply to a /steer whose chat or topic has no Session to steer. */
+export const STEER_TARGET_MISSING_REPLY =
+  '当前绑定目标不存在，无法执行 /steer。';
+
+/**
+ * The target a runtime control (/break, /steer) acts on: the route the chat
+ * or topic already has, found without creating a topic Session for a
+ * command. A connector without host routing is its own target, as for any
+ * input; a host that routes but offers no lookup yields no target.
+ */
+export function existingControlTarget(
+  sourceJid: string,
+  routed: boolean,
+  lookup: (() => ChannelRouteTarget | null) | undefined,
+): string | undefined {
+  if (!routed) return sourceJid;
+  return resolveAdmittedChannelRoute(sourceJid, lookup ?? (() => null))
+    ?.targetJid;
+}
+
 export async function runSessionBreak(
   onSessionBreak: OnChannelSessionBreak | undefined,
   input: Parameters<OnChannelSessionBreak>[0],

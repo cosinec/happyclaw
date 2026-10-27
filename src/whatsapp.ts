@@ -50,9 +50,11 @@ import {
   type GroupSenderAdmission,
 } from './im-group-audience.js';
 import {
+  existingControlTarget,
   parseConnectorRuntimeControl,
   projectChannelInbound,
   runSessionBreak,
+  STEER_TARGET_MISSING_REPLY,
   type ChannelFollowUpConnectOpts,
 } from './im-connector-follow-up.js';
 import { PhysicalDeliveryTracker } from './im-delivery-progress.js';
@@ -128,6 +130,10 @@ export interface WhatsAppConnectOpts
   ) => Promise<string | null>;
   resolveGroupFolder?: (jid: string) => string | undefined;
   resolveEffectiveChatJid?: (
+    chatJid: string,
+  ) => { effectiveJid: string; agentId: string | null } | null;
+  /** The route a chat already has; never creates one. */
+  lookupEffectiveChatJid?: (
     chatJid: string,
   ) => { effectiveJid: string; agentId: string | null } | null;
   onAgentMessage?: (baseChatJid: string, agentId: string) => void;
@@ -912,13 +918,18 @@ export function createWhatsAppConnection(
         eligible: !isGroup || isBotMentioned,
         hasAttachments: detectMedia(inner) !== null,
       });
+      // A runtime control acts on the Session the chat already has.
+      const lookup = opts.lookupEffectiveChatJid;
+      const controlTarget = () =>
+        existingControlTarget(
+          chatJid,
+          !!opts?.resolveEffectiveChatJid,
+          lookup && (() => lookup(chatJid)),
+        );
       if (runtimeControl?.kind === 'break') {
         const reply = await runSessionBreak(opts.onSessionBreak, {
           sourceJid: chatJid,
-          targetJid: resolveAdmittedChannelRoute(
-            chatJid,
-            opts.resolveEffectiveChatJid,
-          )?.targetJid,
+          targetJid: controlTarget(),
           senderImId,
           chatType: isGroup ? 'group' : 'p2p',
         });
@@ -932,6 +943,17 @@ export function createWhatsAppConnection(
       }
       const steerText =
         runtimeControl?.kind === 'steer' ? runtimeControl.text : undefined;
+      if (steerText !== undefined && !controlTarget()) {
+        inboundLifecycle.assertCurrent(lease);
+        try {
+          await activeSock.sendMessage(remoteJid, {
+            text: STEER_TARGET_MISSING_REPLY,
+          });
+        } catch (err) {
+          logger.warn({ err, chatJid }, 'WhatsApp /steer reply send failed');
+        }
+        return;
+      }
       if (steerText !== undefined) text = steerText;
 
       // Control commands may repair/change a binding. Consume them before

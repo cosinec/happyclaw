@@ -57,6 +57,7 @@ import {
   telegramAddressedText,
   telegramCommandMentions,
 } from '../src/telegram.js';
+import { STEER_TARGET_MISSING_REPLY } from '../src/im-connector-follow-up.js';
 import { followUpHost } from './helpers/follow-up-host.js';
 import {
   groupAudienceHost,
@@ -586,6 +587,83 @@ describe('Telegram durable queue and runtime controls', () => {
     expect(host.onSessionBreak).toHaveBeenCalledWith(
       expect.objectContaining({ targetJid: undefined, chatType: 'group' }),
     );
+  });
+
+  test('a runtime control in a topic only looks its Session up', async () => {
+    const host = followUpHost('queued');
+    const resolveEffectiveChatJid = vi.fn(() => ({
+      effectiveJid: 'web:home#agent:created',
+      agentId: 'created',
+    }));
+    const lookupEffectiveChatJid = vi.fn(() => null);
+    await connect(host, { resolveEffectiveChatJid, lookupEffectiveChatJid });
+    const inTopic = { message_thread_id: 77, from: MEMBER };
+
+    await send({
+      ...inTopic,
+      text: '@happy_bot /break',
+      entities: [{ type: 'mention', offset: 0, length: 10 }],
+    });
+    expect(lookupEffectiveChatJid).toHaveBeenCalledWith(
+      GROUP_JID,
+      expect.objectContaining({ threadId: '77' }),
+    );
+    expect(host.onSessionBreak).toHaveBeenCalledWith(
+      expect.objectContaining({ targetJid: undefined, chatType: 'group' }),
+    );
+
+    const steer = textCtx({
+      ...inTopic,
+      text: '/steer@happy_bot go',
+      entities: [{ type: 'bot_command', offset: 0, length: 16 }],
+    });
+    await inbound.handlers.get('message:text')!(steer);
+    expect(steer.reply).toHaveBeenCalledWith(STEER_TARGET_MISSING_REPLY);
+
+    seq += 1;
+    const caption = {
+      message: {
+        message_id: seq,
+        date: Math.floor(Date.now() / 1000),
+        message_thread_id: 77,
+        caption: '/steer@happy_bot look',
+        caption_entities: [{ type: 'bot_command', offset: 0, length: 16 }],
+        video: { file_id: 'v2', file_name: 'clip.mp4', file_size: 12 },
+      },
+      chat: { id: -100777, type: 'supergroup', title: 'Team' },
+      from: { id: MEMBER, first_name: 'm' },
+      react: vi.fn(async () => {}),
+      reply: vi.fn(async () => {}),
+    };
+    await inbound.handlers.get('message:video')!(caption);
+    expect(caption.reply).toHaveBeenCalledWith(STEER_TARGET_MISSING_REPLY);
+
+    // Nothing was routed, so no topic Session was created and nothing stored.
+    expect(resolveEffectiveChatJid).not.toHaveBeenCalled();
+    expect(inbound.storeMessageDirect).not.toHaveBeenCalled();
+    expect(host.onFollowUpMessage).not.toHaveBeenCalled();
+
+    // A topic that has its Session is the target of both controls.
+    lookupEffectiveChatJid.mockReturnValue({
+      effectiveJid: 'web:home#agent:t77',
+      agentId: 't77',
+    } as never);
+    await send({
+      ...inTopic,
+      text: '@happy_bot /break',
+      entities: [{ type: 'mention', offset: 0, length: 10 }],
+    });
+    expect(host.onSessionBreak).toHaveBeenLastCalledWith(
+      expect.objectContaining({ targetJid: 'web:home#agent:t77' }),
+    );
+    await send({
+      ...inTopic,
+      text: '/steer@happy_bot go',
+      entities: [{ type: 'bot_command', offset: 0, length: 16 }],
+    });
+    expect(host.onFollowUpMessage.mock.calls[0][0]).toMatchObject({
+      requestedMode: 'steer',
+    });
   });
 
   test('a /steer caption carries its image as guidance', async () => {

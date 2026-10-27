@@ -173,6 +173,12 @@ export interface IMChannelConnectOpts {
     agentId: string | null;
     sourceJid?: string;
   } | null;
+  /**
+   * The bound target a chat (or native topic) already has, or null. Never
+   * creates a topic Session or upgrades a mount, so a runtime control
+   * (/break, /steer) aimed at an unseen topic leaves nothing behind.
+   */
+  lookupEffectiveChatJid?: IMChannelConnectOpts['resolveEffectiveChatJid'];
   /** 当 IM 消息被路由到 conversation agent 后调用，触发 agent 处理 */
   onAgentMessage?: (baseChatJid: string, agentId: string) => void;
   onFollowUpMessage?: (input: {
@@ -656,6 +662,7 @@ export function createTelegramChannel(
           ignoreMessagesBefore: opts.ignoreMessagesBefore,
           resolveGroupFolder: opts.resolveGroupFolder,
           resolveEffectiveChatJid: opts.resolveEffectiveChatJid,
+          lookupEffectiveChatJid: opts.lookupEffectiveChatJid,
           onAgentMessage: opts.onAgentMessage,
           onMessagePersisted: opts.onMessagePersisted,
           onFollowUpMessage: opts.onFollowUpMessage,
@@ -1507,6 +1514,7 @@ export function createDiscordChannel(
           onCommand: opts.onCommand,
           resolveGroupFolder: opts.resolveGroupFolder,
           resolveEffectiveChatJid: opts.resolveEffectiveChatJid,
+          lookupEffectiveChatJid: opts.lookupEffectiveChatJid,
           onAgentMessage: opts.onAgentMessage,
           onMessagePersisted: opts.onMessagePersisted,
           onFollowUpMessage: opts.onFollowUpMessage,
@@ -1683,6 +1691,7 @@ export function createWhatsAppChannel(
           ignoreMessagesBefore: opts.ignoreMessagesBefore,
           resolveGroupFolder: opts.resolveGroupFolder,
           resolveEffectiveChatJid: opts.resolveEffectiveChatJid,
+          lookupEffectiveChatJid: opts.lookupEffectiveChatJid,
           onAgentMessage: opts.onAgentMessage,
           onMessagePersisted: opts.onMessagePersisted,
           onFollowUpMessage: opts.onFollowUpMessage,
