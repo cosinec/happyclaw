@@ -27,6 +27,7 @@ import type {
   DiscordGuildInfo,
 } from './discord.js';
 import type { FeishuConversationPlan } from './feishu-conversation-policy.js';
+import type { FeishuBrand } from './feishu-domain.js';
 import type { WeChatConnectionState } from './wechat.js';
 import type { WeComConnectionConfig, WeComConnectionState } from './wecom.js';
 import type { WhatsAppConnectionState } from './whatsapp.js';
@@ -94,6 +95,8 @@ export interface UserIMConnection {
 export interface FeishuConnectConfig {
   appId: string;
   appSecret: string;
+  /** Feishu (China) or Lark (international); absent means Feishu. */
+  domain?: FeishuBrand;
   enabled?: boolean;
 }
 
@@ -237,6 +240,8 @@ export interface ConnectFeishuOptions {
     chatJid: string,
     messageId: string,
   ) => void | Promise<void>;
+  getOwnerOpenId?: IMChannelConnectOpts['getOwnerOpenId'];
+  onTransportIssue?: IMChannelConnectOpts['onTransportIssue'];
 }
 
 export class IMConnectionManager {
@@ -1412,6 +1417,7 @@ export class IMConnectionManager {
       appId: config.appId,
       appSecret: config.appSecret,
       channelAccountId: options?.accountId,
+      domain: config.domain,
     });
 
     return this.connectChannel(
@@ -1445,6 +1451,8 @@ export class IMConnectionManager {
         onCardInterrupt: options?.onCardInterrupt,
         onP2pSender: options?.onP2pSender,
         onMessageRecalled: options?.onMessageRecalled,
+        getOwnerOpenId: options?.getOwnerOpenId,
+        onTransportIssue: options?.onTransportIssue,
       },
       options?.accountId,
       options?.scopeIncomingJids,

@@ -616,6 +616,8 @@ import {
   isSenderAllowedByAudience,
   isUnknownFeishuSenderAllowed,
 } from './im-audience-policy.js';
+import { applyFeishuTransportIssue } from './channel-account-transport.js';
+import { normalizeFeishuBrand } from './feishu-domain.js';
 import { logger } from './logger.js';
 import { resolveTaskOwner } from './task-utils.js';
 import { checkOwnerActive } from './owner-gate.js';
@@ -22761,6 +22763,7 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
         {
           appId: secret.appId || '',
           appSecret: secret.appSecret || '',
+          domain: normalizeFeishuBrand(secret.domain),
           enabled: true,
         },
         onNewChat,
@@ -22785,6 +22788,17 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
           onMessageRecalled: handleChannelMessageRecalled,
           onFollowUpCardAction: handleFollowUpCardAction,
           onCardInterrupt: handleCardInterrupt,
+          // The same mutable secret onP2pSender fills on the first DM claim.
+          getOwnerOpenId: () => secret.ownerOpenId || undefined,
+          onTransportIssue: (issue) => {
+            const latest = applyFeishuTransportIssue(account.id, issue);
+            if (!latest) return;
+            broadcastChannelAccountStatus(account.owner_user_id, account.id, {
+              transportStatus: latest.transport_status,
+              lastError: latest.last_error,
+              connectedAt: latest.connected_at,
+            });
+          },
           onP2pSender: (senderOpenId: string) => {
             // First valid DM claims this bot. Never let a later arbitrary DM
             // replace the account owner.

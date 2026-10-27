@@ -4,7 +4,12 @@
  * Defines a standard interface for all IM integrations (Feishu, Telegram, etc.)
  * and provides adapter factories that wrap existing connection implementations.
  */
-import type { FeishuConnection, FeishuConnectionConfig } from './feishu.js';
+import type {
+  ConnectOptions as FeishuConnectOptions,
+  FeishuConnection,
+  FeishuConnectionConfig,
+} from './feishu.js';
+import type { FeishuBrand } from './feishu-domain.js';
 import type { FeishuConversationPlan } from './feishu-conversation-policy.js';
 import type {
   TelegramConnection,
@@ -111,6 +116,17 @@ export function appendStreamingSessionAnswer(
 }
 
 // ─── Unified Interface ──────────────────────────────────────────
+
+/** Feishu account credentials plus the brand (Feishu or Lark) they belong to. */
+export type FeishuChannelConfig = FeishuConnectionConfig & {
+  domain?: FeishuBrand;
+};
+
+/**
+ * Feishu long-connection health beyond connect/disconnect: another program is
+ * holding this App's single long connection. `null` reports recovery.
+ */
+export type FeishuTransportIssue = { kind: 'conflict'; message: string } | null;
 
 export interface IMChannelConnectOpts {
   isChatBound?: (jid: string) => boolean;
@@ -243,6 +259,10 @@ export interface IMChannelConnectOpts {
   onWeChatConnectionStateChange?: (state: WeChatConnectionState) => void;
   /** WeCom WebSocket authentication/transport lifecycle. */
   onWeComConnectionStateChange?: (state: WeComConnectionState) => void;
+  /** Feishu: read the account owner lazily, so a first-DM claim needs no reconnect. */
+  getOwnerOpenId?: () => string | undefined;
+  /** Feishu: the App's long connection is taken elsewhere, or has recovered. */
+  onTransportIssue?: (issue: FeishuTransportIssue) => void;
 }
 
 export interface IMChannel {
@@ -344,7 +364,7 @@ export function extractChatId(jid: string): string {
 
 // ─── Feishu Adapter ─────────────────────────────────────────────
 
-export function createFeishuChannel(config: FeishuConnectionConfig): IMChannel {
+export function createFeishuChannel(config: FeishuChannelConfig): IMChannel {
   let inner: FeishuConnection | null = null;
 
   const channel: IMChannel = {
@@ -354,7 +374,8 @@ export function createFeishuChannel(config: FeishuConnectionConfig): IMChannel {
       const { createFeishuConnection } =
         await loadChannelImplementation('feishu');
       inner = createFeishuConnection(config);
-      const connected = await inner.connect({
+      const connectOptions: FeishuConnectOptions &
+        Pick<IMChannelConnectOpts, 'getOwnerOpenId' | 'onTransportIssue'> = {
         isChatBound: opts.isChatBound,
         onReady: opts.onReady,
         onNewChat: opts.onNewChat,
@@ -382,8 +403,10 @@ export function createFeishuChannel(config: FeishuConnectionConfig): IMChannel {
         shouldDeferInbound: opts.shouldDeferInbound,
         onInboundGateOpen: opts.onInboundGateOpen,
         onMessageRecalled: opts.onMessageRecalled,
-      });
-      return connected;
+        getOwnerOpenId: opts.getOwnerOpenId,
+        onTransportIssue: opts.onTransportIssue,
+      };
+      return inner.connect(connectOptions);
     },
 
     async disconnect(): Promise<void> {
