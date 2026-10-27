@@ -177,7 +177,7 @@ export function WizardSourceStep({
             自定义兼容地址
           </span>
           <span className="block text-caption text-muted-foreground">
-            任何 Anthropic Messages 兼容接口，例如自建中转；支持粘贴 alias 导入
+            任何 Anthropic Messages 兼容接口，例如自建中转
           </span>
         </span>
         <ChevronRight

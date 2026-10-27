@@ -240,7 +240,8 @@ describe('Claude subscription', () => {
       60_000,
     );
     expect(text()).toContain('连接成功');
-    expect(onChanged).toHaveBeenCalled();
+    // Read again: the server may have stored the header the test proved.
+    expect(onChanged).toHaveBeenCalledWith();
   });
 });
 
@@ -370,23 +371,33 @@ describe('third-party connection settings', () => {
     expect(text()).toContain('「DeepSeek」预设的地址');
   });
 
-  test('a passed test on a legacy connection offers to keep the header it found', async () => {
-    mocks.post.mockResolvedValue({
-      ok: true,
-      probes: [{ model: 'glm-5.3', ok: true, status: 200, latencyMs: 90 }],
-      code: null,
-      authMode: 'x-api-key',
-    });
+  test('the auth header can be set, or handed back to the automatic fallback', async () => {
     await render(legacyProvider);
-    await click(button('测试连接'));
-    await flush();
-    expect(text()).toContain('服务商接受 x-api-key 认证');
-    await click(button('保存认证方式'));
+    const select = () =>
+      document.querySelector('#connection-auth-mode') as HTMLSelectElement;
+    // No stored header: automatic.
+    expect(select().value).toBe('auto');
+    await choose('#connection-auth-mode', 'x-api-key');
+    await click(button('保存连接设置'));
     await flush();
     expect(mocks.confirm).toHaveBeenCalledTimes(1);
     expect(mocks.patch).toHaveBeenCalledWith(
       `${PROVIDERS}/glm`,
       { anthropicAuthMode: 'x-api-key' },
+      120_000,
+    );
+
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    mocks.patch.mockClear();
+    await render({ ...legacyProvider, anthropicAuthMode: 'bearer' });
+    expect(select().value).toBe('bearer');
+    await choose('#connection-auth-mode', 'auto');
+    await click(button('保存连接设置'));
+    await flush();
+    expect(mocks.patch).toHaveBeenCalledWith(
+      `${PROVIDERS}/glm`,
+      { anthropicAuthMode: null },
       120_000,
     );
   });
@@ -474,6 +485,8 @@ describe('model list', () => {
     await render(legacyProvider);
     await openMenu('glm-5.2 的更多操作');
     await menuItem('从连接中删除');
+    // Taking a model out stops runners, so it asks first.
+    expect(mocks.confirm).toHaveBeenCalledTimes(1);
     expect(setError).toHaveBeenCalledWith(
       expect.stringContaining('智能体「写作助手」'),
     );
@@ -519,6 +532,28 @@ describe('model list', () => {
     expect(mocks.patch).not.toHaveBeenCalled();
   });
 
+  test('renaming a model with its 1M switch asks first, and declining keeps it', async () => {
+    mocks.confirm.mockResolvedValue(false);
+    await render(legacyProvider);
+    await click(
+      document.querySelector('[aria-label="glm-5.2 使用 1M 上下文"]'),
+    );
+    await flush();
+    expect(mocks.confirm).toHaveBeenCalledTimes(1);
+    expect(mocks.patch).not.toHaveBeenCalled();
+
+    mocks.confirm.mockResolvedValue(true);
+    await click(
+      document.querySelector('[aria-label="glm-5.2 使用 1M 上下文"]'),
+    );
+    await flush();
+    expect(mocks.patch).toHaveBeenCalledWith(
+      `${PROVIDERS}/glm`,
+      { models: [{ id: 'glm-5.3' }, { id: 'glm-5.2[1m]', hidden: true }] },
+      120_000,
+    );
+  });
+
   test('a manual model is added visible', async () => {
     await render(legacyProvider);
     await type('input[aria-label="手动添加模型"]', 'glm-6');
@@ -535,5 +570,7 @@ describe('model list', () => {
       },
       120_000,
     );
+    // Adding stops nothing, so nothing is asked.
+    expect(mocks.confirm).not.toHaveBeenCalled();
   });
 });

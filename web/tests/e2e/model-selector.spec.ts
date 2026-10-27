@@ -1,7 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 
-// The composer's model picker and reasoning effort button, in ChatView over the
-// composer harness. The model-selection API is answered by the test itself:
+// The composer's model picker (with the ChatGPT reasoning effort in its
+// panel), in ChatView over the composer harness. The model-selection API is answered by the test itself:
 // GET returns the current selection, PUT records the body and applies it.
 
 const HARNESS_PATH = '/tests/e2e/composer-harness.html';
@@ -90,12 +90,14 @@ async function openHarness(page: Page, initial: Partial<Selection> = {}) {
 
 const modelButton = (page: Page) =>
   page.locator('[data-hc-composer] button[aria-label^="模型："]');
-const effortButton = (page: Page) =>
-  page.locator('[data-hc-composer] button[aria-label^="推理档位："]');
-const radio = (page: Page, text: string) =>
-  page.getByRole('menuitemradio').filter({ hasText: text }).first();
+/** A model row of the open panel, by the model it names. */
+const modelRow = (page: Page, model: string) =>
+  page.locator(`[data-model-row][title="${model}"]`);
+/** A reasoning effort chip of the open panel. */
+const effortChip = (page: Page, effort: string) =>
+  page.locator(`[data-effort="${effort}"]`);
 
-/** The row of composer actions the two buttons sit in. */
+/** The row of composer actions the model button sits in. */
 const actionRow = (page: Page) =>
   modelButton(page).locator('xpath=ancestor::div[@data-composer-toolbar][1]');
 
@@ -116,8 +118,8 @@ async function expectRowFits(page: Page) {
   expect(fits.sendInside).toBe(true);
 }
 
-test.describe('model and effort buttons', () => {
-  test('sit side by side without pushing the send button off a phone', async ({
+test.describe('model picker', () => {
+  test('fits the composer row without pushing the send button off a phone', async ({
     page,
   }) => {
     await openHarness(page, {
@@ -125,56 +127,35 @@ test.describe('model and effort buttons', () => {
       selectedModel: 'gpt-6-astra',
       selectedEffort: 'high',
     });
-    await expect(effortButton(page)).toBeVisible();
+    // The model, then its effort in plain text.
     await expect(modelButton(page)).toContainText('gpt-6-astra');
-    // The model button comes first.
-    const boxes = await Promise.all([
-      modelButton(page).boundingBox(),
-      effortButton(page).boundingBox(),
-    ]);
-    expect(boxes[0]!.x).toBeLessThan(boxes[1]!.x);
+    await expect(modelButton(page)).toContainText('高');
     await expectRowFits(page);
 
     for (const width of [412, 360, 320]) {
       await page.setViewportSize({ width, height: 800 });
       await expectRowFits(page);
-      await expect(effortButton(page)).toBeVisible();
+      await expect(modelButton(page)).toBeVisible();
     }
-  });
-
-  test('the effort shows as an icon on a phone and spelled out on a wide screen', async ({
-    page,
-  }) => {
-    await openHarness(page, {
-      selectedModelConfigId: 'chatgpt',
-      selectedModel: 'gpt-6-astra',
-      selectedEffort: 'high',
-    });
-    await page.setViewportSize({ width: 390, height: 800 });
-    const phoneBox = await effortButton(page).boundingBox();
-    expect(phoneBox!.width).toBeLessThan(56);
-    await page.setViewportSize({ width: 1100, height: 800 });
-    await expect(effortButton(page)).toContainText('high');
-    const wideBox = await effortButton(page).boundingBox();
-    expect(wideBox!.width).toBeGreaterThan(phoneBox!.width);
   });
 
   test('picking a model, then an effort, saves both for the conversation', async ({
     page,
   }) => {
     const { puts } = await openHarness(page);
-    // Nothing to set an effort on while the pool chooses the configuration.
-    await expect(effortButton(page)).toBeDisabled();
 
     await modelButton(page).click();
+    const panel = page.getByRole('dialog');
     await expect(
-      page.getByText('ChatGPT 订阅 (someone@example.com)'),
+      panel.getByText('ChatGPT 订阅 (someone@example.com)').first(),
     ).toBeVisible();
     // Models are listed by name; whatever commentary the catalog carries stays out.
-    await expect(page.getByRole('menu')).not.toContainText(
-      /主力编码|旗舰|遗留|配置默认/,
-    );
-    await radio(page, 'gpt-6-astra').click();
+    await expect(panel).not.toContainText(/主力编码|旗舰|遗留|配置默认/);
+    // Nothing to set an effort on while the pool chooses the configuration.
+    await expect(
+      panel.getByRole('radiogroup', { name: '推理档位' }),
+    ).toHaveCount(0);
+    await modelRow(page, 'gpt-6-astra').click();
     await expect.poll(() => puts.length).toBe(1);
     expect(puts[0]).toMatchObject({
       modelConfigId: 'chatgpt',
@@ -182,52 +163,44 @@ test.describe('model and effort buttons', () => {
       effort: null,
     });
     await expect(modelButton(page)).toContainText('gpt-6-astra');
-    await expect(effortButton(page)).toBeEnabled();
 
-    await effortButton(page).click();
-    await expect(radio(page, 'xhigh')).toBeVisible();
-    // gpt-6-astra offers everything up to max here.
-    await expect(page.getByRole('menuitemradio')).toHaveCount(
-      1 + EFFORTS.length,
-    );
-    await radio(page, 'xhigh').click();
+    await modelButton(page).click();
+    const efforts = page.getByRole('radiogroup', { name: '推理档位' });
+    await expect(efforts).toBeVisible();
+    // gpt-6-astra offers everything up to max here, after the default chip.
+    await expect(efforts.getByRole('radio')).toHaveCount(1 + EFFORTS.length);
+    await effortChip(page, 'xhigh').click();
     await expect.poll(() => puts.length).toBe(2);
     expect(puts[1]).toMatchObject({
       modelConfigId: 'chatgpt',
       model: 'gpt-6-astra',
       effort: 'xhigh',
     });
-    await expect(effortButton(page)).toHaveAttribute(
-      'aria-label',
-      '推理档位：xhigh',
-    );
+    await expect(modelButton(page)).toContainText('超高');
 
     // A model without that level puts the effort back to its default.
-    await modelButton(page).click();
-    await radio(page, 'gpt-5.5').click();
+    await modelRow(page, 'gpt-5.5').click();
     await expect.poll(() => puts.length).toBe(3);
     expect(puts[2]).toMatchObject({ model: 'gpt-5.5', effort: null });
-    await expect(effortButton(page)).toHaveAttribute(
-      'aria-label',
-      '推理档位：medium（默认）',
-    );
+    await expect(modelButton(page)).toContainText('gpt-5.5中');
   });
 
-  test('the menus stay inside a small screen', async ({ page }) => {
+  test('the panel stays inside a small screen', async ({ page }) => {
     await openHarness(page, {
       selectedModelConfigId: 'chatgpt',
       selectedModel: 'gpt-6-astra',
     });
-    await page.setViewportSize({ width: 360, height: 700 });
-    for (const open of [modelButton, effortButton]) {
-      await open(page).click();
-      const menu = page.getByRole('menu');
-      await expect(menu).toBeVisible();
-      const box = await menu.boundingBox();
+    for (const width of [360, 1100]) {
+      await page.setViewportSize({ width, height: 700 });
+      await modelButton(page).click();
+      const panel = page.getByRole('dialog');
+      await expect(panel).toBeVisible();
+      const box = await panel.boundingBox();
       expect(box!.x).toBeGreaterThanOrEqual(0);
-      expect(box!.x + box!.width).toBeLessThanOrEqual(360 + 0.5);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(width + 0.5);
+      expect(box!.y).toBeGreaterThanOrEqual(0);
       await page.keyboard.press('Escape');
-      await expect(menu).toBeHidden();
+      await expect(panel).toBeHidden();
     }
   });
 });

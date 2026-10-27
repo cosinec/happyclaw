@@ -18,6 +18,10 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import {
+  NativeSelect,
+  NativeSelectOption,
+} from '@/components/ui/native-select';
 import { IconButton } from '@/components/common/IconButton';
 import { describeBaseUrlProblem, getModelPreset } from '@/lib/model-providers';
 import {
@@ -29,6 +33,8 @@ import { CodexModelFields } from './CodexModelFields';
 import { ConnectionModelList } from './ConnectionModelList';
 import { ConnectionTestResult } from './ConnectionTestResult';
 import {
+  AUTH_MODE_LABELS,
+  AUTO_AUTH_MODE_HINT,
   allowsNoDefaultModel,
   confirmProtocolChange,
   connectionKind,
@@ -40,6 +46,7 @@ import {
   testOutcome,
   updateConnection,
   type ConnectionKind,
+  type ProviderAuthMode,
   type TestOutcome,
 } from './model-connections';
 import { OAuthLoginPanel } from './OAuthLoginPanel';
@@ -150,41 +157,15 @@ function ConnectionDetail({
     try {
       const result = await testConnection({ providerId: provider.id });
       setTest({ outcome: testOutcome(result), error: null });
-      // The server stored the record as the connection's last test.
-      onChanged(
-        result.record
-          ? { id: provider.id, lastTest: result.record }
-          : undefined,
-      );
+      // The server stored the record, and may have stored the header the
+      // test proved: read the connection again.
+      onChanged();
     } catch (err) {
       setTest({ outcome: null, error: getErrorMessage(err, '测试连接失败') });
     } finally {
       setTesting(false);
     }
   };
-  // A connection saved before the auth mode was recorded runs on the old
-  // guess; once a test finds the header the endpoint takes, offer to keep it.
-  const learnedAuthMode =
-    thirdParty &&
-    provider.anthropicAuthMode === null &&
-    test?.outcome?.ok &&
-    test.outcome.authMode
-      ? test.outcome.authMode
-      : null;
-  const saveAuthMode = async () => {
-    if (!learnedAuthMode || !(await confirmProtocolChange(provider))) return;
-    try {
-      onChanged(
-        await updateConnection(provider.id, {
-          anthropicAuthMode: learnedAuthMode,
-        }),
-      );
-      setNotice('认证方式已保存');
-    } catch (err) {
-      setError(getErrorMessage(err, '保存认证方式失败'));
-    }
-  };
-
   return (
     <div className="flex min-w-0 flex-col gap-6">
       <DialogHeader>
@@ -269,22 +250,6 @@ function ConnectionDetail({
           testing={testing}
           requestError={test?.error ?? null}
         />
-        {learnedAuthMode && (
-          <div className="flex flex-wrap items-center gap-2 text-caption text-muted-foreground">
-            服务商接受{' '}
-            {learnedAuthMode === 'bearer'
-              ? 'Authorization: Bearer'
-              : 'x-api-key'}{' '}
-            认证。保存后不再按旧规则猜测。
-            <Button
-              size="xs"
-              variant="outline"
-              onClick={() => void saveAuthMode()}
-            >
-              保存认证方式
-            </Button>
-          </div>
-        )}
       </section>
 
       {kind === 'chatgpt' ? (
@@ -421,6 +386,10 @@ function ConnectionSettings({
     provider.anthropicModel,
   );
   const [env, setEnv] = useState<ProviderEnvDraft>(initialEnv);
+  const savedAuthMode = provider.anthropicAuthMode ?? 'auto';
+  const [authMode, setAuthMode] = useState<ProviderAuthMode | 'auto'>(
+    savedAuthMode,
+  );
   const [saving, setSaving] = useState(false);
   const baseUrlProblem =
     kind === 'custom' ? describeBaseUrlProblem(baseUrl) : null;
@@ -429,7 +398,8 @@ function ConnectionSettings({
   const envChanged = !sameEnv(built.customEnv, provider.customEnv ?? {});
   const urlChanged =
     kind === 'custom' && baseUrl.trim() !== provider.anthropicBaseUrl;
-  const dirty = urlChanged || !!secret.trim() || envChanged;
+  const authModeChanged = authMode !== savedAuthMode;
+  const dirty = urlChanged || !!secret.trim() || envChanged || authModeChanged;
 
   const save = async () => {
     if (built.error) {
@@ -446,6 +416,10 @@ function ConnectionSettings({
       const patch: Record<string, unknown> = {};
       const secrets: Record<string, unknown> = {};
       if (urlChanged) patch.anthropicBaseUrl = baseUrl.trim();
+      // Null clears the stored header, so the server falls back again.
+      if (authModeChanged) {
+        patch.anthropicAuthMode = authMode === 'auto' ? null : authMode;
+      }
       if (envChanged) patch.customEnv = built.customEnv;
       if (secret.trim()) {
         if (thirdParty) {
@@ -640,6 +614,34 @@ function ConnectionSettings({
               className="font-mono"
             />
           </SettingsField>
+          {thirdParty && (
+            <SettingsField
+              label="认证方式"
+              htmlFor="connection-auth-mode"
+              description={
+                authMode === 'auto'
+                  ? AUTO_AUTH_MODE_HINT
+                  : '只用这一种请求头发送密钥。'
+              }
+            >
+              <NativeSelect
+                id="connection-auth-mode"
+                value={authMode}
+                onChange={(event) =>
+                  setAuthMode(event.target.value as ProviderAuthMode | 'auto')
+                }
+                disabled={saving}
+                className="w-full sm:w-72"
+              >
+                <NativeSelectOption value="auto">自动判断</NativeSelectOption>
+                {(['bearer', 'x-api-key'] as const).map((mode) => (
+                  <NativeSelectOption key={mode} value={mode}>
+                    {AUTH_MODE_LABELS[mode]}
+                  </NativeSelectOption>
+                ))}
+              </NativeSelect>
+            </SettingsField>
+          )}
           <ProviderEnvEditor
             thirdParty={thirdParty}
             defaultModel={provider.anthropicModel}

@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   put: vi.fn(),
   toastSuccess: vi.fn(),
   toastError: vi.fn(),
+  canManage: false,
 }));
 
 vi.mock('../../api/client', () => ({
@@ -22,7 +23,7 @@ vi.mock('../../api/client', () => ({
 }));
 vi.mock('../../stores/auth', () => ({
   useAuthStore: (selector: (state: unknown) => unknown) =>
-    selector({ hasPermission: () => false }),
+    selector({ hasPermission: () => mocks.canManage }),
 }));
 vi.mock('sonner', () => ({
   toast: { success: mocks.toastSuccess, error: mocks.toastError },
@@ -60,62 +61,6 @@ function selection(
     ...overrides,
   };
 }
-
-let root: Root;
-let container: HTMLDivElement;
-
-beforeEach(() => {
-  vi.clearAllMocks();
-  container = document.createElement('div');
-  document.body.append(container);
-  root = createRoot(container);
-});
-
-afterEach(async () => {
-  await act(async () => root.unmount());
-  container.remove();
-  document.body.innerHTML = '';
-});
-
-async function render(agentId: string | null, canChange = true) {
-  await act(async () => {
-    root.render(
-      <MemoryRouter>
-        <ModelSelector
-          groupJid="web:ws"
-          agentId={agentId}
-          canChange={canChange}
-        />
-      </MemoryRouter>,
-    );
-  });
-}
-
-function trigger(): HTMLButtonElement {
-  const button = container.querySelector('button');
-  if (!button) throw new Error('model selector trigger not rendered');
-  return button;
-}
-
-/** The reasoning effort button: always the one after the model button. */
-function effortTrigger(): HTMLButtonElement | null {
-  return container.querySelectorAll('button')[1] ?? null;
-}
-
-async function open(button: HTMLButtonElement) {
-  await act(async () => {
-    button.dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
-    );
-  });
-}
-
-const menuItems = () => [
-  ...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
-];
-
-const itemByText = (text: string) =>
-  menuItems().find((item) => item.textContent?.includes(text));
 
 const FULL = ['low', 'medium', 'high', 'xhigh', 'max'];
 
@@ -175,6 +120,139 @@ function chatGptSelection(
     ],
     ...overrides,
   };
+}
+
+/** Two connections that list their models (a current server). */
+function connectionSelection(
+  overrides: Partial<SessionModelSelection> = {},
+): SessionModelSelection {
+  return {
+    selectedModelConfigId: null,
+    selectedModel: null,
+    selectedEffort: null,
+    default: { source: 'pool', modelConfigId: null, enabledCount: 2 },
+    options: [
+      {
+        id: 'official',
+        name: 'Claude 官方',
+        kind: 'official',
+        enabled: true,
+        model: 'opus',
+        usable: true,
+        models: [
+          { id: 'opus', hidden: false },
+          { id: 'sonnet', hidden: false },
+          { id: 'haiku', hidden: true },
+        ],
+      },
+      {
+        id: 'glm',
+        name: 'GLM',
+        kind: 'third_party',
+        enabled: false,
+        model: 'glm-5.3[1m]',
+        usable: true,
+        models: [
+          { id: 'glm-5.3[1m]', hidden: false },
+          { id: 'glm-4.6', hidden: false },
+        ],
+      },
+    ],
+    ...overrides,
+  };
+}
+
+let root: Root;
+let container: HTMLDivElement;
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mocks.canManage = false;
+  container = document.createElement('div');
+  document.body.append(container);
+  root = createRoot(container);
+});
+
+afterEach(async () => {
+  await act(async () => root.unmount());
+  container.remove();
+  document.body.innerHTML = '';
+});
+
+async function render(agentId: string | null, canChange = true) {
+  await act(async () => {
+    root.render(
+      <MemoryRouter>
+        <ModelSelector
+          groupJid="web:ws"
+          agentId={agentId}
+          canChange={canChange}
+        />
+      </MemoryRouter>,
+    );
+  });
+}
+
+async function rerender(canChange = true) {
+  await act(async () => root.unmount());
+  root = createRoot(container);
+  await render(null, canChange);
+}
+
+function trigger(): HTMLButtonElement {
+  const button = container.querySelector<HTMLButtonElement>(
+    'button[aria-label^="模型："]',
+  );
+  if (!button) throw new Error('model selector trigger not rendered');
+  return button;
+}
+
+async function open() {
+  await act(async () => trigger().click());
+}
+
+const rows = () => [
+  ...document.querySelectorAll<HTMLButtonElement>('[data-model-row]'),
+];
+/** The first line of each row: the model (or the default) it stands for. */
+const titles = () => rows().map((row) => row.getAttribute('title'));
+const row = (title: string) =>
+  rows().find((item) => item.getAttribute('title') === title);
+const detail = (title: string) =>
+  row(title)?.querySelectorAll('span span')[1]?.textContent ?? '';
+const checked = () =>
+  rows().filter((item) => item.getAttribute('aria-checked') === 'true');
+
+const effortGroup = () =>
+  document.querySelector('[role="radiogroup"][aria-label="推理档位"]');
+const chips = () => [
+  ...(effortGroup()?.querySelectorAll<HTMLButtonElement>('[role="radio"]') ??
+    []),
+];
+const chip = (value: string) =>
+  document.querySelector<HTMLButtonElement>(`[data-effort="${value}"]`);
+
+const railButton = (label: string) =>
+  document.querySelector<HTMLButtonElement>(
+    `[role="group"][aria-label="模型配置"] button[aria-label="${label}"]`,
+  );
+
+async function search(value: string) {
+  const input = document.querySelector<HTMLInputElement>(
+    'input[aria-label="搜索模型"]',
+  )!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+}
+
+async function click(element: HTMLElement | null | undefined) {
+  if (!element) throw new Error('element not found');
+  await act(async () => element.click());
 }
 
 describe('describeDefaultModel', () => {
@@ -270,25 +348,196 @@ describe('describeDefaultModel', () => {
   });
 });
 
-describe('ModelSelector', () => {
-  test('loads the conversation selection and labels the default', async () => {
+describe('the trigger', () => {
+  test('loads the conversation selection and names what the default runs, without a 默认 prefix', async () => {
     mocks.get.mockResolvedValue(selection());
     await render('session-1');
     expect(mocks.get).toHaveBeenCalledWith(
       '/api/groups/web%3Aws/model-selection?agentId=session-1',
     );
-    expect(trigger().textContent).toContain('默认 · 自动 · 2 个');
+    expect(trigger().textContent).toBe('自动 · 2 个');
     expect(trigger().disabled).toBe(false);
+
+    mocks.get.mockResolvedValue(
+      connectionSelection({
+        default: {
+          source: 'default',
+          modelConfigId: 'glm',
+          enabledCount: 2,
+          model: 'glm-5.3[1m]',
+        },
+      }),
+    );
+    await rerender();
+    expect(trigger().textContent).toBe('glm-5.3');
+    expect(trigger().getAttribute('aria-label')).toBe(
+      '模型：GLM · glm-5.3（1M）',
+    );
   });
 
-  test('shows the picked configuration and is read-only without Modify', async () => {
+  test('names the picked model and is read-only without Modify', async () => {
     mocks.get.mockResolvedValue(selection({ selectedModelConfigId: 'glm' }));
     await render(null, false);
     expect(mocks.get).toHaveBeenCalledWith(
       '/api/groups/web%3Aws/model-selection',
     );
-    expect(trigger().textContent).toContain('GLM');
+    expect(trigger().textContent).toBe('glm-5.3');
     expect(trigger().disabled).toBe(true);
+    // The full 「连接 · 模型」 is still readable.
+    expect(trigger().title).toBe('GLM · glm-5.3（1M）');
+  });
+
+  test('is plain text at rest and filled on hover or while open', async () => {
+    mocks.get.mockResolvedValue(connectionSelection());
+    await render(null);
+    const classes = [...trigger().classList];
+    expect(classes).toEqual(
+      expect.arrayContaining([
+        'h-[30px]',
+        'rounded-full',
+        'text-label',
+        'hover:bg-surface-hover',
+        'data-[state=open]:bg-surface-hover',
+      ]),
+    );
+    expect(classes.some((name) => name.startsWith('border'))).toBe(false);
+    // The name truncates; the chevron stays.
+    expect(trigger().querySelector('.truncate')).not.toBeNull();
+    expect(trigger().querySelector('svg')).not.toBeNull();
+    await open();
+    expect(trigger().getAttribute('data-state')).toBe('open');
+  });
+
+  test('shows a ChatGPT effort in muted text after the model', async () => {
+    mocks.get.mockResolvedValue(
+      chatGptSelection({
+        selectedModelConfigId: 'chatgpt',
+        selectedModel: 'gpt-6-astra',
+        selectedEffort: 'high',
+      }),
+    );
+    await render(null);
+    expect(trigger().textContent).toBe('gpt-6-astra高');
+    const effort = [...trigger().querySelectorAll('span')].find(
+      (span) => span.textContent === '高',
+    );
+    expect(effort?.className).toContain('text-muted-foreground');
+  });
+
+  test('the full label shows in a tooltip', async () => {
+    mocks.get.mockResolvedValue(
+      connectionSelection({
+        selectedModelConfigId: 'glm',
+        selectedModel: 'glm-4.6',
+      }),
+    );
+    await render(null);
+    expect(trigger().title).toBe('');
+    await act(async () => trigger().focus());
+    expect(
+      document.querySelector('[data-slot="tooltip-content"]')?.textContent,
+    ).toContain('GLM · glm-4.6');
+  });
+
+  test('closing the panel does not pop the tooltip up over the pick', async () => {
+    mocks.get.mockResolvedValue(connectionSelection());
+    mocks.put.mockResolvedValue(
+      connectionSelection({
+        selectedModelConfigId: 'official',
+        selectedModel: 'sonnet',
+      }),
+    );
+    await render(null);
+    await open();
+    await click(row('sonnet'));
+    expect(document.querySelector('[data-slot="tooltip-content"]')).toBeNull();
+    // Leaving and coming back shows it again.
+    await act(async () => {
+      trigger().dispatchEvent(new PointerEvent('pointerleave'));
+      trigger().blur();
+    });
+    await act(async () => trigger().focus());
+    expect(
+      document.querySelector('[data-slot="tooltip-content"]')?.textContent,
+    ).toContain('Claude 官方 · sonnet');
+  });
+
+  test('stays hidden when no model configuration exists', async () => {
+    mocks.get.mockResolvedValue(selection({ options: [] }));
+    await render(null);
+    expect(container.querySelector('button')).toBeNull();
+  });
+});
+
+describe('the panel', () => {
+  test('lists the default and every model as two-line rows, the one in use checked', async () => {
+    mocks.get.mockResolvedValue(
+      connectionSelection({
+        selectedModelConfigId: 'glm',
+        selectedModel: 'glm-4.6',
+      }),
+    );
+    await render(null);
+    await open();
+    expect(titles()).toEqual([
+      '默认 · 自动 · 2 个',
+      'opus',
+      'sonnet',
+      'glm-5.3',
+      'glm-4.6',
+    ]);
+    // Second line: the connection, the 1M window, then any note.
+    expect(detail('glm-5.3')).toBe('GLM · 1M 上下文');
+    expect(detail('opus')).toBe('Claude 官方');
+    // Pool membership is Settings' business.
+    expect(document.body.textContent).not.toContain('未启用');
+    expect(checked().map((item) => item.getAttribute('title'))).toEqual([
+      'glm-4.6',
+    ]);
+    expect(checked()[0].querySelector('svg.lucide-check')).not.toBeNull();
+  });
+
+  test('the rail filters by connection and 全部 brings everything back', async () => {
+    mocks.get.mockResolvedValue(connectionSelection());
+    await render(null);
+    await open();
+    expect(railButton('全部')?.getAttribute('aria-pressed')).toBe('true');
+    await click(railButton('GLM'));
+    expect(railButton('GLM')?.getAttribute('aria-pressed')).toBe('true');
+    expect(titles()).toEqual(['glm-5.3', 'glm-4.6']);
+    await click(railButton('全部'));
+    expect(titles()).toHaveLength(5);
+  });
+
+  test('search looks through every connection, whatever the rail shows', async () => {
+    mocks.get.mockResolvedValue(connectionSelection());
+    await render(null);
+    await open();
+    await click(railButton('GLM'));
+    await search('SON');
+    expect(titles()).toEqual(['sonnet']);
+    await search('glm');
+    // A connection's name matches all of its models.
+    expect(titles()).toEqual(['glm-5.3', 'glm-4.6']);
+    await search('nothing-like-this');
+    expect(rows()).toHaveLength(0);
+    expect(document.body.textContent).toContain('没有匹配的模型');
+  });
+
+  test('offers 管理模型配置 to whoever may manage them', async () => {
+    mocks.get.mockResolvedValue(connectionSelection());
+    await render(null);
+    await open();
+    expect(document.body.textContent).not.toContain('管理模型配置');
+
+    mocks.canManage = true;
+    await rerender();
+    await open();
+    const manage = [...document.querySelectorAll('button')].find(
+      (button) => button.textContent?.trim() === '管理模型配置',
+    );
+    await click(manage);
+    expect(trigger().getAttribute('data-state')).toBe('closed');
   });
 
   test('a configuration without a credential is shown but not selectable', async () => {
@@ -301,55 +550,25 @@ describe('ModelSelector', () => {
             name: 'GLM (副本)',
             kind: 'third_party',
             enabled: false,
-            model: 'glm-5.3',
+            model: 'glm-5.2',
             usable: false,
           },
         ],
       }),
     );
     await render(null);
-    await act(async () => {
-      trigger().dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
-      );
-    });
-    const copy = [
-      ...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
-    ].find((item) => item.textContent?.includes('GLM (副本)'));
-    expect(copy?.textContent).toContain('缺少凭据');
-    expect(copy?.getAttribute('aria-disabled')).toBe('true');
+    await open();
+    expect(detail('glm-5.2')).toContain('缺少凭据');
+    expect(row('glm-5.2')?.disabled).toBe(true);
   });
 
-  test('stays hidden when no model configuration exists', async () => {
-    mocks.get.mockResolvedValue(selection({ options: [] }));
-    await render(null);
-    expect(container.querySelector('button')).toBeNull();
-  });
-
-  test('picking a configuration saves it for this conversation', async () => {
+  test('picking a configuration from an older server sends only the configuration', async () => {
     mocks.get.mockResolvedValue(selection());
     mocks.put.mockResolvedValue(selection({ selectedModelConfigId: 'glm' }));
     await render('session-1');
-
-    await act(async () => {
-      trigger().dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
-      );
-    });
-    const items = [
-      ...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
-    ];
-    expect(items.map((item) => item.textContent)).toEqual([
-      expect.stringContaining('默认'),
-      expect.stringContaining('Claude 官方'),
-      expect.stringContaining('GLM'),
-    ]);
-    // An explicit pick ignores the pool, so its status is not shown here.
-    expect(items[2].textContent).not.toContain('未启用');
-    await act(async () => {
-      items[2].click();
-    });
-
+    await open();
+    expect(titles()).toEqual(['默认 · 自动 · 2 个', 'opus', 'glm-5.3']);
+    await click(row('glm-5.3'));
     expect(mocks.put).toHaveBeenCalledWith(
       '/api/groups/web%3Aws/model-selection',
       { agentId: 'session-1', modelConfigId: 'glm' },
@@ -357,64 +576,158 @@ describe('ModelSelector', () => {
     expect(mocks.toastSuccess).toHaveBeenCalledWith(
       '已切换到「GLM」，从下一条消息开始生效',
     );
-    expect(trigger().textContent).toContain('GLM');
+    expect(trigger().textContent).toBe('glm-5.3');
+    // The panel closes once something is picked.
+    expect(rows()).toHaveLength(0);
+  });
+});
+
+describe('models of a configuration', () => {
+  test('picking a model of a configuration pins it for the conversation', async () => {
+    mocks.get.mockResolvedValue(connectionSelection());
+    mocks.put.mockResolvedValue(
+      connectionSelection({
+        selectedModelConfigId: 'glm',
+        selectedModel: 'glm-4.6',
+      }),
+    );
+    await render(null);
+    await open();
+    await click(row('glm-4.6'));
+    expect(mocks.put).toHaveBeenCalledWith(
+      '/api/groups/web%3Aws/model-selection',
+      { agentId: null, modelConfigId: 'glm', model: 'glm-4.6' },
+    );
+    expect(mocks.toastSuccess).toHaveBeenCalledWith(
+      '已切换到「GLM · glm-4.6」，从下一条消息开始生效',
+    );
+  });
+
+  test('the default model row follows the configuration with the request older servers know', async () => {
+    mocks.get.mockResolvedValue(
+      connectionSelection({
+        selectedModelConfigId: 'glm',
+        selectedModel: 'glm-4.6',
+      }),
+    );
+    mocks.put.mockResolvedValue(
+      connectionSelection({ selectedModelConfigId: 'glm' }),
+    );
+    await render(null);
+    await open();
+    await click(row('glm-5.3'));
+    expect(mocks.put).toHaveBeenCalledWith(
+      '/api/groups/web%3Aws/model-selection',
+      { agentId: null, modelConfigId: 'glm' },
+    );
+  });
+
+  test('a hidden model the conversation runs on stays visible and checked', async () => {
+    mocks.get.mockResolvedValue(
+      connectionSelection({
+        selectedModelConfigId: 'official',
+        selectedModel: 'haiku',
+      }),
+    );
+    await render(null);
+    await open();
+    expect(titles()).toContain('haiku');
+    expect(detail('haiku')).toContain('已隐藏');
+    expect(checked().map((item) => item.getAttribute('title'))).toEqual([
+      'haiku',
+    ]);
+  });
+
+  test('a model the list no longer has stays visible and checked', async () => {
+    mocks.get.mockResolvedValue(
+      connectionSelection({
+        selectedModelConfigId: 'glm',
+        selectedModel: 'glm-4.0',
+      }),
+    );
+    await render(null);
+    await open();
+    expect(detail('glm-4.0')).toContain('不在模型列表里');
+    expect(checked()[0].getAttribute('title')).toBe('glm-4.0');
+    // Choosing it again changes nothing.
+    await click(checked()[0]);
+    expect(mocks.put).not.toHaveBeenCalled();
+  });
+
+  test('a configuration without a credential lists its models disabled', async () => {
+    const base = connectionSelection();
+    mocks.get.mockResolvedValue({
+      ...base,
+      options: [base.options[0], { ...base.options[1], usable: false }],
+    });
+    await render(null);
+    await open();
+    expect(row('glm-4.6')?.disabled).toBe(true);
+    expect(detail('glm-4.6')).toContain('缺少凭据');
+    expect(row('sonnet')?.disabled).toBe(false);
+  });
+
+  test('a relay without a model of its own lets the relay decide', async () => {
+    const base = connectionSelection();
+    mocks.get.mockResolvedValue({
+      ...base,
+      options: [
+        base.options[0],
+        {
+          ...base.options[1],
+          model: '',
+          models: [{ id: 'glm-4.6', hidden: false }],
+        },
+      ],
+    });
+    mocks.put.mockResolvedValue(base);
+    await render(null);
+    await open();
+    await click(row('由中转站决定'));
+    expect(mocks.put).toHaveBeenCalledWith(
+      '/api/groups/web%3Aws/model-selection',
+      { agentId: null, modelConfigId: 'glm' },
+    );
+  });
+
+  test('a refused model reads as such and reloads the selection', async () => {
+    mocks.get.mockResolvedValue(connectionSelection());
+    mocks.put.mockRejectedValue({
+      status: 400,
+      message: 'model not in connection',
+      body: { code: 'MODEL_NOT_IN_CONNECTION' },
+    });
+    await render(null);
+    await open();
+    await click(row('glm-4.6'));
+    expect(mocks.toastError).toHaveBeenCalledWith(
+      '所选模型已不在该模型配置的模型列表里，请重新选择模型',
+    );
+    expect(mocks.get).toHaveBeenCalledTimes(2);
   });
 });
 
 describe('ChatGPT models', () => {
-  test('a login lists its models under its own heading, by name only', async () => {
+  test('lists a login models by name only', async () => {
     mocks.get.mockResolvedValue(chatGptSelection());
     await render(null);
-    await open(trigger());
-    expect(menuItems().map((item) => item.textContent)).toEqual([
-      expect.stringContaining('默认'),
-      expect.stringContaining('Claude 官方'),
-      expect.stringContaining('gpt-6.1-sol'),
-      expect.stringContaining('gpt-6-astra'),
-      expect.stringContaining('gpt-5.5'),
+    await open();
+    expect(titles()).toEqual([
+      '默认 · 自动 · 2 个',
+      'opus',
+      'gpt-6.1-sol',
+      'gpt-6-astra',
+      'gpt-5.5',
     ]);
     // The catalog may still carry commentary; the picker never shows it.
-    expect(
-      menuItems()
-        .slice(2)
-        .map((item) => item.textContent),
-    ).toEqual(['gpt-6.1-sol', 'gpt-6-astra', 'gpt-5.5']);
     expect(document.body.textContent).not.toMatch(
       /主力编码|旗舰|遗留|配置默认/,
     );
-    const headings = [
-      ...document.querySelectorAll('[data-slot="dropdown-menu-label"]'),
-    ].map((node) => node.textContent);
-    expect(headings.some((text) => text?.includes('ChatGPT 订阅'))).toBe(true);
-    // The picked-model note replaces the configuration-only one.
+    expect(detail('gpt-6-astra')).toBe('ChatGPT 订阅');
+    // Its mark reads G, not the C a Claude connection has.
+    expect(railButton('ChatGPT 订阅')?.textContent).toBe('G');
+    expect(railButton('Claude 官方')?.textContent).toBe('C');
     expect(document.body.textContent).toContain('只调整推理档位不会');
-  });
-
-  test('the model button names the model a pinned login runs', async () => {
-    mocks.get.mockResolvedValue(
-      chatGptSelection({
-        selectedModelConfigId: 'chatgpt',
-        selectedModel: 'gpt-6-astra',
-      }),
-    );
-    await render(null);
-    expect(trigger().textContent).toContain('gpt-6-astra');
-    await open(trigger());
-    const checked = menuItems().filter(
-      (item) => item.getAttribute('aria-checked') === 'true',
-    );
-    expect(checked.map((item) => item.textContent)).toEqual([
-      expect.stringContaining('gpt-6-astra'),
-    ]);
-
-    // Following the configuration shows its own model, on the default row.
-    mocks.get.mockResolvedValue(
-      chatGptSelection({ selectedModelConfigId: 'chatgpt' }),
-    );
-    await act(async () => root.unmount());
-    root = createRoot(container);
-    await render(null);
-    expect(trigger().textContent).toContain('gpt-6.1-sol');
   });
 
   test('a stored model the account list lacks stays visible and checked', async () => {
@@ -425,16 +738,10 @@ describe('ChatGPT models', () => {
       }),
     );
     await render(null);
-    await open(trigger());
-    const checked = menuItems().filter(
-      (item) => item.getAttribute('aria-checked') === 'true',
-    );
-    expect(checked.map((item) => item.textContent)).toEqual([
-      expect.stringContaining('gpt-unlisted'),
-    ]);
-    expect(checked[0].textContent).toContain('不在账号的模型列表里');
-    // Choosing it again changes nothing.
-    await act(async () => checked[0].click());
+    await open();
+    expect(checked()[0].getAttribute('title')).toBe('gpt-unlisted');
+    expect(detail('gpt-unlisted')).toContain('不在账号的模型列表里');
+    await click(checked()[0]);
     expect(mocks.put).not.toHaveBeenCalled();
   });
 
@@ -454,8 +761,8 @@ describe('ChatGPT models', () => {
       }),
     );
     await render('session-1');
-    await open(trigger());
-    await act(async () => itemByText('gpt-6-astra')!.click());
+    await open();
+    await click(row('gpt-6-astra'));
     expect(mocks.put).toHaveBeenCalledWith(
       '/api/groups/web%3Aws/model-selection',
       {
@@ -485,8 +792,8 @@ describe('ChatGPT models', () => {
       }),
     );
     await render(null);
-    await open(trigger());
-    await act(async () => itemByText('gpt-5.5')!.click());
+    await open();
+    await click(row('gpt-5.5'));
     expect(mocks.put).toHaveBeenCalledWith(
       '/api/groups/web%3Aws/model-selection',
       {
@@ -497,7 +804,7 @@ describe('ChatGPT models', () => {
       },
     );
     expect(mocks.toastSuccess).toHaveBeenCalledWith(
-      expect.stringContaining('该模型不支持 max，档位已恢复为默认（medium）'),
+      expect.stringContaining('该模型不支持 最高，档位已恢复为默认（中）'),
     );
   });
 
@@ -511,8 +818,8 @@ describe('ChatGPT models', () => {
     );
     mocks.put.mockResolvedValue(chatGptSelection());
     await render(null);
-    await open(trigger());
-    await act(async () => itemByText('默认')!.click());
+    await open();
+    await click(row('默认 · 自动 · 2 个'));
     expect(mocks.put).toHaveBeenCalledWith(
       '/api/groups/web%3Aws/model-selection',
       { agentId: null, modelConfigId: null },
@@ -521,30 +828,26 @@ describe('ChatGPT models', () => {
     mocks.put.mockResolvedValue(
       chatGptSelection({ selectedModelConfigId: 'chatgpt' }),
     );
-    await open(trigger());
-    await act(async () => itemByText('gpt-6.1-sol')!.click());
+    await open();
+    await click(row('gpt-6.1-sol'));
     expect(mocks.put).toHaveBeenLastCalledWith(
       '/api/groups/web%3Aws/model-selection',
       { agentId: null, modelConfigId: 'chatgpt', model: null, effort: null },
     );
   });
 
-  test('a login that has to be redone, or has no credential, cannot be picked', async () => {
+  test('a login that has to be redone cannot be picked', async () => {
     mocks.get.mockResolvedValue(
       chatGptSelection({}, { needsReauth: true }, {}),
     );
     await render(null);
-    await open(trigger());
-    expect(itemByText('gpt-6-astra')?.getAttribute('aria-disabled')).toBe(
-      'true',
-    );
-    expect(document.body.textContent).toContain('需重新登录');
-    expect(itemByText('Claude 官方')?.getAttribute('aria-disabled')).not.toBe(
-      'true',
-    );
+    await open();
+    expect(row('gpt-6-astra')?.disabled).toBe(true);
+    expect(detail('gpt-6-astra')).toContain('需重新登录');
+    expect(row('opus')?.disabled).toBe(false);
   });
 
-  test('looks again when the menu opens while the list is only a fallback', async () => {
+  test('looks again when the panel opens while the list is only a fallback', async () => {
     mocks.get.mockResolvedValue(chatGptSelection({}, { source: 'builtin' }));
     await render(null);
     expect(mocks.get).toHaveBeenCalledTimes(1);
@@ -565,7 +868,7 @@ describe('ChatGPT models', () => {
     );
     mocks.get.mockResolvedValue(live);
     // Within a few seconds of the first load nothing is asked again.
-    await open(trigger());
+    await open();
     expect(mocks.get).toHaveBeenCalledTimes(1);
 
     vi.useFakeTimers();
@@ -580,15 +883,13 @@ describe('ChatGPT models', () => {
       await render(null);
       vi.setSystemTime(Date.now() + 10_000);
       mocks.get.mockResolvedValue(live);
-      await open(trigger());
+      await open();
       expect(mocks.get).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
     }
   });
-});
 
-describe('looking the list up again', () => {
   test('never puts an older selection back over one that was just saved', async () => {
     vi.useFakeTimers();
     try {
@@ -597,7 +898,7 @@ describe('looking the list up again', () => {
       );
       await render(null);
       vi.setSystemTime(Date.now() + 10_000);
-      // The look-up the menu starts is slow; the save overtakes it.
+      // The look-up the panel starts is slow; the save overtakes it.
       let answerLookUp!: (value: SessionModelSelection) => void;
       mocks.get.mockReturnValueOnce(
         new Promise<SessionModelSelection>((resolve) => {
@@ -610,8 +911,8 @@ describe('looking the list up again', () => {
           selectedModel: 'gpt-6-astra',
         }),
       );
-      await open(trigger());
-      await act(async () => itemByText('gpt-6-astra')!.click());
+      await open();
+      await click(row('gpt-6-astra'));
       expect(trigger().textContent).toContain('gpt-6-astra');
       await act(async () => {
         answerLookUp(chatGptSelection({}, { source: 'live' }));
@@ -623,47 +924,21 @@ describe('looking the list up again', () => {
   });
 });
 
-describe('reasoning effort button', () => {
-  test('is absent without a ChatGPT login and follows the model button otherwise', async () => {
-    mocks.get.mockResolvedValue(selection());
+describe('reasoning effort', () => {
+  test('is not offered without a ChatGPT login, or while the pool picks', async () => {
+    mocks.get.mockResolvedValue(connectionSelection());
     await render(null);
-    expect(container.querySelectorAll('button')).toHaveLength(1);
+    await open();
+    expect(effortGroup()).toBeNull();
 
-    await act(async () => root.unmount());
-    root = createRoot(container);
     mocks.get.mockResolvedValue(chatGptSelection());
-    await render(null);
-    const buttons = container.querySelectorAll('button');
-    expect(buttons).toHaveLength(2);
-    // The model button stays the first button of the selector.
-    expect(buttons[0].getAttribute('aria-label')).toContain('模型');
-    expect(buttons[1].getAttribute('aria-label')).toContain('推理档位');
+    await rerender();
+    await open();
+    expect(effortGroup()).toBeNull();
+    expect(trigger().textContent).toBe('自动 · 2 个');
   });
 
-  test('is greyed out while the pool picks the configuration', async () => {
-    mocks.get.mockResolvedValue(chatGptSelection());
-    await render(null);
-    expect(effortTrigger()!.disabled).toBe(true);
-    expect(effortTrigger()!.title).toContain('请先选择');
-  });
-
-  test('shows the default effort of the model in use until one is picked', async () => {
-    mocks.get.mockResolvedValue(
-      chatGptSelection({
-        selectedModelConfigId: 'chatgpt',
-        selectedModel: 'gpt-6-astra',
-      }),
-    );
-    await render(null);
-    expect(effortTrigger()!.disabled).toBe(false);
-    expect(effortTrigger()!.textContent).toContain('默认 · medium');
-    expect(effortTrigger()!.getAttribute('aria-label')).toBe(
-      '推理档位：medium（默认）',
-    );
-    expect(effortTrigger()!.title).toBe('推理档位：medium（默认）');
-  });
-
-  test('lists the efforts of the model in use, low to high, and saves a pick', async () => {
+  test('sits under the model in use, lists its levels low to high and saves a pick', async () => {
     mocks.get.mockResolvedValue(
       chatGptSelection({
         selectedModelConfigId: 'chatgpt',
@@ -678,14 +953,21 @@ describe('reasoning effort button', () => {
       }),
     );
     await render('session-1');
-    await open(effortTrigger()!);
-    expect(menuItems().map((item) => item.textContent)).toEqual([
-      expect.stringContaining('默认 · medium'),
-      'low',
-      'medium',
-      'high',
+    // Following the model's default level.
+    expect(trigger().textContent).toBe('gpt-5.5中');
+    await open();
+    // Right after the checked row.
+    expect(checked()[0].nextElementSibling?.getAttribute('aria-label')).toBe(
+      '推理档位',
+    );
+    expect(chips().map((item) => item.textContent)).toEqual([
+      '默认 · 中',
+      '低',
+      '中',
+      '高',
     ]);
-    await act(async () => itemByText('high')!.click());
+    expect(chip('default')?.getAttribute('aria-checked')).toBe('true');
+    await click(chip('high'));
     expect(mocks.put).toHaveBeenCalledWith(
       '/api/groups/web%3Aws/model-selection',
       {
@@ -696,10 +978,10 @@ describe('reasoning effort button', () => {
       },
     );
     expect(mocks.toastSuccess).toHaveBeenCalledWith(
-      '推理档位已设为 high，从下一个请求开始生效',
+      '推理档位已设为高，从下一个请求开始生效',
     );
-    expect(effortTrigger()!.textContent).toContain('high');
-    expect(effortTrigger()!.title).toBe('推理档位：high');
+    expect(trigger().textContent).toBe('gpt-5.5高');
+    expect(chip('high')?.getAttribute('aria-checked')).toBe('true');
   });
 
   test('only offers the levels the server lists for this user', async () => {
@@ -720,32 +1002,21 @@ describe('reasoning effort button', () => {
       ),
     );
     await render(null);
-    await open(effortTrigger()!);
-    expect(menuItems().map((item) => item.textContent)).toContain('ultra');
+    await open();
+    expect(chip('ultra')).not.toBeNull();
 
-    await act(async () => root.unmount());
-    root = createRoot(container);
     mocks.get.mockResolvedValue(
-      chatGptSelection(
-        { selectedModelConfigId: 'chatgpt', selectedModel: 'gpt-6-astra' },
-        {
-          models: [
-            {
-              value: 'gpt-6-astra',
-              label: 'gpt-6-astra',
-              efforts: FULL,
-              defaultEffort: 'medium',
-            },
-          ],
-        },
-      ),
+      chatGptSelection({
+        selectedModelConfigId: 'chatgpt',
+        selectedModel: 'gpt-6-astra',
+      }),
     );
-    await render(null);
-    await open(effortTrigger()!);
-    expect(menuItems().map((item) => item.textContent)).not.toContain('ultra');
+    await rerender();
+    await open();
+    expect(chip('ultra')).toBeNull();
   });
 
-  test('the default row clears a picked effort', async () => {
+  test('the default chip clears a picked effort', async () => {
     mocks.get.mockResolvedValue(
       chatGptSelection({
         selectedModelConfigId: 'chatgpt',
@@ -756,44 +1027,18 @@ describe('reasoning effort button', () => {
       chatGptSelection({ selectedModelConfigId: 'chatgpt' }),
     );
     await render(null);
-    await open(effortTrigger()!);
-    await act(async () => itemByText('默认')!.click());
+    await open();
+    await click(chip('default'));
     expect(mocks.put).toHaveBeenCalledWith(
       '/api/groups/web%3Aws/model-selection',
-      {
-        agentId: null,
-        modelConfigId: 'chatgpt',
-        model: null,
-        effort: null,
-      },
+      { agentId: null, modelConfigId: 'chatgpt', model: null, effort: null },
     );
     expect(mocks.toastSuccess).toHaveBeenCalledWith(
       '已恢复默认推理档位，从下一个请求开始生效',
     );
   });
 
-  test('shows the global default in the trigger and selects the default row', async () => {
-    const defaulted = chatGptSelection({
-      default: {
-        source: 'default',
-        modelConfigId: 'chatgpt',
-        enabledCount: 2,
-      },
-    });
-    mocks.get.mockResolvedValue(defaulted);
-    await render(null);
-    expect(trigger().textContent).toContain('默认 · gpt-6.1-sol');
-    expect(trigger().textContent).not.toContain('自动');
-    await open(trigger());
-    const checked = menuItems().filter(
-      (item) => item.getAttribute('aria-checked') === 'true',
-    );
-    expect(checked).toHaveLength(1);
-    expect(checked[0].textContent).toContain('默认 · gpt-6.1-sol');
-    expect(document.body.textContent).toContain('使用模型配置里设为默认的模型');
-  });
-
-  test('the effort button acts on the login the global default resolves to', async () => {
+  test('a ChatGPT default sits under the default row and pins the login when set', async () => {
     const defaulted = chatGptSelection({
       default: {
         source: 'default',
@@ -808,67 +1053,23 @@ describe('reasoning effort button', () => {
       selectedEffort: 'high',
     });
     await render(null);
-    expect(effortTrigger()!.disabled).toBe(false);
-    await open(effortTrigger()!);
-    await act(async () => itemByText('high')!.click());
+    expect(trigger().textContent).toBe('gpt-6.1-sol低');
+    await open();
+    expect(checked().map((item) => item.getAttribute('title'))).toEqual([
+      '默认 · gpt-6.1-sol',
+    ]);
+    expect(document.body.textContent).toContain('使用模型配置里设为默认的模型');
+    expect(checked()[0].nextElementSibling?.getAttribute('aria-label')).toBe(
+      '推理档位',
+    );
+    await click(chip('high'));
     expect(mocks.put).toHaveBeenCalledWith(
       '/api/groups/web%3Aws/model-selection',
-      {
-        agentId: null,
-        modelConfigId: 'chatgpt',
-        model: null,
-        effort: 'high',
-      },
+      { agentId: null, modelConfigId: 'chatgpt', model: null, effort: 'high' },
     );
   });
 
-  test('acts on the login the default resolves to, pinning it', async () => {
-    mocks.get.mockResolvedValue(
-      chatGptSelection({
-        default: {
-          source: 'single',
-          modelConfigId: 'chatgpt',
-          enabledCount: 1,
-        },
-      }),
-    );
-    mocks.put.mockResolvedValue(
-      chatGptSelection({
-        default: {
-          source: 'single',
-          modelConfigId: 'chatgpt',
-          enabledCount: 1,
-        },
-        selectedModelConfigId: 'chatgpt',
-        selectedEffort: 'xhigh',
-      }),
-    );
-    await render(null);
-    expect(effortTrigger()!.disabled).toBe(false);
-    await open(effortTrigger()!);
-    await act(async () => itemByText('xhigh')!.click());
-    expect(mocks.put).toHaveBeenCalledWith(
-      '/api/groups/web%3Aws/model-selection',
-      {
-        agentId: null,
-        modelConfigId: 'chatgpt',
-        model: null,
-        effort: 'xhigh',
-      },
-    );
-  });
-
-  test('is read-only without Modify and unusable when the login must be redone', async () => {
-    mocks.get.mockResolvedValue(
-      chatGptSelection({ selectedModelConfigId: 'chatgpt' }),
-    );
-    await render(null, false);
-    expect(effortTrigger()!.disabled).toBe(true);
-    // The current level is still readable.
-    expect(effortTrigger()!.textContent).toContain('low');
-
-    await act(async () => root.unmount());
-    root = createRoot(container);
+  test('cannot be changed when the login must be redone', async () => {
     mocks.get.mockResolvedValue(
       chatGptSelection(
         { selectedModelConfigId: 'chatgpt' },
@@ -876,10 +1077,11 @@ describe('reasoning effort button', () => {
       ),
     );
     await render(null);
-    expect(effortTrigger()!.disabled).toBe(true);
+    await open();
+    expect(chips().every((item) => item.disabled)).toBe(true);
   });
 
-  test('stays unavailable when the model in use is not in the account list', async () => {
+  test('says why when the model in use is not in the account list', async () => {
     mocks.get.mockResolvedValue(
       chatGptSelection({
         selectedModelConfigId: 'chatgpt',
@@ -887,9 +1089,12 @@ describe('reasoning effort button', () => {
       }),
     );
     await render(null);
-    expect(trigger().textContent).toContain('gpt-unlisted');
-    expect(effortTrigger()!.disabled).toBe(true);
-    expect(effortTrigger()!.title).toContain('不在账号的模型列表里');
+    expect(trigger().textContent).toBe('gpt-unlisted');
+    await open();
+    expect(effortGroup()).toBeNull();
+    expect(document.body.textContent).toContain(
+      '当前模型不在账号的模型列表里，无法设置推理档位',
+    );
   });
 
   test('a refused pick reloads what the server holds', async () => {
@@ -900,393 +1105,13 @@ describe('reasoning effort button', () => {
       new Error('推理档位 ultra 仅限具备系统配置权限的用户选择'),
     );
     await render(null);
-    await open(effortTrigger()!);
-    await act(async () => itemByText('max')!.click());
+    await open();
+    await click(chip('max'));
     expect(mocks.toastError).toHaveBeenCalledWith(
       '推理档位 ultra 仅限具备系统配置权限的用户选择',
     );
     // Picked again from the server's state.
     expect(mocks.get).toHaveBeenCalledTimes(2);
-    expect(effortTrigger()!.textContent).toContain('low');
-  });
-});
-
-/** Configurations that list their models, as a current server sends them. */
-function connectionSelection(
-  overrides: Partial<SessionModelSelection> = {},
-): SessionModelSelection {
-  return {
-    selectedModelConfigId: null,
-    selectedModel: null,
-    selectedEffort: null,
-    default: { source: 'pool', modelConfigId: null, enabledCount: 2 },
-    options: [
-      {
-        id: 'official',
-        name: 'Claude 官方',
-        kind: 'official',
-        enabled: true,
-        model: 'opus',
-        usable: true,
-        models: [
-          { id: 'opus', hidden: false },
-          { id: 'sonnet', hidden: false },
-          { id: 'haiku', hidden: true },
-        ],
-      },
-      {
-        id: 'glm',
-        name: 'GLM',
-        kind: 'third_party',
-        enabled: false,
-        model: 'glm-5.3[1m]',
-        usable: true,
-        models: [
-          { id: 'glm-5.3[1m]', hidden: false },
-          { id: 'glm-4.6', hidden: false },
-        ],
-      },
-    ],
-    ...overrides,
-  };
-}
-
-const checkedItems = () =>
-  menuItems().filter((item) => item.getAttribute('aria-checked') === 'true');
-
-const headings = () =>
-  [...document.querySelectorAll('[data-slot="dropdown-menu-label"]')].map(
-    (node) => node.textContent,
-  );
-
-describe('models of a configuration', () => {
-  test('lists each configuration under its heading with its visible models', async () => {
-    mocks.get.mockResolvedValue(connectionSelection());
-    await render(null);
-    await open(trigger());
-    expect(headings()).toEqual([
-      '本会话使用的模型',
-      'Claude 官方',
-      // A disabled configuration is still a plain pick here.
-      'GLM',
-    ]);
-    expect(menuItems().map((item) => item.textContent)).toEqual([
-      expect.stringContaining('默认'),
-      'opus',
-      'sonnet',
-      // The 1M window shows as a tag next to the model.
-      'glm-5.31M',
-      'glm-4.6',
-    ]);
-    // A hidden model is left out of the menu.
-    expect(itemByText('haiku')).toBeUndefined();
-  });
-
-  test('picking a model of a configuration pins it for the conversation', async () => {
-    mocks.get.mockResolvedValue(connectionSelection());
-    mocks.put.mockResolvedValue(
-      connectionSelection({
-        selectedModelConfigId: 'official',
-        selectedModel: 'sonnet',
-      }),
-    );
-    await render('session-1');
-    await open(trigger());
-    await act(async () => itemByText('sonnet')!.click());
-    expect(mocks.put).toHaveBeenCalledWith(
-      '/api/groups/web%3Aws/model-selection',
-      { agentId: 'session-1', modelConfigId: 'official', model: 'sonnet' },
-    );
-    expect(mocks.toastSuccess).toHaveBeenCalledWith(
-      '已切换到「Claude 官方 · sonnet」，从下一条消息开始生效',
-    );
-    expect(trigger().getAttribute('aria-label')).toBe(
-      '模型：Claude 官方 · sonnet',
-    );
-    await open(trigger());
-    expect(checkedItems().map((item) => item.textContent)).toEqual(['sonnet']);
-    // No effort control without a ChatGPT login.
-    expect(container.querySelectorAll('button')).toHaveLength(1);
-  });
-
-  test('the default model row follows the configuration with the request older servers know', async () => {
-    mocks.get.mockResolvedValue(
-      connectionSelection({
-        selectedModelConfigId: 'official',
-        selectedModel: 'sonnet',
-      }),
-    );
-    mocks.put.mockResolvedValue(
-      connectionSelection({ selectedModelConfigId: 'official' }),
-    );
-    await render(null);
-    await open(trigger());
-    await act(async () => itemByText('opus')!.click());
-    expect(mocks.put).toHaveBeenCalledWith(
-      '/api/groups/web%3Aws/model-selection',
-      { agentId: null, modelConfigId: 'official' },
-    );
-    expect(mocks.toastSuccess).toHaveBeenCalledWith(
-      '已切换到「Claude 官方」，从下一条消息开始生效',
-    );
-    // Following the configuration names its default model.
-    expect(trigger().getAttribute('aria-label')).toBe(
-      '模型：Claude 官方 · opus',
-    );
-    await open(trigger());
-    expect(checkedItems().map((item) => item.textContent)).toEqual(['opus']);
-  });
-
-  test('the default row of another configuration sends the configuration alone', async () => {
-    mocks.get.mockResolvedValue(connectionSelection());
-    mocks.put.mockResolvedValue(
-      connectionSelection({ selectedModelConfigId: 'glm' }),
-    );
-    await render(null);
-    await open(trigger());
-    await act(async () => itemByText('glm-5.3')!.click());
-    expect(mocks.put).toHaveBeenCalledWith(
-      '/api/groups/web%3Aws/model-selection',
-      { agentId: null, modelConfigId: 'glm' },
-    );
-    expect(trigger().getAttribute('aria-label')).toBe(
-      '模型：GLM · glm-5.3（1M）',
-    );
-  });
-
-  test('a hidden model the conversation runs on stays visible and checked', async () => {
-    mocks.get.mockResolvedValue(
-      connectionSelection({
-        selectedModelConfigId: 'official',
-        selectedModel: 'haiku',
-      }),
-    );
-    await render(null);
-    expect(trigger().getAttribute('aria-label')).toBe(
-      '模型：Claude 官方 · haiku',
-    );
-    await open(trigger());
-    const checked = checkedItems();
-    expect(checked.map((item) => item.textContent)).toEqual(['haiku已隐藏']);
-    // Choosing it again changes nothing.
-    await act(async () => checked[0].click());
-    expect(mocks.put).not.toHaveBeenCalled();
-  });
-
-  test('a model the list no longer has stays visible and checked', async () => {
-    mocks.get.mockResolvedValue(
-      connectionSelection({
-        selectedModelConfigId: 'glm',
-        selectedModel: 'glm-retired',
-      }),
-    );
-    await render(null);
-    await open(trigger());
-    const checked = checkedItems();
-    expect(checked.map((item) => item.textContent)).toEqual([
-      'glm-retired不在模型列表里',
-    ]);
-    // The other models of the configuration are still there to pick.
-    expect(itemByText('glm-4.6')).toBeDefined();
-    await act(async () => checked[0].click());
-    expect(mocks.put).not.toHaveBeenCalled();
-  });
-
-  test('a configuration without a credential lists its models disabled', async () => {
-    mocks.get.mockResolvedValue(
-      connectionSelection({
-        options: [
-          ...connectionSelection().options,
-          {
-            id: 'kimi',
-            name: 'Kimi',
-            kind: 'third_party',
-            enabled: true,
-            model: 'kimi-k3',
-            usable: false,
-            models: [
-              { id: 'kimi-k3', hidden: false },
-              { id: 'kimi-k2', hidden: false },
-            ],
-          },
-        ],
-      }),
-    );
-    await render(null);
-    await open(trigger());
-    expect(headings()).toContain('Kimi· 缺少凭据');
-    for (const name of ['kimi-k3', 'kimi-k2']) {
-      expect(itemByText(name)?.getAttribute('aria-disabled')).toBe('true');
-    }
-    expect(itemByText('sonnet')?.getAttribute('aria-disabled')).not.toBe(
-      'true',
-    );
-  });
-
-  test('a relay without a model of its own lets the relay decide', async () => {
-    mocks.get.mockResolvedValue(
-      connectionSelection({
-        options: [
-          {
-            id: 'relay',
-            name: '中转站',
-            kind: 'third_party',
-            enabled: true,
-            model: '',
-            usable: true,
-            models: [{ id: 'deepseek-v4', hidden: false }],
-          },
-        ],
-      }),
-    );
-    mocks.put.mockResolvedValue(
-      connectionSelection({ selectedModelConfigId: 'relay' }),
-    );
-    await render(null);
-    await open(trigger());
-    expect(menuItems().map((item) => item.textContent)).toEqual([
-      expect.stringContaining('默认'),
-      '由中转站决定',
-      'deepseek-v4',
-    ]);
-    await act(async () => itemByText('由中转站决定')!.click());
-    expect(mocks.put).toHaveBeenCalledWith(
-      '/api/groups/web%3Aws/model-selection',
-      { agentId: null, modelConfigId: 'relay' },
-    );
-  });
-
-  test('a configuration from an older server, without models, stays one row', async () => {
-    mocks.get.mockResolvedValue(
-      connectionSelection({
-        options: [
-          connectionSelection().options[0],
-          {
-            id: 'legacy',
-            name: 'Legacy',
-            kind: 'third_party',
-            enabled: false,
-            model: 'glm-5.3',
-          },
-        ],
-      }),
-    );
-    mocks.put.mockResolvedValue(
-      connectionSelection({ selectedModelConfigId: 'legacy' }),
-    );
-    await render(null);
-    await open(trigger());
-    expect(headings()).toEqual(['本会话使用的模型', 'Claude 官方']);
-    const legacy = itemByText('Legacy')!;
-    expect(legacy.textContent).toContain('兼容接口 · glm-5.3');
-    expect(legacy.textContent).not.toContain('未启用');
-    await act(async () => legacy.click());
-    expect(mocks.put).toHaveBeenCalledWith(
-      '/api/groups/web%3Aws/model-selection',
-      { agentId: null, modelConfigId: 'legacy' },
-    );
-  });
-
-  test('a refused model reads as such and reloads the selection', async () => {
-    mocks.get.mockResolvedValue(connectionSelection());
-    // The API client rejects with a plain object, not an Error.
-    mocks.put.mockRejectedValue({
-      status: 400,
-      message: 'Bad Request',
-      body: { code: 'MODEL_NOT_IN_CONNECTION' },
-    });
-    await render(null);
-    await open(trigger());
-    await act(async () => itemByText('glm-4.6')!.click());
-    expect(mocks.toastError).toHaveBeenCalledWith(
-      '所选模型已不在该模型配置的模型列表里，请重新选择模型',
-    );
-    expect(mocks.get).toHaveBeenCalledTimes(2);
-
-    mocks.put.mockRejectedValue({
-      status: 400,
-      message: '该模型配置缺少凭据，请先在模型配置中补全密钥或完成授权',
-      body: {},
-    });
-    await open(trigger());
-    await act(async () => itemByText('sonnet')!.click());
-    expect(mocks.toastError).toHaveBeenLastCalledWith(
-      '该模型配置缺少凭据，请先在模型配置中补全密钥或完成授权',
-    );
-  });
-});
-
-describe('composer pill buttons', () => {
-  const PILL = [
-    'h-[30px]',
-    'rounded-full',
-    'px-2.5',
-    'border',
-    'border-transparent',
-    'text-label',
-    'hover:bg-surface-hover',
-    'hover:border-surface-border',
-    'data-[state=open]:bg-surface-hover',
-    'data-[state=open]:border-surface-border',
-    'pointer-coarse:h-10',
-  ];
-
-  test('the model and effort buttons share the pill look', async () => {
-    mocks.get.mockResolvedValue(
-      chatGptSelection({
-        selectedModelConfigId: 'chatgpt',
-        selectedModel: 'gpt-6-astra',
-      }),
-    );
-    await render(null);
-    for (const button of [trigger(), effortTrigger()!]) {
-      expect([...button.classList]).toEqual(expect.arrayContaining(PILL));
-    }
-    await open(trigger());
-    expect(trigger().getAttribute('data-state')).toBe('open');
-  });
-
-  test('the full label shows in a tooltip, or as the title when read-only', async () => {
-    mocks.get.mockResolvedValue(
-      connectionSelection({
-        selectedModelConfigId: 'glm',
-        selectedModel: 'glm-4.6',
-      }),
-    );
-    await render(null);
-    expect(trigger().title).toBe('');
-    await act(async () => trigger().focus());
-    const tooltip = document.querySelector('[data-slot="tooltip-content"]');
-    expect(tooltip?.textContent).toContain('GLM · glm-4.6');
-
-    await act(async () => root.unmount());
-    root = createRoot(container);
-    await render(null, false);
-    expect(trigger().title).toBe('模型：GLM · glm-4.6');
-  });
-
-  test('closing the menu does not pop the tooltip up over the pick', async () => {
-    mocks.get.mockResolvedValue(connectionSelection());
-    mocks.put.mockResolvedValue(
-      connectionSelection({
-        selectedModelConfigId: 'official',
-        selectedModel: 'sonnet',
-      }),
-    );
-    await render(null);
-    await open(trigger());
-    await act(async () => itemByText('sonnet')!.click());
-    // Focus is back on the button, the tooltip stays closed.
-    expect(document.activeElement).toBe(trigger());
-    expect(document.querySelector('[data-slot="tooltip-content"]')).toBeNull();
-    // Leaving and coming back shows it again.
-    await act(async () => {
-      trigger().dispatchEvent(new PointerEvent('pointerleave'));
-      trigger().blur();
-    });
-    await act(async () => trigger().focus());
-    expect(
-      document.querySelector('[data-slot="tooltip-content"]')?.textContent,
-    ).toContain('Claude 官方 · sonnet');
+    expect(trigger().textContent).toBe('gpt-6.1-sol低');
   });
 });

@@ -29,6 +29,7 @@ import { cn } from '@/lib/utils';
 import {
   confirmProtocolChange,
   discoverModels,
+  effortLabel,
   errorCopy,
   modelInUseAgents,
   presetModelName,
@@ -77,7 +78,15 @@ export function ConnectionModelList({
     nextDefault: string = defaultModel,
   ): Promise<boolean> => {
     const defaultChanged = nextDefault !== defaultModel;
-    if (defaultChanged && !(await confirmProtocolChange(provider))) {
+    // A model taken out (a 1M switch renames, so it takes one out too) stops
+    // the runners that may be on it, like a new default does.
+    const removed = models.some(
+      (entry) => !next.some((other) => other.id === entry.id),
+    );
+    if (
+      (defaultChanged || removed) &&
+      !(await confirmProtocolChange(provider))
+    ) {
       return false;
     }
     const previous = models;
@@ -254,7 +263,7 @@ export function ConnectionModelList({
                     <NativeSelectOption value="">档位默认</NativeSelectOption>
                     {MODEL_EFFORTS.map((effort) => (
                       <NativeSelectOption key={effort} value={effort}>
-                        {effort}
+                        {effortLabel(effort)}
                       </NativeSelectOption>
                     ))}
                   </NativeSelect>

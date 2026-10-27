@@ -28,10 +28,6 @@ import {
 } from '@/lib/model-providers';
 import { cn } from '@/lib/utils';
 import { api } from '../../api/client';
-import type {
-  ProviderAuthMode,
-  ProviderEnvImport,
-} from '../../utils/provider-env-import';
 import { buildDefaultProviderEnv } from '../../utils/provider-model';
 import {
   codexDefaultsPatch,
@@ -42,6 +38,7 @@ import {
 import { CodexModelFields } from './CodexModelFields';
 import { ConnectionTestResult } from './ConnectionTestResult';
 import {
+  AUTO_AUTH_MODE_HINT,
   CONNECTION_KIND_LABELS,
   PROVIDERS_API,
   allowsNoDefaultModel,
@@ -51,6 +48,7 @@ import {
   testOutcome,
   updateConnection,
   type ConnectionDraftBody,
+  type ProviderAuthMode,
   type TestOutcome,
 } from './model-connections';
 import {
@@ -61,7 +59,11 @@ import {
   type ModelCandidate,
 } from './ModelPicker';
 import { OAuthLoginPanel } from './OAuthLoginPanel';
-import { ProviderEnvImportPanel } from './ProviderEnvImportPanel';
+import {
+  ProviderEnvEditor,
+  buildProviderCustomEnv,
+  type ProviderEnvDraft,
+} from './ProviderEnvEditor';
 import { SettingsField } from './SettingsLayout';
 import { getErrorMessage, type UnifiedProviderPublic } from './types';
 import {
@@ -139,11 +141,7 @@ export function AddModelWizard({
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [credentialInput, setCredentialInput] = useState('');
-  /** Environment a pasted alias carries; edited later in the detail. */
-  const [importedEnv, setImportedEnv] = useState<Record<string, string>>({});
-  const [importedName, setImportedName] = useState<string | null>(null);
-  const [importedAuthMode, setImportedAuthMode] =
-    useState<ProviderAuthMode | null>(null);
+  const [env, setEnv] = useState<ProviderEnvDraft>({ overrides: {}, rows: [] });
   /** Made by an OAuth callback; later steps update it instead of creating. */
   const [created, setCreated] = useState<UnifiedProviderPublic | null>(null);
   const [detected, setDetected] = useState<ModelPreset | null>(null);
@@ -217,19 +215,30 @@ export function AddModelWizard({
       ? RELAY_PASS_THROUGH
       : OFFICIAL_PASS_THROUGH;
 
-  // Whatever identifies the credential and endpoint: a change makes the
-  // model list and the test result stale.
+  // A custom address may need its own environment, such as the custom
+  // headers its key travels in; they go with every request for the draft.
+  const envResult =
+    kind === 'custom'
+      ? buildProviderCustomEnv(true, env)
+      : { customEnv: {}, error: null };
+  const customEnv = envResult.customEnv;
+  const hasCustomHeaders = !!customEnv.ANTHROPIC_CUSTOM_HEADERS?.trim();
+
+  // Whatever the requests carry (custom headers are credentials too): a
+  // change makes the model list and the test stale. The server decides
+  // which of it matters.
   const connectionSignature = JSON.stringify([
     sourceKey(source),
     thirdParty ? effectiveBaseUrl : '',
     kind === 'claude_subscription' ? credentialInput.trim() : apiKey.trim(),
     created?.id ?? '',
+    customEnv,
   ]);
-  // A saved connection is tested by id alone, so only the draft's model and
-  // environment make a new test worth sending.
+  // A saved connection is tested by id alone, so only the draft's model
+  // makes a new test worth sending.
   const testSignature = created
     ? connectionSignature
-    : JSON.stringify([connectionSignature, defaultModelId, importedEnv]);
+    : JSON.stringify([connectionSignature, defaultModelId]);
   const latest = useRef({ connectionSignature, testSignature });
   latest.current = { connectionSignature, testSignature };
 
@@ -241,7 +250,7 @@ export function AddModelWizard({
   const chooseSource = (next: WizardSource) => {
     if (sourceKey(next) !== sourceKey(source)) {
       // A different vendor starts from its own models; models typed by hand
-      // (or imported) stay, and so does a default the user set among them.
+      // stay, and so does a default the user set among them.
       const manual = candidates.filter(
         (candidate) => candidate.origin === 'manual',
       );
@@ -285,35 +294,6 @@ export function AddModelWizard({
     return () => clearTimeout(timer);
   }, [kind, baseUrl, dismissedUrl]);
 
-  const applyImport = (imported: ProviderEnvImport) => {
-    if (imported.name) setImportedName(imported.name);
-    if (imported.baseUrl) setBaseUrl(imported.baseUrl);
-    if (imported.token) setApiKey(imported.token);
-    if (imported.authMode) setImportedAuthMode(imported.authMode);
-    // Blank prefilled overrides mean "use the default"; never persist them.
-    setImportedEnv({
-      ...imported.customEnv,
-      ...Object.fromEntries(
-        Object.entries(imported.envOverrides).filter(([, value]) =>
-          value.trim(),
-        ),
-      ),
-    });
-    if (imported.model) {
-      const model = imported.model;
-      setCandidates((current) => [
-        ...current.filter((candidate) => candidate.base !== model),
-        {
-          base: model,
-          oneMillion: imported.oneMillionContext,
-          picked: true,
-          origin: 'manual',
-        },
-      ]);
-      setDefaultBase(model);
-    }
-  };
-
   // ─── Discovery ───
   const draftBody = (): ConnectionDraftBody => {
     switch (kind) {
@@ -329,6 +309,7 @@ export function AddModelWizard({
           type: 'third_party',
           anthropicBaseUrl: baseUrl.trim(),
           anthropicAuthToken: apiKey.trim(),
+          ...(Object.keys(customEnv).length > 0 ? { customEnv } : {}),
         };
       case 'anthropic_api':
         return { type: 'official', anthropicApiKey: apiKey.trim() };
@@ -412,7 +393,13 @@ export function AddModelWizard({
       return 'superseded';
     }
     setDiscoveringFor(null);
-    if (next.status === 'failed' && next.code === 'AUTH_INVALID') {
+    // With custom headers the refusal may be about them, not the key: the
+    // user moves on and the test step tells.
+    if (
+      next.status === 'failed' &&
+      next.code === 'AUTH_INVALID' &&
+      !hasCustomHeaders
+    ) {
       // Asked again on the next try, so a fixed key gets through.
       discoveredFor.current = null;
       setDiscovery({ status: 'idle' });
@@ -461,7 +448,6 @@ export function AddModelWizard({
       : {
           ...draftBody(),
           anthropicModel: defaultModelId,
-          ...(thirdParty ? { customEnv: importedEnv } : {}),
         };
     const settle = (outcome: TestOutcome | null, error: string | null) => {
       if (
@@ -495,7 +481,7 @@ export function AddModelWizard({
     created?.name ??
     preset?.name ??
     (kind === 'custom'
-      ? importedName || hostnameOf(baseUrl) || CONNECTION_KIND_LABELS.custom
+      ? hostnameOf(baseUrl) || CONNECTION_KIND_LABELS.custom
       : CONNECTION_KIND_LABELS[kind ?? 'custom']);
   // Same rule the server applies: join the pool when nothing else is in it.
   // A connection an OAuth login made already carries the server's choice;
@@ -534,10 +520,7 @@ export function AddModelWizard({
       } else {
         // A model list the endpoint answered proves the header; the test's
         // report counts only when the list did not.
-        const authMode =
-          discoveredAuthMode ??
-          currentTest?.outcome?.authMode ??
-          importedAuthMode;
+        const authMode = discoveredAuthMode ?? currentTest?.outcome?.authMode;
         const body: Record<string, unknown> = {
           name: trimmedName,
           ...draftBody(),
@@ -545,10 +528,7 @@ export function AddModelWizard({
           models,
           enabled: poolEnabled,
         };
-        if (thirdParty) {
-          body.customEnv = importedEnv;
-          if (authMode) body.anthropicAuthMode = authMode;
-        }
+        if (thirdParty && authMode) body.anthropicAuthMode = authMode;
         provider = await api.post<UnifiedProviderPublic>(PROVIDERS_API, body);
         // The draft test was not stored; test the saved connection so its
         // status is on record.
@@ -571,7 +551,11 @@ export function AddModelWizard({
       case 'chatgpt':
         return !!created;
       case 'custom':
-        return !!normalizeProviderBaseUrl(baseUrl) && !!apiKey.trim();
+        return (
+          !!normalizeProviderBaseUrl(baseUrl) &&
+          !!apiKey.trim() &&
+          !envResult.error
+        );
       case 'preset':
       case 'anthropic_api':
         return !!apiKey.trim();
@@ -599,12 +583,9 @@ export function AddModelWizard({
     setStep('models');
   };
 
-  const compactWindow =
-    importedEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW ||
-    buildDefaultProviderEnv(defaultModelId).find(
-      (row) => row.key === 'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
-    )?.value;
-  const importedCount = Object.keys(importedEnv).length;
+  const compactWindow = buildDefaultProviderEnv(defaultModelId).find(
+    (row) => row.key === 'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
+  )?.value;
 
   const footer = (
     <>
@@ -780,7 +761,6 @@ export function AddModelWizard({
 
       {step === 'connect' && kind === 'custom' && (
         <div className="space-y-4">
-          <ProviderEnvImportPanel onApply={applyImport} />
           <SettingsField
             label="服务地址"
             htmlFor="wizard-base-url"
@@ -845,8 +825,15 @@ export function AddModelWizard({
             onChange={setApiKey}
             label="API Key"
             placeholder="粘贴 API Key 或 Token"
-            description="认证方式会自动识别：先用 Authorization: Bearer，被拒绝时改用 x-api-key。"
+            description={`认证方式会自动识别：${AUTO_AUTH_MODE_HINT}`}
           />
+          <ProviderEnvEditor
+            thirdParty
+            defaultModel={defaultModelId}
+            value={env}
+            onChange={setEnv}
+          />
+          <KeyError message={envResult.error} />
         </div>
       )}
 
@@ -909,10 +896,8 @@ export function AddModelWizard({
                 <dd className="text-foreground">
                   系统预填 Claude Code 运行环境：Opus / Sonnet / Haiku / 子
                   Agent 跟随默认模型，压缩窗口{' '}
-                  {Number(compactWindow).toLocaleString('en-US')} tokens
-                  {importedCount > 0 &&
-                    `；另有 ${importedCount} 项导入的环境变量`}
-                  。保存后可在连接设置里调整。
+                  {Number(compactWindow).toLocaleString('en-US')}{' '}
+                  tokens。保存后可在连接设置里调整。
                 </dd>
               </>
             )}

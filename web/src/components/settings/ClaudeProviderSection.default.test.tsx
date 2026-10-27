@@ -327,7 +327,21 @@ describe('ClaudeProviderSection connections', () => {
     );
   });
 
-  test('a stored test result and a saved field update the row without a reload', async () => {
+  test('a row test reads the list again; a saved field updates its row in place', async () => {
+    const tested = listing(null);
+    tested.providers[0] = {
+      ...tested.providers[0],
+      // The server stored the result and the header the test proved.
+      anthropicAuthMode: 'x-api-key',
+      lastTest: {
+        ok: true,
+        code: null,
+        status: 200,
+        model: 'a-model',
+        latencyMs: 30,
+        at: new Date().toISOString(),
+      },
+    };
     mocks.get.mockResolvedValue(listing(null));
     mocks.post.mockResolvedValue({
       ok: true,
@@ -344,6 +358,7 @@ describe('ClaudeProviderSection connections', () => {
     });
     await render();
     mocks.get.mockClear();
+    mocks.get.mockResolvedValue(tested);
     await act(async () =>
       document
         .querySelectorAll<HTMLButtonElement>('button[aria-label="更多操作"]')[0]
@@ -361,6 +376,8 @@ describe('ClaudeProviderSection connections', () => {
         (row) => row.textContent ?? '',
       );
     expect(rows()[0]).toContain('已连接');
+    expect(mocks.get).toHaveBeenCalledTimes(1);
+    mocks.get.mockClear();
 
     // What the detail saved comes back as fields of that connection.
     await act(async () =>

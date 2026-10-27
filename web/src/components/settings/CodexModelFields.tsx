@@ -8,6 +8,7 @@ import {
   codexModelEfforts,
   type CodexCatalog,
 } from './codex-catalog';
+import { effortLabel } from './model-connections';
 import { SettingsField } from './SettingsLayout';
 
 interface CodexModelFieldsProps {
@@ -80,7 +81,9 @@ export function CodexModelFields({
         >
           {efforts.map((level) => (
             <NativeSelectOption key={level} value={level}>
-              {level === modelDefaultEffort ? `${level}（默认）` : level}
+              {level === modelDefaultEffort
+                ? `${effortLabel(level)}（默认）`
+                : effortLabel(level)}
             </NativeSelectOption>
           ))}
         </NativeSelect>

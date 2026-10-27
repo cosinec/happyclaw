@@ -308,18 +308,16 @@ export function ClaudeProviderSection({
           const copy = errorCopy(outcome.code);
           setError(`「${provider.name}」${copy.title}：${copy.hint}`);
         }
-        handleConnectionChanged(
-          result.record
-            ? { id: provider.id, lastTest: result.record }
-            : undefined,
-        );
+        // The server stored the result, and may have stored the header the
+        // test proved; read the list again.
+        await loadProviders().catch(() => {});
       } catch (err) {
         setError(getErrorMessage(err, '测试连接失败'));
       } finally {
         setTestingId(null);
       }
     },
-    [handleConnectionChanged, setNotice, setError],
+    [loadProviders, setNotice, setError],
   );
 
   // ─── 加权轮询的权重 ───────────────────────────────────────────
