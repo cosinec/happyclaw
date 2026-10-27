@@ -5653,13 +5653,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // main chat. WebSocket remains the push channel for the stored message
       // and stream events; a successful return now means the server really
       // persisted and classified this message as started/queued/steered.
-      const data = await api.post<{
-        success: true;
-        messageId: string;
-        timestamp: string;
-        disposition: 'started' | 'queued' | 'steered';
-        runId?: string;
-      }>(
+      const data = await api.post<
+        | { success: true; cleared: true }
+        | {
+            success: true;
+            cleared?: undefined;
+            messageId: string;
+            timestamp: string;
+            disposition: 'started' | 'queued' | 'steered';
+            runId?: string;
+          }
+      >(
         '/api/messages',
         {
           chatJid: jid,
@@ -5670,6 +5674,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         },
         attachmentTimeoutMs(normalizedAttachments),
       );
+      // /clear and /fresh were handled by the server: no message was stored
+      // and no reply is coming, so the session must not wait for one.
+      if (data.cleared) return true;
       if (data.disposition === 'started' && data.runId) {
         get().handleRunStarted(`${jid}#agent:${agentId}`, data.runId);
       }
