@@ -27,6 +27,13 @@ import { downloadAndDecryptMedia, uploadMediaBuffer } from './wechat-crypto.js';
 import { createDedupCache } from './im-utils.js';
 import { weChatIlinkHeaders } from './wechat-onboarding.js';
 import { resolveAdmittedChannelRoute } from './channel-admission.js';
+import {
+  offerChannelFollowUp,
+  parseConnectorRuntimeControl,
+  runSessionBreak,
+  type OnChannelFollowUpMessage,
+  type OnChannelSessionBreak,
+} from './im-connector-follow-up.js';
 import { createWeChatHttpDispatcher } from './wechat-http.js';
 import {
   createDatabaseWeChatContextTokenStore,
@@ -146,6 +153,11 @@ export interface WeChatConnectOpts {
   ) => { effectiveJid: string; agentId: string | null } | null;
   onAgentMessage?: (baseChatJid: string, agentId: string) => void;
   onMessagePersisted?: import('./channel-contracts.js').OnChannelMessagePersisted;
+  /** Offer each persisted input to the host's durable follow-up queue. */
+  onFollowUpMessage?: OnChannelFollowUpMessage;
+  onFollowUpsChanged?: import('./channel-contracts.js').OnChannelFollowUpsChanged;
+  /** `/break` — cancel the pending queue and interrupt the active query. */
+  onSessionBreak?: OnChannelSessionBreak;
   normalizeIncomingJid?: (jid: string) => string | null;
   /** No inbound message may register or download media before this passes. */
   isChatAuthorized?: (jid: string) => boolean;
@@ -1321,9 +1333,40 @@ export function createWeChatConnection(
         opts.onNewChat(jid, chatName);
       }
 
+      // iLink delivers 1:1 conversations only, so every message is directly
+      // addressed to the bot.
+      const items = msg.item_list ?? [];
+      const runtimeControl = parseConnectorRuntimeControl({
+        commandText: items
+          .filter((item) => item.type === MESSAGE_ITEM_TYPE_TEXT)
+          .map((item) => item.text_item?.text ?? '')
+          .join(''),
+        eligible: true,
+        hasAttachments: items.some(
+          (item) => item.type !== MESSAGE_ITEM_TYPE_TEXT,
+        ),
+      });
+      if (runtimeControl?.kind === 'break') {
+        const reply = await runSessionBreak(opts.onSessionBreak, {
+          sourceJid: jid,
+          targetJid,
+          senderImId: fromUserId,
+          chatType: 'p2p',
+        });
+        try {
+          await sendManagedText(fromUserId, reply);
+        } catch (err) {
+          logger.warn({ jid, err }, 'Failed to send WeChat /break reply');
+        }
+        return;
+      }
+      const requestedFollowUpMode =
+        runtimeControl?.kind === 'steer' ? ('steer' as const) : undefined;
+      if (runtimeControl?.kind === 'steer') content = runtimeControl.text;
+
       // Handle slash commands
       const slashMatch = content.match(/^\/(\S+)(?:\s+(.*))?$/i);
-      if (slashMatch && opts.onCommand) {
+      if (slashMatch && opts.onCommand && !requestedFollowUpMode) {
         const cmdBody = (
           slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
         ).trim();
@@ -1448,6 +1491,13 @@ export function createWeChatConnection(
           sourceJid: jid,
         },
       );
+      const followUp = offerChannelFollowUp(opts.onFollowUpMessage, {
+        targetJid,
+        sourceJid: jid,
+        messageId: id,
+        senderImId: senderId,
+        requestedMode: requestedFollowUpMode,
+      });
 
       opts.onMessagePersisted?.(
         targetJid,
@@ -1461,9 +1511,19 @@ export function createWeChatConnection(
           timestamp,
           attachments: attachmentsJson,
           is_from_me: false,
+          ...followUp.deliveryFields,
         },
         agentRouting?.agentId ?? undefined,
       );
+      if (!followUp.shouldStartTurn) {
+        // Released by the host when the active run ends.
+        opts.onFollowUpsChanged?.(targetJid);
+        logger.info(
+          { jid, targetJid, disposition: followUp.disposition },
+          'WeChat message queued behind the active run',
+        );
+        return;
+      }
       notifyNewImMessage();
 
       if (agentRouting?.agentId) {

@@ -55,6 +55,7 @@ import {
   dingTalkCommandMentions,
   type DingTalkConnectOpts,
 } from '../src/dingtalk.js';
+import { followUpHost } from './helpers/follow-up-host.js';
 import {
   groupAudienceHost,
   type AudienceGroup,
@@ -263,5 +264,168 @@ describe('dingTalkCommandMentions', () => {
       }),
     ).toEqual([{ imId: 'A' }]);
     expect(dingTalkCommandMentions({})).toEqual([]);
+  });
+});
+
+describe('DingTalk durable queue and runtime controls', () => {
+  let connection: ReturnType<typeof createDingTalkConnection> | null = null;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sdk.MockDWClient.instances.length = 0;
+    webhookBodies.length = 0;
+    vi.mocked(storeMessageDirect).mockImplementation(() => 'stored');
+    vi.spyOn(https, 'request').mockImplementation(((
+      _opts: unknown,
+      callback?: (res: EventEmitter) => void,
+    ) => {
+      const req = new EventEmitter() as EventEmitter & Record<string, any>;
+      req.setTimeout = () => undefined;
+      req.write = (chunk: unknown) => webhookBodies.push(String(chunk));
+      req.destroy = () => undefined;
+      req.end = () => {
+        const res = new EventEmitter() as EventEmitter & Record<string, any>;
+        res.statusCode = 200;
+        res.headers = {};
+        callback?.(res);
+        res.emit(
+          'data',
+          Buffer.from(
+            JSON.stringify({ errcode: 0, access_token: 't', expires_in: 7200 }),
+          ),
+        );
+        res.emit('end');
+      };
+      return req as any;
+    }) as any);
+  });
+
+  afterEach(async () => {
+    await connection?.disconnect();
+    connection = null;
+    vi.restoreAllMocks();
+  });
+
+  async function connect(
+    host: ReturnType<typeof followUpHost>,
+    overrides: Partial<DingTalkConnectOpts> = {},
+  ) {
+    connection = createDingTalkConnection({
+      clientId: 'ding-client',
+      clientSecret: 'ding-secret',
+    });
+    const opts = {
+      onNewChat: vi.fn(),
+      isChatAuthorized: () => true,
+      resolveEffectiveChatJid: (jid: string) => ({
+        effectiveJid: jid,
+        agentId: null,
+      }),
+      onMessagePersisted: vi.fn(),
+      onAgentMessage: vi.fn(),
+      onCommand: vi.fn(async () => null),
+      ...host,
+      ...overrides,
+    };
+    await connection.connect(opts);
+    const client = sdk.MockDWClient.instances.at(-1)!;
+    return {
+      opts,
+      deliver: (d: ReturnType<typeof downstream>) => client.listener!(d),
+    };
+  }
+
+  const repliedText = () =>
+    webhookBodies
+      .map((body) => JSON.parse(body))
+      .map((b) => b.text?.content ?? b.markdown?.text);
+
+  test('an input arriving during a run waits in the durable queue', async () => {
+    const host = followUpHost('queued');
+    const { opts, deliver } = await connect(host);
+    await deliver(
+      downstream({ senderId: 'U1', content: 'later', group: false }),
+    );
+    const stored = vi.mocked(storeMessageDirect).mock.calls[0];
+    expect(host.onFollowUpMessage).toHaveBeenCalledWith({
+      targetJid: 'dingtalk:c2c:U1',
+      sourceJid: 'dingtalk:c2c:U1',
+      messageId: stored[0],
+      senderImId: 'dingtalk:U1',
+      requestedMode: undefined,
+    });
+    expect(opts.onMessagePersisted.mock.calls[0][1]).toMatchObject({
+      delivery_status: 'queued',
+      delivery_mode: 'queue',
+    });
+    expect(host.onFollowUpsChanged).toHaveBeenCalledWith('dingtalk:c2c:U1');
+    expect(notifyNewImMessage).not.toHaveBeenCalled();
+  });
+
+  test('with no active run the input starts a turn as before', async () => {
+    const host = followUpHost('started');
+    const { deliver } = await connect(host);
+    await deliver(downstream({ senderId: 'U1', content: 'now', group: false }));
+    expect(notifyNewImMessage).toHaveBeenCalledOnce();
+    expect(host.onFollowUpsChanged).not.toHaveBeenCalled();
+  });
+
+  test('/steer stores its guidance as a steer', async () => {
+    const host = followUpHost('queued');
+    const { opts, deliver } = await connect(host);
+    await deliver(
+      downstream({ senderId: 'U1', content: '/steer stop and summarize' }),
+    );
+    expect(vi.mocked(storeMessageDirect).mock.calls[0][4]).toBe(
+      'stop and summarize',
+    );
+    expect(host.onFollowUpMessage.mock.calls[0][0]).toMatchObject({
+      requestedMode: 'steer',
+    });
+    expect(opts.onCommand).not.toHaveBeenCalled();
+  });
+
+  test('/break runs on the host and replies through the session webhook', async () => {
+    const host = followUpHost('queued');
+    const { deliver } = await connect(host);
+    await deliver(downstream({ senderId: 'U1', content: '/break' }));
+    expect(host.onSessionBreak).toHaveBeenCalledWith({
+      sourceJid: GROUP_JID,
+      targetJid: GROUP_JID,
+      senderImId: 'U1',
+      chatType: 'group',
+    });
+    expect(repliedText()).toContain('Current task stopped.');
+    expect(storeMessageDirect).not.toHaveBeenCalled();
+
+    await deliver(
+      downstream({ senderId: 'U2', content: '/break', group: false }),
+    );
+    expect(host.onSessionBreak).toHaveBeenLastCalledWith(
+      expect.objectContaining({ chatType: 'p2p', senderImId: 'U2' }),
+    );
+  });
+
+  test('a group message without the @ flag is not a runtime control', async () => {
+    const host = followUpHost('started');
+    const { deliver } = await connect(host, {
+      shouldProcessGroupMessage: () => true,
+    });
+    await deliver(
+      downstream({ senderId: 'U1', content: '/break', isInAtList: false }),
+    );
+    expect(host.onSessionBreak).not.toHaveBeenCalled();
+    expect(vi.mocked(storeMessageDirect).mock.calls[0][4]).toBe('/break');
+  });
+
+  test('a /break whose route is rejected reports no target to the host', async () => {
+    const host = followUpHost('started');
+    const { deliver } = await connect(host, {
+      resolveEffectiveChatJid: () => null,
+    });
+    await deliver(downstream({ senderId: 'U1', content: '/break' }));
+    expect(host.onSessionBreak).toHaveBeenCalledWith(
+      expect.objectContaining({ targetJid: undefined }),
+    );
   });
 });

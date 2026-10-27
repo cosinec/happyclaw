@@ -48,6 +48,13 @@ import {
   type ChannelCommandMention,
   type GroupOwnerView,
 } from './im-group-audience.js';
+import {
+  offerChannelFollowUp,
+  parseConnectorRuntimeControl,
+  runSessionBreak,
+  type OnChannelFollowUpMessage,
+  type OnChannelSessionBreak,
+} from './im-connector-follow-up.js';
 import { PhysicalDeliveryTracker } from './im-delivery-progress.js';
 import {
   ChannelInboundLifecycle,
@@ -131,6 +138,11 @@ export interface WhatsAppConnectOpts {
   shouldProcessGroupMessage?: (chatJid: string, senderImId?: string) => boolean;
   /** owner_mentioned mode: bot @mentioned but sender not group owner → drop */
   isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
+  /** Offer each persisted input to the host's durable follow-up queue. */
+  onFollowUpMessage?: OnChannelFollowUpMessage;
+  onFollowUpsChanged?: import('./channel-contracts.js').OnChannelFollowUpsChanged;
+  /** `/break` — cancel the pending queue and interrupt the active query. */
+  onSessionBreak?: OnChannelSessionBreak;
   /** Group response audience: false → drop before any further processing */
   isSenderAllowedInGroup?: (chatJid: string, senderImId?: string) => boolean;
   resolveRegisteredGroup?: (jid: string) => GroupOwnerView | undefined;
@@ -660,11 +672,14 @@ export function createWhatsAppConnection(
     groupFolder: string | undefined,
     lease: ChannelInboundLease,
     activeSock: WASocket,
+    /** Replaces the provider caption, e.g. by the guidance of `/steer`. */
+    captionOverride?: string,
   ): Promise<{ content: string; attachmentsJson?: string } | null> {
     inboundLifecycle.assertCurrent(lease);
     const detected = detectMedia(content);
     if (!detected) return null;
     const { kind, label, node, defaultExt } = detected;
+    const caption = captionOverride ?? node.caption;
 
     // Baileys unwraps its known FutureProofMessage variants internally, but
     // rc13 does not yet recognize proto-74 lottieStickerMessage. Keep the
@@ -693,11 +708,11 @@ export function createWhatsAppConnection(
         { err, kind, msgId: msg.key?.id },
         'WhatsApp media download failed',
       );
-      const cap = node.caption ? `: ${node.caption}` : '';
+      const cap = caption ? `: ${caption}` : '';
       return { content: `[${label} 下载失败${cap}]` };
     }
 
-    const captionLine = node.caption ? `\n${node.caption}` : '';
+    const captionLine = caption ? `\n${caption}` : '';
 
     if (!groupFolder) {
       // No workspace mapping for this chat — skip disk save, just signal what arrived
@@ -856,8 +871,8 @@ export function createWhatsAppConnection(
       }
 
       // ── Group gates: response audience → mention required → owner check ──
+      const isBotMentioned = isGroup && isMentioningBot(inner, activeSock.user);
       if (isGroup) {
-        const isBotMentioned = isMentioningBot(inner, activeSock.user);
         const addressedText = text
           ? stripLeadingWhatsAppBotMention(text, inner, activeSock.user)
           : text;
@@ -902,11 +917,40 @@ export function createWhatsAppConnection(
         text = addressedText;
       }
 
+      // A group message must carry the bot in mentionedJid; a 1:1 chat is
+      // addressed to the bot by construction.
+      const runtimeControl = parseConnectorRuntimeControl({
+        commandText: text?.trim() ?? '',
+        eligible: !isGroup || isBotMentioned,
+        hasAttachments: detectMedia(inner) !== null,
+      });
+      if (runtimeControl?.kind === 'break') {
+        const reply = await runSessionBreak(opts.onSessionBreak, {
+          sourceJid: chatJid,
+          targetJid: resolveAdmittedChannelRoute(
+            chatJid,
+            opts.resolveEffectiveChatJid,
+          )?.targetJid,
+          senderImId,
+          chatType: isGroup ? 'group' : 'p2p',
+        });
+        inboundLifecycle.assertCurrent(lease);
+        try {
+          await activeSock.sendMessage(remoteJid, { text: reply });
+        } catch (err) {
+          logger.warn({ err, chatJid }, 'WhatsApp /break reply send failed');
+        }
+        return;
+      }
+      const steerText =
+        runtimeControl?.kind === 'steer' ? runtimeControl.text : undefined;
+      if (steerText !== undefined) text = steerText;
+
       // Control commands may repair/change a binding. Consume them before
       // route validation; media must not be downloaded for a stale route.
       const commandText = text?.trim() ?? '';
       const slashMatch = commandText.match(/^\/(\S+)(?:\s+(.*))?$/s);
-      if (slashMatch && opts.onCommand) {
+      if (slashMatch && opts.onCommand && steerText === undefined) {
         const cmdBody = (
           slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
         ).trim();
@@ -968,6 +1012,7 @@ export function createWhatsAppConnection(
         opts.resolveGroupFolder?.(chatJid),
         lease,
         activeSock,
+        steerText,
       );
       inboundLifecycle.assertCurrent(lease);
       if (media) {
@@ -1004,6 +1049,13 @@ export function createWhatsAppConnection(
         false,
         { attachments: attachmentsJson, sourceJid: chatJid },
       );
+      const followUp = offerChannelFollowUp(opts.onFollowUpMessage, {
+        targetJid,
+        sourceJid: chatJid,
+        messageId: id,
+        senderImId: senderId,
+        requestedMode: steerText === undefined ? undefined : 'steer',
+      });
 
       opts.onMessagePersisted?.(
         targetJid,
@@ -1017,9 +1069,24 @@ export function createWhatsAppConnection(
           timestamp: timestampISO,
           attachments: attachmentsJson,
           is_from_me: false,
+          ...followUp.deliveryFields,
         },
         routing?.agentId ?? undefined,
       );
+      if (!followUp.shouldStartTurn) {
+        // Released by the host when the active run ends.
+        opts.onFollowUpsChanged?.(targetJid);
+        logger.info(
+          {
+            chatJid,
+            targetJid,
+            msgId: key.id,
+            disposition: followUp.disposition,
+          },
+          'WhatsApp message queued behind the active run',
+        );
+        return;
+      }
       notifyNewImMessage();
 
       if (routing?.agentId) {

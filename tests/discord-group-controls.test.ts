@@ -13,6 +13,9 @@ const discord = vi.hoisted(() => {
     application: { commands: { set: vi.fn(async () => []) } },
     guilds: { cache: { values: () => [] } },
     channels: { fetch: vi.fn(async () => sentChannel) },
+    users: {
+      fetch: vi.fn(async () => ({ createDM: async () => sentChannel })),
+    },
     once(event: string, fn: (...args: any[]) => unknown) {
       const list = onceListeners.get(event) ?? [];
       list.push(fn);
@@ -75,11 +78,14 @@ vi.mock('../src/logger.js', () => ({
 }));
 
 import { storeMessageDirect } from '../src/db.js';
+import { notifyNewImMessage } from '../src/message-notifier.js';
 import {
   createDiscordConnection,
+  discordAddressedText,
   discordCommandMentions,
   type DiscordConnectOpts,
 } from '../src/discord.js';
+import { followUpHost } from './helpers/follow-up-host.js';
 import {
   groupAudienceHost,
   type AudienceGroup,
@@ -265,5 +271,142 @@ describe('discordCommandMentions', () => {
         { id: '4' },
       ]),
     ).toEqual([{ imId: '2' }, { imId: '3' }]);
+  });
+});
+
+describe('Discord durable queue and runtime controls', () => {
+  let connection: ReturnType<typeof createDiscordConnection> | null = null;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    discord.listeners.clear();
+  });
+
+  afterEach(async () => {
+    await connection?.disconnect();
+    connection = null;
+  });
+
+  async function connect(
+    host: ReturnType<typeof followUpHost>,
+    overrides: Partial<DiscordConnectOpts> = {},
+  ) {
+    connection = createDiscordConnection({ botToken: 'test-token' });
+    const opts = {
+      onNewChat: vi.fn(),
+      isChatAuthorized: () => true,
+      resolveEffectiveChatJid: (jid: string) => ({
+        effectiveJid: jid,
+        agentId: null,
+      }),
+      onCommand: vi.fn(async () => null),
+      onMessagePersisted: vi.fn(),
+      ...host,
+      ...overrides,
+    };
+    await connection.connect(opts);
+    const handler = discord.listeners.get('messageCreate')![0]!;
+    return {
+      opts,
+      deliver: (msg: ReturnType<typeof guildMsg>) => handler(msg),
+    };
+  }
+
+  test('an input arriving during a run waits in the durable queue', async () => {
+    const host = followUpHost('queued');
+    const { opts, deliver } = await connect(host);
+    await deliver(guildMsg({ author: '5', content: 'later', dm: true }));
+    expect(host.onFollowUpMessage.mock.calls[0][0]).toMatchObject({
+      targetJid: 'discord:dm:5',
+      sourceJid: 'discord:dm:5',
+      senderImId: 'discord:5',
+    });
+    expect(opts.onMessagePersisted.mock.calls[0][1]).toMatchObject({
+      delivery_status: 'queued',
+    });
+    expect(host.onFollowUpsChanged).toHaveBeenCalledWith('discord:dm:5');
+    expect(notifyNewImMessage).not.toHaveBeenCalled();
+  });
+
+  test('with no active run the input starts a turn as before', async () => {
+    const host = followUpHost('started');
+    const { deliver } = await connect(host);
+    await deliver(guildMsg({ author: '5', content: 'now', dm: true }));
+    expect(notifyNewImMessage).toHaveBeenCalledOnce();
+  });
+
+  test('/steer and /break in a DM', async () => {
+    const host = followUpHost('queued');
+    const { opts, deliver } = await connect(host);
+    await deliver(
+      guildMsg({ author: '5', content: '/steer go left', dm: true }),
+    );
+    expect(vi.mocked(storeMessageDirect).mock.calls[0][4]).toBe('go left');
+    expect(host.onFollowUpMessage.mock.calls[0][0]).toMatchObject({
+      requestedMode: 'steer',
+    });
+    expect(opts.onCommand).not.toHaveBeenCalled();
+
+    await deliver(guildMsg({ author: '5', content: '/break', dm: true }));
+    expect(host.onSessionBreak).toHaveBeenCalledWith({
+      sourceJid: 'discord:dm:5',
+      targetJid: 'discord:dm:5',
+      senderImId: '5',
+      chatType: 'p2p',
+    });
+    expect(discord.sentChannel.send).toHaveBeenCalledWith(
+      'Current task stopped.',
+    );
+    expect(storeMessageDirect).toHaveBeenCalledTimes(1);
+  });
+
+  test('a guild control needs a leading @Bot that Discord resolved', async () => {
+    const host = followUpHost('started');
+    const { deliver } = await connect(host);
+    await deliver(guildMsg({ author: '5', content: '/break' }));
+    await deliver(
+      guildMsg({ author: '5', content: `<@${BOT}> /break`, mentioned: [] }),
+    );
+    expect(host.onSessionBreak).not.toHaveBeenCalled();
+
+    await deliver(
+      guildMsg({
+        author: '5',
+        content: `<@!${BOT}> /break`,
+        mentioned: [{ id: BOT, bot: true }],
+      }),
+    );
+    expect(host.onSessionBreak).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceJid: GUILD_JID, chatType: 'group' }),
+    );
+  });
+
+  test('/break with an attachment is ordinary input', async () => {
+    const host = followUpHost('started');
+    const { deliver } = await connect(host);
+    await deliver(
+      guildMsg({
+        author: '5',
+        content: '/break',
+        dm: true,
+        // Oversized, so the connector records a marker without downloading.
+        attachments: [
+          { name: 'a.txt', size: 10 ** 12, url: 'https://cdn.test/a.txt' },
+        ],
+      }),
+    );
+    expect(host.onSessionBreak).not.toHaveBeenCalled();
+  });
+});
+
+describe('discordAddressedText', () => {
+  test('a leading resolved bot mention only', () => {
+    const users = new Map([['900', {}]]);
+    expect(discordAddressedText('<@900> /break', users, '900')).toBe('/break');
+    expect(discordAddressedText('<@!900>/break', users, '900')).toBe('/break');
+    expect(discordAddressedText('/break <@900>', users, '900')).toBeNull();
+    expect(discordAddressedText('<@901> /break', users, '900')).toBeNull();
+    expect(discordAddressedText('<@900> /break', new Map(), '900')).toBeNull();
+    expect(discordAddressedText('<@900> /break', users, undefined)).toBeNull();
   });
 });

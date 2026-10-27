@@ -112,6 +112,7 @@ vi.mock('proxy-agent', () => ({
 const { createWhatsAppConnection, whatsAppCommandMentions } =
   await import('../src/whatsapp.js');
 const { groupAudienceHost } = await import('./helpers/group-audience.js');
+const { followUpHost } = await import('./helpers/follow-up-host.js');
 type AudienceGroup = import('./helpers/group-audience.js').AudienceGroup;
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsapp-group-'));
@@ -283,5 +284,110 @@ describe('whatsAppCommandMentions', () => {
         { id: '19990001111:7@s.whatsapp.net' },
       ),
     ).toEqual([{ imId: '15550000002@s.whatsapp.net' }]);
+  });
+});
+
+describe('WhatsApp durable queue and runtime controls', () => {
+  let connection: ReturnType<typeof createWhatsAppConnection> | null = null;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    harness.sockets.length = 0;
+  });
+
+  afterEach(async () => {
+    await connection?.disconnect();
+    connection = null;
+  });
+
+  async function connect(
+    host: ReturnType<typeof followUpHost>,
+    extra: Record<string, unknown> = {},
+  ) {
+    seq += 1;
+    connection = createWhatsAppConnection({
+      accountId: `wa-rc-${seq}`,
+      authDir: path.join(root, `auth-rc-${seq}`),
+    });
+    const opts = {
+      onNewChat: vi.fn(),
+      isChatAuthorized: () => true,
+      onCommand: vi.fn(async () => null),
+      onMessagePersisted: vi.fn(),
+      ...host,
+      ...extra,
+    };
+    await connection.connect(opts);
+    const socket = harness.sockets.at(-1)!;
+    return {
+      opts,
+      socket,
+      deliver: (...messages: ReturnType<typeof groupMessage>[]) =>
+        socket.emit('messages.upsert', { type: 'notify', messages }),
+    };
+  }
+
+  const dm = (text: string) =>
+    groupMessage(OUTSIDER, text, undefined, OUTSIDER);
+
+  test('an input arriving during a run waits in the durable queue', async () => {
+    const host = followUpHost('queued');
+    const { opts, deliver } = await connect(host);
+    await deliver(dm('later'));
+    expect(host.onFollowUpMessage.mock.calls[0][0]).toMatchObject({
+      targetJid: `whatsapp:${OUTSIDER}`,
+      sourceJid: `whatsapp:${OUTSIDER}`,
+      senderImId: `whatsapp:${OUTSIDER}`,
+    });
+    expect(opts.onMessagePersisted.mock.calls[0][1]).toMatchObject({
+      delivery_status: 'queued',
+    });
+    expect(host.onFollowUpsChanged).toHaveBeenCalledWith(
+      `whatsapp:${OUTSIDER}`,
+    );
+    expect(notify.notifyNewImMessage).not.toHaveBeenCalled();
+  });
+
+  test('with no active run the input starts a turn as before', async () => {
+    const host = followUpHost('started');
+    const { deliver } = await connect(host);
+    await deliver(dm('now'));
+    expect(notify.notifyNewImMessage).toHaveBeenCalledOnce();
+  });
+
+  test('/steer and /break in a private chat', async () => {
+    const host = followUpHost('queued');
+    const { opts, socket, deliver } = await connect(host);
+    await deliver(dm('/steer shorter answers'));
+    expect(db.storeMessageDirect.mock.calls[0][4]).toBe('shorter answers');
+    expect(host.onFollowUpMessage.mock.calls[0][0]).toMatchObject({
+      requestedMode: 'steer',
+    });
+    expect(opts.onCommand).not.toHaveBeenCalled();
+
+    await deliver(dm('/break'));
+    expect(host.onSessionBreak).toHaveBeenCalledWith({
+      sourceJid: `whatsapp:${OUTSIDER}`,
+      targetJid: `whatsapp:${OUTSIDER}`,
+      senderImId: OUTSIDER,
+      chatType: 'p2p',
+    });
+    expect(socket.sendMessage).toHaveBeenCalledWith(OUTSIDER, {
+      text: 'Current task stopped.',
+    });
+    expect(db.storeMessageDirect).toHaveBeenCalledTimes(1);
+  });
+
+  test('a group control needs the bot in mentionedJid', async () => {
+    const host = followUpHost('started');
+    const { deliver } = await connect(host, {
+      shouldProcessGroupMessage: () => true,
+    });
+    await deliver(groupMessage(MEMBER, '/break'));
+    expect(host.onSessionBreak).not.toHaveBeenCalled();
+    await deliver(groupMessage(MEMBER, '@19990001111 /break', [BOT_JID]));
+    expect(host.onSessionBreak).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceJid: GROUP_JID, chatType: 'group' }),
+    );
   });
 });

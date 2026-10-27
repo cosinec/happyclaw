@@ -53,6 +53,7 @@ import {
   parseRuntimeControl,
 } from './follow-up-policy.js';
 import type { FollowUpDisposition, FollowUpMode } from './types.js';
+import { offerChannelFollowUp } from './im-connector-follow-up.js';
 import {
   ChannelInboundLifecycle,
   type ChannelInboundLease,
@@ -545,53 +546,6 @@ function parseQQChatId(
   return null;
 }
 
-export interface QQFollowUpOutcome {
-  /**
-   * Whether the caller should start a turn now. A queued or steered message is
-   * released later by the scheduler, so starting one here would run it twice.
-   */
-  shouldStartTurn: boolean;
-  disposition: FollowUpDisposition['disposition'];
-  /** Projection fields describing the outcome to `onMessagePersisted`. */
-  deliveryFields: Record<string, unknown>;
-  position?: number;
-}
-
-/**
- * Translate the host's follow-up decision into projection fields.
- *
- * Split out from the connector so the mapping can be pinned by tests: the
- * steer case is easy to get wrong because it reports as `steered` but must be
- * persisted as `queued`.
- */
-export function describeFollowUpOutcome(
-  followUp: FollowUpDisposition,
-  now: string = new Date().toISOString(),
-): QQFollowUpOutcome {
-  if (followUp.disposition === 'started') {
-    return {
-      shouldStartTurn: true,
-      disposition: 'started',
-      deliveryFields: {},
-    };
-  }
-
-  return {
-    shouldStartTurn: false,
-    disposition: followUp.disposition,
-    position: followUp.position,
-    deliveryFields: {
-      delivery_mode: followUp.disposition === 'steered' ? 'steer' : 'queue',
-      // Steering stays `queued`: it is a durable hand-off, and the row is only
-      // released once the interrupted query reports idle. Marking it anything
-      // else would hide it from the queue readers that must eventually run it.
-      delivery_status: 'queued',
-      delivery_run_id: followUp.runId ?? null,
-      delivery_updated_at: now,
-    },
-  };
-}
-
 /**
  * Group members a QQ group command names, for `/allow` and `/disallow`, in
  * the `group:` namespace of group senders. Only structured `mentions` entries
@@ -803,32 +757,6 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
     const next = current + 1;
     msgSeqCounters.set(chatId, next);
     return next;
-  }
-
-  /**
-   * Offer a just-persisted inbound message to the durable follow-up queue.
-   *
-   * Order matters and mirrors the Feishu intake: the host applies its decision
-   * with an UPDATE keyed on the message row, so the row has to exist before
-   * this runs. Returns the projection fields describing the outcome plus
-   * whether the caller should start a turn now — a queued or steered message
-   * is released later by the scheduler, so starting one here would run it
-   * twice.
-   */
-  function offerFollowUp(
-    opts: QQConnectOpts,
-    input: {
-      targetJid: string;
-      sourceJid: string;
-      messageId: string;
-      senderImId: string;
-      requestedMode?: FollowUpMode;
-    },
-  ): QQFollowUpOutcome {
-    const followUp: FollowUpDisposition = opts.onFollowUpMessage?.(input) ?? {
-      disposition: 'started',
-    };
-    return describeFollowUpOutcome(followUp);
   }
 
   /**
@@ -2315,7 +2243,7 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
           { attachments: attachmentsJson, sourceJid: jid },
         );
 
-        const followUp = offerFollowUp(opts, {
+        const followUp = offerChannelFollowUp(opts.onFollowUpMessage, {
           targetJid,
           sourceJid: jid,
           messageId: id,
@@ -2605,7 +2533,7 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
           { attachments: attachmentsJson, sourceJid: jid },
         );
 
-        const followUp = offerFollowUp(opts, {
+        const followUp = offerChannelFollowUp(opts.onFollowUpMessage, {
           targetJid,
           sourceJid: jid,
           messageId: id,

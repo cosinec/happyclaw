@@ -53,6 +53,14 @@ import {
   type GroupOwnerView,
 } from './im-group-audience.js';
 import {
+  describeFollowUpOutcome,
+  offerChannelFollowUp,
+  parseConnectorRuntimeControl,
+  runSessionBreak,
+  type OnChannelFollowUpMessage,
+  type OnChannelSessionBreak,
+} from './im-connector-follow-up.js';
+import {
   ExactAsyncIndicatorRegistry,
   processingIndicatorKey,
 } from './processing-indicator.js';
@@ -420,6 +428,11 @@ export interface DingTalkConnectOpts {
     senderImId?: string,
     mentions?: ChannelCommandMention[],
   ) => Promise<string | null>;
+  /** Offer each persisted input to the host's durable follow-up queue. */
+  onFollowUpMessage?: OnChannelFollowUpMessage;
+  onFollowUpsChanged?: import('./channel-contracts.js').OnChannelFollowUpsChanged;
+  /** `/break` — cancel the pending queue and interrupt the active query. */
+  onSessionBreak?: OnChannelSessionBreak;
   /** Group response audience, keyed by the robot callback's `senderId`. */
   isSenderAllowedInGroup?: (chatJid: string, senderImId?: string) => boolean;
   resolveGroupFolder?: (jid: string) => string | undefined;
@@ -2342,6 +2355,34 @@ export function createDingTalkConnection(
           jid,
           opts.resolveEffectiveChatJid,
         );
+        // DingTalk pushes a group message only for an @mention and marks it
+        // with isInAtList; a 1:1 chat is addressed to the bot by construction.
+        const runtimeControl = parseConnectorRuntimeControl({
+          commandText: extractDingTalkAdmissionText(data),
+          eligible: !isGroup || isDingTalkBotMentioned(data),
+          hasAttachments: data.msgtype !== 'text',
+        });
+        if (runtimeControl?.kind === 'break') {
+          const reply = await runSessionBreak(opts.onSessionBreak, {
+            sourceJid: jid,
+            targetJid: resolvedRoute?.targetJid,
+            senderImId: data.senderId ?? '',
+            chatType: isGroup ? 'group' : 'p2p',
+          });
+          assertInboundGeneration(generation, signal);
+          if (data.sessionWebhook) {
+            await sendViaSessionWebhook(
+              data.sessionWebhook,
+              markdownToPlainText(reply),
+              isGroup,
+              signal,
+            );
+            assertInboundGeneration(generation, signal);
+          }
+          return;
+        }
+        const steerText =
+          runtimeControl?.kind === 'steer' ? runtimeControl.text : undefined;
         if (!resolvedRoute) {
           logger.warn(
             { jid },
@@ -2405,7 +2446,7 @@ export function createDingTalkConnection(
 
         if (data.msgtype === 'text' && 'text' in data) {
           const textBlock = (data as DingTalkRobotMessage).text;
-          const userText = textBlock?.content?.trim() || '';
+          const userText = steerText ?? (textBlock?.content?.trim() || '');
           const reply = textBlock?.isReplyMsg
             ? extractRepliedMsg(
                 textBlock.repliedMsg,
@@ -2552,7 +2593,7 @@ export function createDingTalkConnection(
             { msgId, textParts, imageEntriesCount: imageCodes.length },
             'DingTalk richText parsed',
           );
-          const text = textParts.join('').trim();
+          const text = steerText ?? textParts.join('').trim();
           // Vision gets every inline-sized image; each saved image keeps its
           // own path label. Only a null normalize result is a failure — an
           // oversized image is saved without a Vision attachment.
@@ -2861,7 +2902,7 @@ export function createDingTalkConnection(
 
         // Handle slash commands
         const slashMatch = content.match(/^\/(\S+)(?:\s+(.*))?$/i);
-        if (slashMatch && opts.onCommand) {
+        if (slashMatch && opts.onCommand && steerText === undefined) {
           const cmdBody = (
             slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
           ).trim();
@@ -2916,6 +2957,24 @@ export function createDingTalkConnection(
         // silently drops the message.
         dedup.markSeen(msgId);
 
+        // Persistence is the ACK boundary: nothing after it may throw back
+        // into the Stream callback. A failed queue offer falls back to the
+        // legacy start-now path rather than losing the stored message.
+        let followUp = describeFollowUpOutcome({ disposition: 'started' });
+        try {
+          followUp = offerChannelFollowUp(opts.onFollowUpMessage, {
+            targetJid,
+            sourceJid: jid,
+            messageId: id,
+            senderImId: senderId,
+            requestedMode: steerText === undefined ? undefined : 'steer',
+          });
+        } catch (err) {
+          logger.error(
+            { err, jid, targetJid, msgId },
+            'DingTalk follow-up queue offer failed',
+          );
+        }
         try {
           opts.onMessagePersisted?.(
             targetJid,
@@ -2929,6 +2988,7 @@ export function createDingTalkConnection(
               timestamp,
               attachments: attachmentsJson,
               is_from_me: false,
+              ...followUp.deliveryFields,
             },
             agentRouting?.agentId ?? undefined,
           );
@@ -2950,6 +3010,23 @@ export function createDingTalkConnection(
             recallAckReaction,
           )
           .catch(() => {});
+
+        if (!followUp.shouldStartTurn) {
+          // Released by the host when the active run ends.
+          try {
+            opts.onFollowUpsChanged?.(targetJid);
+          } catch (err) {
+            logger.error(
+              { err, jid, targetJid, msgId },
+              'DingTalk follow-up projection failed',
+            );
+          }
+          logger.info(
+            { jid, targetJid, msgId, disposition: followUp.disposition },
+            'DingTalk message queued behind the active run',
+          );
+          return;
+        }
 
         try {
           notifyNewImMessage();

@@ -54,8 +54,10 @@ vi.mock('../src/logger.js', () => ({
 
 import {
   createTelegramConnection,
+  telegramAddressedText,
   telegramCommandMentions,
 } from '../src/telegram.js';
+import { followUpHost } from './helpers/follow-up-host.js';
 import {
   groupAudienceHost,
   type AudienceGroup,
@@ -262,5 +264,253 @@ describe('telegramCommandMentions', () => {
         reply_to_message: { from: { id: 1, is_bot: true } },
       }),
     ).toEqual([]);
+  });
+});
+
+describe('Telegram durable queue and runtime controls', () => {
+  let connection: ReturnType<typeof createTelegramConnection> | null = null;
+
+  beforeEach(() => {
+    inbound.handlers.clear();
+    inbound.storeMessageDirect.mockReset();
+    inbound.notifyNewImMessage.mockReset();
+  });
+
+  afterEach(async () => {
+    if (connection) {
+      await connection.disconnect();
+      connection = null;
+    }
+  }, 8000);
+
+  async function connect(
+    host: ReturnType<typeof followUpHost>,
+    extra: Record<string, unknown> = {},
+  ) {
+    connection = createTelegramConnection({ botToken: 'test-token' });
+    const opts = {
+      onNewChat: vi.fn(),
+      isChatAuthorized: () => true,
+      onCommand: vi.fn(async () => null),
+      onMessagePersisted: vi.fn(),
+      onAgentMessage: vi.fn(),
+      ...host,
+      ...extra,
+    };
+    await connection.connect(opts as never);
+    return opts;
+  }
+
+  const DM = { id: OUTSIDER, type: 'private' };
+  const send = (input: Parameters<typeof textCtx>[0]) =>
+    inbound.handlers.get('message:text')!(textCtx(input));
+
+  test('an input arriving during a run waits in the durable queue', async () => {
+    const host = followUpHost('queued');
+    const opts = await connect(host, {
+      resolveEffectiveChatJid: () => ({
+        effectiveJid: 'web:home#agent:a1',
+        agentId: 'a1',
+      }),
+    });
+    await send({ text: 'later please', from: OUTSIDER, chat: DM });
+
+    const stored = inbound.storeMessageDirect.mock.calls[0];
+    expect(stored[1]).toBe('web:home#agent:a1');
+    expect(stored[7]).toMatchObject({ sourceJid: `telegram:${OUTSIDER}` });
+    expect(host.onFollowUpMessage).toHaveBeenCalledWith({
+      targetJid: 'web:home#agent:a1',
+      sourceJid: `telegram:${OUTSIDER}`,
+      messageId: stored[0],
+      senderImId: `tg:${OUTSIDER}`,
+      requestedMode: undefined,
+    });
+    expect(opts.onMessagePersisted.mock.calls[0][1]).toMatchObject({
+      delivery_mode: 'queue',
+      delivery_status: 'queued',
+      delivery_run_id: 'run-1',
+    });
+    expect(host.onFollowUpsChanged).toHaveBeenCalledWith('web:home#agent:a1');
+    // Released by the host when the run ends: no wake-up, no agent start.
+    expect(inbound.notifyNewImMessage).not.toHaveBeenCalled();
+    expect(opts.onAgentMessage).not.toHaveBeenCalled();
+  });
+
+  test('with no active run the input starts a turn as before', async () => {
+    const host = followUpHost('started');
+    const opts = await connect(host);
+    await send({ text: 'hello', from: OUTSIDER, chat: DM });
+    expect(inbound.notifyNewImMessage).toHaveBeenCalledOnce();
+    expect(host.onFollowUpsChanged).not.toHaveBeenCalled();
+    expect(opts.onMessagePersisted.mock.calls[0][1]).not.toHaveProperty(
+      'delivery_status',
+    );
+  });
+
+  test('/steer in a private chat stores its guidance as a steer', async () => {
+    const host = followUpHost('queued');
+    const opts = await connect(host);
+    await send({ text: '/steer focus on tests', from: OUTSIDER, chat: DM });
+    expect(inbound.storeMessageDirect.mock.calls[0][4]).toBe('focus on tests');
+    expect(host.onFollowUpMessage.mock.calls[0][0]).toMatchObject({
+      requestedMode: 'steer',
+    });
+    expect(opts.onMessagePersisted.mock.calls[0][1]).toMatchObject({
+      delivery_mode: 'steer',
+      delivery_status: 'queued',
+    });
+    expect(opts.onCommand).not.toHaveBeenCalled();
+  });
+
+  test('/break in a private chat runs on the host and replies', async () => {
+    const host = followUpHost('queued');
+    await connect(host);
+    const ctx = textCtx({ text: '/break', from: OUTSIDER, chat: DM });
+    await inbound.handlers.get('message:text')!(ctx);
+    expect(host.onSessionBreak).toHaveBeenCalledWith({
+      sourceJid: `telegram:${OUTSIDER}`,
+      targetJid: `telegram:${OUTSIDER}`,
+      senderImId: String(OUTSIDER),
+      chatType: 'p2p',
+    });
+    expect(ctx.reply).toHaveBeenCalledWith('Current task stopped.');
+    expect(inbound.storeMessageDirect).not.toHaveBeenCalled();
+  });
+
+  test('a group needs a structural @Bot; a bare command is ordinary input', async () => {
+    const host = followUpHost('started');
+    await connect(host);
+    await send({ text: '/break', from: MEMBER });
+    expect(host.onSessionBreak).not.toHaveBeenCalled();
+    expect(inbound.storeMessageDirect.mock.calls[0][4]).toBe('/break');
+
+    const mention = textCtx({
+      text: '@happy_bot /break',
+      from: MEMBER,
+      entities: [{ type: 'mention', offset: 0, length: 10 }],
+    });
+    await inbound.handlers.get('message:text')!(mention);
+    const command = textCtx({
+      text: '/steer@happy_bot try again',
+      from: MEMBER,
+      entities: [{ type: 'bot_command', offset: 0, length: 16 }],
+    });
+    await inbound.handlers.get('message:text')!(command);
+
+    expect(host.onSessionBreak).toHaveBeenCalledWith({
+      sourceJid: GROUP_JID,
+      targetJid: GROUP_JID,
+      senderImId: String(MEMBER),
+      chatType: 'group',
+    });
+    expect(inbound.storeMessageDirect.mock.calls[1][4]).toBe('try again');
+    expect(host.onFollowUpMessage.mock.calls[1][0]).toMatchObject({
+      requestedMode: 'steer',
+    });
+  });
+
+  test('/break with arguments or another case is ordinary input', async () => {
+    const host = followUpHost('started');
+    await connect(host);
+    await send({ text: '/break now', from: OUTSIDER, chat: DM });
+    await send({ text: '/Break', from: OUTSIDER, chat: DM });
+    expect(host.onSessionBreak).not.toHaveBeenCalled();
+    expect(inbound.storeMessageDirect).toHaveBeenCalledTimes(2);
+  });
+
+  test('a group /break whose route is rejected reports no target to the host', async () => {
+    const host = followUpHost('started');
+    await connect(host, {
+      resolveEffectiveChatJid: () => null,
+    });
+    await send({
+      text: '@happy_bot /break',
+      from: MEMBER,
+      entities: [{ type: 'mention', offset: 0, length: 10 }],
+    });
+    expect(host.onSessionBreak).toHaveBeenCalledWith(
+      expect.objectContaining({ targetJid: undefined, chatType: 'group' }),
+    );
+  });
+
+  test('a /steer caption carries its image as guidance', async () => {
+    const host = followUpHost('queued');
+    await connect(host);
+    seq += 1;
+    await inbound.handlers.get('message:video')!({
+      message: {
+        message_id: seq,
+        date: Math.floor(Date.now() / 1000),
+        caption: '/steer use this clip',
+        video: { file_id: 'v1', file_name: 'clip.mp4', file_size: 12 },
+      },
+      chat: DM,
+      from: { id: OUTSIDER, first_name: 'o' },
+      react: vi.fn(async () => {}),
+      reply: vi.fn(async () => {}),
+    });
+    const content = inbound.storeMessageDirect.mock.calls[0][4] as string;
+    expect(content).toContain('use this clip');
+    expect(content).not.toContain('/steer');
+    expect(host.onFollowUpMessage.mock.calls[0][0]).toMatchObject({
+      requestedMode: 'steer',
+    });
+  });
+});
+
+describe('telegramAddressedText', () => {
+  const bot = { username: 'happy_bot', id: 1 };
+  test('only Telegram-marked addressing of this bot counts', () => {
+    expect(
+      telegramAddressedText(
+        {
+          text: '@happy_bot /break',
+          entities: [{ type: 'mention', offset: 0, length: 10 }],
+        },
+        bot,
+      ),
+    ).toBe('/break');
+    expect(
+      telegramAddressedText(
+        {
+          text: '/break@Happy_Bot',
+          entities: [{ type: 'bot_command', offset: 0, length: 16 }],
+        },
+        bot,
+      ),
+    ).toBe('/break');
+    expect(
+      telegramAddressedText(
+        {
+          text: 'Happy /break',
+          entities: [
+            { type: 'text_mention', offset: 0, length: 5, user: { id: 1 } },
+          ],
+        },
+        bot,
+      ),
+    ).toBe('/break');
+    expect(
+      telegramAddressedText(
+        {
+          text: '@other_bot /break',
+          entities: [{ type: 'mention', offset: 0, length: 10 }],
+        },
+        bot,
+      ),
+    ).toBeNull();
+    expect(
+      telegramAddressedText(
+        {
+          text: '/break',
+          entities: [{ type: 'bot_command', offset: 0, length: 6 }],
+        },
+        bot,
+      ),
+    ).toBeNull();
+    // Typed text without an entity is not proof.
+    expect(
+      telegramAddressedText({ text: '@happy_bot /break' }, bot),
+    ).toBeNull();
   });
 });

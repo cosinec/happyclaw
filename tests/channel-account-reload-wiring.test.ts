@@ -147,6 +147,30 @@ describe('group response audience reaches every group-capable connector', () => 
   );
 });
 
+describe('the durable follow-up queue and runtime controls reach every connector', () => {
+  test.each(Object.keys(CONNECTORS) as Provider[])(
+    '%s offers inputs to the queue and runs /break on the host',
+    async (provider) => {
+      const h = reloadHarness(provider, {
+        botToken: 'token',
+        ilinkBotId: 'ilink',
+        appId: 'app',
+        appSecret: 'secret',
+        clientId: 'client',
+        clientSecret: 'secret',
+        botId: 'bot',
+        secret: 'secret',
+      });
+      const { options } = await h.connect();
+      expect(options.onFollowUpMessage).toBe(h.globals.handleIncomingFollowUp);
+      expect(options.onFollowUpsChanged).toBe(
+        h.globals.broadcastFollowUpUpdate,
+      );
+      expect(options.onSessionBreak).toBe(h.globals.handleSessionBreak);
+    },
+  );
+});
+
 describe('Feishu account wiring', () => {
   test('brand from the secret, lazy owner and the conflict status mapping', async () => {
     const secret: Record<string, string> = {

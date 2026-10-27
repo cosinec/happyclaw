@@ -1483,6 +1483,9 @@ export class IMConnectionManager {
       } | null;
       onAgentMessage?: (baseChatJid: string, agentId: string) => void;
       onMessagePersisted?: IMChannelConnectOpts['onMessagePersisted'];
+      onFollowUpMessage?: IMChannelConnectOpts['onFollowUpMessage'];
+      onFollowUpsChanged?: IMChannelConnectOpts['onFollowUpsChanged'];
+      onSessionBreak?: IMChannelConnectOpts['onSessionBreak'];
       onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
       onBotRemovedFromGroup?: (chatJid: string) => void;
       onNativeContextDetected?: (
@@ -1520,6 +1523,9 @@ export class IMConnectionManager {
         resolveEffectiveChatJid: options?.resolveEffectiveChatJid,
         onAgentMessage: options?.onAgentMessage,
         onMessagePersisted: options?.onMessagePersisted,
+        onFollowUpMessage: options?.onFollowUpMessage,
+        onFollowUpsChanged: options?.onFollowUpsChanged,
+        onSessionBreak: options?.onSessionBreak,
         onBotAddedToGroup: options?.onBotAddedToGroup,
         onBotRemovedFromGroup: options?.onBotRemovedFromGroup,
         onNativeContextDetected: options?.onNativeContextDetected,
@@ -1642,6 +1648,9 @@ export class IMConnectionManager {
       } | null;
       onAgentMessage?: (baseChatJid: string, agentId: string) => void;
       onMessagePersisted?: IMChannelConnectOpts['onMessagePersisted'];
+      onFollowUpMessage?: IMChannelConnectOpts['onFollowUpMessage'];
+      onFollowUpsChanged?: IMChannelConnectOpts['onFollowUpsChanged'];
+      onSessionBreak?: IMChannelConnectOpts['onSessionBreak'];
       isChatAuthorized?: (jid: string) => boolean;
       onPairAttempt?: (
         jid: string,
@@ -1691,6 +1700,9 @@ export class IMConnectionManager {
         resolveEffectiveChatJid: options?.resolveEffectiveChatJid,
         onAgentMessage: options?.onAgentMessage,
         onMessagePersisted: options?.onMessagePersisted,
+        onFollowUpMessage: options?.onFollowUpMessage,
+        onFollowUpsChanged: options?.onFollowUpsChanged,
+        onSessionBreak: options?.onSessionBreak,
         isChatAuthorized: options?.isChatAuthorized,
         onPairAttempt: options?.onPairAttempt,
         onWeChatConnectionStateChange: options?.onConnectionStateChange,
@@ -1721,6 +1733,9 @@ export class IMConnectionManager {
       } | null;
       onAgentMessage?: (baseChatJid: string, agentId: string) => void;
       onMessagePersisted?: IMChannelConnectOpts['onMessagePersisted'];
+      onFollowUpMessage?: IMChannelConnectOpts['onFollowUpMessage'];
+      onFollowUpsChanged?: IMChannelConnectOpts['onFollowUpsChanged'];
+      onSessionBreak?: IMChannelConnectOpts['onSessionBreak'];
       shouldProcessGroupMessage?: (
         chatJid: string,
         senderImId?: string,
@@ -1770,6 +1785,9 @@ export class IMConnectionManager {
         resolveEffectiveChatJid: options?.resolveEffectiveChatJid,
         onAgentMessage: options?.onAgentMessage,
         onMessagePersisted: options?.onMessagePersisted,
+        onFollowUpMessage: options?.onFollowUpMessage,
+        onFollowUpsChanged: options?.onFollowUpsChanged,
+        onSessionBreak: options?.onSessionBreak,
         shouldProcessGroupMessage: options?.shouldProcessGroupMessage,
         isGroupOwnerMessage: options?.isGroupOwnerMessage,
         isSenderAllowedInGroup: options?.isSenderAllowedInGroup,
@@ -1811,6 +1829,9 @@ export class IMConnectionManager {
       } | null;
       onAgentMessage?: (baseChatJid: string, agentId: string) => void;
       onMessagePersisted?: IMChannelConnectOpts['onMessagePersisted'];
+      onFollowUpMessage?: IMChannelConnectOpts['onFollowUpMessage'];
+      onFollowUpsChanged?: IMChannelConnectOpts['onFollowUpsChanged'];
+      onSessionBreak?: IMChannelConnectOpts['onSessionBreak'];
       onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
       onBotRemovedFromGroup?: (chatJid: string) => void;
       shouldProcessGroupMessage?: (
@@ -1864,6 +1885,9 @@ export class IMConnectionManager {
         resolveEffectiveChatJid: options?.resolveEffectiveChatJid,
         onAgentMessage: options?.onAgentMessage,
         onMessagePersisted: options?.onMessagePersisted,
+        onFollowUpMessage: options?.onFollowUpMessage,
+        onFollowUpsChanged: options?.onFollowUpsChanged,
+        onSessionBreak: options?.onSessionBreak,
         onBotAddedToGroup: options?.onBotAddedToGroup,
         onBotRemovedFromGroup: options?.onBotRemovedFromGroup,
         shouldProcessGroupMessage: options?.shouldProcessGroupMessage,
@@ -1986,6 +2010,9 @@ export class IMConnectionManager {
       } | null;
       onAgentMessage?: (baseChatJid: string, agentId: string) => void;
       onMessagePersisted?: IMChannelConnectOpts['onMessagePersisted'];
+      onFollowUpMessage?: IMChannelConnectOpts['onFollowUpMessage'];
+      onFollowUpsChanged?: IMChannelConnectOpts['onFollowUpsChanged'];
+      onSessionBreak?: IMChannelConnectOpts['onSessionBreak'];
       onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
       onBotRemovedFromGroup?: (chatJid: string) => void;
       shouldProcessGroupMessage?: (
@@ -2031,6 +2058,9 @@ export class IMConnectionManager {
         resolveEffectiveChatJid: options?.resolveEffectiveChatJid,
         onAgentMessage: options?.onAgentMessage,
         onMessagePersisted: options?.onMessagePersisted,
+        onFollowUpMessage: options?.onFollowUpMessage,
+        onFollowUpsChanged: options?.onFollowUpsChanged,
+        onSessionBreak: options?.onSessionBreak,
         onBotAddedToGroup: options?.onBotAddedToGroup,
         onBotRemovedFromGroup: options?.onBotRemovedFromGroup,
         shouldProcessGroupMessage: options?.shouldProcessGroupMessage,
@@ -2074,6 +2104,9 @@ export class IMConnectionManager {
       } | null;
       onAgentMessage?: (baseChatJid: string, agentId: string) => void;
       onMessagePersisted?: IMChannelConnectOpts['onMessagePersisted'];
+      onFollowUpMessage?: IMChannelConnectOpts['onFollowUpMessage'];
+      onFollowUpsChanged?: IMChannelConnectOpts['onFollowUpsChanged'];
+      onSessionBreak?: IMChannelConnectOpts['onSessionBreak'];
       onBotAddedToGroup?: (chatJid: string, chatName: string) => void;
       onBotRemovedFromGroup?: (chatJid: string) => void;
       shouldProcessGroupMessage?: (
@@ -2105,6 +2138,9 @@ export class IMConnectionManager {
         resolveEffectiveChatJid: options?.resolveEffectiveChatJid,
         onAgentMessage: options?.onAgentMessage,
         onMessagePersisted: options?.onMessagePersisted,
+        onFollowUpMessage: options?.onFollowUpMessage,
+        onFollowUpsChanged: options?.onFollowUpsChanged,
+        onSessionBreak: options?.onSessionBreak,
         onBotAddedToGroup: options?.onBotAddedToGroup,
         onBotRemovedFromGroup: options?.onBotRemovedFromGroup,
         shouldProcessGroupMessage: options?.shouldProcessGroupMessage,

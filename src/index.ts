@@ -22454,7 +22454,7 @@ async function discardWithdrawnTurnCardsAfterConnect(
 }
 
 /**
- * Feishu `/break` is a session cutoff, not a message for the Agent. Cancel
+ * `/break` (every IM channel) is a session cutoff, not a message for the Agent. Cancel
  * everything that was already durably queued, then interrupt the exact active
  * query. Messages admitted after this synchronous cutoff remain runnable.
  */
@@ -22744,7 +22744,11 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
     scopeIncomingJids: !account.is_legacy_default,
     ignoreMessagesBefore: Date.now(),
     onMessagePersisted: broadcastNewMessage,
+    // Every connector offers its inputs to the durable follow-up queue and
+    // parses `/steer` and `/break` (CLAUDE.md §4, §6.4).
+    onFollowUpMessage: handleIncomingFollowUp,
     onFollowUpsChanged: broadcastFollowUpUpdate,
+    onSessionBreak: handleSessionBreak,
     onCommand: handleCommand,
     resolveGroupFolder: (jid: string) => resolveEffectiveFolder(jid),
     resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
@@ -22779,8 +22783,6 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
               sender,
               () => secret.ownerOpenId || undefined,
             ),
-          onFollowUpMessage: handleIncomingFollowUp,
-          onSessionBreak: handleSessionBreak,
           onSessionClear: handleFeishuSessionClear,
           onSessionFresh: handleFeishuSessionFresh,
           onMessageRecalled: handleChannelMessageRecalled,
@@ -22863,13 +22865,8 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
           workspace.jid,
           account.is_legacy_default,
         ),
-        // Not added to `common`: the remaining channels do not forward the
-        // callback to their connector, so enabling it there would only look
-        // like queue support without providing it.
         {
           ...common,
-          onFollowUpMessage: handleIncomingFollowUp,
-          onSessionBreak: handleSessionBreak,
           isSenderAllowedInGroup,
           resolveRegisteredGroup: getRegisteredGroup,
         },

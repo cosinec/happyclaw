@@ -52,6 +52,13 @@ import {
   type GroupOwnerView,
 } from './im-group-audience.js';
 import {
+  offerChannelFollowUp,
+  parseConnectorRuntimeControl,
+  runSessionBreak,
+  type OnChannelFollowUpMessage,
+  type OnChannelSessionBreak,
+} from './im-connector-follow-up.js';
+import {
   ExactAsyncIndicatorRegistry,
   processingIndicatorKey,
 } from './processing-indicator.js';
@@ -69,6 +76,24 @@ const IMAGE_MAX_BASE64_SIZE = 5 * 1024 * 1024;
 
 export function isUnsupportedDiscordGroupDm(type: ChannelType): boolean {
   return type === ChannelType.GroupDM;
+}
+
+/**
+ * The text of a guild message that structurally addresses the bot, without
+ * that address; null otherwise. The proof is a leading `<@botId>` token that
+ * Discord also resolved into `mentions.users` (not a reply ping, role or
+ * @everyone).
+ */
+export function discordAddressedText(
+  content: string,
+  mentionedUsers: { has(id: string): boolean },
+  botId: string | undefined,
+): string | null {
+  if (!botId || !mentionedUsers.has(botId)) return null;
+  const leading = content.match(/^\s*<@!?(\d+)>/);
+  return leading?.[1] === botId
+    ? content.slice(leading[0].length).trim()
+    : null;
 }
 
 /**
@@ -112,6 +137,11 @@ export interface DiscordConnectOpts {
     senderImId?: string,
     mentions?: ChannelCommandMention[],
   ) => Promise<string | null>;
+  /** Offer each persisted input to the host's durable follow-up queue. */
+  onFollowUpMessage?: OnChannelFollowUpMessage;
+  onFollowUpsChanged?: import('./channel-contracts.js').OnChannelFollowUpsChanged;
+  /** `/break` — cancel the pending queue and interrupt the active query. */
+  onSessionBreak?: OnChannelSessionBreak;
   /** Guild-channel response audience, keyed by the author's user id. */
   isSenderAllowedInGroup?: (chatJid: string, senderImId?: string) => boolean;
   resolveRegisteredGroup?: (jid: string) => GroupOwnerView | undefined;
@@ -618,10 +648,47 @@ export function createDiscordConnection(
           content = content.replace(/<@!?\d+>/g, '').trim();
         }
 
+        const addressedText = isDM
+          ? msg.content.trim()
+          : discordAddressedText(
+              msg.content,
+              msg.mentions.users,
+              connectedClient.user?.id,
+            );
+        const runtimeControl = parseConnectorRuntimeControl({
+          commandText: addressedText ?? '',
+          eligible: addressedText !== null,
+          hasAttachments: collectDiscordInboundAttachments(msg).length > 0,
+        });
+        if (runtimeControl?.kind === 'break') {
+          const reply = await runSessionBreak(opts.onSessionBreak, {
+            sourceJid: jid,
+            targetJid: resolveAdmittedChannelRoute(
+              jid,
+              opts.resolveEffectiveChatJid,
+            )?.targetJid,
+            senderImId,
+            chatType: isDM ? 'p2p' : 'group',
+          });
+          inboundLifecycle.assertCurrent(lease);
+          const channel = await resolveChannel(jid);
+          if (channel) {
+            for (const chunk of splitDiscordChunks(reply)) {
+              await channel.send(chunk);
+            }
+          }
+          return;
+        }
+        const requestedFollowUpMode =
+          runtimeControl?.kind === 'steer' ? ('steer' as const) : undefined;
+        if (runtimeControl?.kind === 'steer') {
+          content = runtimeControl.text.replace(/<@!?\d+>/g, '').trim();
+        }
+
         // Control commands may repair/change a binding, so consume them before
         // route validation. Attachment work deliberately stays after routing.
         const slashMatch = content.match(/^\/(\S+)(?:\s+(.*))?$/i);
-        if (slashMatch && opts.onCommand) {
+        if (slashMatch && opts.onCommand && !requestedFollowUpMode) {
           const cmdBody = (
             slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
           ).trim();
@@ -824,6 +891,13 @@ export function createDiscordConnection(
             sourceJid: jid,
           },
         );
+        const followUp = offerChannelFollowUp(opts.onFollowUpMessage, {
+          targetJid,
+          sourceJid: jid,
+          messageId: id,
+          senderImId: senderId,
+          requestedMode: requestedFollowUpMode,
+        });
 
         opts.onMessagePersisted?.(
           targetJid,
@@ -837,6 +911,7 @@ export function createDiscordConnection(
             timestamp,
             attachments: attachmentsJson,
             is_from_me: false,
+            ...followUp.deliveryFields,
           },
           agentRouting?.agentId ?? undefined,
         );
@@ -871,6 +946,16 @@ export function createDiscordConnection(
             recallAckReaction,
           )
           .catch(() => {});
+
+        if (!followUp.shouldStartTurn) {
+          // Released by the host when the active run ends.
+          opts.onFollowUpsChanged?.(targetJid);
+          logger.info(
+            { jid, targetJid, msgId, disposition: followUp.disposition },
+            'Discord message queued behind the active run',
+          );
+          return;
+        }
 
         notifyNewImMessage();
 
