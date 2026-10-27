@@ -22,6 +22,8 @@ import {
 } from '@/components/ui/tooltip';
 import { api } from '../../api/client';
 import { useAuthStore } from '../../stores/auth';
+import { modelBindingErrorMessage } from '../settings/model-connections';
+import { getErrorMessage } from '../settings/types';
 
 /** One model a ChatGPT login may run, with the efforts this user may pick on it. */
 export interface CodexModelChoice {
@@ -81,6 +83,12 @@ export interface SessionModelSelection {
     source: 'agent' | 'default' | 'single' | 'pool' | 'workspace_env' | 'none';
     modelConfigId: string | null;
     enabledCount: number;
+    /**
+     * The model the default runs on that connection: what a launch with no
+     * pick would use. Null for the pool and the workspace override; older
+     * servers do not send it.
+     */
+    model?: string | null;
   };
   options: SessionModelOption[];
 }
@@ -95,14 +103,17 @@ const KIND_LABELS: Record<SessionModelOption['kind'], string> = {
 
 /** Human label for "what the default resolves to" in this conversation. */
 export function describeDefaultModel(selection: SessionModelSelection): string {
-  const { source, modelConfigId, enabledCount } = selection.default;
+  const { source, modelConfigId, enabledCount, model } = selection.default;
   const named = selection.options.find((option) => option.id === modelConfigId);
   switch (source) {
     case 'agent':
     case 'default':
     case 'single':
-      // A ChatGPT configuration is named by the model it runs.
-      return (named?.codex ? named.codex.defaultModel : named?.name) ?? '默认';
+      // A ChatGPT configuration is named by the model it runs; the others by
+      // name and, when known, the model.
+      if (named?.codex) return model || named.codex.defaultModel;
+      if (!named) return '默认';
+      return model ? `${named.name} · ${modelLabel(model)}` : named.name;
     case 'pool':
       return `自动 · ${enabledCount} 个`;
     case 'workspace_env':
@@ -231,21 +242,6 @@ function ModelName({ id, note }: { id: string; note?: string }) {
   );
 }
 
-/** Readable copy for a refused pick. */
-function saveErrorMessage(err: unknown): string {
-  if (err && typeof err === 'object') {
-    const { message, body } = err as {
-      message?: unknown;
-      body?: { code?: unknown };
-    };
-    if (body?.code === 'MODEL_NOT_IN_CONNECTION') {
-      return '该模型已不在模型配置的模型列表里，请重新选择';
-    }
-    if (typeof message === 'string' && message) return message;
-  }
-  return '切换模型失败';
-}
-
 /**
  * The configuration, model and effort the conversation actually runs on, when
  * that is a ChatGPT login the effort button can act on. An automatic pool, a
@@ -273,7 +269,12 @@ export function resolveEffortContext(selection: SessionModelSelection): {
   const pinnedModel = selectedModelConfigId
     ? (selection.selectedModel ?? null)
     : null;
-  const modelValueInUse = pinnedModel ?? option.codex.defaultModel;
+  // Following the default runs the model the server resolved for it (an
+  // Agent may bind one); a pick of the configuration alone runs its own.
+  const modelValueInUse =
+    pinnedModel ??
+    (selectedModelConfigId ? null : selection.default.model) ??
+    option.codex.defaultModel;
   return {
     option,
     codex: option.codex,
@@ -389,7 +390,9 @@ export function ModelSelector({
       setSelection(next);
       toast.success(success(next));
     } catch (err) {
-      toast.error(saveErrorMessage(err));
+      toast.error(
+        modelBindingErrorMessage(err) ?? getErrorMessage(err, '切换模型失败'),
+      );
       void load();
     } finally {
       setSaving(false);

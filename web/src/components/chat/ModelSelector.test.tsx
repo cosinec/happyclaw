@@ -28,7 +28,8 @@ vi.mock('sonner', () => ({
   toast: { success: mocks.toastSuccess, error: mocks.toastError },
 }));
 
-const { ModelSelector, describeDefaultModel } = await import('./ModelSelector');
+const { ModelSelector, describeDefaultModel, resolveEffortContext } =
+  await import('./ModelSelector');
 
 (
   globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
@@ -210,6 +211,62 @@ describe('describeDefaultModel', () => {
       ),
     ).toBe('GLM');
     expect(describeDefaultModel(selection())).toBe('自动 · 2 个');
+  });
+
+  test('adds the model the server says the default runs', () => {
+    expect(
+      describeDefaultModel(
+        selection({
+          default: {
+            source: 'agent',
+            modelConfigId: 'glm',
+            enabledCount: 1,
+            model: 'glm-5.2[1m]',
+          },
+        }),
+      ),
+    ).toBe('GLM · glm-5.2（1M）');
+    // A ChatGPT default is named by that model alone.
+    expect(
+      describeDefaultModel(
+        chatGptSelection({
+          default: {
+            source: 'agent',
+            modelConfigId: 'chatgpt',
+            enabledCount: 2,
+            model: 'gpt-6-astra',
+          },
+        }),
+      ),
+    ).toBe('gpt-6-astra');
+    // The pool has no model of its own.
+    expect(
+      describeDefaultModel(
+        selection({
+          default: {
+            source: 'pool',
+            modelConfigId: null,
+            enabledCount: 2,
+            model: null,
+          },
+        }),
+      ),
+    ).toBe('自动 · 2 个');
+  });
+
+  test('the effort of a followed default is the model the server resolved', () => {
+    const context = resolveEffortContext(
+      chatGptSelection({
+        default: {
+          source: 'agent',
+          modelConfigId: 'chatgpt',
+          enabledCount: 2,
+          model: 'gpt-5.5',
+        },
+      }),
+    );
+    expect(context?.model?.value).toBe('gpt-5.5');
+    expect(context?.pinnedModel).toBeNull();
   });
 });
 
@@ -1138,7 +1195,7 @@ describe('models of a configuration', () => {
     await open(trigger());
     await act(async () => itemByText('glm-4.6')!.click());
     expect(mocks.toastError).toHaveBeenCalledWith(
-      '该模型已不在模型配置的模型列表里，请重新选择',
+      '所选模型已不在该模型配置的模型列表里，请重新选择模型',
     );
     expect(mocks.get).toHaveBeenCalledTimes(2);
 
