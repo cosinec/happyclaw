@@ -492,7 +492,7 @@ describe('model list', () => {
     expect(mocks.post).toHaveBeenCalledWith(
       `${PROVIDERS}/discover-models`,
       { providerId: 'glm' },
-      30_000,
+      45_000,
     );
     expect(mocks.patch).toHaveBeenCalledWith(
       `${PROVIDERS}/glm`,

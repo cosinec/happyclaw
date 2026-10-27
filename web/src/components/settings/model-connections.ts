@@ -213,7 +213,8 @@ export function discoverModels(
   return api.post<DiscoverModelsResponse>(
     `${PROVIDERS_API}/discover-models`,
     body,
-    30_000,
+    // The server may try the other auth header after a refusal.
+    45_000,
   );
 }
 

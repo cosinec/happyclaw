@@ -19,6 +19,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import {
+  PROVIDER_ERROR_COPY,
   describeBaseUrlProblem,
   findPresetsByBaseUrl,
   getModelPreset,
@@ -158,6 +159,10 @@ export function AddModelWizard({
     useState<ProviderAuthMode | null>(null);
   const discoveredFor = useRef<string | null>(null);
   const discoverySeq = useRef(0);
+  /** The draft whose model list is being read, while it is. */
+  const [discoveringFor, setDiscoveringFor] = useState<string | null>(null);
+  /** A key the vendor refused, for the draft it was refused on. */
+  const [keyRefused, setKeyRefused] = useState<string | null>(null);
   const codexCatalog = useCodexCatalog(
     source?.kind === 'chatgpt' && created ? created.id : null,
   );
@@ -335,76 +340,103 @@ export function AddModelWizard({
     }
   };
 
-  const runDiscovery = () => {
+  /**
+   * Reads the draft's model list. A refused key sends the user back to the
+   * key instead of on to a model list built from guesses; any other failure
+   * still leaves the preset or manual models to finish with.
+   */
+  const runDiscovery = async (): Promise<
+    'listed' | 'key_refused' | 'superseded'
+  > => {
     const signature = connectionSignature;
     const seq = ++discoverySeq.current;
     discoveredFor.current = signature;
+    setDiscoveringFor(signature);
     setDiscovery({ status: 'loading' });
     const official = kind === 'claude_subscription' || kind === 'anthropic_api';
-    const apply = (next: DiscoveryState, extra: () => void = () => {}) => {
-      // A slower answer for an earlier draft must not land on this one.
-      if (
-        seq !== discoverySeq.current ||
-        signature !== latest.current.connectionSignature
-      ) {
-        return;
-      }
-      setDiscovery(next);
-      extra();
-    };
-    discoverModels(created ? { providerId: created.id } : draftBody())
-      .then((result) => {
-        if (result.ok) {
-          apply(
-            {
-              status: 'done',
-              count: result.models.length,
-              builtin: result.source === 'builtin',
-            },
-            () => {
-              // Built-in aliases are what a subscription runs: offer them
-              // checked. A vendor's own list arrives unchecked.
-              setCandidates((current) =>
-                addCandidates(
-                  current,
-                  result.models,
-                  'discovered',
-                  result.source === 'builtin',
-                ),
-              );
-              setDiscoveredAuthMode(result.authMode ?? null);
-            },
+    let next: DiscoveryState;
+    let extra = () => {};
+    try {
+      const result = await discoverModels(
+        created ? { providerId: created.id } : draftBody(),
+      );
+      if (result.ok) {
+        next = {
+          status: 'done',
+          count: result.models.length,
+          builtin: result.source === 'builtin',
+        };
+        extra = () => {
+          // Built-in aliases are what a subscription runs: offer them
+          // checked. A vendor's own list arrives unchecked.
+          setCandidates((current) =>
+            addCandidates(
+              current,
+              result.models,
+              'discovered',
+              result.source === 'builtin',
+            ),
           );
-          return;
-        }
-        apply(
-          {
-            status: 'failed',
-            code: result.code,
-            message: result.message || null,
-          },
-          () => {
-            if (official) {
-              setCandidates((current) =>
-                addCandidates(
-                  current,
-                  CLAUDE_MODEL_ALIASES.map((id) => ({ id })),
-                  'discovered',
-                  kind === 'claude_subscription',
-                ),
-              );
-            }
-          },
-        );
-      })
-      .catch((err) => {
-        apply({
+          setDiscoveredAuthMode(result.authMode ?? null);
+        };
+      } else {
+        next = {
           status: 'failed',
-          code: 'UNKNOWN',
-          message: getErrorMessage(err, '获取模型列表失败'),
-        });
-      });
+          code: result.code,
+          message: result.message || null,
+        };
+        if (official && result.code !== 'AUTH_INVALID') {
+          extra = () =>
+            setCandidates((current) =>
+              addCandidates(
+                current,
+                CLAUDE_MODEL_ALIASES.map((id) => ({ id })),
+                'discovered',
+                kind === 'claude_subscription',
+              ),
+            );
+        }
+      }
+    } catch (err) {
+      next = {
+        status: 'failed',
+        code: 'UNKNOWN',
+        message: getErrorMessage(err, '获取模型列表失败'),
+      };
+    }
+    // A slower answer for an earlier draft must not land on this one.
+    if (
+      seq !== discoverySeq.current ||
+      signature !== latest.current.connectionSignature
+    ) {
+      return 'superseded';
+    }
+    setDiscoveringFor(null);
+    if (next.status === 'failed' && next.code === 'AUTH_INVALID') {
+      // Asked again on the next try, so a fixed key gets through.
+      discoveredFor.current = null;
+      setDiscovery({ status: 'idle' });
+      setKeyRefused(signature);
+      setStep('connect');
+      return 'key_refused';
+    }
+    setDiscovery(next);
+    extra();
+    return 'listed';
   };
+
+  const leaveConnect = async () => {
+    if (kind === 'chatgpt' || discoveredFor.current === connectionSignature) {
+      setStep('models');
+      return;
+    }
+    if ((await runDiscovery()) === 'listed') setStep('models');
+  };
+  const checkingKey = discoveringFor === connectionSignature;
+  const keyError =
+    keyRefused === connectionSignature
+      ? `${PROVIDER_ERROR_COPY.AUTH_INVALID.title}：${PROVIDER_ERROR_COPY.AUTH_INVALID.hint}`
+      : null;
 
   useEffect(() => {
     if (
@@ -412,7 +444,7 @@ export function AddModelWizard({
       kind !== 'chatgpt' &&
       discoveredFor.current !== connectionSignature
     ) {
-      runDiscovery();
+      void runDiscovery();
     }
     // runDiscovery reads the current draft; the signature is what matters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -500,9 +532,11 @@ export function AddModelWizard({
           ).provider;
         }
       } else {
+        // A model list the endpoint answered proves the header; the test's
+        // report counts only when the list did not.
         const authMode =
-          currentTest?.outcome?.authMode ??
           discoveredAuthMode ??
+          currentTest?.outcome?.authMode ??
           importedAuthMode;
         const body: Record<string, unknown> = {
           name: trimmedName,
@@ -591,7 +625,11 @@ export function AddModelWizard({
         </Button>
       )}
       {step === 'connect' && (
-        <Button onClick={() => setStep('models')} disabled={!canLeaveConnect}>
+        <Button
+          onClick={() => void leaveConnect()}
+          disabled={!canLeaveConnect || checkingKey}
+        >
+          {checkingKey && <Loader2 className="animate-spin" />}
           下一步
         </Button>
       )}
@@ -652,7 +690,9 @@ export function AddModelWizard({
                   onChange={(event) => setCredentialInput(event.target.value)}
                   placeholder="粘贴 setup-token 或 .credentials.json 内容"
                   autoComplete="off"
+                  aria-invalid={keyError ? true : undefined}
                 />
+                <KeyError message={keyError} />
               </SettingsField>
             </>
           )}
@@ -671,6 +711,7 @@ export function AddModelWizard({
 
       {step === 'connect' && kind === 'anthropic_api' && (
         <KeyField
+          error={keyError}
           value={apiKey}
           onChange={setApiKey}
           label="Anthropic API Key"
@@ -714,6 +755,7 @@ export function AddModelWizard({
             />
           </SettingsField>
           <KeyField
+            error={keyError}
             value={apiKey}
             onChange={setApiKey}
             label={`${preset.name} API Key`}
@@ -798,6 +840,7 @@ export function AddModelWizard({
             </div>
           )}
           <KeyField
+            error={keyError}
             value={apiKey}
             onChange={setApiKey}
             label="API Key"
@@ -987,12 +1030,15 @@ function KeyField({
   label,
   placeholder,
   description,
+  error,
 }: {
   value: string;
   onChange: (value: string) => void;
   label: string;
   placeholder: string;
   description?: ReactNode;
+  /** The vendor refused this key. */
+  error: string | null;
 }) {
   return (
     <SettingsField
@@ -1007,9 +1053,20 @@ function KeyField({
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
         autoComplete="new-password"
+        aria-invalid={error ? true : undefined}
         className="font-mono"
       />
+      <KeyError message={error} />
     </SettingsField>
+  );
+}
+
+function KeyError({ message }: { message: string | null }) {
+  if (!message) return null;
+  return (
+    <p role="alert" className="text-caption leading-5 text-error">
+      {message}
+    </p>
   );
 }
 

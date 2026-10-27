@@ -106,11 +106,14 @@ export function ModelPicker({
     );
     onCandidatesChange(next);
     if (patch.picked === undefined) return;
-    // The default is always one of the saved models.
-    if (patch.picked && !defaultBase && !passThrough) onDefaultChange(base);
+    // The default is always one of the saved models. Checking a model while
+    // there is none makes it the default: a relay given glm-5.2 should run
+    // it, not whatever Claude model name Claude Code sends. 不指定 stays a
+    // deliberate pick.
+    if (patch.picked && !defaultBase) onDefaultChange(base);
     if (!patch.picked && defaultBase === base) {
       const first = next.find((candidate) => candidate.picked);
-      onDefaultChange(passThrough ? '' : (first?.base ?? ''));
+      onDefaultChange(first?.base ?? '');
     }
   };
 
@@ -124,7 +127,7 @@ export function ModelPicker({
       ...candidates,
       { base, oneMillion, picked: true, origin: 'manual' },
     ]);
-    if (!defaultBase && !passThrough) onDefaultChange(base);
+    if (!defaultBase) onDefaultChange(base);
     return true;
   };
 

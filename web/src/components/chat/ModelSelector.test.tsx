@@ -342,8 +342,10 @@ describe('ModelSelector', () => {
     expect(items.map((item) => item.textContent)).toEqual([
       expect.stringContaining('默认'),
       expect.stringContaining('Claude 官方'),
-      expect.stringContaining('未启用'),
+      expect.stringContaining('GLM'),
     ]);
+    // An explicit pick ignores the pool, so its status is not shown here.
+    expect(items[2].textContent).not.toContain('未启用');
     await act(async () => {
       items[2].click();
     });
@@ -965,7 +967,8 @@ describe('models of a configuration', () => {
     expect(headings()).toEqual([
       '本会话使用的模型',
       'Claude 官方',
-      'GLM· 未启用',
+      // A disabled configuration is still a plain pick here.
+      'GLM',
     ]);
     expect(menuItems().map((item) => item.textContent)).toEqual([
       expect.stringContaining('默认'),
@@ -1175,7 +1178,8 @@ describe('models of a configuration', () => {
     await open(trigger());
     expect(headings()).toEqual(['本会话使用的模型', 'Claude 官方']);
     const legacy = itemByText('Legacy')!;
-    expect(legacy.textContent).toContain('兼容接口 · glm-5.3 · 未启用');
+    expect(legacy.textContent).toContain('兼容接口 · glm-5.3');
+    expect(legacy.textContent).not.toContain('未启用');
     await act(async () => legacy.click());
     expect(mocks.put).toHaveBeenCalledWith(
       '/api/groups/web%3Aws/model-selection',

@@ -154,7 +154,7 @@ describe('vendor preset', () => {
         anthropicBaseUrl: 'https://api.deepseek.com/anthropic',
         anthropicAuthToken: 'sk-ds',
       },
-      30_000,
+      45_000,
     );
     expect(checkbox('deepseek-flash[1m]')?.getAttribute('aria-checked')).toBe(
       'true',
@@ -240,7 +240,116 @@ describe('vendor preset', () => {
       PROVIDERS,
       expect.objectContaining({
         models: [{ id: 'deepseek-flash[1m]' }, { id: 'deepseek-v4-pro[1m]' }],
+        // The list proved nothing, so the test's header is kept.
+        anthropicAuthMode: 'bearer',
       }),
+    );
+  });
+
+  test('a refused key keeps the user on 连接 with the reason under the key', async () => {
+    answer({
+      [DISCOVER]: (body: { anthropicAuthToken: string }) =>
+        body.anthropicAuthToken === 'sk-bad'
+          ? {
+              ok: false,
+              code: 'AUTH_INVALID',
+              status: 401,
+              message: 'invalid x-api-key',
+            }
+          : { ok: true, source: 'endpoint', models: [] },
+    });
+    await render();
+    await click(buttonContaining('api.deepseek.com'));
+    await type('#wizard-api-key', 'sk-bad');
+    await next();
+    expect(field('#wizard-api-key')).not.toBeNull();
+    expect(field('#wizard-api-key')?.getAttribute('aria-invalid')).toBe('true');
+    expect(text()).toContain('密钥无效：检查 API Key 是否完整');
+    expect(checkbox('deepseek-flash[1m]')).toBeNull();
+    // The same key is asked about again, and refused again.
+    await next();
+    expect(
+      mocks.post.mock.calls.filter(([path]) => path === DISCOVER),
+    ).toHaveLength(2);
+    expect(field('#wizard-api-key')).not.toBeNull();
+
+    // A new key clears the reason and gets through.
+    await type('#wizard-api-key', 'sk-good');
+    expect(text()).not.toContain('密钥无效');
+    await next();
+    expect(checkbox('deepseek-flash[1m]')).not.toBeNull();
+  });
+
+  test('a header proved by the model list wins over the test report', async () => {
+    answer({
+      [DISCOVER]: {
+        ok: true,
+        source: 'endpoint',
+        authMode: 'x-api-key',
+        models: [{ id: 'glm-5.2' }],
+      },
+      [TEST]: { ...OK_TEST, authMode: 'bearer' },
+      [PROVIDERS]: makeProvider({ id: 'new' }),
+    });
+    await render();
+    await click(buttonContaining('自定义兼容地址'));
+    await type('#wizard-base-url', 'https://relay.example.test');
+    await type('#wizard-api-key', 'sk');
+    await next();
+    await next();
+    await click(button('保存'));
+    await flush();
+    expect(mocks.post).toHaveBeenCalledWith(
+      PROVIDERS,
+      expect.objectContaining({ anthropicAuthMode: 'x-api-key' }),
+    );
+  });
+
+  test('checking a model with no default makes it the default; unchecking hands it on', async () => {
+    answer({
+      [DISCOVER]: {
+        ok: true,
+        source: 'endpoint',
+        models: [{ id: 'glm-5.2' }, { id: 'glm-5.3' }],
+      },
+      [TEST]: OK_TEST,
+    });
+    await render();
+    await click(buttonContaining('自定义兼容地址'));
+    await type('#wizard-base-url', 'https://relay.example.test');
+    await type('#wizard-api-key', 'sk');
+    await next();
+    const passThrough = () =>
+      document.querySelectorAll<HTMLInputElement>('input[type="radio"]')[0];
+    const isDefault = (id: string) =>
+      document.querySelector<HTMLInputElement>(
+        `input[aria-label="把 ${id} 设为默认模型"]`,
+      )?.checked;
+    // Discovered models arrive unchecked; nothing is the default yet.
+    expect(passThrough().checked).toBe(true);
+
+    await click(checkbox('glm-5.2'));
+    expect(isDefault('glm-5.2')).toBe(true);
+    await click(checkbox('glm-5.3'));
+    expect(isDefault('glm-5.2')).toBe(true);
+    await click(checkbox('glm-5.2'));
+    expect(isDefault('glm-5.3')).toBe(true);
+    await click(checkbox('glm-5.3'));
+    expect(passThrough().checked).toBe(true);
+
+    // 不指定 is still a deliberate choice next to checked models.
+    await click(checkbox('glm-5.2'));
+    expect(isDefault('glm-5.2')).toBe(true);
+    await click(passThrough());
+    expect(passThrough().checked).toBe(true);
+    await click(
+      document.querySelector('input[aria-label="把 glm-5.2 设为默认模型"]'),
+    );
+    await next();
+    expect(mocks.post).toHaveBeenCalledWith(
+      TEST,
+      expect.objectContaining({ anthropicModel: 'glm-5.2' }),
+      60_000,
     );
   });
 });
@@ -437,8 +546,12 @@ describe('late answers', () => {
     await type('#wizard-base-url', 'https://relay.example.test');
     await type('#wizard-api-key', 'sk-a');
     await next();
-    await click(button('上一步'));
+    // Still reading the list for sk-a: the user stays on 连接.
+    expect(field('#wizard-api-key')).not.toBeNull();
+    expect(button('下一步').disabled).toBe(true);
+    // A new key is a new draft; its answer is the one that counts.
     await type('#wizard-api-key', 'sk-b');
+    expect(button('下一步').disabled).toBe(false);
     await next();
     expect(checkbox('model-b')).not.toBeNull();
     await act(async () => {
@@ -507,7 +620,7 @@ describe('official kinds', () => {
     expect(mocks.post).toHaveBeenCalledWith(
       DISCOVER,
       { type: 'official', anthropicApiKey: 'sk-ant-1' },
-      30_000,
+      45_000,
     );
     expect(checkbox('claude-opus-4-7')?.getAttribute('aria-checked')).toBe(
       'false',
@@ -552,7 +665,7 @@ describe('official kinds', () => {
     expect(mocks.post).toHaveBeenCalledWith(
       DISCOVER,
       { type: 'official', claudeCredentialInput: 'sk-ant-oat01-x' },
-      30_000,
+      45_000,
     );
     // Built-in aliases are what a subscription runs: offered checked.
     expect(checkbox('opus')?.getAttribute('aria-checked')).toBe('true');
@@ -617,7 +730,7 @@ describe('official kinds', () => {
     expect(mocks.post).toHaveBeenCalledWith(
       DISCOVER,
       { providerId: 'claude-new' },
-      30_000,
+      45_000,
     );
     await next();
     expect(mocks.post).toHaveBeenCalledWith(
