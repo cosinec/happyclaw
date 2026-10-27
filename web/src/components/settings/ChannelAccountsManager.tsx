@@ -1326,6 +1326,7 @@ function defaultCredentials(provider: ChannelProvider): Record<string, string> {
   if (provider === 'wechat') return { bypassProxy: 'true' };
   if (provider === 'dingtalk') return { streamingMode: 'card' };
   if (provider === 'discord') return { streamingMode: 'off' };
+  if (provider === 'telegram') return { streamingMode: 'edit' };
   return {};
 }
 
@@ -1337,6 +1338,7 @@ const OPTION_SECTIONS: Partial<
   feishu: { saveLabel: '保存平台' },
   dingtalk: { title: '回复方式', saveLabel: '保存回复方式' },
   discord: { title: '回复方式', saveLabel: '保存回复方式' },
+  telegram: { title: '回复方式', saveLabel: '保存回复方式' },
 };
 
 function accountOptions(account: ChannelAccount): Record<string, string> {
@@ -1348,6 +1350,8 @@ function accountOptions(account: ChannelAccount): Record<string, string> {
     return { streamingMode: account.options?.streamingMode ?? 'card' };
   if (account.provider === 'discord')
     return { streamingMode: account.options?.streamingMode ?? 'off' };
+  if (account.provider === 'telegram')
+    return { streamingMode: account.options?.streamingMode ?? 'edit' };
   return {};
 }
 

@@ -145,6 +145,19 @@ export function ProviderConnectionFields({
         />
       )}
 
+      {showOptions && provider === 'telegram' && (
+        <OptionSwitch
+          id={`${idPrefix}-streaming-edit`}
+          label="流式编辑"
+          description="开启后回复期间持续编辑一条进度消息，完成后另发最终答复；关闭后完成生成再发送。"
+          checked={(values.streamingMode ?? 'edit') === 'edit'}
+          disabled={disabled}
+          onCheckedChange={(checked) =>
+            onChange('streamingMode', checked ? 'edit' : 'off')
+          }
+        />
+      )}
+
       {showOptions && provider === 'discord' && (
         <OptionSwitch
           id={`${idPrefix}-streaming-edit`}

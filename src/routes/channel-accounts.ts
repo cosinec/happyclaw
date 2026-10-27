@@ -223,6 +223,8 @@ function publicAccount(account: ChannelAccount): PublicChannelAccount {
     options.streamingMode = secret.streamingMode === 'text' ? 'text' : 'card';
   } else if (account.provider === 'discord') {
     options.streamingMode = secret.streamingMode === 'edit' ? 'edit' : 'off';
+  } else if (account.provider === 'telegram') {
+    options.streamingMode = secret.streamingMode === 'off' ? 'off' : 'edit';
   } else if (account.provider === 'whatsapp' && secret.phoneNumber) {
     options.phoneNumber = secret.phoneNumber;
   }
@@ -269,7 +271,7 @@ function credentialsError(
       'domain',
       ...(allowInternalQrSecrets ? ['ownerOpenId'] : []),
     ],
-    telegram: ['botToken', 'proxyUrl'],
+    telegram: ['botToken', 'proxyUrl', 'streamingMode'],
     qq: ['appId', 'appSecret'],
     wechat: [
       'bypassProxy',
@@ -296,10 +298,10 @@ function credentialsError(
   }
   if (
     credentials.streamingMode &&
-    provider === 'discord' &&
+    (provider === 'discord' || provider === 'telegram') &&
     !['edit', 'off'].includes(credentials.streamingMode)
   ) {
-    return 'Discord streamingMode must be edit or off';
+    return `${provider === 'telegram' ? 'Telegram' : 'Discord'} streamingMode must be edit or off`;
   }
   if (
     credentials.domain &&
