@@ -143,6 +143,7 @@ test.describe('the step timeline', () => {
 
   test('has touch-sized buttons and nothing that sticks out sideways', async ({
     page,
+    hasTouch,
   }) => {
     await open(page, 'scenario=streaming');
     const card = block(page).locator('[data-hc-process-card]');
@@ -152,7 +153,7 @@ test.describe('the step timeline', () => {
     for (let i = 0; i < count; i += 1) {
       const box = await buttons.nth(i).boundingBox();
       // 40px is the touch target the coarse-pointer variants ask for.
-      expect(box!.height).toBeGreaterThanOrEqual(39);
+      if (hasTouch) expect(box!.height).toBeGreaterThanOrEqual(39);
     }
     await expectNoSidewaysOverflow(page);
   });
@@ -456,6 +457,7 @@ test.describe('a finished reply that has its steps', () => {
 
   test('has a summary row the touch target asks for, as high as the streaming card keeps', async ({
     page,
+    hasTouch,
   }) => {
     await open(page, 'scenario=history&steps=1');
     const summary = page
@@ -463,7 +465,8 @@ test.describe('a finished reply that has its steps', () => {
       .first();
     await summary.scrollIntoViewIfNeeded();
     const final = (await summary.boundingBox())!;
-    expect(final.height).toBeGreaterThanOrEqual(39);
+    // The touch target applies to coarse pointers only.
+    if (hasTouch) expect(final.height).toBeGreaterThanOrEqual(39);
 
     await open(page, 'scenario=settled');
     const frozen = (await page
@@ -595,6 +598,7 @@ test.describe('the reasoning and trace the server kept', () => {
 
   test('is one collapsed row that loads the settled card, open on the steps', async ({
     page,
+    hasTouch,
   }) => {
     const requests: string[] = [];
     await route(page, (r) => {
@@ -609,7 +613,7 @@ test.describe('the reasoning and trace the server kept', () => {
     // Nothing is asked for until the row is opened.
     expect(requests).toEqual([]);
     const rowBox = (await row.boundingBox())!;
-    expect(rowBox.height).toBeGreaterThanOrEqual(39);
+    if (hasTouch) expect(rowBox.height).toBeGreaterThanOrEqual(39);
 
     await row.click();
     const card = page.locator('[data-hc-process-card]');
@@ -1241,21 +1245,19 @@ test.describe('the streamed answer', () => {
     /** Median milliseconds between renders of the answer as text streams. */
     const cadence = async (typing: boolean) => {
       const [from, to] = await page.evaluate(async (typing) => {
-        const textarea = document.querySelector('textarea')!;
-        const setValue = Object.getOwnPropertyDescriptor(
-          HTMLTextAreaElement.prototype,
-          'value',
-        )!.set!;
+        // The composer's Tiptap editor, as typing reaches it.
+        const composer = (
+          document.querySelector('[data-composer-editor]') as HTMLElement & {
+            editor: { commands: { insertContent: (text: string) => void } };
+          }
+        ).editor;
         const from = performance.now();
         for (let i = 0; i < 60; i += 1) {
           window.renderHarness.emit({
             eventType: 'text_delta',
             text: `word${i} `,
           });
-          if (typing) {
-            setValue.call(textarea, `${textarea.value}a`);
-            textarea.dispatchEvent(new Event('input', { bubbles: true }));
-          }
+          if (typing) composer.commands.insertContent('a');
           await new Promise((resolve) => setTimeout(resolve, 20));
         }
         return [from, performance.now()];

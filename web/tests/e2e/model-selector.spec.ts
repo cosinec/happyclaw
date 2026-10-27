@@ -97,7 +97,7 @@ const radio = (page: Page, text: string) =>
 
 /** The row of composer actions the two buttons sit in. */
 const actionRow = (page: Page) =>
-  modelButton(page).locator('xpath=ancestor::div[contains(@class,"pb-2")][1]');
+  modelButton(page).locator('xpath=ancestor::div[@data-composer-toolbar][1]');
 
 async function expectRowFits(page: Page) {
   const fits = await actionRow(page).evaluate((row) => {
