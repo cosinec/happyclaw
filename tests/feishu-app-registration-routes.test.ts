@@ -268,6 +268,49 @@ describe('Feishu app registration routes', () => {
     });
   });
 
+  test('a Lark success answered by the Feishu host keeps its credentials', async () => {
+    as('reg-lark-direct');
+    const started = await begin();
+    upstream.replies.push(SUCCESS('lark'));
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(10_000);
+    // No second poll on the Lark host for a device code already consumed.
+    expect(pollCalls().map((call) => call.url)).toEqual([
+      'https://accounts.feishu.cn/oauth/v1/app/registration',
+    ]);
+    const done = await read(started.body.registration.id);
+    expect(done.body.registration).toMatchObject({
+      status: 'success',
+      brand: 'lark',
+      event_console_url: 'https://open.larksuite.com/app/cli_registered/event',
+    });
+    const account = db.getChannelAccountForUser(
+      done.body.registration.account_id,
+      'reg-lark-direct',
+    )!;
+    expect(secrets.loadChannelAccountSecret(account.secret_ref)).toEqual({
+      appId: 'cli_registered',
+      appSecret: 'registered-app-secret',
+      ownerOpenId: 'ou_registered_owner',
+      domain: 'lark',
+    });
+  });
+
+  test('a settled answer from a Lark tenant is not re-polled on the Lark host', async () => {
+    as('reg-lark-denied');
+    const started = await begin();
+    upstream.replies.push({
+      status: 400,
+      body: { error: 'access_denied', user_info: { tenant_brand: 'lark' } },
+    });
+    await vi.advanceTimersByTimeAsync(5_000);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(pollCalls()).toHaveLength(1);
+    expect(
+      (await read(started.body.registration.id)).body.registration.status,
+    ).toBe('denied');
+  });
+
   test('slow_down stretches the server-side interval', async () => {
     as('reg-slow');
     const started = await begin();
