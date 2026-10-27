@@ -161,6 +161,9 @@ test('scan-to-create a Lark app opens the new account with the event hint', asyn
     dialog.getByRole('img', { name: 'Lark 创建应用二维码' }),
   ).toBeVisible();
   await expect(dialog.getByText('等待扫码')).toBeVisible();
+  await expect(
+    dialog.getByRole('img', { name: 'Lark 创建应用二维码' }).locator('..'),
+  ).toHaveCSS('background-color', 'rgb(255, 255, 255)');
   await expect(dialog.getByText('WXYZ-0001')).toBeVisible();
   await expect(
     dialog.getByRole('link', { name: '无法扫码？在浏览器中打开' }),
@@ -214,6 +217,10 @@ test('closing the dialog mid-scan cancels the registration', async ({
   const dialog = await openCreateDialog(page, 'dark');
   await dialog.getByRole('button', { name: '生成二维码' }).click();
   await expect(dialog.getByText('等待扫码')).toBeVisible();
+  // The quiet zone stays white in the dark scheme so the code scans.
+  await expect(
+    dialog.getByRole('img', { name: '飞书创建应用二维码' }).locator('..'),
+  ).toHaveCSS('background-color', 'rgb(255, 255, 255)');
   await dialog.getByRole('button', { name: '取消', exact: true }).click();
   await expect(dialog).toBeHidden();
   await expect

@@ -828,10 +828,15 @@ async function pollFeishuRegistration(
   // Cancelled while the request was in flight.
   if (registration.status !== 'pending') return;
 
-  const discovered =
-    result.status === 'success' ? result.brand : result.tenantBrand;
-  if (registration.pollBrand === 'feishu' && discovered === 'lark') {
-    // A Lark tenant confirmed: the credentials are issued by the Lark host.
+  // A Lark tenant answering a still-open poll moves polling to the Lark host.
+  // Settled answers are taken as they are: a success already carries the
+  // app's credentials (its brand says Lark), and re-polling a consumed
+  // device code would lose an app that already exists in the tenant.
+  if (
+    (result.status === 'pending' || result.status === 'slow_down') &&
+    registration.pollBrand === 'feishu' &&
+    result.tenantBrand === 'lark'
+  ) {
     registration.pollBrand = 'lark';
     scheduleFeishuRegistrationPoll(registration, 0);
     return;
