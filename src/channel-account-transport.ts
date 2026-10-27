@@ -1,5 +1,5 @@
 import { getChannelAccount, updateChannelAccountStatus } from './db.js';
-import type { FeishuTransportIssue } from './im-channel.js';
+import type { FeishuTransportIssue } from './feishu-connection-conflict.js';
 import type { ChannelAccount } from './types.js';
 
 /**
@@ -14,7 +14,7 @@ import type { ChannelAccount } from './types.js';
  */
 export function applyFeishuTransportIssue(
   accountId: string,
-  issue: FeishuTransportIssue,
+  issue: FeishuTransportIssue | null,
 ): ChannelAccount | null {
   const account = getChannelAccount(accountId);
   if (!account?.enabled || account.transport_status === 'disconnected') {

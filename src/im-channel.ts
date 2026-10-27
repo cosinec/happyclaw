@@ -14,6 +14,7 @@ import type {
   GroupOwnerView,
 } from './im-group-audience.js';
 import type { FeishuConversationPlan } from './feishu-conversation-policy.js';
+import type { FeishuTransportIssue } from './feishu-connection-conflict.js';
 import type {
   TelegramConnection,
   TelegramConnectionConfig,
@@ -123,12 +124,6 @@ export function appendStreamingSessionAnswer(
 
 /** Feishu account credentials and the brand (Feishu or Lark) they belong to. */
 export type FeishuChannelConfig = FeishuConnectionConfig;
-
-/**
- * Feishu long-connection health beyond connect/disconnect: another program is
- * holding this App's single long connection. `null` reports recovery.
- */
-export type FeishuTransportIssue = { kind: 'conflict'; message: string } | null;
 
 export interface IMChannelConnectOpts {
   isChatBound?: (jid: string) => boolean;
@@ -257,8 +252,8 @@ export interface IMChannelConnectOpts {
   onWeComConnectionStateChange?: (state: WeComConnectionState) => void;
   /** Feishu: read the account owner lazily, so a first-DM claim needs no reconnect. */
   getOwnerOpenId?: () => string | undefined;
-  /** Feishu: the App's long connection is taken elsewhere, or has recovered. */
-  onTransportIssue?: (issue: FeishuTransportIssue) => void;
+  /** Feishu: the App's long connection is taken elsewhere, or `null`: recovered. */
+  onTransportIssue?: (issue: FeishuTransportIssue | null) => void;
 }
 
 export interface IMChannel {
