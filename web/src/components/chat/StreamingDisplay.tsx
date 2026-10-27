@@ -40,7 +40,11 @@ import {
   formatRunElapsed,
   isCompactingStatus,
 } from '../../lib/run-phase';
-import { answerStart, type StreamingStep } from '../../lib/stream-steps';
+import {
+  answerStart,
+  readStepQuestions,
+  type StreamingStep,
+} from '../../lib/stream-steps';
 import { streamingMarkdownInterval } from '../../lib/streaming-interval';
 import { cn } from '@/lib/utils';
 
@@ -328,7 +332,7 @@ function StreamingContent({
         {askUserTools.map((tool) => (
           <AskUserQuestionCard
             key={tool.toolUseId}
-            toolInput={tool.toolInput ?? {}}
+            questions={readStepQuestions(tool.toolInput) ?? []}
           />
         ))}
       </div>

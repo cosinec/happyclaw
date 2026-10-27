@@ -498,7 +498,7 @@ export const ProcessCard = memo(function ProcessCard({
   useFoldAnchor(rootRef, mode);
   if (!listed && !waitVisible) {
     // A question alone is the card the reader answers, with no process to open.
-    return live && shown.some(isQuestionStep) ? (
+    return shown.some(isQuestionStep) ? (
       <QuestionCards steps={shown} activeTools={activeTools} />
     ) : null;
   }
@@ -556,7 +556,7 @@ export const ProcessCard = memo(function ProcessCard({
           {timeline}
         </ProcessWindow>
       )}
-      {live && <QuestionCards steps={shown} activeTools={activeTools} />}
+      <QuestionCards steps={shown} activeTools={activeTools} />
     </div>
   );
 });
