@@ -51,3 +51,9 @@ for name in thinking-text stream-steps; do
   sync_file "$ROOT/shared/$name.ts" "$ROOT/src/$name.ts"
   sync_file "$ROOT/shared/$name.ts" "$ROOT/web/src/lib/$name.ts"
 done
+
+# --- Model connection presets, model lists and upstream errors (backend + web) ---
+# The server validates and tests connections with the same rules the Web uses
+# to guide the user through adding one.
+sync_file "$ROOT/shared/model-providers.ts" "$ROOT/src/model-providers.ts"
+sync_file "$ROOT/shared/model-providers.ts" "$ROOT/web/src/lib/model-providers.ts"

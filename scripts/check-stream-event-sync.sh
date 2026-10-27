@@ -47,6 +47,11 @@ for name in thinking-text stream-steps; do
     "$ROOT/web/src/lib/$name.ts"
 done
 
+# Model connection presets, model lists and upstream errors
+check_sync "$ROOT/shared/model-providers.ts" \
+  "$ROOT/src/model-providers.ts" \
+  "$ROOT/web/src/lib/model-providers.ts"
+
 if [ "$FAIL" -eq 0 ]; then
   echo "All shared type copies are in sync."
 else
