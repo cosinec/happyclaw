@@ -108,12 +108,23 @@ describe('telegramReferencedMessage', () => {
     expect(
       telegramReferencedMessage(
         {
+          is_topic_message: true,
           message_thread_id: 30,
           reply_to_message: { message_id: 30, from: ALICE, text: 'topic' },
         },
         1,
       ),
     ).toBeNull();
+    // Outside a forum the same shape is an explicit reply.
+    expect(
+      telegramReferencedMessage(
+        {
+          message_thread_id: 30,
+          reply_to_message: { message_id: 30, from: ALICE, text: 'root' },
+        },
+        1,
+      )?.text,
+    ).toBe('root');
     expect(
       telegramReferencedMessage(
         {

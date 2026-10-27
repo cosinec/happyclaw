@@ -305,6 +305,7 @@ interface TelegramMessageLike {
   text?: string;
   caption?: string;
   message_thread_id?: number;
+  is_topic_message?: boolean;
   entities?: TelegramEntityLike[];
   caption_entities?: TelegramEntityLike[];
   from?: { id: number; is_bot?: boolean };
@@ -341,9 +342,11 @@ interface TelegramRepliedMessage {
 /** Every forum-topic message implicitly replies to the topic's opening one. */
 function isImplicitTopicReply(message: TelegramMessageLike): boolean {
   const replied = message.reply_to_message;
+  // An ordinary supergroup reply carries message_thread_id too (the reply
+  // chain's root), so only a forum topic message can reply implicitly.
   return (
     !!replied?.forum_topic_created ||
-    (message.message_thread_id !== undefined &&
+    (message.is_topic_message === true &&
       replied?.message_id === message.message_thread_id)
   );
 }
@@ -1095,7 +1098,6 @@ export function createTelegramConnection(
       jid: string;
       targetJid: string;
       sourceJid: string;
-      senderId: string;
       senderName: string;
       content: string;
       timestamp: string;
@@ -1112,6 +1114,14 @@ export function createTelegramConnection(
       };
     },
   ): ChannelFollowUpOutcome {
+    // An unattributable sender (anonymous admin, channel identity) is stored
+    // as such, so no later check can mistake the shared system account for
+    // a person.
+    const senderImId = telegramSenderImId({
+      from: input.provider.from,
+      sender_chat: input.provider.message.sender_chat,
+    });
+    const senderId = senderImId ? `tg:${senderImId}` : 'tg:unknown';
     const channelContext = buildTelegramChannelTurnContext({
       sourceJid: input.sourceJid,
       chat: input.provider.chat,
@@ -1122,7 +1132,7 @@ export function createTelegramConnection(
     storeMessageDirect(
       input.id,
       input.targetJid,
-      input.senderId,
+      senderId,
       input.senderName,
       input.content,
       input.timestamp,
@@ -1139,7 +1149,7 @@ export function createTelegramConnection(
         id: input.id,
         chat_jid: input.targetJid,
         source_jid: input.sourceJid,
-        sender: input.senderId,
+        sender: senderId,
         sender_name: input.senderName,
         content: input.content,
         timestamp: input.timestamp,
@@ -1593,7 +1603,6 @@ export function createTelegramConnection(
               )
               .catch(() => {});
             const timestamp = new Date(ctx.message.date * 1000).toISOString();
-            const senderId = ctx.from?.id ? `tg:${ctx.from.id}` : 'tg:unknown';
             storeChatMetadata(targetJid, timestamp);
             // The connector owns persistence; the host decides how to project it.
             const followUp = persistTelegramInbound(opts, {
@@ -1601,7 +1610,6 @@ export function createTelegramConnection(
               jid,
               targetJid,
               sourceJid,
-              senderId,
               senderName,
               content,
               timestamp,
@@ -1789,14 +1797,12 @@ export function createTelegramConnection(
               )
               .catch(() => {});
             const timestamp = new Date(ctx.message.date * 1000).toISOString();
-            const senderId = ctx.from?.id ? `tg:${ctx.from.id}` : 'tg:unknown';
             storeChatMetadata(targetJid, timestamp);
             persistTelegramInbound(opts, {
               id,
               jid,
               targetJid,
               sourceJid,
-              senderId,
               senderName,
               content: text,
               timestamp,
@@ -1911,7 +1917,6 @@ export function createTelegramConnection(
                 jid,
                 targetJid,
                 sourceJid,
-                senderId: ctx.from?.id ? `tg:${ctx.from.id}` : 'tg:unknown',
                 senderName,
                 content: telegramMediaMessageText(
                   `[文件过大，未下载: ${safeFilename}]`,
@@ -1978,14 +1983,12 @@ export function createTelegramConnection(
               )
               .catch(() => {});
             const timestamp = new Date(ctx.message.date * 1000).toISOString();
-            const senderId = ctx.from?.id ? `tg:${ctx.from.id}` : 'tg:unknown';
             storeChatMetadata(targetJid, timestamp);
             persistTelegramInbound(opts, {
               id,
               jid,
               targetJid,
               sourceJid,
-              senderId,
               senderName,
               content: text,
               timestamp,
@@ -2141,7 +2144,6 @@ export function createTelegramConnection(
               )
               .catch(() => {});
             const timestamp = new Date(tgMessage.date * 1000).toISOString();
-            const senderId = ctx.from?.id ? `tg:${ctx.from.id}` : 'tg:unknown';
             const { caption, requestedMode } = telegramMediaCaption(
               tgMessage,
               tgChat as TelegramChatDescriptor,
@@ -2156,7 +2158,6 @@ export function createTelegramConnection(
               jid,
               targetJid,
               sourceJid,
-              senderId,
               senderName,
               content: text,
               timestamp,
