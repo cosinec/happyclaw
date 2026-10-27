@@ -186,10 +186,15 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
 规则：
 
 - Agent 工具权限保持开放；不要虚构只读或受限工具模式。唯一例外是 Claude Code
-  内置、依赖 CLI 进程常驻的会话级工具（`CronCreate`/`CronDelete`/`CronList`、
-  `ScheduleWakeup`、`EnterWorktree`/`ExitWorktree`）：Runner 每轮结束会关闭 CLI，
-  这些承诺会静默丢失，因此默认禁用，并设置 `CLAUDE_CODE_DISABLE_CRON=1` 关闭 CLI
-  自带的定时调度；定时需求走 HappyClaw 的 `schedule_task`。
+  内置、依赖 CLI 进程常驻或交互审批的会话级工具（`CronCreate`/`CronDelete`/`CronList`、
+  `ScheduleWakeup`、`EnterWorktree`/`ExitWorktree`、`EnterPlanMode`/`ExitPlanMode`）：
+  Runner 每轮结束会关闭 CLI，这些承诺会静默丢失，计划模式也等不到审批，因此默认禁用，
+  并设置 `CLAUDE_CODE_DISABLE_CRON=1` 关闭 CLI 自带的定时调度；定时需求走 HappyClaw
+  的 `schedule_task`。
+- Runner 安装 `canUseTool`（`builtin-tool-policy.ts`），CLI 才会注册
+  AskUserQuestion；其余工具仍由 `bypassPermissions` 放行。Runner 没有交互作答通道：
+  AskUserQuestion 立即以「已向用户展示、下一条消息作答」的结果返回，模型在回复里复述
+  问题和选项后结束本轮；Web 卡片和飞书按钮只是作答捷径，用户的回答作为下一条消息到达。
 - 一次运行绑定的模型配置按固定顺序解析（`container-runner.ts` 的
   `resolvePinnedModelConfigId`）：会话手选 → 智能体绑定 → 全局默认
   （`defaultModelConfigId`，工作区自带 Provider 环境变量时让位）→ 唯一启用的配置 →

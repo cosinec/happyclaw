@@ -33,7 +33,11 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import { detectImageMimeTypeFromBase64Strict } from './image-detector.js';
 import { isClaudeAttachmentPassDisabled } from './claude-attachments.js';
-import { RUNNER_DISALLOWED_BUILTIN_TOOLS } from './builtin-tool-policy.js';
+import {
+  RUNNER_DISALLOWED_BUILTIN_TOOLS,
+  runnerCanUseTool,
+  silenceShadowedCanUseToolWarning,
+} from './builtin-tool-policy.js';
 import { pluginLoadWarnings } from './sdk-init-audit.js';
 import { classifyPreInitErrorResult } from './startup-failure.js';
 import { pruneProcessedHistoryImagesInTranscript as pruneProcessedHistoryImagesInTranscriptFile } from './history-image-prune.js';
@@ -3026,6 +3030,9 @@ async function runQueryAttempt(
       ...(agentEffort ? { effort: agentEffort } : {}),
       permissionMode: 'bypassPermissions' as const,
       allowDangerouslySkipPermissions: true,
+      // Registers AskUserQuestion, which the CLI omits without a handler.
+      // bypassPermissions still approves every other tool before it.
+      canUseTool: runnerCanUseTool,
       agentProgressSummaries: true,
       settingSources: activeAgentMcpPolicy.settingSources,
       // New hosts pass the canonical manifest. Undefined preserves compatibility
@@ -5572,6 +5579,7 @@ process.on('unhandledRejection', (reason: unknown) => {
   console.error('Unhandled rejection:', reason);
   process.exit(1);
 });
+silenceShadowedCanUseToolWarning();
 main().catch((err) => {
   console.error('Fatal error in main():', err);
   process.exit(1);
