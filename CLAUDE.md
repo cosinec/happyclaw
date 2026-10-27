@@ -142,7 +142,7 @@ Web UI 约定：
 
 - 同一序列化键内的消息保持顺序。
 - 不同飞书话题、不同 Runtime Session 使用不同序列化键，可以并发。
-- Agent loop 运行期间到达的普通消息逐条进入可见、可编辑和可排序的 durable 队列；
+- Agent loop 运行期间到达的普通消息（Web 与全部 IM 渠道）逐条进入可见、可编辑和可排序的 durable 队列；
   当前 loop 自然结束后，调度器原子快照当时剩余的普通队列，并将其作为一个批次交给
   下一轮 Agent。Web 与飞书等渠道共用这套 Workspace/Session 级语义。
 - 显式“发送”或 `steer` 是优先屏障：它中断当前 loop，与它之前已排队的普通消息按可见
@@ -212,6 +212,10 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
 - 每个渠道 JID 和 mount 都携带 `channel_account_id`，发送时使用绑定账号的机器人身份。
 - 账号可以设置默认工作区；恢复默认绑定时先解析账号归属，不能跨用户或跨账号回退。
 - 同一工作区可以绑定多个机器人账号和多个群聊。
+- 飞书账号区分飞书与 Lark（国际版）品牌，存于账号 secret 的 `domain`；所有到平台的
+  请求、长连接、CLI 与深链按品牌取 host（`src/feishu-domain.ts`）。账号可手填凭证，
+  也可扫码一键创建应用（device-code，`src/feishu-app-registration.ts`），后者直接
+  得到 owner open_id。同一 App 的长连接被别处占用时，账号状态记为 `error` 并说明原因。
 
 ### 6.2 绑定边界
 
@@ -255,6 +259,10 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
 - 绑定到工作区；每个原生话题拥有独立 Runtime Session，同一话题复用其 Session。
 - `always` 与 `when_mentioned` 只决定话题是否需要首次激活，不合并不同话题上下文。
 
+飞书卡片上的 AskUserQuestion 单选按钮：点击等同点击者在该聊天/话题发出所选项文本，
+走正常入站管线（受众、owner、激活检查照旧，命令不解析），重复点击幂等；本轮结束后的
+终态卡片保留按钮。
+
 原生上下文映射持久化在 `im_context_bindings`。工作区群聊挂载使用
 `channel_mounts`，Agent/会话挂载使用 `agent_channel_mounts`；兼容字段仍双写，
 迁移期间不得只更新其中一侧。
@@ -269,7 +277,10 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
 - 激活：`/require_mention`
 
 破坏性命令受 `OWNER_REQUIRED_IM_COMMANDS` 和渠道原生 sender ID 约束。
-响应对象策略不能因服务重启、同步聊天或恢复绑定而回退成默认值。
+响应对象策略不能因服务重启、同步聊天或恢复绑定而回退成默认值。所有支持群聊的渠道
+（飞书、企微、Telegram、QQ、钉钉、Discord、WhatsApp）都按 `src/im-group-audience.ts`
+执行同一响应对象语义：`owner_only` 只放行 owner（及 `/owner_mention` 认领路径），
+白名单只在 `everyone` 下生效；owner 未认领时群成员一律拒绝；私聊不经过群检查。
 
 飞书群聊中的通用斜杠命令必须由结构化真实 `@Bot` 触发并通过响应对象（audience）
 检查，但不受激活闸门（`activation_mode`、`when_mentioned`、`disabled`）约束；
@@ -289,10 +300,13 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
 
 另有精确的 Session 运行时控制命令，由渠道连接器在通用斜杠命令之前解析。
 群聊必须由渠道结构证明真实 `@Bot`，命令大小写敏感；私聊可直接使用。
-飞书支持 `/steer`、`/break`、`/clear` 和 `/fresh`；QQ 支持 `/steer` 和 `/break`，
-其 `/clear` 与 `/fresh` 仍走通用命令处理器。
-QQ 群聊的结构证明来自平台本身 —— 网关只在真实 `@Bot` 时投递
-`GROUP_AT_MESSAGE_CREATE`：
+飞书支持 `/steer`、`/break`、`/clear` 和 `/fresh`；QQ、Telegram、钉钉、Discord、
+WhatsApp、企微、微信支持 `/steer` 和 `/break`，其 `/clear` 与 `/fresh` 仍走通用命令
+处理器。各渠道的群聊结构证明：QQ 由平台保证（网关只在真实 `@Bot` 时投递
+`GROUP_AT_MESSAGE_CREATE`）；Telegram 为行首 `@bot`、`text_mention` 或 `/cmd@bot`；
+钉钉为 `isInAtList`；Discord 为平台解析出的行首 Bot 提及；WhatsApp 为 Bot 在
+`mentionedJid` 中；企微群回调本身即 `@`；微信只有私聊。缺少证明的群聊文本按普通
+消息处理：
 
 - `/steer <非空消息>`：先可靠进入当前 Session 的 durable pending，再 clean interrupt
   当前 generation；当前已 pending 的普通消息与 steer 按可见顺序在下一轮合批，命令前缀
