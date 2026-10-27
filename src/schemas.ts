@@ -53,6 +53,12 @@ export const ChannelAccountPatchSchema = z.object({
   credentials: ChannelCredentialsSchema.optional(),
 });
 
+/** Start a one-click Feishu/Lark app creation (device-code registration). */
+export const FeishuAppRegistrationCreateSchema = z.object({
+  name: z.string().trim().min(1).max(80).optional(),
+  brand: z.enum(['feishu', 'lark']).optional().default('feishu'),
+});
+
 /**
  * A schedule's prompt is replayed on a timer, so it is stored content with no
  * natural bound.

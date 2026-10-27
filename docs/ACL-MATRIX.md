@@ -72,7 +72,9 @@ token（Runner/查询退出即吊销），并拒绝带 `Forwarded`、`X-Forwarde
 | `/api/billing/my/*`                                 | Login，仅本人                                 |
 
 产品级 Agent 删除前必须先迁移其工作区。渠道账号删除、登出或断开时必须清理/更新
-自身连接和绑定，不能影响其他用户或其他账号。
+自身连接和绑定，不能影响其他用户或其他账号。飞书扫码建应用的注册
+（`/api/channel-accounts/feishu/registrations/*`）同样只对发起者可见，他人读取或
+取消返回 404，成功后只为发起者建号。
 
 ## 4. 工作区 ACL
 

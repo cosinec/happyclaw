@@ -455,6 +455,25 @@ owner 明确拒绝首次设置时可提交
 - `DELETE /api/channel-accounts/:id/paired-chats/:jid`
 - `POST /api/channel-accounts/:id/disconnect`
 - `POST /api/channel-accounts/:id/logout`
+- `POST /api/channel-accounts/feishu/registrations`
+- `GET|DELETE /api/channel-accounts/feishu/registrations/:registrationId`
+
+飞书账号凭证可带 `domain`（`feishu` 或 `lark`，缺省 `feishu`），连接、测试连接和
+开发者后台链接都按它选择飞书或 Lark 的域名；公开账号在 `options.domain` 返回品牌。
+`ownerOpenId` 只能由服务端写入。
+
+`feishu/registrations` 扫码一键创建飞书/Lark 应用（OAuth device-code 注册，
+PersonalAgent 应用）。`POST` 请求体 `{ name?, brand? }`，向飞书申请注册码，返回 201
+`{ registration }`，其中包含 `qr_data_url`（只在这次响应中返回）、`verification_url`、
+`user_code`、`expires_at`、`interval`；上游失败返回 502，同一用户进行中的注册超过 3 个
+返回 429 `too_many_registrations`。服务端按飞书给出的间隔在后台轮询（`slow_down` 时
+加长，租户为 Lark 时切到 Lark 域名），`GET` 只读内存状态，不会触发对飞书的请求。
+`status` 取值 `pending`、`creating`、`success`、`expired`、`denied`、`error`；
+成功时用与 `POST /api/channel-accounts` 相同的创建路径建号并连接，返回 `account_id`、
+`account` 和 `event_console_url`（该应用的事件订阅页：PersonalAgent 应用默认只订阅
+`im.message.receive_v1`）。App Secret 与 device code 从不返回或写入日志。`DELETE`
+取消并删除注册，正在建号时返回 409 `registration_completing`。注册只存在于进程内存，
+按用户隔离（他人 404），过期上限 15 分钟，结束后保留 10 分钟。
 
 账号严格按 `owner_user_id` 隔离。同一 Provider 可以有多个账号。兼容字段
 `default_workspace_jid` 不能替代渠道会话的显式绑定；连接、发现和配对不自动选择 Session。
