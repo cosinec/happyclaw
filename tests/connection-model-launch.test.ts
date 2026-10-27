@@ -414,6 +414,20 @@ describe('one SDK session runs on one model', () => {
     expect(db.getSessionModel(FOLDER, null)).toBe('glm-5');
   });
 
+  test('switching only the 1M window keeps the session: the upstream model is the same', () => {
+    legacySession(glm.id);
+    pick(glm.id);
+    expect(launch()).toMatchObject({ predicted: false, reset: false });
+    pick(glm.id, 'glm-5[1m]');
+    const widened = launch();
+    expect(widened).toMatchObject({ predicted: false, reset: false });
+    expect(widened.selection.resolved.config.anthropicModel).toBe('glm-5[1m]');
+    expect(db.getSessionModel(FOLDER, null)).toBe('glm-5[1m]');
+    pick(glm.id);
+    expect(launch()).toMatchObject({ predicted: false, reset: false });
+    expect(db.getSession(FOLDER, null)).toBe('sdk-legacy');
+  });
+
   test("an Agent's model binding that changes the model starts a new session once", () => {
     legacySession(glm.id);
     const agent = { modelConfigId: glm.id };

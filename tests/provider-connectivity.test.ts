@@ -4,6 +4,7 @@ import {
   buildMessagesUrl,
   parseCustomHeaders,
   probeProviderModel,
+  redact,
   testProviderConnectivity,
 } from '../src/provider-connectivity.js';
 
@@ -127,6 +128,29 @@ describe('provider connectivity probe', () => {
       'deepseek-v4-pro',
       'deepseek-v4-flash',
     ]);
+  });
+
+  test('redacts a key echoed JSON-escaped and the custom header values', async () => {
+    const key = 'bce-v3/ALTAK-abcdefgh/0123456789abcdef';
+    const escaped = JSON.stringify({ detail: { key } }).replace(/\//g, '\\/');
+    expect(redact(escaped, [key])).not.toContain('0123456789abcdef');
+
+    const probe = await probeProviderModel(
+      {
+        baseUrl: 'https://relay.test',
+        token: 'tok-abcdef-123',
+        authMode: 'bearer',
+        model: 'm',
+        customHeaders: 'X-Tenant-Secret: tenant-secret-42',
+      },
+      {
+        fetchImpl: (async () =>
+          new Response('rejected tenant tenant-secret-42', {
+            status: 403,
+          })) as unknown as typeof fetch,
+      },
+    );
+    expect(probe.message).toBe('rejected tenant ***');
   });
 
   test('helpers', () => {

@@ -350,3 +350,134 @@ describe('the last connection test', () => {
     expect(readFile().providers[0]).not.toHaveProperty('lastTest');
   });
 });
+
+describe('what a test describes', () => {
+  const expiresAt = Date.now() + 3_600_000;
+  function oauth(suffix: string) {
+    return {
+      accessToken: `sk-ant-oat01-access-${suffix}`,
+      refreshToken: `sk-ant-ort01-refresh-${suffix}`,
+      expiresAt,
+      scopes: ['user:inference', 'user:profile'],
+    };
+  }
+
+  test('a renewed login is the same; a new login, even into the same account, is not', () => {
+    const created = runtimeConfig.createProvider({
+      name: 'Claude',
+      type: 'official',
+      claudeOAuthCredentials: oauth('a'),
+      claudeOAuthAccount: { accountUuid: 'acct-1' },
+    });
+    const tested = runtimeConfig.getProviderById(created.id)!;
+    expect(tested.claudeOAuthGrantId).toMatch(/^[0-9a-f]{16}$/);
+
+    // A renewal while the test ran keeps the login.
+    expect(
+      runtimeConfig.updateProviderOAuthCredentialsIfCurrent(
+        created.id,
+        oauth('a'),
+        oauth('b'),
+      ),
+    ).toBe(true);
+    expect(
+      runtimeConfig.recordProviderTest(created.id, tested, PASSED),
+    ).not.toBeNull();
+
+    // Logging in again replaces it: a test started before is not written.
+    const beforeLogin = runtimeConfig.getProviderById(created.id)!;
+    runtimeConfig.updateProviderSecrets(created.id, {
+      claudeOAuthCredentials: oauth('c'),
+      claudeOAuthAccount: { accountUuid: 'acct-1' },
+    });
+    expect(
+      runtimeConfig.recordProviderTest(created.id, beforeLogin, PASSED),
+    ).toBeNull();
+    expect(runtimeConfig.getProviderById(created.id)!.lastTest).toBeUndefined();
+  });
+
+  test('the env the test sends is part of it; other env is not', () => {
+    const created = createThirdParty({
+      customEnv: { ANTHROPIC_CUSTOM_HEADERS: 'X-Tenant: a' },
+    });
+    const record = () =>
+      runtimeConfig.recordProviderTest(
+        created.id,
+        runtimeConfig.getProviderById(created.id)!,
+        PASSED,
+      );
+
+    record();
+    expect(
+      runtimeConfig.updateProvider(created.id, {
+        customEnv: {
+          ANTHROPIC_CUSTOM_HEADERS: 'X-Tenant: a',
+          API_TIMEOUT_MS: '600000',
+        },
+      }).lastTest,
+    ).toEqual(PASSED);
+    expect(
+      runtimeConfig.updateProvider(created.id, {
+        customEnv: { ANTHROPIC_CUSTOM_HEADERS: 'X-Tenant: b' },
+      }).lastTest,
+    ).toBeUndefined();
+
+    const beforeHaiku = runtimeConfig.getProviderById(created.id)!;
+    runtimeConfig.updateProvider(created.id, {
+      customEnv: {
+        ANTHROPIC_CUSTOM_HEADERS: 'X-Tenant: b',
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'glm-5.3-flash',
+      },
+    });
+    expect(
+      runtimeConfig.recordProviderTest(created.id, beforeHaiku, PASSED),
+    ).toBeNull();
+  });
+
+  test('a preset stays only with its own endpoint', () => {
+    const relay = createThirdParty({
+      anthropicBaseUrl: 'https://relay.example.com/anthropic',
+      presetId: 'zhipu-glm-cn',
+    });
+    expect(relay.presetId).toBeUndefined();
+
+    const glm = createThirdParty({ presetId: 'zhipu-glm-cn' });
+    expect(glm.presetId).toBe('zhipu-glm-cn');
+    // The same address written differently is still the preset's.
+    expect(
+      runtimeConfig.updateProvider(glm.id, {
+        anthropicBaseUrl: 'https://OPEN.bigmodel.cn/api/anthropic/',
+      }).presetId,
+    ).toBe('zhipu-glm-cn');
+    expect(
+      runtimeConfig.updateProvider(glm.id, {
+        anthropicBaseUrl: 'https://relay.example.com/anthropic',
+      }).presetId,
+    ).toBeUndefined();
+    expect(readFile().providers[1]).not.toHaveProperty('presetId');
+  });
+
+  test('a list already at its cap cannot take a new default by dropping a model', () => {
+    const models = Array.from({ length: 100 }, (_, index) => ({
+      id: index === 0 ? 'glm-5.3' : `m-${index}`,
+    }));
+    const created = createThirdParty({ models });
+    expect(created.models).toHaveLength(100);
+    expect(() =>
+      runtimeConfig.updateProvider(created.id, { anthropicModel: 'glm-new' }),
+    ).toThrow('最多 100 个模型');
+    expect(runtimeConfig.getProviderById(created.id)!.models).toHaveLength(100);
+    // 99 models and a new default fit; 100 others and a new default do not.
+    expect(() =>
+      createThirdParty({ anthropicModel: 'glm-new', models: models.slice(1) }),
+    ).not.toThrow();
+    expect(() =>
+      createThirdParty({
+        anthropicModel: 'glm-new',
+        models: models.map((model, index) =>
+          index === 0 ? { id: 'm-0' } : model,
+        ),
+      }),
+    ).toThrow('最多 100 个模型');
+  });
+});

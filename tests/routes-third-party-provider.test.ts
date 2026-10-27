@@ -190,7 +190,8 @@ describe('third-party provider routes', () => {
     const provider = createThirdParty({
       customEnv: { ANTHROPIC_DEFAULT_HAIKU_MODEL: 'glm-5.3-flash' },
     });
-    mocks.connectivity.mockResolvedValue({ ok: true, probes: [] });
+    const probe = { model: 'glm-5.3', ok: true, status: 200, latencyMs: 12 };
+    mocks.connectivity.mockResolvedValue({ ok: true, probes: [probe] });
     const { status, body } = await request('POST', '/providers/test', {
       providerId: provider.id,
       anthropicModel: 'glm-5.3[1m]',
@@ -198,15 +199,15 @@ describe('third-party provider routes', () => {
     expect(status).toBe(200);
     expect(body).toEqual({
       ok: true,
-      probes: [],
+      probes: [probe],
       code: null,
       authMode: 'x-api-key',
       record: {
         ok: true,
         code: null,
-        status: null,
-        model: null,
-        latencyMs: null,
+        status: 200,
+        model: 'glm-5.3',
+        latencyMs: 12,
         at: expect.any(String),
       },
     });
