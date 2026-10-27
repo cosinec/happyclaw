@@ -4,7 +4,11 @@ import type {
   StreamEvent,
   StreamEventType,
 } from '../src/stream-event.types.js';
-import { MAX_STEPS, type StreamingStep } from '../src/stream-steps.js';
+import {
+  MAX_STEPS,
+  QUESTION_DEFERRED_MARK,
+  type StreamingStep,
+} from '../src/stream-steps.js';
 import { capTailByBytes } from '../src/stream-trace.js';
 import { THINKING_OMITTED_MARKER } from '../src/thinking-text.js';
 import {
@@ -1267,7 +1271,7 @@ describe('a question for the reader', () => {
       30,
       ev('tool_result', {
         toolUseId: 'q',
-        toolResult: 'deferred',
+        toolResult: `${QUESTION_DEFERRED_MARK} The answer is the next message.`,
         toolIsError: true,
       }),
     ],

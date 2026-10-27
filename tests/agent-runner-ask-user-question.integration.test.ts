@@ -14,6 +14,7 @@ import {
   runnerCanUseTool,
   silenceShadowedCanUseToolWarning,
 } from '../container/agent-runner/src/builtin-tool-policy.js';
+import { QUESTION_DEFERRED_MARK } from '../src/stream-steps.js';
 
 /**
  * The pinned Claude CLI registers AskUserQuestion only when the host answers
@@ -306,6 +307,10 @@ describe('AskUserQuestion in the runner', () => {
       behavior: 'deny',
       message: APPROVAL_UNAVAILABLE_RESULT,
     });
+    // The step list recognizes the deferred answer by its first sentence.
+    expect(
+      ASK_USER_QUESTION_DEFERRED_RESULT.startsWith(QUESTION_DEFERRED_MARK),
+    ).toBe(true);
   });
 
   test('the model receives the deferred result and ends the turn with its reply', async () => {

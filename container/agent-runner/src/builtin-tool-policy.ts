@@ -28,7 +28,9 @@ export const RUNNER_DISALLOWED_BUILTIN_TOOLS: readonly string[] = [
  * Tool result of an AskUserQuestion call. The runner has no interactive
  * answer channel: the host shows the questions from the tool input (a Web
  * card, Feishu buttons) and the user's answer arrives as their next message.
- * Other channels show only the reply text, so the reply restates them.
+ * Other channels show only the reply text, so the reply restates them. The
+ * first sentence is QUESTION_DEFERRED_MARK (shared/stream-steps.ts), which
+ * tells the step list the question was asked.
  */
 export const ASK_USER_QUESTION_DEFERRED_RESULT =
   'The question was not answered inside this turn. HappyClaw has shown it ' +

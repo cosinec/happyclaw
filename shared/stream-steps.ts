@@ -114,6 +114,13 @@ export interface StepQuestion {
 
 /** The tool whose call is a question for the reader. */
 export const QUESTION_TOOL_NAME = 'AskUserQuestion';
+/**
+ * The start of the Runner's answer to every AskUserQuestion call: the reader
+ * answers in their next message. A question answered with any other failure
+ * (input that failed validation) asked nothing.
+ */
+export const QUESTION_DEFERRED_MARK =
+  'The question was not answered inside this turn.';
 /** AskUserQuestion allows four questions; streamed input is not yet checked. */
 const MAX_STEP_QUESTIONS = 4;
 const MAX_QUESTION_OPTIONS = 10;
@@ -568,12 +575,24 @@ export function endToolStep(
       : list;
   }
   // The Runner answers every question with the same refusal (the reader
-  // answers in their next message): the question was asked, nothing failed.
+  // answers in their next message): that question was asked, nothing failed.
   if (step.toolName === QUESTION_TOOL_NAME) {
-    return replaceAt(list, index, {
-      status: 'done',
+    if (!failed || result?.includes(QUESTION_DEFERRED_MARK)) {
+      return replaceAt(list, index, {
+        status: 'done',
+        endedAt: step.endedAt ?? at,
+      });
+    }
+    // Refused for another reason: there is no question for the reader.
+    const { questions: _questions, ...asked } = step;
+    const steps = list.steps.slice();
+    steps[index] = {
+      ...asked,
+      status: 'error',
       endedAt: step.endedAt ?? at,
-    });
+      resultPreview: text || step.resultPreview,
+    };
+    return { steps, dropped: list.dropped };
   }
   return replaceAt(list, index, {
     status: failed ? 'error' : step.status === 'error' ? 'error' : 'done',

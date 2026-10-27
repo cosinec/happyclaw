@@ -15,6 +15,7 @@ import {
   openThinkingStep,
   patchToolStep,
   progressToolStep,
+  QUESTION_DEFERRED_MARK,
   railSteps,
   readStepQuestions,
   rebuildSteps,
@@ -550,9 +551,13 @@ describe('question steps', () => {
       { toolUseId: 'q', questions: readStepQuestions(input) },
       20,
     );
-    list = endToolStep(list, 'q', 30, 'deferred to the next message', {
-      isError: true,
-    });
+    list = endToolStep(
+      list,
+      'q',
+      30,
+      `${QUESTION_DEFERRED_MARK} The answer is the next message.`,
+      { isError: true },
+    );
     expect(list.steps[0]).toMatchObject({
       status: 'done',
       endedAt: 30,
@@ -560,6 +565,26 @@ describe('question steps', () => {
     });
     expect(list.steps[0].resultPreview).toBeUndefined();
     expect(summarizeSteps(list.steps).failed).toBe(0);
+  });
+
+  it('drops the questions of a call refused for another reason', () => {
+    let list = startToolStep(
+      empty(),
+      {
+        toolUseId: 'q',
+        toolName: 'AskUserQuestion',
+        questions: readStepQuestions(input),
+      },
+      10,
+    );
+    list = endToolStep(list, 'q', 30, 'InputValidationError: too few options', {
+      isError: true,
+    });
+    expect(list.steps[0]).toMatchObject({
+      status: 'error',
+      resultPreview: 'InputValidationError: too few options',
+    });
+    expect(list.steps[0].questions).toBeUndefined();
   });
 
   it('keeps questions only on an AskUserQuestion step', () => {
