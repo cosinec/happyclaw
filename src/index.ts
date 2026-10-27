@@ -18264,11 +18264,9 @@ async function processAgentConversation(
       // turn's process must never reach an IM channel.
       if (agentStreamingSession && publishesFrameworkAnswer(interactionMode)) {
         const se = output.streamEvent;
-        if (
-          agentAnswerProjection?.visibleAnswerChanged &&
-          agentStreamingSession.isActive()
-        ) {
-          agentStreamingSession.append(
+        if (agentAnswerProjection?.visibleAnswerChanged) {
+          appendStreamingSessionAnswer(
+            agentStreamingSession,
             heldAgentBaseText() + agentAnswerProjection.visibleAnswerText,
           );
         }

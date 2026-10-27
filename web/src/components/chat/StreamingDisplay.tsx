@@ -25,6 +25,7 @@ import { useShellStore } from '../../stores/shell';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
 import { useConnectionStatus } from '../../hooks/useConnectionStatus';
 import { useRunElapsed } from '../../hooks/useRunElapsed';
+import { useReplyRate } from '../../hooks/useReplyRate';
 import {
   useStreamLayout,
   type StreamLayout,
@@ -90,17 +91,43 @@ function RunElapsed({ runtimeJid }: { runtimeJid: string }) {
   );
 }
 
+/**
+ * Estimated output speed while the reply's text streams. Not announced: it
+ * is a reading, not news; on a narrow screen the phase needs the room.
+ */
+function ReplyRate({
+  groupJid,
+  agentId,
+}: {
+  groupJid: string;
+  agentId?: string;
+}) {
+  const rate = useReplyRate(groupJid, agentId);
+  if (rate == null) return null;
+  return (
+    <span
+      aria-hidden="true"
+      className="shrink-0 text-faint-foreground tabular-nums max-sm:hidden"
+    >
+      · 约 {rate} tok/s
+    </span>
+  );
+}
+
 /** Codex-style run status: current phase plus time since the run started. */
 const RunStatus = memo(function RunStatus({
-  runtimeJid,
+  groupJid,
+  agentId,
   phase,
   stopHint = false,
 }: {
-  runtimeJid: string;
+  groupJid: string;
+  agentId?: string;
   phase: string;
   /** This view's composer stops the run on Esc. */
   stopHint?: boolean;
 }) {
+  const runtimeJid = agentId ? `${groupJid}#agent:${agentId}` : groupJid;
   // A requested stop freezes the timer at the click: the run is ending.
   const stopped = useChatStore((s) => !!s.stopRequests[runtimeJid]);
   const elapsed = useRunElapsed(runtimeJid);
@@ -127,13 +154,18 @@ const RunStatus = memo(function RunStatus({
           {formatRunElapsed(elapsed)}
         </span>
       )}
-      {stopHint && !stopped && !offline && (
-        <span
-          aria-hidden="true"
-          className="shrink-0 text-faint-foreground max-sm:hidden pointer-coarse:hidden"
-        >
-          · Esc 停止
-        </span>
+      {!stopped && !offline && (
+        <>
+          <ReplyRate groupJid={groupJid} agentId={agentId} />
+          {stopHint && (
+            <span
+              aria-hidden="true"
+              className="shrink-0 text-faint-foreground max-sm:hidden pointer-coarse:hidden"
+            >
+              · Esc 停止
+            </span>
+          )}
+        </>
       )}
     </span>
   );
@@ -595,7 +627,8 @@ export function StreamingDisplay({
   const runStatus =
     isWaiting && !streaming?.interrupted ? (
       <RunStatus
-        runtimeJid={runtimeJid}
+        groupJid={groupJid}
+        agentId={agentId}
         phase={describeRunPhase(streaming, stopping)}
         stopHint={stopHint}
       />
@@ -611,7 +644,10 @@ export function StreamingDisplay({
   // phase and elapsed time. Same height as MessageBubble's row so the
   // streaming → final swap doesn't move content.
   const identityRow = (
-    <div className="sticky top-0 z-10 mb-1.5 flex h-6 items-center gap-2 bg-background">
+    <div
+      data-follow-sticky
+      className="sticky top-0 z-10 mb-1.5 flex h-6 items-center gap-2 bg-background"
+    >
       <EmojiAvatar
         imageUrl={agentIdentity.imageUrl}
         emoji={agentIdentity.emoji}
@@ -761,7 +797,10 @@ export function StreamingDisplay({
     return (
       <div className="mb-2 border-b border-surface-border pb-2">
         {/* Sender line */}
-        <div className="sticky top-0 z-10 mb-1 flex h-6 items-center gap-1.5 bg-background">
+        <div
+          data-follow-sticky
+          className="sticky top-0 z-10 mb-1 flex h-6 items-center gap-1.5 bg-background"
+        >
           <span className="text-caption font-medium text-foreground">
             {senderName}
           </span>

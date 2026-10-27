@@ -113,7 +113,9 @@ Web UI 约定：
   设置类页面使用 `components/settings/SettingsLayout`。
 - 破坏性确认使用 `confirmDialog()`；未保存离开守卫保持同步的原生 `confirm()`。
 - 快捷键在 `lib/shortcuts.ts` 注册并用 `Shortcut` 渲染键帽；动画用 `motion` 的 `m.*`，
-  经 `MotionProvider` 懒加载并遵循减少动态效果设置。
+  经 `MotionProvider` 懒加载并遵循减少动态效果设置。流式回复的贴底跟随（每批一次的
+  WAAPI 位移补偿）和逐词淡入（CSS keyframes）是逐帧、逐词的热路径，不走 `m.*`，
+  同样在减少动态效果时关闭。
 
 ### 3.3 Agent Runner
 
@@ -153,6 +155,12 @@ Web UI 约定：
   的启动、终态和最终答复按发起它的输入写入 `subagent_checkpoints`；重跑同一输入时
   这些断点作为上下文回注给主 Agent：已完成的直接汇总，未完成的标明中断，部署、迁移、
   推送等非幂等操作要求先核实实际状态。宿主不会自动重跑任何子任务。
+- 一轮成功结束、最后一次模型响应只有思考而没有正文（静默停止）时，Claude Code 会先在
+  轮内自行补问一次；仍无正文时 Runner 在同一 SDK 流里再要一次答复，每条输入最多一次。
+  主动模式、已有后续输入排队、后台任务未结清时不续写。
+- Runner 的生产诊断日志以 `[agent-runner:info]` / `[agent-runner:warn]` 前缀写入主服务
+  日志：每次 `query()` 的启动耗时 `[query-timing]`（info），空回复形态 `[reply-shape]`、
+  静默停止 `[silent-stop]` 和疑似工具调用循环 `[tool-loop]`（warn，只记录不中断）。
 
 Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时后端仅为兼容而忽略，
 不得重新把它实现为全局 Host 并发池。
@@ -180,7 +188,8 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
 - Agent 工具权限保持开放；不要虚构只读或受限工具模式。唯一例外是 Claude Code
   内置、依赖 CLI 进程常驻的会话级工具（`CronCreate`/`CronDelete`/`CronList`、
   `ScheduleWakeup`、`EnterWorktree`/`ExitWorktree`）：Runner 每轮结束会关闭 CLI，
-  这些承诺会静默丢失，因此默认禁用，定时需求走 HappyClaw 的 `schedule_task`。
+  这些承诺会静默丢失，因此默认禁用，并设置 `CLAUDE_CODE_DISABLE_CRON=1` 关闭 CLI
+  自带的定时调度；定时需求走 HappyClaw 的 `schedule_task`。
 - 一次运行绑定的模型配置按固定顺序解析（`container-runner.ts` 的
   `resolvePinnedModelConfigId`）：会话手选 → 智能体绑定 → 全局默认
   （`defaultModelConfigId`，工作区自带 Provider 环境变量时让位）→ 唯一启用的配置 →

@@ -398,16 +398,20 @@ export function attachStderrHandler(
   const retainLimit = runnerOutputRetainLimit(warnLimit);
   stream.on('data', (data) => {
     const chunk = data.toString();
-    // Runner-side operational failures are prefixed so they survive the
+    // Runner-side operational failures and the few lines meant for production
+    // diagnosis (such as per-query timing) are prefixed so they survive the
     // debug-level default; without this they are invisible in production
     // (observed: every workspace-memory snapshot failure was dropped).
     const hasRunnerWarning = chunk.includes('[agent-runner:warn]');
-    if (hasRunnerWarning || logger.isLevelEnabled('debug')) {
+    const hasRunnerInfo = chunk.includes('[agent-runner:info]');
+    if (hasRunnerWarning || hasRunnerInfo || logger.isLevelEnabled('debug')) {
       const lines = chunk.trim().split('\n');
       for (const line of lines) {
         if (!line) continue;
         if (line.includes('[agent-runner:warn]')) {
           logger.warn(logContext, line);
+        } else if (line.includes('[agent-runner:info]')) {
+          logger.info(logContext, line);
         } else {
           logger.debug(logContext, line);
         }
