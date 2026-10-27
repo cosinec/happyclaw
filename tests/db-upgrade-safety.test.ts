@@ -201,6 +201,8 @@ describe('schema version head', () => {
     // turn (schema-v81-turn-traces.test.ts).
     // v82: turn_traces.steps_json / steps_dropped, the turn's steps in the
     // order they happened (schema-v82-turn-steps.test.ts).
-    expect(db.CURRENT_SCHEMA_VERSION).toBe(82);
+    // v83: agent_profiles.model, the model an Agent picks within its model
+    // configuration (schema-v83-agent-model.test.ts).
+    expect(db.CURRENT_SCHEMA_VERSION).toBe(83);
   });
 });

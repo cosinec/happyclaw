@@ -330,6 +330,11 @@ export interface AgentProfile {
   avatar_url: string | null;
   /** Null means inherit the system default model configuration. */
   model_config_id: string | null;
+  /**
+   * A model from `model_config_id`'s list; null runs that configuration's
+   * default model. Always null without a configuration.
+   */
+  model: string | null;
   runtime_policy: AgentProfileRuntimePolicy;
   identity_hash: string;
   version: number;

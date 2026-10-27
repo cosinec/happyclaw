@@ -42,6 +42,7 @@ import {
   clearSessionModelSelectionsForModelConfig,
   countAgentProfilesByModelConfigId,
   countSessionModelSelectionsForModelConfig,
+  listAgentProfilesUsingModels,
 } from '../db.js';
 import { parseChannelAddress } from '../channel-address.js';
 import { conversationBindingPolicyError } from '../channel-conversation-kind.js';
@@ -76,13 +77,16 @@ import {
   UnifiedProviderPatchSchema,
   UnifiedProviderSecretsSchema,
   ProviderConnectivityTestSchema,
+  ProviderDiscoverModelsSchema,
   BalancingConfigSchema,
+  type ProviderConnectivityTestInput,
 } from '../schemas.js';
 import {
   getClaudeProviderConfig,
   toPublicClaudeProviderConfig,
   appendClaudeConfigAudit,
   getProviders,
+  getProviderById,
   getEnabledProviders,
   getDefaultModelConfigId,
   getUsableDefaultProvider,
@@ -91,6 +95,9 @@ import {
   getBalancingConfig,
   saveBalancingConfig,
   createProvider,
+  nextProviderModelList,
+  providerModels,
+  recordProviderTest,
   updateProvider,
   updateProviderSecrets,
   setProviderEnabled,
@@ -138,6 +145,7 @@ import type {
   ClaudeOAuthAccountInfo,
   ClaudeOAuthCredentials,
   CachedOAuthUsage,
+  ProviderAuthMode,
   UnifiedProvider,
 } from '../runtime-config.js';
 import {
@@ -145,6 +153,7 @@ import {
   buildClaudeCodeExchangeBody,
   ClaudeCredentialInputError,
   CLAUDE_CODE_USER_AGENT,
+  CLAUDE_OAUTH_BETA,
   CLAUDE_OAUTH_PROFILE_URL,
   CLAUDE_OAUTH_TOKEN_URL,
   CLAUDE_OAUTH_USAGE_URL,
@@ -195,9 +204,12 @@ import {
   resolveCodexDefaultEffort,
 } from '../codex-gateway/model-catalog.js';
 import {
+  codexProviderCatalogFailure,
   ensureCodexProviderCatalog,
   getResolvedCodexCatalog,
+  listCodexModelsForProvider,
   maybeRefreshCodexCatalog,
+  refreshCodexProviderCatalog,
   type ProviderCodexCatalog,
 } from '../codex-gateway/model-catalog-sync.js';
 import {
@@ -208,7 +220,31 @@ import type { AuthUser, RegisteredGroup } from '../types.js';
 import { logger } from '../logger.js';
 import brandAssetRoutes from './brand-assets.js';
 import { testFeishuAppCredentials } from '../channel-account-connectivity.js';
-import { testProviderConnectivity } from '../provider-connectivity.js';
+import {
+  ANTHROPIC_API_ORIGIN,
+  checkClaudeAccount,
+  CLAUDE_SUBSCRIPTION_MODELS,
+  connectionTestResult,
+  discoverAnthropicModels,
+  discoverEndpointModels,
+  redact,
+  testAnthropicApiKey,
+  testProviderConnectivity,
+  testThirdPartyConnection,
+  type ConnectionTestResult,
+  type ModelDiscoveryResult,
+} from '../provider-connectivity.js';
+import {
+  classifyProviderError,
+  findPresetsByBaseUrl,
+  getModelPreset,
+  modelsUrlFor,
+  presetModelEntryId,
+  type ModelPreset,
+  type ProviderErrorCode,
+  type ProviderModelEntry,
+} from '../model-providers.js';
+import { isCodexGatewayBaseUrl } from '../codex-gateway/resolve-gateway-url.js';
 import {
   buildSessionMountUpdate,
   buildDetachedWorkspaceUpdate,
@@ -599,6 +635,43 @@ function syncProviderSessionCaches(affectedFolders: string[]): void {
       delete deps.sessions[folder];
     }
   }
+}
+
+/**
+ * Whether a new connection that did not say starts enabled: only when no
+ * other connection is. A second connection must not quietly turn a single
+ * connection into a rotating pool.
+ */
+function newConnectionJoinsPool(): boolean {
+  return getEnabledProviders().length === 0;
+}
+
+/** The models a connection edit leaves out of the connection's list. */
+function removedProviderModels(
+  previous: UnifiedProvider,
+  patch: {
+    anthropicBaseUrl?: string;
+    anthropicModel?: string;
+    models?: ProviderModelEntry[];
+  },
+): string[] {
+  const anthropicModel =
+    patch.anthropicModel !== undefined
+      ? patch.anthropicModel.trim()
+      : previous.anthropicModel;
+  const kept = new Set(
+    providerModels({
+      anthropicBaseUrl: patch.anthropicBaseUrl ?? previous.anthropicBaseUrl,
+      anthropicModel,
+      models: nextProviderModelList(previous, {
+        anthropicModel,
+        models: patch.models,
+      }),
+    }).map((entry) => entry.id),
+  );
+  return providerModels(previous)
+    .map((entry) => entry.id)
+    .filter((model) => !kept.has(model));
 }
 
 /**
@@ -1111,7 +1184,7 @@ async function fetchOAuthUsage(
         {
           headers: {
             Authorization: `Bearer ${oauthCredentials.accessToken}`,
-            'anthropic-beta': 'oauth-2025-04-20',
+            'anthropic-beta': CLAUDE_OAUTH_BETA,
             'Content-Type': 'application/json',
           },
         },
@@ -1516,19 +1589,18 @@ configRoutes.post(
 
     const envError = validateProviderCustomEnv(validation.data.customEnv ?? {});
     if (envError) return c.json({ error: envError }, 400);
-    if (validation.data.enabled) {
-      const draft = validation.data;
-      const hasCredential = !!(
-        draft.anthropicAuthToken?.trim() ||
-        draft.anthropicApiKey?.trim() ||
-        (draft.type === 'official' &&
-          (draft.claudeCodeOauthToken?.trim() ||
-            draft.claudeOAuthCredentials ||
-            draft.claudeCredentialInput?.trim()))
-      );
-      if (!hasCredential) {
-        return c.json({ error: '启用的模型配置必须带有可用的凭据' }, 400);
-      }
+    // A connection without a credential could neither be tested nor run.
+    const draft = validation.data;
+    const hasCredential = !!(
+      draft.anthropicAuthToken?.trim() ||
+      draft.anthropicApiKey?.trim() ||
+      (draft.type === 'official' &&
+        (draft.claudeCodeOauthToken?.trim() ||
+          draft.claudeOAuthCredentials ||
+          draft.claudeCredentialInput?.trim()))
+    );
+    if (!hasCredential) {
+      return c.json({ error: '新建模型配置需要凭据' }, 400);
     }
 
     const actor = (c.get('user') as AuthUser).username;
@@ -1548,7 +1620,17 @@ configRoutes.post(
     }
 
     try {
-      const provider = createProvider({ ...createInput, ...pasted });
+      const provider = createProvider({
+        ...createInput,
+        ...pasted,
+        // A preset connection may leave its address to the preset.
+        anthropicBaseUrl:
+          createInput.anthropicBaseUrl?.trim() ||
+          (createInput.type === 'third_party'
+            ? getModelPreset(createInput.presetId)?.baseUrl
+            : undefined),
+        enabled: createInput.enabled ?? newConnectionJoinsPool(),
+      });
       appendClaudeConfigAudit(actor, 'create_provider', [
         `id:${provider.id}`,
         `type:${provider.type}`,
@@ -1646,6 +1728,22 @@ configRoutes.patch(
           customEnvChanged ||
           tokenChanged ||
           authModeChanged;
+        // Toggling 1M renames a model, so it counts as a removal too.
+        const removedModels = removedProviderModels(previous, providerPatch);
+        const agentsUsingRemoved = listAgentProfilesUsingModels(
+          id,
+          removedModels,
+        );
+        if (agentsUsingRemoved.length > 0) {
+          return c.json(
+            {
+              error: `${agentsUsingRemoved.map((agent) => agent.name).join('、')} 正在使用要移除的模型，请先为这些智能体改选模型`,
+              code: 'MODEL_IN_USE',
+              agents: agentsUsingRemoved,
+            },
+            409,
+          );
+        }
         const pendingInvalidation = getPendingProviderSessionInvalidation(id);
         const sessionInvalidation = {
           modelChanged:
@@ -1681,8 +1779,20 @@ configRoutes.patch(
           return updated;
         };
 
+        // Showing, hiding, re-tuning or adding models reaches a runner at its
+        // next launch, as the default model's effort does; nothing running
+        // has to stop for it. Every other change keeps quiescing as before.
+        const runnersUnaffected =
+          !protocolFieldChanged &&
+          !pendingInvalidation &&
+          removedModels.length === 0 &&
+          (providerPatch.name === undefined ||
+            providerPatch.name.trim() === previous.name) &&
+          (providerPatch.weight === undefined ||
+            providerPatch.weight === previous.weight);
+
         let mutation: ClaudeMutationResult<ReturnType<typeof updateProvider>>;
-        if (providerMayHaveRunners(previous)) {
+        if (providerMayHaveRunners(previous) && !runnersUnaffected) {
           mutation = await mutateClaudeConfigForAllGroups(
             actor,
             metadata,
@@ -2026,77 +2136,508 @@ configRoutes.post(
   },
 );
 
-// ─── POST /claude/providers/test — 测试第三方端点连通性 ─────
+// ─── 模型连接的测试与模型列表 ─────
 const CONNECTIVITY_TEST_WINDOW_MS = 60_000;
 const CONNECTIVITY_TEST_LIMIT = 10;
 const connectivityTestHits = new Map<string, number[]>();
 
+/** Spend one of an admin's upstream checks (tests and model lists) per minute. */
+function takeConnectivityCheck(userId: string): boolean {
+  const now = Date.now();
+  const recent = (connectivityTestHits.get(userId) ?? []).filter(
+    (at) => now - at < CONNECTIVITY_TEST_WINDOW_MS,
+  );
+  if (recent.length >= CONNECTIVITY_TEST_LIMIT) return false;
+  recent.push(now);
+  connectivityTestHits.set(userId, recent);
+  return true;
+}
+
+/** The upstream a test or a model list reaches, and what it sends there. */
+type CheckedConnection =
+  | { kind: 'chatgpt'; stored: UnifiedProvider }
+  | {
+      kind: 'third_party';
+      baseUrl: string;
+      token: string;
+      /** The style tried first: the explicit one, else the runtime's. */
+      authMode: ProviderAuthMode;
+      explicitAuthMode: boolean;
+      preset: ModelPreset | null;
+      model: string;
+      customEnv: Record<string, string>;
+    }
+  | {
+      kind: 'api_key';
+      credential: string;
+      authMode: ProviderAuthMode;
+      model: string;
+    }
+  | {
+      kind: 'account';
+      /** Set for a saved grant, which may be renewed before the check. */
+      providerId: string | null;
+      oauth: ClaudeOAuthCredentials | null;
+      token: string;
+    };
+
+/**
+ * Read the connection a request describes: a draft, or a saved connection
+ * whose blank fields fall back to what is stored.
+ */
+function resolveCheckedConnection(
+  draft: ProviderConnectivityTestInput,
+):
+  | { connection: CheckedConnection; stored: UnifiedProvider | undefined }
+  | { error: string; status: 400 | 404 } {
+  const stored = draft.providerId
+    ? (getProviderById(draft.providerId) ?? undefined)
+    : undefined;
+  if (draft.providerId && !stored) {
+    return { error: '未找到指定供应商', status: 404 };
+  }
+  if (stored?.codexOAuthCredentials) {
+    return { connection: { kind: 'chatgpt', stored }, stored };
+  }
+  const type = stored?.type ?? draft.type ?? 'third_party';
+  const model = draft.anthropicModel ?? stored?.anthropicModel;
+
+  if (type === 'third_party') {
+    const preset = getModelPreset(draft.presetId ?? stored?.presetId);
+    const baseUrl =
+      draft.anthropicBaseUrl?.trim() ||
+      stored?.anthropicBaseUrl ||
+      preset?.baseUrl ||
+      '';
+    const draftToken = draft.anthropicAuthToken?.trim();
+    const token =
+      draftToken || stored?.anthropicAuthToken || stored?.anthropicApiKey || '';
+    if (!baseUrl) return { error: '请填写 API 端点', status: 400 };
+    if (isCodexGatewayBaseUrl(baseUrl)) {
+      return { error: 'ChatGPT 订阅请先完成登录', status: 400 };
+    }
+    if (!token) return { error: '请填写 API 密钥', status: 400 };
+    // A key the runtime sends as ANTHROPIC_API_KEY has no other style.
+    const apiKeyOnly =
+      !draftToken && !stored?.anthropicAuthToken && !!stored?.anthropicApiKey;
+    const explicit =
+      draft.anthropicAuthMode ??
+      (apiKeyOnly ? 'x-api-key' : stored?.anthropicAuthMode);
+    return {
+      stored,
+      connection: {
+        kind: 'third_party',
+        baseUrl,
+        token,
+        // A saved connection without a style is probed with the header its
+        // runtime infers (bare token → x-api-key, `Bearer …` → Authorization);
+        // a new one with Bearer, which every preset takes.
+        authMode:
+          explicit ??
+          (stored && !/^Bearer\s/i.test(token) ? 'x-api-key' : 'bearer'),
+        explicitAuthMode: !!explicit,
+        preset,
+        model:
+          model ??
+          (preset?.models[0] ? presetModelEntryId(preset.models[0]) : ''),
+        customEnv: draft.customEnv ?? stored?.customEnv ?? {},
+      },
+    };
+  }
+
+  let pasted: ReturnType<typeof claudeCredentialInputFields>;
+  try {
+    pasted = claudeCredentialInputFields(
+      draft.claudeCredentialInput,
+      'official',
+      draft,
+    );
+  } catch (err) {
+    if (err instanceof ClaudeCredentialInputError) {
+      return { error: err.message, status: 400 };
+    }
+    throw err;
+  }
+  // A credential in the request replaces the saved one as a whole.
+  const draftCredential: Partial<
+    Pick<
+      UnifiedProvider,
+      | 'anthropicApiKey'
+      | 'anthropicAuthToken'
+      | 'claudeOAuthCredentials'
+      | 'claudeCodeOauthToken'
+    >
+  > = {
+    anthropicApiKey: draft.anthropicApiKey?.trim(),
+    anthropicAuthToken: draft.anthropicAuthToken?.trim(),
+    ...pasted,
+  };
+  const fromDraft = Object.values(draftCredential).some(Boolean);
+  const credential = fromDraft ? draftCredential : (stored ?? draftCredential);
+  const { claudeOAuthCredentials: oauth, claudeCodeOauthToken: setupToken } =
+    credential;
+  const apiKey = credential.anthropicApiKey || credential.anthropicAuthToken;
+  let connection: CheckedConnection | null = null;
+  if (oauth || setupToken) {
+    connection = {
+      kind: 'account',
+      providerId: fromDraft || !oauth ? null : stored!.id,
+      oauth: oauth ?? null,
+      token: oauth?.accessToken ?? setupToken!,
+    };
+  } else if (apiKey) {
+    connection = {
+      kind: 'api_key',
+      credential: apiKey,
+      // Claude Code sends ANTHROPIC_API_KEY as x-api-key and an auth token
+      // as Authorization, unless the connection chose otherwise.
+      authMode: credential.anthropicApiKey
+        ? 'x-api-key'
+        : (draft.anthropicAuthMode ?? stored?.anthropicAuthMode ?? 'bearer'),
+      model: model ?? '',
+    };
+  }
+  return connection
+    ? { connection, stored }
+    : { error: '请填写凭据', status: 400 };
+}
+
+/** Whether a request tests something other than the saved connection. */
+function draftChangesConnection(
+  draft: ProviderConnectivityTestInput,
+  stored: UnifiedProvider,
+): boolean {
+  const differs = (value: string | undefined, current: string) =>
+    !!value?.trim() && value.trim() !== current;
+  return (
+    differs(draft.anthropicBaseUrl, stored.anthropicBaseUrl) ||
+    differs(draft.anthropicAuthToken, stored.anthropicAuthToken) ||
+    differs(draft.anthropicApiKey, stored.anthropicApiKey) ||
+    draft.claudeCredentialInput !== undefined ||
+    (draft.anthropicAuthMode !== undefined &&
+      draft.anthropicAuthMode !== stored.anthropicAuthMode) ||
+    (draft.customEnv !== undefined &&
+      JSON.stringify(draft.customEnv) !== JSON.stringify(stored.customEnv))
+  );
+}
+
+/** Where a check goes, for logs: never a path, a query or a key. */
+function connectionOrigin(connection: CheckedConnection): string {
+  switch (connection.kind) {
+    case 'third_party':
+      try {
+        return new URL(connection.baseUrl).origin;
+      } catch {
+        return 'invalid';
+      }
+    case 'api_key':
+    case 'account':
+      return ANTHROPIC_API_ORIGIN;
+    case 'chatgpt':
+      return 'chatgpt';
+  }
+}
+
+/** A failed check that never reached the upstream. */
+function unreachedTest(
+  code: ProviderErrorCode,
+  message: string,
+): ConnectionTestResult {
+  return connectionTestResult(
+    {
+      ok: false,
+      probes: [
+        { model: '', ok: false, status: null, latencyMs: 0, message, code },
+      ],
+    },
+    { model: null },
+  );
+}
+
+/**
+ * Claude subscription: a saved grant due for renewal is renewed first, as a
+ * runner launch would; a pasted one is never renewed here, because renewing
+ * rotates the refresh token the admin is about to save.
+ */
+async function checkSubscriptionAccount(
+  connection: Extract<CheckedConnection, { kind: 'account' }>,
+): Promise<ConnectionTestResult> {
+  let token = connection.token;
+  if (connection.oauth && connection.providerId) {
+    const current = getProviderById(connection.providerId);
+    if (current?.claudeOAuthLastRefreshError) {
+      return unreachedTest(
+        'AUTH_INVALID',
+        current.claudeOAuthLastRefreshError.message,
+      );
+    }
+    if (isClaudeOAuthRefreshDue(connection.providerId, connection.oauth)) {
+      const outcome = await refreshClaudeProviderOAuth(connection.providerId);
+      if (
+        outcome.status === 'needs_relogin' ||
+        (outcome.status === 'failed' && outcome.terminal)
+      ) {
+        return unreachedTest('AUTH_INVALID', 'Claude 登录已失效，请重新登录');
+      }
+      token =
+        getProviderById(connection.providerId)?.claudeOAuthCredentials
+          ?.accessToken ?? token;
+    }
+  } else if (connection.oauth && connection.oauth.expiresAt <= Date.now()) {
+    return unreachedTest(
+      'UNKNOWN',
+      '访问令牌已过期，保存后会自动续期；现在无法验证',
+    );
+  }
+  return checkClaudeAccount(token);
+}
+
+/** ChatGPT subscription: fetch the account's live model catalog. */
+async function checkChatGptAccount(
+  provider: UnifiedProvider,
+): Promise<ConnectionTestResult> {
+  const startedAt = Date.now();
+  const ok = await refreshCodexProviderCatalog(provider.id);
+  const latencyMs = Date.now() - startedAt;
+  if (ok) {
+    return connectionTestResult(
+      { ok: true, probes: [{ model: '', ok: true, status: 200, latencyMs }] },
+      { model: null },
+    );
+  }
+  const failure = codexProviderCatalogFailure(provider.id);
+  const reauth =
+    getProviderById(provider.id)?.codexOAuthLastRefreshError?.kind ===
+    'reauth_required';
+  return connectionTestResult(
+    {
+      ok: false,
+      probes: [
+        {
+          model: '',
+          ok: false,
+          status: failure?.status ?? null,
+          latencyMs,
+          message: redact(failure?.message ?? 'ChatGPT 模型目录获取失败', []),
+          code: reauth
+            ? 'AUTH_INVALID'
+            : failure?.status
+              ? classifyProviderError({ status: failure.status }).code
+              : 'UNKNOWN',
+        },
+      ],
+    },
+    { model: null },
+  );
+}
+
+function testConnection(
+  connection: CheckedConnection,
+): Promise<ConnectionTestResult> {
+  switch (connection.kind) {
+    case 'third_party':
+      return testThirdPartyConnection(
+        {
+          baseUrl: connection.baseUrl,
+          token: connection.token,
+          authMode: connection.authMode,
+          explicitAuthMode: connection.explicitAuthMode,
+          model: connection.model,
+          haikuModel: connection.customEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL,
+          customHeaders: connection.customEnv.ANTHROPIC_CUSTOM_HEADERS,
+        },
+        testProviderConnectivity,
+      );
+    case 'api_key':
+      return testAnthropicApiKey(connection);
+    case 'account':
+      return checkSubscriptionAccount(connection);
+    case 'chatgpt':
+      return checkChatGptAccount(connection.stored);
+  }
+}
+
+async function discoverModels(
+  connection: CheckedConnection,
+): Promise<ModelDiscoveryResult> {
+  switch (connection.kind) {
+    case 'third_party': {
+      // A custom address that is exactly one vendor's lists models where
+      // that vendor does.
+      const matches = findPresetsByBaseUrl(connection.baseUrl);
+      const url = modelsUrlFor(
+        connection.baseUrl,
+        connection.preset ?? (matches.length === 1 ? matches[0] : null),
+      );
+      if (!url) {
+        return {
+          ok: false,
+          code: 'ENDPOINT_NOT_FOUND',
+          status: null,
+          message: '地址无效',
+        };
+      }
+      return discoverEndpointModels({
+        url,
+        credential: connection.token,
+        authMode: connection.authMode,
+        explicitAuthMode: connection.explicitAuthMode,
+        customHeaders: connection.customEnv.ANTHROPIC_CUSTOM_HEADERS,
+      });
+    }
+    case 'api_key':
+      return discoverAnthropicModels(connection);
+    case 'account':
+      return {
+        ok: true,
+        models: [...CLAUDE_SUBSCRIPTION_MODELS],
+        source: 'builtin',
+      };
+    case 'chatgpt': {
+      await ensureCodexProviderCatalog(connection.stored.id);
+      return {
+        ok: true,
+        source: 'catalog',
+        models: listCodexModelsForProvider(connection.stored).models.map(
+          (entry) => ({
+            id: entry.value,
+            ...(entry.label && entry.label !== entry.value
+              ? { name: entry.label }
+              : {}),
+          }),
+        ),
+      };
+    }
+  }
+}
+
+// ─── POST /claude/providers/discover-models — 获取模型连接的模型列表 ─────
+configRoutes.post(
+  '/claude/providers/discover-models',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    const user = c.get('user') as AuthUser;
+    if (!takeConnectivityCheck(user.id)) {
+      return c.json({ error: '测试过于频繁，请稍后再试' }, 429);
+    }
+    const body = await c.req.json().catch(() => ({}));
+    const validation = ProviderDiscoverModelsSchema.safeParse(body);
+    if (!validation.success) {
+      return c.json({ error: 'Invalid request body' }, 400);
+    }
+    const resolved = resolveCheckedConnection(validation.data);
+    if ('error' in resolved) {
+      return c.json({ error: resolved.error }, resolved.status);
+    }
+    const result = await discoverModels(resolved.connection);
+    logger.info(
+      {
+        providerId: validation.data.providerId ?? null,
+        kind: resolved.connection.kind,
+        origin: connectionOrigin(resolved.connection),
+        ok: result.ok,
+        ...(result.ok
+          ? { count: result.models.length }
+          : { code: result.code, status: result.status }),
+      },
+      'Provider model discovery finished',
+    );
+    return c.json(result);
+  },
+);
+
+// ─── POST /claude/providers/test — 测试模型连接 ─────
+// 带 providerId 且测的就是已保存的连接时，结果存为该连接的 lastTest；
+// 没有认证方式的连接同时记下端点接受的那一种。不停 Runner，不清会话。
 configRoutes.post(
   '/claude/providers/test',
   authMiddleware,
   systemConfigMiddleware,
   async (c) => {
     const user = c.get('user') as AuthUser;
-    const now = Date.now();
-    const recent = (connectivityTestHits.get(user.id) ?? []).filter(
-      (at) => now - at < CONNECTIVITY_TEST_WINDOW_MS,
-    );
-    if (recent.length >= CONNECTIVITY_TEST_LIMIT) {
+    if (!takeConnectivityCheck(user.id)) {
       return c.json({ error: '测试过于频繁，请稍后再试' }, 429);
     }
-    recent.push(now);
-    connectivityTestHits.set(user.id, recent);
-
     const body = await c.req.json().catch(() => ({}));
     const validation = ProviderConnectivityTestSchema.safeParse(body);
     if (!validation.success) {
       return c.json({ error: 'Invalid request body' }, 400);
     }
     const draft = validation.data;
-    const stored = draft.providerId
-      ? getProviders().find((provider) => provider.id === draft.providerId)
-      : undefined;
-    if (draft.providerId && !stored) {
-      return c.json({ error: '未找到指定供应商' }, 404);
+    const resolved = resolveCheckedConnection(draft);
+    if ('error' in resolved) {
+      return c.json({ error: resolved.error }, resolved.status);
     }
-    if (
-      stored &&
-      (stored.type !== 'third_party' || stored.codexOAuthCredentials)
-    ) {
-      return c.json({ error: '只有第三方兼容接口支持测试连接' }, 400);
+    const { connection, stored } = resolved;
+    const result = await testConnection(connection);
+
+    if (stored && !draftChangesConnection(draft, stored)) {
+      const foundAuthMode =
+        connection.kind === 'third_party' && !connection.explicitAuthMode
+          ? result.authMode
+          : undefined;
+      const recorded = recordProviderTest(
+        stored.id,
+        stored,
+        result.record,
+        foundAuthMode,
+      );
+      if (recorded) {
+        appendClaudeConfigAuditBestEffort(user.username, 'test_provider', [
+          `id:${stored.id}`,
+          `ok:${result.ok}`,
+          ...(result.code ? [`code:${result.code}`] : []),
+          ...(foundAuthMode ? [`anthropicAuthMode:${foundAuthMode}`] : []),
+        ]);
+        // A saved connection whose inferred header was refused now sends the
+        // one that worked; runners still sending the old one retire after
+        // their current query.
+        if (
+          connection.kind === 'third_party' &&
+          foundAuthMode &&
+          foundAuthMode !== connection.authMode
+        ) {
+          getWebDeps()?.queue.drainProviderRunnersForCredentialRefresh(
+            stored.id,
+          );
+        }
+      }
     }
-
-    const baseUrl =
-      draft.anthropicBaseUrl?.trim() || stored?.anthropicBaseUrl || '';
-    const token =
-      draft.anthropicAuthToken?.trim() || stored?.anthropicAuthToken || '';
-    if (!baseUrl) return c.json({ error: '请填写 API 端点' }, 400);
-    if (!token) return c.json({ error: '请填写 API 密钥' }, 400);
-    const customEnv = draft.customEnv ?? stored?.customEnv ?? {};
-    const model = draft.anthropicModel ?? stored?.anthropicModel ?? '';
-
-    const result = await testProviderConnectivity({
-      baseUrl,
-      token,
-      // A legacy provider has no mode; probe with the header its runtime
-      // infers (bare token → x-api-key, `Bearer …` → Authorization).
-      authMode:
-        draft.anthropicAuthMode ??
-        stored?.anthropicAuthMode ??
-        (stored && !/^Bearer\s/i.test(token) ? 'x-api-key' : 'bearer'),
-      model,
-      haikuModel: customEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL,
-      customHeaders: customEnv.ANTHROPIC_CUSTOM_HEADERS,
-    });
     logger.info(
       {
         providerId: draft.providerId ?? null,
+        kind: connection.kind,
+        origin: connectionOrigin(connection),
         ok: result.ok,
+        code: result.code,
         statuses: result.probes.map((probe) => probe.status),
       },
       'Provider connectivity test finished',
     );
     return c.json(result);
+  },
+);
+
+// ─── GET /claude/providers/:id/impact — 修改协议字段会停掉多少 Runner ─────
+// activeRunners：正在使用这个连接的 Runner；stoppedRunners：修改端点、密钥、
+// 默认模型等协议字段时实际会停掉的 Runner（当前实现会停掉全部工作区的 Runner，
+// 连接既未启用也没被绑定或选用时则一个都不停）。
+configRoutes.get(
+  '/claude/providers/:id/impact',
+  authMiddleware,
+  systemConfigMiddleware,
+  (c) => {
+    const { id } = c.req.param();
+    const provider = getProviderById(id);
+    if (!provider) return c.json({ error: '未找到指定供应商' }, 404);
+    const status = getWebDeps()?.queue.getStatus();
+    const live = status?.groups.filter((group) => group.active) ?? [];
+    return c.json({
+      activeRunners: live.filter((group) => group.selectedProviderId === id)
+        .length,
+      stoppedRunners: providerMayHaveRunners(provider) ? live.length : 0,
+    });
   },
 );
 
@@ -2443,7 +2984,7 @@ configRoutes.post(
             : '官方 Claude (OAuth)',
           type: 'official',
           ...secrets,
-          enabled: true,
+          enabled: newConnectionJoinsPool(),
         });
         appendClaudeConfigAuditBestEffort(user.username, 'oauth_login', [
           `providerId:${provider.id}`,
@@ -2633,7 +3174,7 @@ configRoutes.post(
             anthropicModel: defaults.anthropicModel,
             customEnv: defaults.customEnv,
             codexOAuthCredentials: codexCredentials,
-            enabled: true,
+            enabled: newConnectionJoinsPool(),
           });
           appendClaudeConfigAuditBestEffort(actor, 'codex_oauth_login', [
             `providerId:${provider.id}`,

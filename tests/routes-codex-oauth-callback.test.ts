@@ -161,7 +161,24 @@ describe('POST /api/config/codex/oauth/callback', () => {
       codexOAuthNeedsReauth: false,
       codexOAuthLastRefreshError: null,
       codexDefaultEffort: 'low',
+      // The only connection: it joins the pool.
+      enabled: true,
+      models: [],
     });
+  });
+
+  test('a new login does not join a pool that already has a member', async () => {
+    runtimeConfig.createProvider({
+      name: 'Relay',
+      type: 'third_party',
+      anthropicBaseUrl: 'https://relay.test',
+      anthropicAuthToken: 'relay-secret',
+      enabled: true,
+    });
+    const state = await startFlow();
+    const response = await callback(state, callbackUrl(state));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ enabled: false });
   });
 
   test('an error= callback is explained and the flow stays usable', async () => {

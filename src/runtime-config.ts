@@ -24,6 +24,18 @@ import { resolveCodexDefaultEffort } from './codex-gateway/model-catalog.js';
 import { getResolvedCodexCatalog } from './codex-gateway/model-catalog-sync.js';
 import { normalizeLegacyCodexModel } from './codex-gateway/convert-request.js';
 import { retiredCodexReauthReason } from './codex-gateway/oauth.js';
+import {
+  effectiveProviderModels,
+  getModelPreset,
+  isValidModelId,
+  MAX_PROVIDER_MODEL_ID_LENGTH,
+  MAX_PROVIDER_MODELS,
+  normalizeProviderModels,
+  PROVIDER_ERROR_CODES,
+  type ProviderErrorCode,
+  type ProviderModelEntry,
+  type ProviderTestRecord,
+} from './model-providers.js';
 
 const MAX_FIELD_LENGTH = 2000;
 const DEFAULT_THIRD_PARTY_PROFILE_ID = 'default';
@@ -604,6 +616,17 @@ interface StoredProviderV4 {
   customEnv?: Record<string, string>;
   /** ChatGPT/Codex 订阅：最近一次 token 刷新失败（非机密运行态，凭据写入时清除）。 */
   codexOAuthLastRefreshError?: CodexOAuthRefreshErrorState;
+  /**
+   * The models the connection offers. Absent: just `anthropicModel`. Not kept
+   * for ChatGPT subscriptions, whose live catalog is their list. Optional
+   * fields like this one are ignored by older releases, so a rollback keeps
+   * every credential; the file version stays 5.
+   */
+  models?: ProviderModelEntry[];
+  /** The vendor preset (MODEL_PRESETS id) the connection started from. */
+  presetId?: string;
+  /** The last connection test; written only by the test route. */
+  lastTest?: ProviderTestRecord;
   updatedAt: string;
 }
 
@@ -651,6 +674,10 @@ export interface UnifiedProvider {
   claudeOAuthLastRefreshError?: ClaudeOAuthRefreshError | null;
   /** 缺省视为无刷新失败；存量配置没有这个字段。 */
   codexOAuthLastRefreshError?: CodexOAuthRefreshErrorState | null;
+  /** See StoredProviderV4.models; read through effectiveProviderModels. */
+  models?: ProviderModelEntry[];
+  presetId?: string;
+  lastTest?: ProviderTestRecord | null;
   customEnv: Record<string, string>;
   updatedAt: string;
 }
@@ -703,6 +730,14 @@ export interface UnifiedProviderPublic {
    * 非 Codex provider 为 null。网关请求侧使用同一个解析函数。
    */
   codexDefaultEffort: string | null;
+  /**
+   * What the connection offers: the default model first when the list does
+   * not name it, never hidden. Empty for ChatGPT subscriptions (the Web reads
+   * their catalog) and for a pass-through relay without models.
+   */
+  models: ProviderModelEntry[];
+  presetId: string | null;
+  lastTest: ProviderTestRecord | null;
   customEnv: Record<string, string>;
   updatedAt: string;
 }
@@ -772,7 +807,7 @@ function normalizeModel(input: unknown): string {
   }
   const value = input.trim();
   if (!value) return '';
-  if (value.length > 128) {
+  if (value.length > MAX_PROVIDER_MODEL_ID_LENGTH) {
     throw new Error('Field too long: anthropicModel');
   }
   return value;
@@ -1438,7 +1473,77 @@ function toStoredProviderV4(provider: UnifiedProvider): StoredProviderV4 {
     ...(provider.codexOAuthLastRefreshError
       ? { codexOAuthLastRefreshError: provider.codexOAuthLastRefreshError }
       : {}),
+    ...connectionListFields(provider),
     updatedAt: provider.updatedAt || new Date().toISOString(),
+  };
+}
+
+/**
+ * The non-secret model fields of a provider as they are stored and read: a
+ * well-formed model list and a preset id this release knows (neither for
+ * ChatGPT subscriptions), a complete test record. Anything else is dropped, so a
+ * hand-edited or newer file never fails to load.
+ */
+function connectionListFields(provider: {
+  anthropicBaseUrl: string;
+  models?: unknown;
+  presetId?: unknown;
+  lastTest?: unknown;
+}): Pick<StoredProviderV4, 'models' | 'presetId' | 'lastTest'> {
+  const chatGpt = isCodexGatewayProvider(provider);
+  const models = chatGpt ? null : normalizeProviderModels(provider.models);
+  const presetId =
+    !chatGpt &&
+    typeof provider.presetId === 'string' &&
+    getModelPreset(provider.presetId)
+      ? provider.presetId
+      : null;
+  // Absent fields stay undefined, which JSON leaves out of the file.
+  return {
+    models: models ?? undefined,
+    presetId: presetId ?? undefined,
+    lastTest: normalizeProviderTestRecord(provider.lastTest) ?? undefined,
+  };
+}
+
+function nullableNumber(value: unknown): number | null | undefined {
+  if (value === null) return null;
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
+/** A stored test record, or null when any field is missing or malformed. */
+export function normalizeProviderTestRecord(
+  raw: unknown,
+): ProviderTestRecord | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const record = raw as Record<string, unknown>;
+  const status = nullableNumber(record.status);
+  const latencyMs = nullableNumber(record.latencyMs);
+  if (
+    typeof record.ok !== 'boolean' ||
+    typeof record.at !== 'string' ||
+    Number.isNaN(Date.parse(record.at)) ||
+    status === undefined ||
+    latencyMs === undefined ||
+    (record.model !== null && typeof record.model !== 'string')
+  ) {
+    return null;
+  }
+  // A code from a newer release reads as UNKNOWN rather than dropping the test.
+  const code: ProviderErrorCode | null = record.ok
+    ? null
+    : (PROVIDER_ERROR_CODES as readonly unknown[]).includes(record.code)
+      ? (record.code as ProviderErrorCode)
+      : 'UNKNOWN';
+  return {
+    ok: record.ok,
+    code,
+    status,
+    model: record.model as string | null,
+    latencyMs,
+    at: record.at,
   };
 }
 
@@ -1503,6 +1608,10 @@ function fromStoredProviderV4(stored: StoredProviderV4): UnifiedProvider {
     ),
     customEnv: sanitizeCustomEnvMap(stored.customEnv || {}, {
       skipReservedClaudeKeys: true,
+    }),
+    ...connectionListFields({
+      ...stored,
+      anthropicBaseUrl: stored.anthropicBaseUrl || '',
     }),
     updatedAt: stored.updatedAt || '',
   };
@@ -2033,6 +2142,91 @@ function applyClaudeAuthKind(
   }
 }
 
+/**
+ * The model list a write leaves a connection with, the default model first
+ * and visible. Without a new list, a new default model joins the current
+ * list instead of replacing the old default, so changing the default never
+ * drops a model by itself. Undefined leaves a connection without a list
+ * (`anthropicModel` alone), as connections saved before lists existed are.
+ */
+export function nextProviderModelList(
+  current: Pick<
+    UnifiedProvider,
+    'anthropicBaseUrl' | 'anthropicModel' | 'models'
+  > | null,
+  next: { anthropicModel: string; models?: readonly ProviderModelEntry[] },
+): ProviderModelEntry[] | undefined {
+  const list =
+    next.models !== undefined
+      ? next.models
+      : current && current.anthropicModel !== next.anthropicModel
+        ? effectiveProviderModels(current)
+        : current?.models;
+  if (!list) return undefined;
+  return effectiveProviderModels({
+    anthropicModel: next.anthropicModel,
+    models: list,
+  }).slice(0, MAX_PROVIDER_MODELS);
+}
+
+function normalizeDefaultModel(input: unknown): string {
+  const model = normalizeModel(input);
+  if (model && !isValidModelId(model)) {
+    throw new Error(`模型名无效：${model}`);
+  }
+  return model;
+}
+
+/** What a connection test checks: a refreshed OAuth token is the same. */
+function testedConnectionIdentity(provider: UnifiedProvider): string {
+  return JSON.stringify([
+    provider.type,
+    provider.anthropicBaseUrl,
+    provider.anthropicAuthMode ?? null,
+    provider.anthropicAuthToken,
+    provider.anthropicApiKey,
+    provider.claudeCodeOauthToken,
+    !!provider.claudeOAuthCredentials,
+    provider.codexOAuthCredentials?.accountId ?? null,
+  ]);
+}
+
+/**
+ * Keep a connection test's outcome with the connection, together with the
+ * auth header style the test found for a connection that had none. Nothing
+ * is written when the connection's endpoint or credential changed while the
+ * test ran, since the outcome describes the old one. Runtime state like a
+ * refresh error: `updatedAt` stays.
+ */
+export function recordProviderTest(
+  id: string,
+  tested: UnifiedProvider,
+  record: ProviderTestRecord,
+  authMode?: ProviderAuthMode,
+): UnifiedProvider | null {
+  const state = readStoredStateV4();
+  if (!state) return null;
+  const idx = state.providers.findIndex((provider) => provider.id === id);
+  if (idx < 0) return null;
+  const current = state.providers[idx];
+  if (testedConnectionIdentity(current) !== testedConnectionIdentity(tested)) {
+    return null;
+  }
+  state.providers[idx] = {
+    ...current,
+    lastTest: record,
+    ...(authMode && !current.anthropicAuthMode
+      ? { anthropicAuthMode: authMode }
+      : {}),
+  };
+  writeStoredStateV4(
+    state.providers,
+    state.balancing,
+    state.defaultModelConfigId,
+  );
+  return state.providers[idx];
+}
+
 export function createProvider(input: {
   name: string;
   type: 'official' | 'third_party';
@@ -2048,8 +2242,11 @@ export function createProvider(input: {
   customEnv?: Record<string, string>;
   weight?: number;
   enabled?: boolean;
+  models?: ProviderModelEntry[];
+  presetId?: string;
 }): UnifiedProvider {
   const authKind = selectedClaudeAuthKind(input.type, input);
+  const anthropicModel = normalizeDefaultModel(input.anthropicModel ?? '');
   const state: StoredStateV5 = readStoredStateV4() || {
     providers: [],
     defaultModelConfigId: null,
@@ -2076,9 +2273,7 @@ export function createProvider(input: {
     ...(input.anthropicAuthMode
       ? { anthropicAuthMode: input.anthropicAuthMode }
       : {}),
-    anthropicModel: input.anthropicModel
-      ? normalizeModel(input.anthropicModel)
-      : '',
+    anthropicModel,
     anthropicApiKey: input.anthropicApiKey
       ? normalizeSecret(input.anthropicApiKey, 'anthropicApiKey')
       : '',
@@ -2095,6 +2290,17 @@ export function createProvider(input: {
     }),
     updatedAt: now,
   };
+  Object.assign(
+    provider,
+    connectionListFields({
+      anthropicBaseUrl: provider.anthropicBaseUrl,
+      models: nextProviderModelList(null, {
+        anthropicModel,
+        models: input.models,
+      }),
+      presetId: input.presetId,
+    }),
+  );
   applyClaudeAuthKind(provider, authKind);
 
   state.providers.push(provider);
@@ -2115,6 +2321,9 @@ export function updateProvider(
     anthropicModel?: string;
     customEnv?: Record<string, string>;
     weight?: number;
+    models?: ProviderModelEntry[];
+    /** Null forgets the preset (the endpoint no longer is the vendor's). */
+    presetId?: string | null;
   },
 ): UnifiedProvider {
   const state = readStoredStateV4();
@@ -2124,6 +2333,10 @@ export function updateProvider(
   if (idx < 0) throw new Error('未找到指定供应商');
 
   const current = state.providers[idx];
+  const anthropicModel =
+    patch.anthropicModel !== undefined
+      ? normalizeDefaultModel(patch.anthropicModel)
+      : current.anthropicModel;
   const updated: UnifiedProvider = {
     ...current,
     ...(patch.name !== undefined
@@ -2135,9 +2348,7 @@ export function updateProvider(
     ...(patch.anthropicAuthMode !== undefined
       ? { anthropicAuthMode: patch.anthropicAuthMode }
       : {}),
-    ...(patch.anthropicModel !== undefined
-      ? { anthropicModel: normalizeModel(patch.anthropicModel) }
-      : {}),
+    anthropicModel,
     ...(patch.customEnv !== undefined
       ? {
           customEnv: sanitizeCustomEnvMap(patch.customEnv, {
@@ -2150,6 +2361,24 @@ export function updateProvider(
       : {}),
     updatedAt: new Date().toISOString(),
   };
+  Object.assign(
+    updated,
+    connectionListFields({
+      anthropicBaseUrl: updated.anthropicBaseUrl,
+      models: nextProviderModelList(current, {
+        anthropicModel,
+        models: patch.models,
+      }),
+      presetId:
+        patch.presetId === undefined ? current.presetId : patch.presetId,
+      // A test describes the endpoint and header it ran against.
+      lastTest:
+        updated.anthropicBaseUrl === current.anthropicBaseUrl &&
+        updated.anthropicAuthMode === current.anthropicAuthMode
+          ? current.lastTest
+          : null,
+    }),
+  );
 
   state.providers[idx] = updated;
   writeStoredStateV4(
@@ -2242,6 +2471,16 @@ export function updateProviderSecrets(
     updated.claudeOAuthAccount = secrets.claudeOAuthAccount ?? null;
     updated.claudeOAuthLastRefreshAt = null;
     updated.claudeOAuthLastRefreshError = null;
+  }
+  // The last test vouched for the old credential.
+  if (
+    claudeGrantChanged ||
+    current.anthropicAuthToken !== updated.anthropicAuthToken ||
+    current.anthropicApiKey !== updated.anthropicApiKey ||
+    !!secrets.codexOAuthCredentials ||
+    !!secrets.clearCodexOAuthCredentials
+  ) {
+    delete updated.lastTest;
   }
 
   state.providers[idx] = updated;
@@ -2660,9 +2899,39 @@ export function toPublicProvider(
     codexDefaultEffort: isCodexGatewayProvider(provider)
       ? resolveCodexProviderDefaultEffort(provider)
       : null,
+    models: providerModels(provider),
+    presetId: provider.presetId ?? null,
+    lastTest: provider.lastTest ?? null,
     customEnv: provider.customEnv || {},
     updatedAt: provider.updatedAt,
   };
+}
+
+/**
+ * The models a connection offers a conversation or an Agent. ChatGPT
+ * subscriptions offer their live catalog instead, which callers read from
+ * the catalog.
+ */
+export function providerModels(
+  provider: Pick<
+    UnifiedProvider,
+    'anthropicBaseUrl' | 'anthropicModel' | 'models'
+  >,
+): ProviderModelEntry[] {
+  return isCodexGatewayProvider(provider)
+    ? []
+    : effectiveProviderModels(provider);
+}
+
+/** The entry for `model` in a connection's list, hidden ones included. */
+export function findProviderModel(
+  provider: Pick<
+    UnifiedProvider,
+    'anthropicBaseUrl' | 'anthropicModel' | 'models'
+  >,
+  model: string,
+): ProviderModelEntry | null {
+  return providerModels(provider).find((entry) => entry.id === model) ?? null;
 }
 
 function claudeAuthKindOf(

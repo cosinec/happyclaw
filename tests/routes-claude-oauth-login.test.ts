@@ -272,6 +272,8 @@ describe('POST /claude/oauth/callback', () => {
       ],
       claudeOAuthNeedsReLogin: false,
       claudeOAuthLastRefreshError: null,
+      // The only connection: it joins the pool.
+      enabled: true,
     });
     const provider = runtimeConfig.getProviderById(body.id)!;
     expect(provider.claudeOAuthCredentials).toMatchObject({
@@ -292,6 +294,24 @@ describe('POST /claude/oauth/callback', () => {
         })
       ).status,
     ).toBe(400);
+  });
+
+  test('a new login does not join a pool that already has a member', async () => {
+    runtimeConfig.createProvider({
+      name: 'Relay',
+      type: 'third_party',
+      anthropicBaseUrl: 'https://relay.test',
+      anthropicAuthToken: 'relay-secret',
+      enabled: true,
+    });
+    const { state } = await startFlow();
+    fullLoginFetch();
+    const response = await post('/api/config/claude/oauth/callback', {
+      state,
+      code: `the-code#${state}`,
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ enabled: false });
   });
 
   test('accepts a callback page URL without a separate state', async () => {
