@@ -953,8 +953,9 @@ describe('queue on phones', () => {
   });
 
   test('an edit of an item the dispatcher claimed moves into the composer', async () => {
-    const view = (items: QueuedFollowUp[]) => (
+    const view = (items: QueuedFollowUp[], key = 'a') => (
       <MessageInput
+        key={key}
         groupJid="web:g1"
         onSend={vi.fn()}
         isRunning
@@ -987,6 +988,14 @@ describe('queue on phones', () => {
     expect(container!.textContent).toContain(
       '这条消息已开始处理，未保存的修改已移到输入框',
     );
+
+    // It is the conversation's draft now: it survives a remount.
+    await wait(350);
+    expect(useChatStore.getState().drafts).toEqual({
+      'web:g1': '我的草稿\n\n排队 2（改过）',
+    });
+    await render(view([], 'b'));
+    expect(text()).toBe('我的草稿\n\n排队 2（改过）');
   });
 
   test('the queue sits inside the composer card, above the editor', async () => {
