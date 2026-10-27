@@ -2256,41 +2256,40 @@ function resolveCheckedConnection(
     }
     throw err;
   }
-  const apiKey = draft.anthropicApiKey?.trim() || stored?.anthropicApiKey;
-  const authToken =
-    draft.anthropicAuthToken?.trim() || stored?.anthropicAuthToken;
-  const draftCredential =
-    !!draft.anthropicApiKey?.trim() ||
-    !!draft.anthropicAuthToken?.trim() ||
-    !!draft.claudeCredentialInput;
-  const oauth =
-    pasted.claudeOAuthCredentials ??
-    (draftCredential ? null : stored?.claudeOAuthCredentials);
-  const setupToken =
-    pasted.claudeCodeOauthToken ??
-    (draftCredential ? undefined : stored?.claudeCodeOauthToken);
+  // A credential in the request replaces the saved one as a whole.
+  const draftCredential: Partial<
+    Pick<
+      UnifiedProvider,
+      | 'anthropicApiKey'
+      | 'anthropicAuthToken'
+      | 'claudeOAuthCredentials'
+      | 'claudeCodeOauthToken'
+    >
+  > = {
+    anthropicApiKey: draft.anthropicApiKey?.trim(),
+    anthropicAuthToken: draft.anthropicAuthToken?.trim(),
+    ...pasted,
+  };
+  const fromDraft = Object.values(draftCredential).some(Boolean);
+  const credential = fromDraft ? draftCredential : (stored ?? draftCredential);
+  const { claudeOAuthCredentials: oauth, claudeCodeOauthToken: setupToken } =
+    credential;
+  const apiKey = credential.anthropicApiKey || credential.anthropicAuthToken;
   let connection: CheckedConnection | null = null;
-  if (oauth) {
+  if (oauth || setupToken) {
     connection = {
       kind: 'account',
-      providerId: pasted.claudeOAuthCredentials ? null : stored!.id,
-      oauth,
-      token: oauth.accessToken,
+      providerId: fromDraft || !oauth ? null : stored!.id,
+      oauth: oauth ?? null,
+      token: oauth?.accessToken ?? setupToken!,
     };
-  } else if (setupToken) {
-    connection = {
-      kind: 'account',
-      providerId: null,
-      oauth: null,
-      token: setupToken,
-    };
-  } else if (apiKey || authToken) {
+  } else if (apiKey) {
     connection = {
       kind: 'api_key',
-      credential: (apiKey || authToken)!,
+      credential: apiKey,
       // Claude Code sends ANTHROPIC_API_KEY as x-api-key and an auth token
       // as Authorization, unless the connection chose otherwise.
-      authMode: apiKey
+      authMode: credential.anthropicApiKey
         ? 'x-api-key'
         : (draft.anthropicAuthMode ?? stored?.anthropicAuthMode ?? 'bearer'),
       model: model ?? '',

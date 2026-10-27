@@ -816,6 +816,27 @@ describe('POST /providers/test', () => {
     expect(JSON.stringify(body)).not.toContain('abcdefghijklmnop');
   });
 
+  test('a credential in the request replaces the saved one as a whole', async () => {
+    anthropic.mockReturnValue({ status: 200, body: { data: [] } });
+    const provider = runtimeConfig.createProvider({
+      name: 'Claude',
+      type: 'official',
+      anthropicApiKey: 'sk-ant-api03-saved-key-123456',
+    });
+    await request('POST', '/providers/test', {
+      providerId: provider.id,
+      anthropicAuthToken: 'sk-ant-api03-other-token-654321',
+    });
+    expect(anthropic.mock.calls[0][1].headers).toMatchObject({
+      authorization: 'Bearer sk-ant-api03-other-token-654321',
+    });
+    expect(anthropic.mock.calls[0][1].headers).not.toHaveProperty('x-api-key');
+    // The saved connection was not what ran.
+    expect(
+      runtimeConfig.getProviderById(provider.id)!.lastTest,
+    ).toBeUndefined();
+  });
+
   test('a pasted setup-token is checked against the account, not billed', async () => {
     anthropic.mockReturnValue({
       status: 403,
