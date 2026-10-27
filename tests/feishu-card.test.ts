@@ -20,7 +20,6 @@ import {
   buildProgressListText,
   buildToolsTimelineText,
   buildThinkingBlockquote,
-  buildAskQuestionText,
   collectAskQuestions,
   buildTimelineText,
   parseToolParam,
@@ -699,7 +698,6 @@ describe('buildStreamingAgentCard', () => {
     expect(ids.has(CARD_ELEMENT_IDS.DETAILS_PANEL)).toBe(false);
     for (const required of [
       CARD_ELEMENT_IDS.STATUS_BANNER,
-      CARD_ELEMENT_IDS.ASK_CONTENT,
       CARD_ELEMENT_IDS.MAIN_CONTENT,
       CARD_ELEMENT_IDS.INTERRUPT_BTN,
       CARD_ELEMENT_IDS.FOOTER_NOTE,
@@ -983,32 +981,6 @@ describe('collectAskQuestions', () => {
   test('undefined/empty → empty array', () => {
     expect(collectAskQuestions(undefined)).toEqual([]);
     expect(collectAskQuestions({})).toEqual([]);
-  });
-});
-
-describe('buildAskQuestionText', () => {
-  test('renders question + option text_tags', () => {
-    const text = buildAskQuestionText([
-      {
-        question: 'Pick one',
-        options: [{ label: 'Alpha' }, { value: 'beta' }],
-      },
-    ]);
-    expect(text).toContain('**Pick one**');
-    expect(text).toContain('<text_tag');
-    expect(text).toContain('Alpha');
-    expect(text).toContain('beta');
-    expect(text).toContain('请在智能体终端回复');
-  });
-
-  test('empty options → just the bold question', () => {
-    const text = buildAskQuestionText([{ question: 'Yes?' }]);
-    expect(text).toContain('**Yes?**');
-    expect(text).not.toContain('text_tag');
-  });
-
-  test('no questions → empty string', () => {
-    expect(buildAskQuestionText([])).toBe('');
   });
 });
 
