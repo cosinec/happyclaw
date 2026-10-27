@@ -1,0 +1,45 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { describe, expect, test } from 'vitest';
+
+const root = process.cwd();
+
+function read(relativePath: string): string {
+  return fs.readFileSync(path.join(root, relativePath), 'utf8');
+}
+
+/**
+ * An Agent's model travels with its model configuration: into every runner
+ * launch, and into every prediction of a session reset, so the history the
+ * new session needs is injected beforehand.
+ */
+describe('Agent model runtime contracts', () => {
+  test('conversations and isolated scheduled tasks hand the Agent model to the runner', () => {
+    expect(read('src/index.ts')).toMatch(
+      /function toContainerAgentProfile[\s\S]*?modelConfigId: profile\.model_config_id,\s*model: profile\.model,/,
+    );
+    expect(read('src/task-scheduler.ts')).toMatch(
+      /function toRunnerAgentProfile[\s\S]*?modelConfigId: profile\.model_config_id,\s*model: profile\.model,/,
+    );
+  });
+
+  test('host and container starts select the provider with the Agent model', () => {
+    const runner = read('src/container-runner.ts');
+    expect(
+      runner.match(
+        /trySelectPoolProvider\(\s*group\.folder,\s*sessionAgentId,\s*input\.agentProfile\?\.modelConfigId,\s*transientRetryProfileForInput\(input\.turnId\),\s*input\.agentProfile\?\.model,\s*\)/g,
+      ),
+    ).toHaveLength(2);
+  });
+
+  test('every session reset prediction knows the Agent model', () => {
+    const main = read('src/index.ts');
+    const calls = main.match(/willClearSessionOnProviderSwitch\(/g) ?? [];
+    expect(calls.length).toBeGreaterThan(0);
+    expect(
+      main.match(
+        /willClearSessionOnProviderSwitch\(\s*effectiveGroup\.folder,\s*(?:undefined|agentId),\s*agentProfile\?\.model_config_id,\s*agentProfile\?\.model,\s*\)/g,
+      ),
+    ).toHaveLength(calls.length);
+  });
+});

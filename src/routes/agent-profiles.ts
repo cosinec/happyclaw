@@ -72,6 +72,7 @@ import {
   hashRuntimePolicy,
 } from '../run-context-snapshot.js';
 import { getProviders, getUsableDefaultProvider } from '../runtime-config.js';
+import { listConnectionModels } from '../session-model-overrides.js';
 
 const agentProfileRoutes = new Hono<{ Variables: Variables }>();
 const AVATARS_DIR = path.join(DATA_DIR, 'avatars');
@@ -128,12 +129,43 @@ agentProfileRoutes.get('/', authMiddleware, (c) => {
       enabled: provider.enabled,
       anthropic_model: provider.anthropicModel,
       is_default: provider.id === defaultModelConfigId,
+      // What an Agent may bind within the configuration, hidden ones too.
+      models: listConnectionModels(provider),
     })),
   });
 });
 
 function modelConfigExists(modelConfigId: string): boolean {
   return getProviders().some((provider) => provider.id === modelConfigId);
+}
+
+/**
+ * Why `model` cannot be an Agent's model within `modelConfigId`, or null when
+ * it can. A model needs a configuration that offers it; a hidden one counts,
+ * since an Agent names it explicitly.
+ */
+function agentModelRejection(
+  modelConfigId: string | null | undefined,
+  model: string,
+): { error: string; code: 'MODEL_NOT_IN_CONNECTION' } | null {
+  const provider = modelConfigId
+    ? getProviders().find((item) => item.id === modelConfigId)
+    : undefined;
+  if (!provider) {
+    return {
+      error: modelConfigId
+        ? '所选模型配置不存在'
+        : '选择模型时需要同时指定模型配置',
+      code: 'MODEL_NOT_IN_CONNECTION',
+    };
+  }
+  if (listConnectionModels(provider).some((entry) => entry.id === model)) {
+    return null;
+  }
+  return {
+    error: `模型 ${model} 不在所选模型配置的模型列表中`,
+    code: 'MODEL_NOT_IN_CONNECTION',
+  };
 }
 
 agentProfileRoutes.post('/', authMiddleware, async (c) => {
@@ -154,6 +186,13 @@ agentProfileRoutes.post('/', authMiddleware, async (c) => {
     !modelConfigExists(parsed.data.model_config_id)
   ) {
     return c.json({ error: '所选模型配置不存在' }, 400);
+  }
+  if (parsed.data.model) {
+    const rejection = agentModelRejection(
+      parsed.data.model_config_id,
+      parsed.data.model,
+    );
+    if (rejection) return c.json(rejection, 400);
   }
   const runtimePolicy = normalizeAgentProfileRuntimePolicy(
     parsed.data.runtime_policy,
@@ -204,6 +243,7 @@ agentProfileRoutes.post('/', authMiddleware, async (c) => {
         avatarEmoji: parsed.data.avatar_emoji,
         avatarColor: parsed.data.avatar_color,
         modelConfigId: parsed.data.model_config_id,
+        model: parsed.data.model,
         runtimePolicy,
       });
       return c.json({ profile }, 201);
@@ -476,6 +516,7 @@ agentProfileRoutes.patch('/:id', authMiddleware, async (c) => {
     parsed.data.avatar_emoji === undefined &&
     parsed.data.avatar_color === undefined &&
     parsed.data.model_config_id === undefined &&
+    parsed.data.model === undefined &&
     parsed.data.runtime_policy === undefined
   ) {
     return c.json({ error: 'No changes provided' }, 400);
@@ -494,6 +535,17 @@ agentProfileRoutes.patch('/:id', authMiddleware, async (c) => {
           !modelConfigExists(parsed.data.model_config_id)
         ) {
           return c.json({ error: '所选模型配置不存在' }, 400);
+        }
+        // A model is checked against the configuration it will belong to:
+        // the one this request names, else the Agent's current one.
+        if (parsed.data.model) {
+          const rejection = agentModelRejection(
+            parsed.data.model_config_id === undefined
+              ? existing.model_config_id
+              : parsed.data.model_config_id,
+            parsed.data.model,
+          );
+          if (rejection) return c.json(rejection, 400);
         }
 
         const effectiveRuntimePolicy =
@@ -566,7 +618,9 @@ agentProfileRoutes.patch('/:id', authMiddleware, async (c) => {
                 normalizeAgentProfileRuntimePolicy(existing.runtime_policy),
               )) ||
           (parsed.data.model_config_id !== undefined &&
-            parsed.data.model_config_id !== existing.model_config_id);
+            parsed.data.model_config_id !== existing.model_config_id) ||
+          (parsed.data.model !== undefined &&
+            (parsed.data.model ?? null) !== existing.model);
 
         let invalidatedRuntimeJids = 0;
         const fourPartPromptPayload = usesFourPartPromptPayload(parsed.data);
@@ -596,6 +650,7 @@ agentProfileRoutes.patch('/:id', authMiddleware, async (c) => {
             avatarEmoji: parsed.data.avatar_emoji,
             avatarColor: parsed.data.avatar_color,
             modelConfigId: parsed.data.model_config_id,
+            model: parsed.data.model,
             runtimePolicy: parsed.data.runtime_policy,
           });
         };

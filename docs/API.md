@@ -394,6 +394,18 @@ HTTP 状态为 409；请求不会停止现有 Runner，也不会修改绑定。
 `effective-capabilities` 返回 PromptPlan、Skill/MCP Manifest、上下文预算和最近一次
 脱敏运行快照，用于对比“配置预期”与“SDK 实际加载”。
 
+`GET /api/agent-profiles` 的每个 profile 带 `model_config_id` 与 `model`（该配置内
+的模型，`null` 表示配置的默认模型）；`model_configs[]` 的每项带 `models[]`（`id`、
+`hidden`），即可以绑定的模型，隐藏模型也在其中，ChatGPT 订阅配置为账号目录中的模型
+（均不隐藏）。创建与 PATCH 接受 `model`（最长 200 个字符，`null` 清除）：它需要一个
+模型配置（请求中的 `model_config_id`，PATCH 时也可以是已有的配置），并且必须在该
+配置的列表（ChatGPT 为目录）中，否则返回 400 与 `code: MODEL_NOT_IN_CONNECTION`。
+更换或清除 `model_config_id` 会清除 `model`，除非同一请求指定了新模型。改模型与改
+配置一样提升 profile 版本并停止相关工作区的 Runner，下一条消息在新的底层会话上开始
+并带上最近的对话记录。运行时，只有智能体的绑定决定了所用配置时才使用它的模型；会话
+自己选择了配置时（即使是同一配置且未选模型）运行会话的选择。配置不再提供该模型时，
+按配置默认模型运行并记录告警。
+
 `POST /api/agent-profiles` 只创建隔离的 AgentProfile。它不会隐式创建 Workspace、
 Session 或 Memory，也不会绑定/复制 Home Workspace。用户必须在创建 Workspace 时
 显式选择它，或通过上面的非 Home Workspace 迁移接口建立归属。内置 HappyClaw 的

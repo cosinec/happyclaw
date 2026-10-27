@@ -308,6 +308,18 @@ export const SessionModelSelectionSchema = z.object({
   effort: z.string().trim().min(1).max(32).nullable().optional(),
 });
 
+/**
+ * An Agent's model within its configuration; null runs the configuration's
+ * default. Whether the configuration offers it is checked by the route.
+ */
+const AgentProfileModelSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(MAX_PROVIDER_MODEL_ID_LENGTH)
+  .nullable()
+  .optional();
+
 const AgentProfileRuntimePolicyModeSchema = z.enum([
   'inherit',
   'custom',
@@ -410,6 +422,7 @@ export const AgentProfileCreateSchema = z
       .nullable()
       .optional(),
     model_config_id: z.string().trim().min(1).max(128).nullable().optional(),
+    model: AgentProfileModelSchema,
     runtime_policy: AgentProfileRuntimePolicySchema.optional(),
   })
   .superRefine(validatePromptModeCompatibility);
@@ -432,6 +445,7 @@ export const AgentProfilePatchSchema = z
       .nullable()
       .optional(),
     model_config_id: z.string().trim().min(1).max(128).nullable().optional(),
+    model: AgentProfileModelSchema,
     runtime_policy: AgentProfileRuntimePolicySchema.optional(),
   })
   .superRefine(validatePromptModeCompatibility);

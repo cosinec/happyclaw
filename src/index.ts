@@ -2511,6 +2511,7 @@ function toContainerAgentProfile(
     identityPrompt: buildAgentProfilePrompt(profile),
     includeClaudePreset: profile.prompt_mode === 'append',
     modelConfigId: profile.model_config_id,
+    model: profile.model,
     runtimePolicy: profile.runtime_policy,
   };
 }
@@ -7357,6 +7358,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       effectiveGroup.folder,
       undefined,
       agentProfile?.model_config_id,
+      agentProfile?.model,
     )
   ) {
     // Proactive provider switch (sticky binding unhealthy/disabled) will clear
@@ -16852,6 +16854,7 @@ async function processAgentConversation(
       effectiveGroup.folder,
       agentId,
       agentProfile?.model_config_id,
+      agentProfile?.model,
     );
   let historyContext: ReturnType<typeof buildRecentConversationHistoryContext> =
     null;
@@ -18172,6 +18175,7 @@ async function processAgentConversation(
         effectiveGroup.folder,
         agentId,
         agentProfile?.model_config_id,
+        agentProfile?.model,
       )
     ) {
       try {
