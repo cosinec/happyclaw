@@ -6,7 +6,7 @@
  * HappyClaw adds the queue glyph and a busy spinner to the same stacked,
  * cross-fading icon layers, painted with HappyClaw tokens.
  *
- * Send / Stop button: one round 32px target whose glyph cross-fades in place
+ * Send / Stop button: one round 30px target whose glyph cross-fades in place
  * (send arrow, queue, stop square, spinner) instead of swapping elements.
  */
 import { forwardRef, type ReactNode } from 'react';
@@ -46,7 +46,7 @@ export const SendButton = forwardRef<HTMLButtonElement, SendButtonProps>(
         onClick={onClick}
         aria-label={ariaLabel}
         className={cn(
-          'relative flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-full',
+          'relative flex size-[30px] shrink-0 cursor-pointer items-center justify-center rounded-full',
           'transition-[color,background-color,transform] duration-150 motion-reduce:transition-none',
           'focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-surface-raised focus-visible:outline-none',
           'pointer-coarse:size-10',

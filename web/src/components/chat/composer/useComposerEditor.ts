@@ -8,7 +8,11 @@ import HardBreak from '@tiptap/extension-hard-break';
 import { History } from '@tiptap/extension-history';
 import { Placeholder } from '@tiptap/extension-placeholder';
 import { Fragment, Slice, type Node as PMNode } from '@tiptap/pm/model';
-import { TextSelection, type EditorState } from '@tiptap/pm/state';
+import {
+  NodeSelection,
+  TextSelection,
+  type EditorState,
+} from '@tiptap/pm/state';
 import type { EditorView } from '@tiptap/pm/view';
 
 import { CjkPunctDecoration } from './cindy/CjkPunctDecoration';
@@ -42,6 +46,8 @@ import {
 import {
   PastedTextChipNode,
   pastedTextChipLabel,
+  replacePastedTextChipWithPlainText,
+  type PastedTextChipAttrs,
 } from './cindy/PastedTextChipNode';
 import { SlashCommandDecoration } from './cindy/SlashCommandDecoration';
 import { WindowsSelectionReplacement } from './cindy/WindowsSelectionReplacement';
@@ -175,15 +181,33 @@ export function useComposerEditor({
         ...popupAriaRef.current,
         'data-composer-editor': '',
         class:
-          'max-h-36 min-h-6 w-full overflow-y-auto text-base leading-6 break-words whitespace-pre-wrap text-foreground outline-none lg:text-body-lg',
+          // cindy: 15px text on a 22px line (16px on phones, which zoom
+          // into smaller inputs), growing up to about eight lines.
+          'max-h-[min(186px,40dvh)] min-h-[22px] w-full overflow-y-auto text-base leading-[22px] break-words whitespace-pre-wrap text-foreground outline-none lg:text-body-lg',
       }),
       clipboardTextSerializer: (slice) =>
         serializeEditorSlice(editorRef.current, slice),
-      handleKeyDown: (view, event) =>
+      handleKeyDown: (view, event) => {
         // An IME's Enter neither sends nor breaks the line.
-        isImeKey(view, event)
-          ? event.key === 'Enter'
-          : handlersRef.current.onKeyDown(view, event),
+        if (isImeKey(view, event)) return event.key === 'Enter';
+        const { selection } = view.state;
+        if (
+          event.key === 'Enter' &&
+          !event.shiftKey &&
+          !event.altKey &&
+          !event.metaKey &&
+          !event.ctrlKey &&
+          selection instanceof NodeSelection &&
+          selection.node.type.name === 'pastedTextChip'
+        ) {
+          return expandPastedText(selection.from, selection.node);
+        }
+        return handlersRef.current.onKeyDown(view, event);
+      },
+      handleClickOn: (_view, _pos, node, nodePos, _event, direct) =>
+        direct &&
+        node.type.name === 'pastedTextChip' &&
+        expandPastedText(nodePos, node),
       handlePaste: (view, event) => handlePaste(view, event),
       handleDOMEvents: {
         keydown: (view, event) => {
@@ -289,6 +313,14 @@ export function useComposerEditor({
     event.preventDefault();
     insertText(view, text);
     return true;
+  }
+
+  /** Turn a folded long paste back into the text it holds, in place. */
+  function expandPastedText(pos: number, node: PMNode): boolean {
+    const current = editorRef.current;
+    if (!current) return false;
+    const { text } = node.attrs as PastedTextChipAttrs;
+    return replacePastedTextChipWithPlainText(current, pos, text, text);
   }
 
   /** Clipboard text, unless it alone is more than a message may carry. */

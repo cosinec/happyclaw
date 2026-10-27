@@ -22,6 +22,7 @@ import { successTap } from '../../hooks/useHaptic';
 import { useShellStore } from '../../stores/shell';
 import { useAuthStore } from '../../stores/auth';
 import { cn } from '@/lib/utils';
+import { EASE_SNAPPY } from '@/lib/motion';
 import { ImageLightbox } from './ImageLightbox';
 import {
   useChatStore,
@@ -63,6 +64,7 @@ import { plainTextToComposerDocument } from './composer/cindy/composerListDocume
 import { restoreComposerDocument } from './composer/cindy/restoreComposerDocument';
 import {
   appendComposerText,
+  caretOnEdgeLine,
   composerDocFor,
 } from './composer/composerDocument';
 import { AttachmentTray } from './composer/AttachmentTray';
@@ -125,6 +127,12 @@ interface MessageInputProps {
     content?: string,
   ) => Promise<boolean> | boolean;
   ref?: Ref<MessageInputHandle>;
+  /**
+   * `docked` at the bottom of a conversation (default), or `centered` in an
+   * empty one: a taller card without the docked bar's backdrop. Switching to
+   * `docked` slides the card down to its new place.
+   */
+  layout?: 'docked' | 'centered';
 }
 
 // ChatView remounts the composer per conversation. Focus and starter-prompt
@@ -136,6 +144,8 @@ const FOCUS_HANDOFF_MS = 1000;
 // A visual viewport at least this much shorter than the layout viewport means
 // a software keyboard is up (a hardware keyboard's shortcut bar is smaller).
 const SOFT_KEYBOARD_MIN_PX = 150;
+// The docking slide covers half the window; a little longer than a fade.
+const DOCK_SLIDE_MS = 280;
 let focusHandoffAt = Number.NEGATIVE_INFINITY;
 let handledFocusRequest = { nonce: 0, at: Number.NEGATIVE_INFINITY };
 let handledDraftRequestNonce = 0;
@@ -174,6 +184,7 @@ export const MessageInput = memo(function MessageInput({
   queuedFollowUps = [],
   onFollowUpAction,
   ref,
+  layout = 'docked',
 }: MessageInputProps) {
   const draftTarget = draftKey ?? groupJid;
   const userId = useAuthStore((s) => s.user?.id);
@@ -232,6 +243,9 @@ export const MessageInput = memo(function MessageInput({
     doc: PMNode;
     draftBefore: JSONContent;
   } | null>(null);
+  // The conversation's draft as of now. A recalled message is not one until
+  // it is edited, and recall only starts from an empty composer.
+  const draftText = () => (recallRef.current ? '' : latestTextRef.current);
 
   const paletteListId = useId();
 
@@ -323,7 +337,7 @@ export const MessageInput = memo(function MessageInput({
       const key = draftTargetRef.current;
       draftTimerRef.current = setTimeout(() => {
         draftTimerRef.current = undefined;
-        persistDraft(key, latestTextRef.current, editor);
+        persistDraft(key, draftText(), editor);
       }, 300);
     },
     [persistDraft],
@@ -408,7 +422,7 @@ export const MessageInput = memo(function MessageInput({
       clearTimeout(draftTimerRef.current);
       draftTimerRef.current = undefined;
     }
-    persistDraft(previous, latestTextRef.current, editor);
+    persistDraft(previous, draftText(), editor);
     const stored = draftTarget
       ? useChatStore.getState().drafts[draftTarget]
       : undefined;
@@ -441,7 +455,7 @@ export const MessageInput = memo(function MessageInput({
       if (draftTimerRef.current) {
         clearTimeout(draftTimerRef.current);
         draftTimerRef.current = undefined;
-        persistDraft(draftTargetRef.current, latestTextRef.current, editor);
+        persistDraft(draftTargetRef.current, draftText(), editor);
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -500,10 +514,17 @@ export const MessageInput = memo(function MessageInput({
     );
   }, [palette.open, paletteActive, paletteListId, setPopupAria]);
 
-  /** ↑ (older) / ↓ (newer) through this conversation's sent messages. */
+  /**
+   * ↑ (older) / ↓ (newer) through this conversation's sent messages. While a
+   * recalled message shows, the arrows move the caret inside it and only
+   * step from its first line (↑) or last line (↓), as in a terminal.
+   */
   const recallHistory = (view: EditorView, step: 1 | -1): boolean => {
     const recall = recallRef.current;
     if (!recall && !composerDocIsEmpty(view.state.doc)) return false;
+    if (recall && !caretOnEdgeLine(view, step === 1 ? 'up' : 'down')) {
+      return false;
+    }
     const key = draftTargetRef.current;
     if (!key) return false;
     const history = sentMessageHistory(
@@ -772,6 +793,38 @@ export const MessageInput = memo(function MessageInput({
     attachments.acceptDrop,
   ]);
 
+  // Docking after the first message slides the card from where it sat in the
+  // empty conversation (a one-shot transform; none when less motion is asked
+  // for). The start is read in the render that docks it, while the DOM still
+  // shows the centred layout: the card also moves without committing (the
+  // editor grows, the page scrolls), so an earlier reading can be stale.
+  const cardRef = useRef<HTMLDivElement>(null);
+  const committedLayoutRef = useRef(layout);
+  const dockFromRef = useRef<number | null>(null);
+  if (layout === 'docked' && committedLayoutRef.current === 'centered') {
+    dockFromRef.current = cardRef.current?.getBoundingClientRect().top ?? null;
+  }
+  useLayoutEffect(() => {
+    committedLayoutRef.current = layout;
+    const from = dockFromRef.current;
+    dockFromRef.current = null;
+    const card = cardRef.current;
+    if (from === null || !card) return;
+    const offset = from - card.getBoundingClientRect().top;
+    if (
+      Math.abs(offset) > 1 &&
+      !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    ) {
+      card.animate?.(
+        [{ transform: `translateY(${offset}px)` }, { transform: 'none' }],
+        {
+          duration: DOCK_SLIDE_MS,
+          easing: `cubic-bezier(${EASE_SNAPPY.join(', ')})`,
+        },
+      );
+    }
+  }, [layout]);
+
   // Blank parts of the card (around the text, between toolbar groups) enter
   // the editor instead of dropping focus; the caret stays where it was.
   const focusFromBlankArea = (event: React.MouseEvent<HTMLDivElement>) => {
@@ -813,19 +866,32 @@ export const MessageInput = memo(function MessageInput({
   // composer leaves too little room for the conversation.
   const queueCollapsible = isTouchInput || isPhoneWidth;
 
+  const centered = layout === 'centered';
+
   return (
     <div
       data-hc-composer
-      className="relative bg-background pt-1 pb-3 max-lg:border-t max-lg:border-surface-border max-lg:bg-background/80 max-lg:backdrop-blur-xl"
-      style={{
-        paddingBottom: `max(0.75rem, env(safe-area-inset-bottom, 0px), var(--keyboard-height, 0px))`,
-      }}
+      data-composer-layout={layout}
+      className={cn(
+        'relative w-full',
+        !centered &&
+          'bg-background pt-1 pb-3 max-lg:border-t max-lg:border-surface-border max-lg:bg-background/80 max-lg:backdrop-blur-xl',
+      )}
+      style={
+        centered
+          ? undefined
+          : {
+              paddingBottom: `max(0.75rem, env(safe-area-inset-bottom, 0px), var(--keyboard-height, 0px))`,
+            }
+      }
     >
       {/* Soft fade so scrolled messages don't end at a hard edge. */}
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-x-0 -top-6 h-6 bg-linear-to-b from-transparent to-background max-lg:hidden"
-      />
+      {!centered && (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-x-0 -top-6 h-6 bg-linear-to-b from-transparent to-background max-lg:hidden"
+        />
+      )}
       {/* Same column as the message list (max-w-3xl + px-6) so the
           composer edges line up with message content. */}
       <div
@@ -847,6 +913,7 @@ export const MessageInput = memo(function MessageInput({
           {/* One card: the queue on top, then the editor. Focus only
               changes the border color. */}
           <div
+            ref={cardRef}
             data-composer-card
             className="relative overflow-hidden rounded-[12px] border border-surface-border bg-surface-raised transition-colors focus-within:border-foreground/25 motion-reduce:transition-none"
           >
@@ -876,28 +943,29 @@ export const MessageInput = memo(function MessageInput({
               </div>
             )}
 
+            {/* cindy's card: the text on top, the toolbar on the bottom
+                edge, and blank space between that still focuses the text. */}
             <div
               className={cn(
-                'flex flex-col px-3 pb-2',
-                isCompact ? 'pt-2' : 'pt-3',
+                'flex flex-col justify-between px-[11px] pt-[11px] pb-[6px]',
+                centered ? 'min-h-[140px]' : 'min-h-[86px]',
               )}
               onMouseDown={focusFromBlankArea}
             >
-              <AttachmentTray
-                images={pendingImages}
-                files={pendingFiles}
-                onPreview={attachments.setPreviewIndex}
-                onRemoveImage={attachments.removeImage}
-                onRemoveFile={attachments.removeFile}
-                onClear={attachments.clearAll}
-              />
-              <EditorContent
-                editor={editor}
-                className={cn(
-                  'px-1',
-                  disabled && 'cursor-not-allowed opacity-50',
-                )}
-              />
+              <div>
+                <AttachmentTray
+                  images={pendingImages}
+                  files={pendingFiles}
+                  onPreview={attachments.setPreviewIndex}
+                  onRemoveImage={attachments.removeImage}
+                  onRemoveFile={attachments.removeFile}
+                  onClear={attachments.clearAll}
+                />
+                <EditorContent
+                  editor={editor}
+                  className={cn(disabled && 'cursor-not-allowed opacity-50')}
+                />
+              </div>
               <ComposerToolbar
                 canAttach={!!groupJid}
                 uploading={attachments.uploading}

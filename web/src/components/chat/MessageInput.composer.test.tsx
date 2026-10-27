@@ -410,6 +410,79 @@ describe('conversation isolation', () => {
   });
 });
 
+describe('layout', () => {
+  const view = (layout: 'docked' | 'centered', placeholder = 'a') => (
+    <MessageInput
+      groupJid="web:g1"
+      onSend={vi.fn()}
+      layout={layout}
+      placeholder={placeholder}
+    />
+  );
+
+  /**
+   * Renders centred at 300, then docks to 700: the card sits where its
+   * committed layout puts it. `moved` shifts it while centred without a
+   * commit, as a growing editor or a scrolled page does.
+   */
+  async function dock(moved = 0) {
+    await render(view('centered'));
+    const root = container!.querySelector('[data-hc-composer]') as HTMLElement;
+    const card = container!.querySelector(
+      '[data-composer-card]',
+    ) as HTMLElement;
+    const animate = vi.fn();
+    let centredTop = 300;
+    card.getBoundingClientRect = () =>
+      ({
+        top: root.dataset.composerLayout === 'docked' ? 700 : centredTop,
+      }) as DOMRect;
+    card.animate = animate;
+    await render(view('centered', 'b'));
+    centredTop += moved;
+    await render(view('docked', 'b'));
+    return { card, animate };
+  }
+
+  test('a centred card is taller; docking slides it down to its place', async () => {
+    await render(view('centered'));
+    const root = container!.querySelector('[data-hc-composer]')!;
+    expect(root.getAttribute('data-composer-layout')).toBe('centered');
+    expect(root.querySelector('.min-h-\\[140px\\]')).not.toBeNull();
+
+    const { card, animate } = await dock();
+    expect(animate).toHaveBeenCalledWith(
+      [{ transform: 'translateY(-400px)' }, { transform: 'none' }],
+      expect.any(Object),
+    );
+    expect(card.querySelector('.min-h-\\[86px\\]')).not.toBeNull();
+    // Later commits leave the docked card alone.
+    await render(view('docked', 'c'));
+    expect(animate).toHaveBeenCalledTimes(1);
+  });
+
+  test('the slide starts where the card is when it docks', async () => {
+    const { animate } = await dock(-40);
+    expect(animate).toHaveBeenCalledWith(
+      [{ transform: 'translateY(-440px)' }, { transform: 'none' }],
+      expect.any(Object),
+    );
+  });
+
+  test('with less motion the card docks without sliding', async () => {
+    const matchMedia = window.matchMedia;
+    window.matchMedia = ((query: string) => ({
+      matches: query.includes('reduce'),
+    })) as unknown as typeof window.matchMedia;
+    try {
+      const { animate } = await dock();
+      expect(animate).not.toHaveBeenCalled();
+    } finally {
+      window.matchMedia = matchMedia;
+    }
+  });
+});
+
 describe('drafts across reloads', () => {
   const persisted = () =>
     [...storage.keys()].filter((key) =>
@@ -652,6 +725,51 @@ describe('long pastes', () => {
   });
 });
 
+describe('expanding a long paste', () => {
+  const log = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`).join('\n');
+
+  test('clicking the chip turns it back into editable text in place', async () => {
+    await render(<MessageInput groupJid="web:g1" onSend={vi.fn()} />);
+    await typeAtCaret('前文 ');
+    await paste({ text: log });
+    await typeAtCaret(' 后文');
+    // ProseMirror resolves a real click from its coordinates (covered by the
+    // e2e); here the click handler gets the node directly.
+    await act(async () => {
+      const { view } = editor();
+      let chipPos = -1;
+      view.state.doc.descendants((node, pos) => {
+        if (node.type.name === 'pastedTextChip') chipPos = pos;
+      });
+      view.someProp('handleClickOn', (handle) =>
+        handle(
+          view,
+          chipPos,
+          view.state.doc.nodeAt(chipPos)!,
+          chipPos,
+          new MouseEvent('click'),
+          true,
+        ),
+      );
+    });
+    expect(editorEl().querySelector('[data-pasted-text-chip]')).toBeNull();
+    expect(text()).toBe(`前文 ${log} 后文`);
+  });
+
+  test('Enter on a selected chip expands it instead of sending', async () => {
+    const onSend = vi.fn(() => true);
+    await render(<MessageInput groupJid="web:g1" onSend={onSend} />);
+    await paste({ text: log });
+    await act(async () => {
+      editor().commands.setNodeSelection(1);
+    });
+    await keyDown('Enter');
+    expect(onSend).not.toHaveBeenCalled();
+    expect(editorEl().querySelector('[data-pasted-text-chip]')).toBeNull();
+    expect(text()).toBe(log);
+  });
+});
+
 describe('uploaded files', () => {
   test('the agent is told the workspace path the upload landed at', async () => {
     const onSend = vi.fn(() => true);
@@ -727,6 +845,61 @@ describe('recalling sent messages', () => {
     await typeAtCaret('，改一下');
     await keyDown('ArrowDown');
     expect(text()).toBe('第二条，改一下');
+  });
+
+  test('the arrows move the caret inside a recalled message, stepping only from its edge lines', async () => {
+    useChatStore.setState({
+      messages: { 'web:g1': [sent('第一条'), sent('上一行\n下一行')] },
+    });
+    await render(<MessageInput groupJid="web:g1" onSend={vi.fn()} />);
+    await keyDown('ArrowUp');
+    expect(text()).toBe('上一行\n下一行');
+    // The caret is on the last line: ↑ moves it, it does not step.
+    await keyDown('ArrowUp');
+    expect(text()).toBe('上一行\n下一行');
+    await act(async () => {
+      editor().commands.setTextSelection(1);
+    });
+    await keyDown('ArrowUp');
+    expect(text()).toBe('第一条');
+  });
+
+  test('a recalled message is not saved as a draft until it is edited', async () => {
+    await render(<MessageInput key="a" groupJid="web:g1" onSend={vi.fn()} />);
+    await keyDown('ArrowUp');
+    expect(text()).toBe('第二条');
+    await wait(350);
+    expect(useChatStore.getState().drafts).toEqual({});
+    expect([...storage.keys()]).toEqual([]);
+
+    // Leaving and coming back offers recall again, not a stale draft.
+    await render(<MessageInput key="b" groupJid="web:g1" onSend={vi.fn()} />);
+    expect(text()).toBe('');
+
+    await keyDown('ArrowUp');
+    await act(async () => {
+      editor().commands.focus('end');
+    });
+    await typeAtCaret('，改了');
+    await wait(350);
+    expect(useChatStore.getState().drafts).toEqual({
+      'web:g1': '第二条，改了',
+    });
+  });
+
+  test('a save still waiting when a recall starts does not store the recalled message', async () => {
+    await render(<MessageInput groupJid="web:g1" onSend={vi.fn()} />);
+    await typeAtCaret('草稿');
+    await wait(350);
+    expect(useChatStore.getState().drafts).toEqual({ 'web:g1': '草稿' });
+    // Clearing schedules a save; ↑ recalls before it runs.
+    await act(async () => {
+      editor().commands.clearContent(true);
+    });
+    await keyDown('ArrowUp');
+    expect(text()).toBe('第二条');
+    await wait(350);
+    expect(useChatStore.getState().drafts).toEqual({});
   });
 
   test('a session recalls only its own messages', async () => {

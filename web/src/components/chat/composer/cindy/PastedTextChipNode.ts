@@ -137,7 +137,7 @@ export const PastedTextChipNode = Node.create<
     const chipAttrs = mergeAttributes(HTMLAttributes, {
       'data-pasted-text-chip': '',
       'aria-label': attrs.display,
-      title: previewOf(attrs.text),
+      title: `${previewOf(attrs.text)}\n\n点击展开为可编辑的文本`,
       class: COMPOSER_CHIP_CLASS,
       draggable: 'true',
       contenteditable: 'false',

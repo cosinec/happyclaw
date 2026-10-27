@@ -12,7 +12,6 @@ import { toast } from 'sonner';
 import { Message, useChatStore } from '../../stores/chat';
 import { MessageBubble } from './MessageBubble';
 import { StreamingDisplay } from './StreamingDisplay';
-import { EmojiAvatar } from '../common/EmojiAvatar';
 import { ErrorBoundary } from '../common';
 import {
   Loader2,
@@ -20,10 +19,7 @@ import {
   ChevronDown,
   AlertTriangle,
   Copy,
-  Code2,
   Zap,
-  BookOpen,
-  Wrench,
 } from 'lucide-react';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
 import { useFollowGlide } from '../../hooks/useFollowGlide';
@@ -46,7 +42,6 @@ import {
   type ChatDateLabel,
 } from '../../lib/chat-date-label';
 import { useAuthStore } from '../../stores/auth';
-import { useShellStore } from '../../stores/shell';
 import type { InteractionMode } from '../../types';
 
 interface MessageListProps {
@@ -62,16 +57,12 @@ interface MessageListProps {
   isWaiting?: boolean;
   /** If set, this MessageList is showing a sub-agent's messages */
   agentId?: string;
-  /** Human-readable name of the active conversation for empty-state clarity */
-  contextLabel?: string;
   /** Agent Profile identity for every conversation in this workspace */
   agentName?: string;
   agentAvatarUrl?: string | null;
   agentAvatarEmoji?: string | null;
   agentAvatarColor?: string | null;
   interactionMode?: InteractionMode;
-  /** Present when the viewer can send; empty-state starters then fill the composer. */
-  onSend?: (content: string) => void;
 }
 
 type FlatItem =
@@ -140,13 +131,6 @@ async function copyErrorText(text: string) {
   }
 }
 
-const quickPrompts = [
-  { icon: Code2, title: '分析代码', desc: '帮我阅读和分析一段代码的逻辑' },
-  { icon: Zap, title: '自动化脚本', desc: '编写一个自动化处理任务的脚本' },
-  { icon: BookOpen, title: '技术概念', desc: '用简单的语言解释一个技术概念' },
-  { icon: Wrench, title: '调试问题', desc: '帮我定位和修复一个 Bug' },
-];
-
 // Memoized: ChatView re-renders for dialogs, panels and run status; the
 // transcript and composer only need to when their own props change.
 export const MessageList = memo(function MessageList({
@@ -158,16 +142,13 @@ export const MessageList = memo(function MessageList({
   groupJid,
   isWaiting,
   agentId,
-  contextLabel,
   agentName,
   agentAvatarUrl,
   agentAvatarEmoji,
   agentAvatarColor,
   interactionMode = 'assistant',
-  onSend,
 }: MessageListProps) {
   const { mode: displayMode } = useDisplayMode();
-  const requestComposerDraft = useShellStore((s) => s.requestComposerDraft);
   const thinkingCache = useChatStore((s) => s.thinkingCache ?? {});
   const thinkingDurationCache = useChatStore(
     (s) => s.thinkingDurationCache ?? {},
@@ -245,7 +226,6 @@ export const MessageList = memo(function MessageList({
   // already pinned the reader again knows that event is layout.
   const resizePinRef = useRef<{ top: number; at: number } | null>(null);
   const lastScrollTopRef = useRef(0);
-  const isEmptyRef = useRef(timelineMessages.length === 0);
   // The transcript's content; a pinned reader's streaming reply glides it up
   // under the streaming cards' sticky identity rows.
   const contentRef = useRef<HTMLDivElement>(null);
@@ -928,7 +908,6 @@ export const MessageList = memo(function MessageList({
   }, [flatMessages.length, virtualizer, timelineMessages.length]);
 
   useLayoutEffect(() => {
-    isEmptyRef.current = flatMessages.length === 0;
     syncEdges();
   }, [flatMessages.length, syncEdges]);
 
@@ -1030,7 +1009,7 @@ export const MessageList = memo(function MessageList({
   // Keep a reader who is pinned to the bottom there while rows below grow
   // after their first measurement (images, Mermaid, late code highlighting),
   // while a row shrinks under a correction, and while the viewport shrinks
-  // (keyboard, a taller composer). The empty state reads from the top.
+  // (keyboard, a taller composer).
   useEffect(() => {
     const content = contentRef.current;
     const parent = parentRef.current;
@@ -1047,7 +1026,7 @@ export const MessageList = memo(function MessageList({
       lastHeight = height;
       lastViewport = viewport;
       syncEdges();
-      if (!changed || isEmptyRef.current) return;
+      if (!changed) return;
       if (
         !scrollStateRef.current.autoScroll &&
         Date.now() > settleUntilRef.current
@@ -1387,68 +1366,6 @@ export const MessageList = memo(function MessageList({
                 );
               })}
             </div>
-
-            {/* In the scroll flow rather than an overlay, so a short viewport
-                (phone in landscape, keyboard up) can scroll to every starter.
-                The top inset subtracts the content's own pt-6. */}
-            {timelineMessages.length === 0 && !loading && (
-              <div
-                data-hc-empty-state
-                className={
-                  displayMode === 'compact'
-                    ? 'mx-auto w-full max-w-3xl pt-[clamp(3rem,calc(14vh_-_1.5rem),7.5rem)] lg:px-6'
-                    : 'pt-[clamp(3rem,calc(14vh_-_1.5rem),7.5rem)]'
-                }
-              >
-                <div className="flex items-start gap-3">
-                  <EmojiAvatar
-                    imageUrl={agentIdentity.imageUrl}
-                    emoji={agentIdentity.emoji}
-                    color={agentIdentity.color}
-                    fallbackChar={agentIdentity.fallbackChar}
-                    size="md"
-                    className="mt-0.5 !size-9 shrink-0 !text-base"
-                  />
-                  <div className="min-w-0 flex-1">
-                    <h2 className="text-title-lg text-foreground">
-                      {agentId ? '开始当前会话' : '开始主会话'}
-                    </h2>
-                    <p className="mt-1 max-w-2xl text-body text-muted-foreground">
-                      {agentId && contextLabel
-                        ? `“${contextLabel}”使用独立上下文。直接输入你的问题。`
-                        : `我是 ${agentIdentity.name}。直接输入你的问题，或从下面选择一个常用起点。`}
-                    </p>
-                  </div>
-                </div>
-
-                {onSend && (
-                  <div className="mt-6 grid gap-2.5 sm:grid-cols-2">
-                    {quickPrompts.map((prompt) => (
-                      <button
-                        key={prompt.title}
-                        onClick={() => requestComposerDraft(prompt.desc)}
-                        className="group min-h-16 cursor-pointer rounded-xl bg-surface-raised px-3.5 py-3 text-left ring-1 ring-surface-border transition-[background-color,box-shadow] hover:bg-surface-hover hover:ring-foreground/15 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none active:scale-[0.99]"
-                      >
-                        <div className="flex items-start gap-3">
-                          <prompt.icon
-                            className="mt-0.5 h-4.5 w-4.5 shrink-0 text-muted-foreground group-hover:text-foreground"
-                            strokeWidth={1.75}
-                          />
-                          <span className="min-w-0">
-                            <span className="block truncate text-body font-medium text-foreground">
-                              {prompt.title}
-                            </span>
-                            <span className="mt-0.5 block overflow-hidden text-caption text-ellipsis text-muted-foreground">
-                              {prompt.desc}
-                            </span>
-                          </span>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
 
             {/* The streaming cards: where the follow glide finds sticky rows. */}
             <div ref={streamCardsRef}>

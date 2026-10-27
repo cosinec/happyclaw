@@ -18,7 +18,13 @@ import {
   type QueuedFollowUp,
 } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
+import { useMediaQuery } from '../../hooks/useMediaQuery';
+import { isMessageVisibleInTimeline } from '../../lib/message-timeline';
 import { MessageList } from './MessageList';
+import {
+  ConversationStarters,
+  EmptyConversationHeading,
+} from './composer/EmptyConversation';
 import { MessageInput, type MessageInputHandle } from './MessageInput';
 import { ModelSelector } from './ModelSelector';
 import {
@@ -549,8 +555,8 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     ? agents.find((a) => a.id === activeAgentTab)
     : null;
   const isConversationTab = activeAgent?.kind === 'conversation';
-  const composerAgentId =
-    activeAgentTab && isConversationTab ? activeAgentTab : null;
+  const sessionTab = !!activeAgentTab && isConversationTab;
+  const composerAgentId = sessionTab ? activeAgentTab : null;
   // Memoized so the memoized composer does not re-render with a fresh element.
   const modelSelector = useMemo(
     () => (
@@ -580,16 +586,31 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   );
   const mainConversationLabel = group?.is_my_home ? '直接对话' : '当前对话';
   const currentContextName =
-    activeAgentTab && isConversationTab && activeAgent
-      ? activeAgent.name
-      : mainConversationLabel;
-  const currentContextWaiting =
-    activeAgentTab && isConversationTab ? activeAgentWaiting : isWaiting;
+    sessionTab && activeAgent ? activeAgent.name : mainConversationLabel;
+  const currentContextWaiting = sessionTab ? activeAgentWaiting : isWaiting;
+  // Loaded and nothing to show yet: the conversation opens on its empty
+  // state, with the composer centred between heading and starters on a wide
+  // screen (a phone keeps it docked above the keyboard).
+  const shownMessages = sessionTab ? activeAgentMessages : groupMessages;
+  const emptyConversation =
+    !currentContextWaiting &&
+    !!shownMessages &&
+    !shownMessages.some(isMessageVisibleInTimeline);
+  const wideEmptyState = useMediaQuery('(min-width: 640px)');
+  const composerKey = sessionTab ? followUpChatJid : groupJid;
+  const heroCentered = emptyConversation && wideEmptyState;
   const agentProfileLabel = group?.agent_profile_name
     ? getAgentProfileDisplayName(group.agent_profile_name)
     : group?.is_home
       ? 'HappyClaw'
       : '智能体';
+  // Who answers, for the transcript and the empty conversation.
+  const agentLook = {
+    agentName: agentProfileLabel,
+    agentAvatarUrl: group?.agent_profile_avatar_url,
+    agentAvatarEmoji: group?.agent_profile_avatar_emoji,
+    agentAvatarColor: group?.agent_profile_avatar_color,
+  };
   const workspaceDisplayName = group?.is_my_home
     ? agentProfileLabel
     : group?.name;
@@ -765,12 +786,6 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   });
   const sendMain = useStableCallback(handleSend);
   const sendActiveAgent = useStableCallback(handleActiveAgentSend);
-  const sendStarterMain = useStableCallback((content: string) => {
-    void handleSend(content);
-  });
-  const sendStarterActiveAgent = useStableCallback((content: string) => {
-    void handleActiveAgentSend(content);
-  });
   const stopMain = useStableCallback(() => interruptQuery(groupJid));
   const stopActiveAgent = useStableCallback(() =>
     interruptQuery(`${groupJid}#agent:${activeAgentTab}`),
@@ -1326,7 +1341,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         {/* Main conversation canvas */}
         <div className="flex-1 flex overflow-hidden min-h-0">
           {/* Messages Area */}
-          <div className="relative flex-1 flex flex-col min-w-0 overflow-x-hidden">
+          <div className="relative flex min-w-0 flex-1 flex-col overflow-x-hidden">
             {isDragOver && (
               <div
                 data-testid="chat-drop-overlay"
@@ -1338,88 +1353,109 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                 </div>
               </div>
             )}
-            {activeAgentTab && isConversationTab ? (
-              <>
-                <MessageList
-                  key={`conv-${activeAgentTab}`}
-                  messages={activeAgentMessages || EMPTY_MESSAGES}
-                  // Not loaded yet (first visit, or evicted from the message
-                  // cache): don't flash the empty-conversation starters.
-                  loading={activeAgentMessages === undefined}
-                  hasMore={activeAgentHasMore}
-                  onLoadMore={loadMoreActiveAgent}
-                  scrollTrigger={scrollTrigger}
-                  groupJid={groupJid}
-                  isWaiting={currentContextWaiting}
-                  agentId={activeAgentTab}
-                  contextLabel={currentContextName}
-                  agentName={agentProfileLabel}
-                  agentAvatarUrl={group?.agent_profile_avatar_url}
-                  agentAvatarEmoji={group?.agent_profile_avatar_emoji}
-                  agentAvatarColor={group?.agent_profile_avatar_color}
-                  interactionMode={interactionMode}
-                  onSend={sendStarterActiveAgent}
-                />
-                <MessageInput
-                  // One instance per conversation: draft and pending
-                  // attachments never carry over to another session.
-                  key={followUpChatJid}
-                  ref={composerRef}
-                  draftKey={followUpChatJid}
-                  placeholder={`向 ${agentProfileLabel} 发送消息…`}
-                  onSend={sendActiveAgent}
-                  groupJid={groupJid}
-                  contextLabel={currentContextName}
-                  isRunning={currentContextWaiting}
-                  onStop={activeAgentInterrupted ? undefined : stopActiveAgent}
-                  queuedFollowUps={queuedFollowUps}
-                  onFollowUpAction={handleFollowUpAction}
-                  onResetSession={
-                    canModifyWorkspaceConfig
-                      ? requestResetActiveAgent
-                      : undefined
-                  }
-                  modelSelector={modelSelector}
-                />
-              </>
+            {emptyConversation ? (
+              // An empty conversation opens on who answers and where to
+              // start; on a wide screen the composer sits between them.
+              <div
+                data-hc-empty-state
+                className={cn(
+                  'flex w-full flex-col px-4',
+                  heroCentered
+                    ? 'flex-[2] justify-end pt-8 pb-6'
+                    : 'min-h-0 flex-1 overflow-y-auto py-6',
+                )}
+              >
+                {/* Centred while it fits; a short screen scrolls it from
+                    the top (justify-center would cut the top off). */}
+                <div
+                  className={cn(
+                    'flex w-full flex-col items-center',
+                    !heroCentered && 'my-auto',
+                  )}
+                >
+                  <EmptyConversationHeading
+                    sessionLabel={sessionTab ? currentContextName : undefined}
+                    {...agentLook}
+                  />
+                  {!heroCentered && (
+                    <ConversationStarters className="mt-8 max-w-3xl" />
+                  )}
+                </div>
+              </div>
+            ) : sessionTab ? (
+              <MessageList
+                key={`conv-${activeAgentTab}`}
+                messages={activeAgentMessages || EMPTY_MESSAGES}
+                // Not loaded yet (first visit, or evicted from the message
+                // cache).
+                loading={activeAgentMessages === undefined}
+                hasMore={activeAgentHasMore}
+                onLoadMore={loadMoreActiveAgent}
+                scrollTrigger={scrollTrigger}
+                groupJid={groupJid}
+                isWaiting={currentContextWaiting}
+                agentId={activeAgentTab}
+                {...agentLook}
+                interactionMode={interactionMode}
+              />
             ) : (
-              <>
-                <MessageList
-                  key={`main-${groupJid}`}
-                  messages={groupMessages || EMPTY_MESSAGES}
-                  loading={loading || groupMessages === undefined}
-                  hasMore={hasMoreMessages}
-                  onLoadMore={loadMoreMain}
-                  scrollTrigger={scrollTrigger}
-                  groupJid={groupJid}
-                  isWaiting={isWaiting}
-                  agentName={agentProfileLabel}
-                  agentAvatarUrl={group?.agent_profile_avatar_url}
-                  agentAvatarEmoji={group?.agent_profile_avatar_emoji}
-                  agentAvatarColor={group?.agent_profile_avatar_color}
-                  interactionMode={interactionMode}
-                  onSend={sendStarterMain}
-                />
-                <MessageInput
-                  key={groupJid}
-                  ref={composerRef}
-                  draftKey={groupJid}
-                  placeholder={`向 ${agentProfileLabel} 发送消息…`}
-                  onSend={sendMain}
-                  groupJid={groupJid}
-                  isRunning={currentContextWaiting}
-                  onStop={mainInterrupted ? undefined : stopMain}
-                  queuedFollowUps={queuedFollowUps}
-                  onFollowUpAction={handleFollowUpAction}
-                  onResetSession={
-                    canModifyWorkspaceConfig ? requestResetMain : undefined
-                  }
-                  onToggleTerminal={
-                    canUseTerminal ? handleTerminalToggle : undefined
-                  }
-                  modelSelector={modelSelector}
-                />
-              </>
+              <MessageList
+                key={`main-${groupJid}`}
+                messages={groupMessages || EMPTY_MESSAGES}
+                loading={loading || groupMessages === undefined}
+                hasMore={hasMoreMessages}
+                onLoadMore={loadMoreMain}
+                scrollTrigger={scrollTrigger}
+                groupJid={groupJid}
+                isWaiting={isWaiting}
+                {...agentLook}
+                interactionMode={interactionMode}
+              />
+            )}
+            {/* One place in the tree for both layouts, so docking after the
+                first message keeps the composer (and what it holds). */}
+            <MessageInput
+              // One instance per conversation: draft and pending
+              // attachments never carry over to another session.
+              key={composerKey}
+              ref={composerRef}
+              layout={heroCentered ? 'centered' : 'docked'}
+              draftKey={composerKey}
+              placeholder={`向 ${agentProfileLabel} 发送消息…`}
+              onSend={sessionTab ? sendActiveAgent : sendMain}
+              groupJid={groupJid}
+              contextLabel={sessionTab ? currentContextName : undefined}
+              isRunning={currentContextWaiting}
+              onStop={
+                sessionTab
+                  ? activeAgentInterrupted
+                    ? undefined
+                    : stopActiveAgent
+                  : mainInterrupted
+                    ? undefined
+                    : stopMain
+              }
+              queuedFollowUps={queuedFollowUps}
+              onFollowUpAction={handleFollowUpAction}
+              onResetSession={
+                canModifyWorkspaceConfig
+                  ? sessionTab
+                    ? requestResetActiveAgent
+                    : requestResetMain
+                  : undefined
+              }
+              onToggleTerminal={
+                !sessionTab && canUseTerminal ? handleTerminalToggle : undefined
+              }
+              modelSelector={modelSelector}
+            />
+            {heroCentered && (
+              <div
+                data-hc-empty-state
+                className="mx-auto w-full max-w-3xl flex-[3] px-4 pt-6 pb-8 lg:px-6"
+              >
+                <ConversationStarters />
+              </div>
             )}
           </div>
         </div>

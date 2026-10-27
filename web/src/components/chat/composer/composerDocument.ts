@@ -103,6 +103,19 @@ export function appendComposerText(
 }
 
 /**
+ * Whether the caret sits on the first line (`up`) or last line (`down`) of the
+ * whole document, wrapped lines included.
+ */
+export function caretOnEdgeLine(view: EditorView, dir: 'up' | 'down'): boolean {
+  const { $head } = view.state.selection;
+  const edge =
+    dir === 'up'
+      ? Selection.atStart(view.state.doc)
+      : Selection.atEnd(view.state.doc);
+  return $head.start() === edge.$head.start() && view.endOfTextblock(dir);
+}
+
+/**
  * The open `/` or `@` run that ends at the caret. A `/` run counts only at the
  * very start of the message; `@` anywhere after whitespace.
  */
