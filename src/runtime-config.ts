@@ -2366,7 +2366,8 @@ export function updateProvider(
   patch: {
     name?: string;
     anthropicBaseUrl?: string;
-    anthropicAuthMode?: ProviderAuthMode;
+    /** Null forgets the style, so it is inferred from the token again. */
+    anthropicAuthMode?: ProviderAuthMode | null;
     anthropicModel?: string;
     customEnv?: Record<string, string>;
     weight?: number;
@@ -2395,7 +2396,7 @@ export function updateProvider(
       ? { anthropicBaseUrl: normalizeBaseUrl(patch.anthropicBaseUrl) }
       : {}),
     ...(patch.anthropicAuthMode !== undefined
-      ? { anthropicAuthMode: patch.anthropicAuthMode }
+      ? { anthropicAuthMode: patch.anthropicAuthMode ?? undefined }
       : {}),
     anthropicModel,
     ...(patch.customEnv !== undefined
