@@ -4,6 +4,7 @@ import {
   useEffect,
   useLayoutEffect,
   useCallback,
+  useId,
   useImperativeHandle,
   memo,
   type ReactNode,
@@ -58,7 +59,7 @@ import {
   isComposerDocJSON,
 } from './composer/composerDocument';
 import { AttachmentTray } from './composer/AttachmentTray';
-import { ComposerPalette } from './composer/ComposerPalette';
+import { ComposerPalette, paletteOptionId } from './composer/ComposerPalette';
 import { ComposerToolbar } from './composer/ComposerToolbar';
 import {
   draftDocFor,
@@ -222,6 +223,10 @@ export const MessageInput = memo(function MessageInput({
   const recalledDocRef = useRef<PMNode | null>(null);
   const draftBeforeRecallRef = useRef<JSONContent | null>(null);
 
+  const paletteListId = useId();
+  // Filled in once the palette state exists (it needs the editor).
+  const [popupAria, setPopupAria] = useState<Record<string, string>>({});
+
   const showSendError = useCallback((message: string, ms = 4000) => {
     setSendError(message);
     window.setTimeout(
@@ -320,6 +325,7 @@ export const MessageInput = memo(function MessageInput({
         : composerDocFromText(initial.text),
     placeholder,
     editable: !disabled,
+    popupAria,
     handlers: {
       onKeyDown: (view, event) => handleEditorKeyDown(view, event),
       onPasteImages: (files) => void attachments.addPastedImages(files),
@@ -463,6 +469,26 @@ export const MessageInput = memo(function MessageInput({
     agentProfileId,
     allowReset: !!onResetSession,
   });
+
+  const paletteActive =
+    palette.open && palette.items.length > 0 ? palette.activeIndex : -1;
+  useEffect(() => {
+    setPopupAria(
+      palette.open
+        ? {
+            'aria-controls': paletteListId,
+            ...(paletteActive >= 0
+              ? {
+                  'aria-activedescendant': paletteOptionId(
+                    paletteListId,
+                    paletteActive,
+                  ),
+                }
+              : {}),
+          }
+        : {},
+    );
+  }, [palette.open, paletteActive, paletteListId]);
 
   /** ↑ (older) / ↓ (newer) through this conversation's sent messages. */
   const recallHistory = (view: EditorView, step: 1 | -1): boolean => {
@@ -832,7 +858,11 @@ export const MessageInput = memo(function MessageInput({
         {/* Palettes anchor on the whole card, queue included. */}
         <div className="relative">
           {palette.open && (
-            <ComposerPalette palette={palette} touch={isTouchInput} />
+            <ComposerPalette
+              palette={palette}
+              touch={isTouchInput}
+              listId={paletteListId}
+            />
           )}
           {/* One card: the queue on top, then the editor. Focus only
               changes the border color. */}

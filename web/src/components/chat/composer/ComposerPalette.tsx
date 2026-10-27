@@ -1,8 +1,13 @@
-import { useEffect, useId, useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import { File, Folder, Loader2, Sparkles, SquareSlash } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
 import type { ComposerPaletteState, PaletteItem } from './useComposerPalette';
+
+/** Id of a palette row, for the editor's `aria-activedescendant`. */
+export function paletteOptionId(listId: string, index: number): string {
+  return `${listId}-option-${index}`;
+}
 
 const ICONS: Record<PaletteItem['kind'], typeof File> = {
   command: SquareSlash,
@@ -19,11 +24,13 @@ const ICONS: Record<PaletteItem['kind'], typeof File> = {
 export function ComposerPalette({
   palette,
   touch,
+  listId,
 }: {
   palette: ComposerPaletteState;
   touch: boolean;
+  /** The listbox id the editor points to (`aria-controls`). */
+  listId: string;
 }) {
-  const listId = useId();
   const listRef = useRef<HTMLDivElement>(null);
   const { items, activeIndex, status, kind } = palette;
 
@@ -62,6 +69,7 @@ export function ComposerPalette({
           return (
             <div
               key={item.key}
+              id={paletteOptionId(listId, index)}
               role="option"
               aria-selected={active}
               onMouseDown={(event) => event.preventDefault()}

@@ -63,6 +63,8 @@ interface ComposerEditorOptions {
   placeholder: string;
   editable: boolean;
   handlers: ComposerEditorHandlers;
+  /** ARIA attributes tying the editor to an open suggestion list. */
+  popupAria: Record<string, string>;
 }
 
 const isWindows = () =>
@@ -79,11 +81,14 @@ export function useComposerEditor({
   placeholder,
   editable,
   handlers,
+  popupAria,
 }: ComposerEditorOptions) {
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
   const placeholderRef = useRef(placeholder);
   placeholderRef.current = placeholder;
+  const popupAriaRef = useRef(popupAria);
+  popupAriaRef.current = popupAria;
   const [snapshot, setSnapshot] = useState<ComposerRenderSnapshot | null>(null);
   const snapshotRef = useRef<ComposerRenderSnapshot | null>(null);
   // Typing a list marker through IME or paste skips input rules; promote it
@@ -134,6 +139,8 @@ export function useComposerEditor({
           role: 'textbox',
           'aria-multiline': 'true',
           'aria-label': placeholderRef.current,
+          'aria-autocomplete': 'list',
+          ...popupAriaRef.current,
           'data-composer-editor': '',
           class:
             'max-h-36 min-h-6 w-full overflow-y-auto text-base leading-6 break-words whitespace-pre-wrap text-foreground outline-none lg:text-body-lg',
@@ -144,6 +151,22 @@ export function useComposerEditor({
           handlersRef.current.onKeyDown(view, event),
         handlePaste: (view, event) => handlePaste(view, event),
         handleDOMEvents: {
+          keydown: (view, event) => {
+            // ProseMirror hands Chrome on Android no Enter keydown at all
+            // (plain Enter comes back as a synthetic key after the DOM
+            // change). A modified Enter is never IME input: take it here so
+            // Mod+Enter still sends there.
+            if (
+              event.key !== 'Enter' ||
+              !(event.metaKey || event.ctrlKey) ||
+              view.composing ||
+              !handlersRef.current.onKeyDown(view, event)
+            ) {
+              return false;
+            }
+            event.preventDefault();
+            return true;
+          },
           compositionend: (view) => {
             handlersRef.current.onCompositionEnd();
             // The final IME commit can bypass input rules. Wait until
@@ -183,12 +206,14 @@ export function useComposerEditor({
     if (editor.isEditable !== editable) editor.setEditable(editable, false);
   }, [editor, editable]);
 
-  // The placeholder and accessible name follow the prop.
+  // The placeholder, accessible name and popup attributes are read from
+  // refs; an empty transaction re-renders them.
+  const popupAriaKey = JSON.stringify(popupAria);
   useEffect(() => {
     if (!editor.isDestroyed) {
       editor.view.dispatch(editor.state.tr.setMeta('addToHistory', false));
     }
-  }, [editor, placeholder]);
+  }, [editor, placeholder, popupAriaKey]);
 
   function handlePaste(view: EditorView, event: ClipboardEvent): boolean {
     const data = event.clipboardData;

@@ -809,6 +809,12 @@ describe('palettes', () => {
       expect.stringContaining('/builtin-pdf'),
       expect.stringContaining('/review审查代码改动'),
     ]);
+    // The editor points at the list and its highlighted row.
+    const listbox = container!.querySelector('[role="listbox"]')!;
+    expect(editorEl().getAttribute('aria-controls')).toBe(listbox.id);
+    expect(editorEl().getAttribute('aria-activedescendant')).toBe(
+      listbox.querySelector('[aria-selected="true"]')!.id,
+    );
 
     // Prefix matches rank before names that only contain the query.
     await typeAtCaret('re');
