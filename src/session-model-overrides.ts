@@ -184,6 +184,27 @@ export function resolveAgentLaunchModel(
 }
 
 /**
+ * The model a launch on `provider` runs when the conversation picked none:
+ * the Agent's model when the Agent's binding is what pins the launch and the
+ * configuration still offers it, else the configuration's own. Null for a
+ * pass-through relay, which names no model.
+ */
+export function unpickedLaunchModel(
+  provider: ModelConfiguration,
+  agentModel: string | null | undefined,
+  groupFolder: string,
+): string | null {
+  const model =
+    resolveAgentLaunchModel(provider, agentModel, {
+      groupFolder,
+      warn: false,
+    }) ?? provider.anthropicModel;
+  return provider.codexOAuthCredentials
+    ? chatGptLaunchModel(model, provider)
+    : model || null;
+}
+
+/**
  * Whether a launch on `effectiveModel` changes the model under a Session that
  * still has an SDK session to resume. Encrypted reasoning only verifies for the
  * model that issued it, so such a session cannot simply continue; sessions of

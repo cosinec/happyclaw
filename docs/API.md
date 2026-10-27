@@ -106,6 +106,9 @@ Public：
 `default.source` 取值 `agent`（智能体绑定）、`workspace_env`（工作区自带 Provider
 环境变量）、`default`（`PUT /api/config/claude/default` 设置的全局默认）、`single`
 （唯一启用的配置）、`pool`（已启用配置间自动轮换）、`none`，顺序与运行时解析一致；
+`default.model` 是不选择时实际运行的模型：`agent` 为智能体绑定的模型（配置已不再
+提供时为该配置的默认模型），`default`、`single` 为该配置的默认模型（ChatGPT 订阅按
+其目录解析），其余来源与直通中转为 `null`。
 PUT 的 `modelConfigId` 为 `null` 时恢复默认。会话选择的（配置, 模型）优先于智能体
 绑定的（配置, 模型），可以选择未启用的配置；切换后该会话的暖 Runner 在当前轮次结束
 后退出，下一条消息使用新选择。

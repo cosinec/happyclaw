@@ -297,6 +297,7 @@ describe('GET /:jid/model-selection', () => {
     expect(body.default).toEqual({
       source: 'default',
       modelConfigId: 'glm',
+      model: 'glm-5.3[1m]',
       enabledCount: 2,
     });
     expect(body.selectedModelConfigId).toBeNull();

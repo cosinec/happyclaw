@@ -113,6 +113,7 @@ import {
   chatGptDefaultModel,
   listConnectionModels,
   readStoredChoice,
+  unpickedLaunchModel,
   validateSessionChoice,
   type CodexSelectionView,
   type ConnectionModelChoice,
@@ -2374,6 +2375,9 @@ function buildSessionModelSelectionPayload(
     return { ...option, codex };
   });
 
+  const defaultProvider = providers.find(
+    (provider) => provider.id === defaultModelConfigId,
+  );
   const selectedModelConfigId = exists(stored?.modelConfigId)
     ? stored.modelConfigId
     : null;
@@ -2403,6 +2407,14 @@ function buildSessionModelSelectionPayload(
     default: {
       source: defaultSource,
       modelConfigId: defaultModelConfigId,
+      // What "default" runs, resolved as a launch without a pick resolves it.
+      model: defaultProvider
+        ? unpickedLaunchModel(
+            defaultProvider,
+            defaultSource === 'agent' ? profile?.model : null,
+            group.folder,
+          )
+        : null,
       enabledCount: enabled.length,
     },
     options,
