@@ -4,6 +4,7 @@ import { ChevronDown, Cpu, Gauge, Loader2, Settings2 } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { cn } from '@/lib/utils';
+import { splitOneMillionSuffix } from '@/lib/model-providers';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -14,6 +15,11 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 import { api } from '../../api/client';
 import { useAuthStore } from '../../stores/auth';
 
@@ -38,21 +44,37 @@ export interface CodexSelectionView {
   models: CodexModelChoice[];
 }
 
+/** One model of a non-ChatGPT configuration. */
+export interface ConnectionModelChoice {
+  id: string;
+  /** Left out of the menu unless the conversation already runs on it. */
+  hidden: boolean;
+}
+
 export interface SessionModelOption {
   id: string;
   name: string;
   kind: 'official' | 'third_party' | 'codex';
   enabled: boolean;
+  /** The configuration's default model; '' lets a relay decide. */
   model: string;
   /** False when the configuration holds no credential and would fail. */
   usable?: boolean;
   /** Present on ChatGPT configurations: the models and efforts to choose from. */
   codex?: CodexSelectionView;
+  /**
+   * The models a non-ChatGPT configuration offers, its default included.
+   * Older servers send none and the configuration stays a single row.
+   */
+  models?: ConnectionModelChoice[];
 }
 
 export interface SessionModelSelection {
   selectedModelConfigId: string | null;
-  /** Older servers do not send the next two. */
+  /**
+   * The model picked within the selected configuration; null follows its
+   * default. Older servers do not send this nor the effort.
+   */
   selectedModel?: string | null;
   selectedEffort?: string | null;
   default: {
@@ -107,21 +129,22 @@ function defaultHint(selection: SessionModelSelection): string {
   }
 }
 
-/** Whether a ChatGPT configuration can be chosen right now. */
-function codexUsable(option: SessionModelOption): boolean {
+/** Whether a configuration's models can be chosen right now. */
+function optionUsable(option: SessionModelOption): boolean {
   return option.usable !== false && !option.codex?.needsReauth;
 }
 
-/** A ChatGPT login with models to list; the others are one row each. */
-function hasModelList(option: SessionModelOption): boolean {
-  return !!option.codex && option.codex.models.length > 0;
-}
-
-/** Why a ChatGPT login is listed but not (or not usually) chosen. */
-function codexStatus(option: SessionModelOption): string {
+/** Why a configuration is listed but not (or not usually) chosen. */
+function optionStatus(option: SessionModelOption): string {
   if (option.usable === false) return '缺少凭据';
   if (option.codex?.needsReauth) return '需重新登录';
   return option.enabled ? '' : '未启用';
+}
+
+/** A model id for a label, with the 1M context window spelled out. */
+function modelLabel(id: string): string {
+  const { model, oneMillion } = splitOneMillionSuffix(id);
+  return oneMillion ? `${model}（1M）` : model;
 }
 
 /** What a radio of the model menu stands for. */
@@ -136,6 +159,91 @@ function configValue(id: string): string {
 
 function modelValue(id: string, model: string): string {
   return `mdl:${id}:${model}`;
+}
+
+/** One radio under a configuration's heading. */
+interface ModelRow {
+  /** The default model's row stands for the configuration itself. */
+  value: string;
+  /** The model picking this row pins; null follows the configuration. */
+  pick: string | null;
+  /** The model id shown; '' when a relay decides. */
+  id: string;
+  note?: string;
+}
+
+/**
+ * The models a configuration lists under its own heading, or null when it is
+ * a single row: an older server, or a configuration without a model list.
+ * Hidden models are left out unless `pinned` names one, and a pinned model
+ * the list lacks stays too, so the menu shows what is really selected.
+ */
+function modelRows(
+  option: SessionModelOption,
+  pinned: string | null,
+): ModelRow[] | null {
+  const defaultModel = option.codex ? option.codex.defaultModel : option.model;
+  const listed = option.codex
+    ? option.codex.models.map((model) => ({ id: model.value, hidden: false }))
+    : option.models;
+  if (!listed?.length) return null;
+  const row = (id: string, note?: string): ModelRow =>
+    id === defaultModel
+      ? { value: configValue(option.id), pick: null, id, note }
+      : { value: modelValue(option.id, id), pick: id, id, note };
+  const rows: ModelRow[] = [];
+  if (
+    pinned &&
+    pinned !== defaultModel &&
+    !listed.some((model) => model.id === pinned)
+  ) {
+    rows.push(
+      row(pinned, option.codex ? '不在账号的模型列表里' : '不在模型列表里'),
+    );
+  }
+  // A relay without a model of its own still lets the relay decide.
+  if (!option.codex && !defaultModel) {
+    rows.push({ value: configValue(option.id), pick: null, id: '' });
+  }
+  for (const model of listed) {
+    if (!model.hidden) rows.push(row(model.id));
+    else if (model.id === pinned) rows.push(row(model.id, '已隐藏'));
+  }
+  return rows;
+}
+
+/** A listed model: its id, the 1M window as a tag, then a note. */
+function ModelName({ id, note }: { id: string; note?: string }) {
+  if (!id) return <span className="truncate">由中转站决定</span>;
+  const { model, oneMillion } = splitOneMillionSuffix(id);
+  return (
+    <span className="flex min-w-0 items-baseline gap-2">
+      <span className="min-w-0 truncate font-mono text-caption">{model}</span>
+      {oneMillion && (
+        <span className="shrink-0 text-micro text-muted-foreground">1M</span>
+      )}
+      {note && (
+        <span className="shrink-0 text-micro text-muted-foreground">
+          {note}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** Readable copy for a refused pick. */
+function saveErrorMessage(err: unknown): string {
+  if (err && typeof err === 'object') {
+    const { message, body } = err as {
+      message?: unknown;
+      body?: { code?: unknown };
+    };
+    if (body?.code === 'MODEL_NOT_IN_CONNECTION') {
+      return '该模型已不在模型配置的模型列表里，请重新选择';
+    }
+    if (typeof message === 'string' && message) return message;
+  }
+  return '切换模型失败';
 }
 
 /**
@@ -177,9 +285,13 @@ export function resolveEffortContext(selection: SessionModelSelection): {
   };
 }
 
-/** Compact trigger look shared by the model and the effort buttons. */
+/**
+ * Composer pill shared by the model and the effort buttons: transparent at
+ * rest, outlined while hovered or open. The border is always there so nothing
+ * shifts when it shows.
+ */
 const TRIGGER_CLASS =
-  'inline-flex h-7 min-w-0 cursor-pointer items-center gap-1 rounded-md px-2 text-micro font-medium text-muted-foreground transition-colors duration-100 hover:bg-surface-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-default disabled:hover:bg-transparent disabled:hover:text-muted-foreground pointer-coarse:h-10';
+  'inline-flex h-[30px] min-w-0 cursor-pointer items-center gap-1 rounded-full border border-transparent px-2.5 text-label font-medium text-muted-foreground transition-colors duration-100 hover:border-surface-border hover:bg-surface-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none data-[state=open]:border-surface-border data-[state=open]:bg-surface-hover data-[state=open]:text-foreground disabled:cursor-default disabled:hover:border-transparent disabled:hover:bg-transparent disabled:hover:text-muted-foreground pointer-coarse:h-10';
 
 interface ModelSelectorProps {
   groupJid: string;
@@ -201,6 +313,10 @@ export function ModelSelector({
     null,
   );
   const [saving, setSaving] = useState(false);
+  const [tooltipOpen, setTooltipOpen] = useState(false);
+  // Focus returns to the button when the menu closes; that alone must not pop
+  // the tooltip up over what was just picked. Leaving the button resets it.
+  const tooltipMuted = useRef(false);
   const lastRefreshAt = useRef(0);
   // Bumped by every save: a look-up that started before one must not put an
   // older selection back over the saved one.
@@ -248,6 +364,12 @@ export function ModelSelector({
     [basePath, query, selection],
   );
 
+  const handleMenuOpenChange = (open: boolean) => {
+    if (!open) tooltipMuted.current = true;
+    setTooltipOpen(false);
+    refreshCatalog(open);
+  };
+
   const save = async (
     body: {
       modelConfigId: string | null;
@@ -267,7 +389,7 @@ export function ModelSelector({
       setSelection(next);
       toast.success(success(next));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : '切换模型失败');
+      toast.error(saveErrorMessage(err));
       void load();
     } finally {
       setSaving(false);
@@ -276,39 +398,50 @@ export function ModelSelector({
 
   if (!selection || selection.options.length === 0) return null;
 
-  // value → what picking it means; non-ChatGPT configurations keep one radio.
-  const targets = new Map<string, ModelChoiceTarget>();
-  for (const option of selection.options) {
-    targets.set(configValue(option.id), {
-      modelConfigId: option.id,
-      model: null,
-    });
-    for (const model of option.codex?.models ?? []) {
-      if (model.value === option.codex?.defaultModel) continue;
-      targets.set(modelValue(option.id, model.value), {
-        modelConfigId: option.id,
-        model: model.value,
-      });
-    }
-  }
-
   const selected = selection.options.find(
     (option) => option.id === selection.selectedModelConfigId,
   );
+  const pinnedModel = selected ? (selection.selectedModel ?? null) : null;
+  // value → what picking it means; a configuration without a model list is
+  // one radio standing for the configuration.
+  const rowsByOption = new Map<string, ModelRow[] | null>();
+  const targets = new Map<string, ModelChoiceTarget>();
+  for (const option of selection.options) {
+    const rows = modelRows(
+      option,
+      option.id === selected?.id ? pinnedModel : null,
+    );
+    rowsByOption.set(option.id, rows);
+    for (const row of rows ?? [{ value: configValue(option.id), pick: null }]) {
+      targets.set(row.value, { modelConfigId: option.id, model: row.pick });
+    }
+  }
+
   const effortContext = resolveEffortContext(selection);
   const hasCodex = selection.options.some((option) => option.codex);
-  const selectedModel =
-    selected?.codex && selection.selectedModel ? selection.selectedModel : null;
+  const selectedDefault = selected
+    ? selected.codex
+      ? selected.codex.defaultModel
+      : selected.model
+    : null;
   const radioValue = !selected
     ? DEFAULT_VALUE
-    : selectedModel && selectedModel !== selected.codex?.defaultModel
-      ? modelValue(selected.id, selectedModel)
+    : pinnedModel &&
+        pinnedModel !== selectedDefault &&
+        rowsByOption.get(selected.id)
+      ? modelValue(selected.id, pinnedModel)
       : configValue(selected.id);
-  // A ChatGPT configuration is named by the model it runs; the others by name.
+  // A ChatGPT configuration is named by the model it runs; the others by
+  // name and model.
+  const shownModel = selected
+    ? (pinnedModel ?? selectedDefault ?? '') || null
+    : null;
   const triggerLabel = selected
     ? selected.codex
-      ? (selectedModel ?? selected.codex.defaultModel)
-      : selected.name
+      ? (shownModel ?? '')
+      : shownModel
+        ? `${selected.name} · ${modelLabel(shownModel)}`
+        : selected.name
     : `默认 · ${describeDefaultModel(selection)}`;
 
   const handleChange = (value: string) => {
@@ -320,12 +453,21 @@ export function ModelSelector({
     const modelConfigId = target.modelConfigId || null;
     if (
       modelConfigId === selection.selectedModelConfigId &&
-      (target.model ?? null) === (selectedModel ?? null)
+      (target.model ?? null) === pinnedModel
     ) {
       return;
     }
     const option = selection.options.find((item) => item.id === modelConfigId);
     if (!option?.codex) {
+      const model = target.model;
+      if (option && model) {
+        void save(
+          { modelConfigId, model },
+          () =>
+            `已切换到「${option.name} · ${modelLabel(model)}」，从下一条消息开始生效`,
+        );
+        return;
+      }
       // Exactly the request older servers understand.
       void save({ modelConfigId }, (next) => {
         const picked = next.options.find((item) => item.id === modelConfigId);
@@ -379,33 +521,62 @@ export function ModelSelector({
     );
   };
 
+  const disabled = !canChange || saving;
+
   return (
     <>
-      <DropdownMenu onOpenChange={refreshCatalog}>
-        <DropdownMenuTrigger asChild>
-          <button
-            type="button"
-            disabled={!canChange || saving}
-            aria-label={`模型：${triggerLabel}`}
-            title={canChange ? '选择本会话使用的模型' : `模型：${triggerLabel}`}
-            className={cn(
-              'ml-0.5 max-w-[min(46vw,220px)]',
-              hasCodex && 'max-sm:max-w-[min(30vw,160px)]',
-              TRIGGER_CLASS,
-              selected && 'text-foreground',
-            )}
-          >
-            {saving ? (
-              <Loader2 className="size-3.5 shrink-0 animate-spin" />
-            ) : (
-              <Cpu className="size-3.5 shrink-0" />
-            )}
-            <span className="truncate">{triggerLabel}</span>
-            {canChange && (
-              <ChevronDown className="size-3 shrink-0 opacity-60" />
-            )}
-          </button>
-        </DropdownMenuTrigger>
+      <DropdownMenu onOpenChange={handleMenuOpenChange}>
+        <Tooltip
+          open={tooltipOpen}
+          onOpenChange={(open) => setTooltipOpen(open && !tooltipMuted.current)}
+        >
+          <DropdownMenuTrigger asChild>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                disabled={disabled}
+                aria-label={`模型：${triggerLabel}`}
+                // A disabled button gets no tooltip; the title still reads.
+                title={disabled ? `模型：${triggerLabel}` : undefined}
+                onPointerLeave={() => {
+                  tooltipMuted.current = false;
+                }}
+                onBlur={() => {
+                  tooltipMuted.current = false;
+                }}
+                className={cn(
+                  // A phone row also holds the attachment, reset and send
+                  // buttons; a long label truncates into the tooltip.
+                  'max-w-[min(46vw,220px)] max-sm:max-w-[40vw]',
+                  hasCodex && 'max-sm:max-w-[min(30vw,160px)]',
+                  TRIGGER_CLASS,
+                  selected && 'text-foreground',
+                )}
+              >
+                {saving ? (
+                  <Loader2 className="size-3.5 shrink-0 animate-spin" />
+                ) : (
+                  <Cpu className="size-3.5 shrink-0" />
+                )}
+                <span className="truncate">
+                  {selected && !selected.codex && shownModel ? (
+                    <>
+                      {/* A phone has room for the model alone. */}
+                      <span className="max-sm:hidden">{selected.name} · </span>
+                      {modelLabel(shownModel)}
+                    </>
+                  ) : (
+                    triggerLabel
+                  )}
+                </span>
+                {canChange && (
+                  <ChevronDown className="size-3 shrink-0 opacity-60" />
+                )}
+              </button>
+            </TooltipTrigger>
+          </DropdownMenuTrigger>
+          <TooltipContent side="top">{triggerLabel}</TooltipContent>
+        </Tooltip>
         <DropdownMenuContent
           align="start"
           side="top"
@@ -429,66 +600,37 @@ export function ModelSelector({
             </DropdownMenuRadioItem>
             <DropdownMenuSeparator />
             {selection.options.map((option, index) => {
-              const group = hasModelList(option);
-              // A ChatGPT login's models form a group of their own; plain
-              // configurations stay one row each without dividers.
+              const rows = rowsByOption.get(option.id) ?? null;
+              // A configuration with a model list forms a group of its own;
+              // single rows stay together without dividers.
               const divided =
                 index > 0 &&
-                (group || hasModelList(selection.options[index - 1]));
+                (!!rows || !!rowsByOption.get(selection.options[index - 1].id));
+              const status = optionStatus(option);
+              const usable = optionUsable(option);
               return (
                 <Fragment key={option.id}>
                   {divided && <DropdownMenuSeparator />}
-                  {group && option.codex ? (
+                  {rows ? (
                     <>
                       <DropdownMenuLabel className="flex items-center gap-1">
                         <span className="min-w-0 truncate">{option.name}</span>
-                        {codexStatus(option) && (
+                        {status && (
                           <span className="shrink-0 font-normal">
-                            · {codexStatus(option)}
+                            · {status}
                           </span>
                         )}
                       </DropdownMenuLabel>
-                      {option.id === selected?.id &&
-                        selectedModel &&
-                        selectedModel !== option.codex.defaultModel &&
-                        !option.codex.models.some(
-                          (model) => model.value === selectedModel,
-                        ) && (
-                          // Kept so the menu shows what is really selected.
-                          <DropdownMenuRadioItem
-                            value={modelValue(option.id, selectedModel)}
-                          >
-                            <span className="flex min-w-0 items-baseline gap-2">
-                              <span className="shrink-0 font-mono text-caption">
-                                {selectedModel}
-                              </span>
-                              <span className="truncate text-micro text-muted-foreground">
-                                不在账号的模型列表里
-                              </span>
-                            </span>
-                          </DropdownMenuRadioItem>
-                        )}
-                      {option.codex.models.map((model) => {
-                        const isDefault =
-                          model.value === option.codex?.defaultModel;
-                        return (
-                          <DropdownMenuRadioItem
-                            key={model.value}
-                            value={
-                              isDefault
-                                ? configValue(option.id)
-                                : modelValue(option.id, model.value)
-                            }
-                            disabled={!codexUsable(option)}
-                          >
-                            <span className="flex min-w-0 items-baseline gap-2">
-                              <span className="shrink-0 font-mono text-caption">
-                                {model.value}
-                              </span>
-                            </span>
-                          </DropdownMenuRadioItem>
-                        );
-                      })}
+                      {rows.map((row) => (
+                        <DropdownMenuRadioItem
+                          key={row.value}
+                          value={row.value}
+                          // What is selected stays reachable as the checked row.
+                          disabled={!usable && !row.note}
+                        >
+                          <ModelName id={row.id} note={row.note} />
+                        </DropdownMenuRadioItem>
+                      ))}
                     </>
                   ) : (
                     <DropdownMenuRadioItem
@@ -516,8 +658,8 @@ export function ModelSelector({
           <DropdownMenuSeparator />
           <p className="px-2 py-1 text-micro leading-4 text-muted-foreground">
             {hasCodex
-              ? '切换模型配置或 ChatGPT 模型会开启新的底层会话，并自动带上最近的对话记录；只调整推理档位不会。'
-              : '切换到不同的模型配置会开启新的底层会话，并自动带上最近的对话记录。'}
+              ? '切换模型配置或模型会开启新的底层会话，并自动带上最近的对话记录；只调整推理档位不会。'
+              : '切换模型配置或模型会开启新的底层会话，并自动带上最近的对话记录。'}
           </p>
           {canManageModels && (
             <DropdownMenuItem onClick={() => navigate('/settings?tab=claude')}>
@@ -530,7 +672,7 @@ export function ModelSelector({
       {hasCodex && (
         <EffortMenu
           context={effortContext}
-          disabled={!canChange || saving}
+          disabled={disabled}
           onPick={handleEffort}
         />
       )}
@@ -548,7 +690,7 @@ interface EffortMenuProps {
 function EffortMenu({ context, disabled, onPick }: EffortMenuProps) {
   const choice = context?.model ?? null;
   const unavailable =
-    !context || !choice || !codexUsable(context.option) || disabled;
+    !context || !choice || !optionUsable(context.option) || disabled;
   const effective = context?.effort ?? choice?.defaultEffort ?? null;
   const following = !!context && !context.effort;
   const label = effective
@@ -571,7 +713,8 @@ function EffortMenu({ context, disabled, onPick }: EffortMenuProps) {
           title={title}
           className={cn(
             TRIGGER_CLASS,
-            'shrink-0',
+            // Only the icon shows on a phone, where the row is tight.
+            'shrink-0 max-sm:px-2',
             context?.effort && 'text-foreground',
           )}
         >
