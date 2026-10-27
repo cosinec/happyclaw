@@ -21966,6 +21966,29 @@ function handleIncomingFollowUp(input: {
   };
 }
 
+/** Serialization key of a queue JID: one per Session of a workspace folder. */
+function queueSerializationKey(groupJid: string): string {
+  // Agent virtual JIDs: {chatJid}#agent:{agentId} → separate serialization key
+  const agentSep = groupJid.indexOf('#agent:');
+  if (agentSep >= 0) {
+    const baseJid = groupJid.slice(0, agentSep);
+    const agentId = groupJid.slice(agentSep + 7);
+    const group = registeredGroups[baseJid];
+    const folder = group?.folder || baseJid;
+    return `${folder}#${agentId}`;
+  }
+  // Task virtual JIDs: {chatJid}#task:{taskId} → separate serialization key
+  const taskSep = groupJid.indexOf('#task:');
+  if (taskSep >= 0) {
+    const baseJid = groupJid.slice(0, taskSep);
+    const taskId = groupJid.slice(taskSep + 6);
+    const group = registeredGroups[baseJid];
+    return `${group?.folder || baseJid}#task:${taskId}`;
+  }
+  const group = registeredGroups[groupJid];
+  return group?.folder || groupJid;
+}
+
 /**
  * 飞书流式卡片按钮中断回调。
  * 仅由飞书卡片按钮触发，不涉及自动关键词检测。
@@ -21984,7 +22007,14 @@ function handleCardInterrupt(
   ) {
     return { ok: false, message: '你没有中断这个会话的权限。' };
   }
-  const interrupted = queue.interruptQuery(chatJid);
+  // The card is keyed by its reply route, whose topic and root suffixes the
+  // queue never sees: interrupt the Session the route belongs to.
+  const agentSep = chatJid.indexOf('#agent:');
+  const sessionJid =
+    agentSep >= 0
+      ? `${sourceChatJid}${chatJid.slice(agentSep)}`
+      : sourceChatJid;
+  const interrupted = queue.interruptQuery(sessionJid);
   if (!interrupted) {
     return { ok: false, message: '当前回复已经结束，无需中断。' };
   }
@@ -24188,27 +24218,7 @@ async function main(): Promise<void> {
     const { effectiveGroup } = resolveEffectiveGroup(group);
     return effectiveGroup.executionMode === 'host';
   });
-  queue.setSerializationKeyResolver((groupJid: string) => {
-    // Agent virtual JIDs: {chatJid}#agent:{agentId} → separate serialization key
-    const agentSep = groupJid.indexOf('#agent:');
-    if (agentSep >= 0) {
-      const baseJid = groupJid.slice(0, agentSep);
-      const agentId = groupJid.slice(agentSep + 7);
-      const group = registeredGroups[baseJid];
-      const folder = group?.folder || baseJid;
-      return `${folder}#${agentId}`;
-    }
-    // Task virtual JIDs: {chatJid}#task:{taskId} → separate serialization key
-    const taskSep = groupJid.indexOf('#task:');
-    if (taskSep >= 0) {
-      const baseJid = groupJid.slice(0, taskSep);
-      const taskId = groupJid.slice(taskSep + 6);
-      const group = registeredGroups[baseJid];
-      return `${group?.folder || baseJid}#task:${taskId}`;
-    }
-    const group = registeredGroups[groupJid];
-    return group?.folder || groupJid;
-  });
+  queue.setSerializationKeyResolver(queueSerializationKey);
   queue.setOnMaxRetriesExceeded(
     async (groupJid: string, snapshot: MessageRetrySnapshot | null) => {
       try {
