@@ -110,7 +110,10 @@ import {
   PhysicalDeliveryTracker,
 } from './im-delivery-progress.js';
 import { preAcceptImDeliveryError } from './im-send-retry-policy.js';
-import { enrichFeishuInboundContent } from './feishu-rich-content.js';
+import {
+  enrichFeishuInboundContent,
+  sliceFeishuText,
+} from './feishu-rich-content.js';
 import { createFeishuSenderNameResolver } from './feishu-sender-name.js';
 import {
   FeishuForwardBundleResolver,
@@ -173,6 +176,13 @@ export interface FeishuConnectionConfig {
 interface FeishuFileInfo {
   fileKey: string;
   filename: string;
+  /** Placeholder in the message text that the download result replaces. */
+  marker: string;
+  /**
+   * Voice and video: what the attachment reads as (`语音消息: 3s`). A failed
+   * download leaves the marker in place.
+   */
+  mediaLabel?: string;
 }
 
 export interface ConnectOptions {
@@ -1115,6 +1125,31 @@ function unwrapFeishuParagraphText(text: string): string {
     .replace(/<\/p>$/i, '');
 }
 
+/** Longest text kept per item when a merged forward is rendered locally. */
+const MERGE_FORWARD_FALLBACK_ITEM_CHARS = 500;
+const MERGE_FORWARD_FALLBACK_MAX_ITEMS = 20;
+
+/** Only web links survive as Markdown links; other schemes keep the text. */
+function postLinkText(text: string, href: unknown): string {
+  if (typeof href !== 'string' || !/^https?:\/\//i.test(href.trim())) {
+    return text;
+  }
+  return `[${text}](${href.trim()})`;
+}
+
+/** What a downloaded (or failed) voice, video or file attachment reads as. */
+function fileAttachmentText(
+  fi: FeishuFileInfo,
+  relPath: string | null,
+): string {
+  if (fi.mediaLabel) {
+    return relPath ? `[${fi.mediaLabel}，文件: ${relPath}]` : fi.marker;
+  }
+  return relPath
+    ? `[文件: ${relPath}]`
+    : `[文件下载失败: ${sanitizeImFilename(fi.filename || fi.fileKey)}]`;
+}
+
 function extractMessageContent(
   messageType: string,
   content: string,
@@ -1133,7 +1168,7 @@ function extractMessageContent(
       return { text: '[合并转发消息]' };
     }
     const lines: string[] = ['[合并转发消息]:'];
-    for (const item of items.slice(0, 20)) {
+    for (const item of items.slice(0, MERGE_FORWARD_FALLBACK_MAX_ITEMS)) {
       const sender = item.sender_name || item.sender || '未知';
       const body = item.body?.content || item.content || '';
       let text = '';
@@ -1144,11 +1179,17 @@ function extractMessageContent(
       } catch {
         text = typeof body === 'string' ? body : '';
       }
+      text = text.trim();
       if (text) {
-        lines.push(`> ${sender}: ${text.split('\n')[0].slice(0, 200)}`);
+        // Keep the item's own lines; quote each so the bundle stays readable.
+        const clipped =
+          text.length > MERGE_FORWARD_FALLBACK_ITEM_CHARS
+            ? `${sliceFeishuText(text, MERGE_FORWARD_FALLBACK_ITEM_CHARS - 1)}…`
+            : text;
+        lines.push(`> ${sender}: ${clipped.replace(/\n/g, '\n> ')}`);
       }
     }
-    if (items.length > 20) {
+    if (items.length > MERGE_FORWARD_FALLBACK_MAX_ITEMS) {
       lines.push(`> ... 共 ${items.length} 条消息`);
     }
     return { text: lines.join('\n') };
@@ -1215,7 +1256,7 @@ function extractMessageContent(
           if (segment.tag === 'text' && typeof segment.text === 'string') {
             parts.push(segment.text);
           } else if (segment.tag === 'a' && typeof segment.text === 'string') {
-            parts.push(segment.text);
+            parts.push(postLinkText(segment.text, segment.href));
           } else if (segment.tag === 'at') {
             const mentionName =
               typeof segment.user_name === 'string'
@@ -1266,10 +1307,8 @@ function extractMessageContent(
         // 使用清洗后的文件名构造占位符，下方 replace 也用同一份清洗结果，
         // 任何上下文（成功/失败/解析失败）都不会让原始 filename 进入 prompt。
         const safeFilename = sanitizeImFilename(filename || fileKey);
-        return {
-          text: `[文件: ${safeFilename}]`,
-          fileInfos: [{ fileKey, filename }],
-        };
+        const marker = `[文件: ${safeFilename}]`;
+        return { text: marker, fileInfos: [{ fileKey, filename, marker }] };
       }
     }
 
@@ -1282,7 +1321,17 @@ function extractMessageContent(
       const duration = parsed.duration
         ? `${Math.round(parsed.duration / 1000)}s`
         : '';
-      return { text: `[语音消息${duration ? ': ' + duration : ''}]` };
+      const mediaLabel = `语音消息${duration ? ': ' + duration : ''}`;
+      const marker = `[${mediaLabel}]`;
+      const fileKey =
+        typeof parsed.file_key === 'string' ? parsed.file_key : '';
+      if (!fileKey) return { text: marker };
+      // Feishu voice messages are Opus audio.
+      const filename = `feishu_voice_${fileKey.slice(-8)}.opus`;
+      return {
+        text: marker,
+        fileInfos: [{ fileKey, filename, marker, mediaLabel }],
+      };
     }
 
     if (messageType === 'share_chat') {
@@ -1334,7 +1383,19 @@ function extractMessageContent(
     }
 
     if (messageType === 'media') {
-      return { text: '[视频消息]' };
+      const mediaLabel = '视频消息';
+      const marker = `[${mediaLabel}]`;
+      const fileKey =
+        typeof parsed.file_key === 'string' ? parsed.file_key : '';
+      if (!fileKey) return { text: marker };
+      const filename =
+        typeof parsed.file_name === 'string' && parsed.file_name.trim()
+          ? parsed.file_name
+          : `feishu_video_${fileKey.slice(-8)}.mp4`;
+      return {
+        text: marker,
+        fileInfos: [{ fileKey, filename, marker, mediaLabel }],
+      };
     }
 
     if (messageType === 'location') {
@@ -4271,26 +4332,17 @@ export function createFeishuConnection(
             'Cannot resolve group folder for file download',
           );
           for (const fi of extracted.fileInfos) {
-            const safeFilename = sanitizeImFilename(fi.filename || fi.fileKey);
-            const placeholder = `[文件: ${safeFilename}]`;
-            text = text.replace(placeholder, `[文件下载失败: ${safeFilename}]`);
+            text = text.replace(fi.marker, fileAttachmentText(fi, null));
           }
         } else {
           for (const fi of extracted.fileInfos) {
-            const safeFilename = sanitizeImFilename(fi.filename || fi.fileKey);
             const relPath = await downloadFeishuFileToDisk(
               messageId,
               fi.fileKey,
               fi.filename,
               groupFolder,
             );
-            const placeholder = `[文件: ${safeFilename}]`;
-            text = text.replace(
-              placeholder,
-              relPath
-                ? `[文件: ${relPath}]`
-                : `[文件下载失败: ${safeFilename}]`,
-            );
+            text = text.replace(fi.marker, fileAttachmentText(fi, relPath));
           }
         }
       }
