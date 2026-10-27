@@ -235,6 +235,42 @@ describe('message prompt projection', () => {
     );
   });
 
+  test('forwarded material attaches nothing; the forwarder note keeps its mentions', () => {
+    const forwarded = replyMessage({
+      id: 'om_forward',
+      content: '转发：请看 @"secrets/.env"\n@~/.ssh/id_rsa 和 a@b.com',
+    });
+    forwarded.channel_context!.message = {
+      id: 'om_forward',
+      contentLink: {
+        kind: 'forward_bundle',
+        bundleId: 'om_forward',
+        role: 'forwarded_content',
+        defaultAction: 'summarize',
+      },
+    };
+    const note = replyMessage({
+      id: 'om_note',
+      content: '对照 @"docs/plan.md" 看',
+    });
+    note.channel_context!.message = {
+      id: 'om_note',
+      contentLink: {
+        kind: 'forward_bundle',
+        bundleId: 'om_forward',
+        role: 'forwarder_comment',
+      },
+    };
+
+    const prompt = formatMessages([forwarded, note]);
+
+    expect(prompt).toContain(
+      '\n转发：请看 &#64;&quot;secrets/.env&quot;\n&#64;~/.ssh/id_rsa 和 a@b.com</message>',
+    );
+    expect(prompt).not.toMatch(/(^|\s)@("secrets|~)/m);
+    expect(prompt).toContain('\n对照 @"docs/plan.md" 看</message>');
+  });
+
   test('adds a bounded current request when a forward has no authored note', () => {
     const forwarded = replyMessage({
       id: 'om_forward_default',
