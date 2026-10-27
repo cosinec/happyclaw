@@ -95,7 +95,6 @@ import {
   getBalancingConfig,
   saveBalancingConfig,
   createProvider,
-  findProviderModel,
   nextProviderModelList,
   providerModels,
   recordProviderTest,
@@ -1730,10 +1729,11 @@ configRoutes.patch(
             ? anthropicAuthToken.trim() !== previous.anthropicAuthToken
             : !!previous.anthropicAuthToken)
         );
-        const authModeChanged = !!(
+        // Null clears the style: a change only when there was one.
+        const authModeChanged =
           providerPatch.anthropicAuthMode !== undefined &&
-          providerPatch.anthropicAuthMode !== previous.anthropicAuthMode
-        );
+          (providerPatch.anthropicAuthMode ?? undefined) !==
+            previous.anthropicAuthMode;
         const protocolFieldChanged =
           baseUrlChanged ||
           modelChanged ||
@@ -1745,11 +1745,6 @@ configRoutes.patch(
         const removedModels = providerModels(previous)
           .map((entry) => entry.id)
           .filter((model) => !nextModels.some((entry) => entry.id === model));
-        // A runner on the default model was launched with its effort.
-        const defaultEffortChanged =
-          findProviderModel(previous, previous.anthropicModel)?.effort !==
-          nextModels.find((entry) => entry.id === previous.anthropicModel)
-            ?.effort;
         const agentsUsingRemoved = listAgentProfilesUsingModels(
           id,
           removedModels,
@@ -1816,14 +1811,12 @@ configRoutes.patch(
         };
 
         // Only what a running runner was launched with stops it: the endpoint,
-        // the key and its header style, the env, the default model and its
-        // effort, or a model a session may be running. A name, a weight, a
-        // model's visibility, an added model or the preset reach the next
-        // pick or launch by themselves.
+        // the key and its header style, the env, the default model, or a model
+        // a session may be running. A name, a weight, a model's visibility or
+        // effort, an added model or the preset reach the next pick or launch
+        // by themselves.
         const runnerEnvironmentChanged =
-          protocolFieldChanged ||
-          defaultEffortChanged ||
-          removedModels.length > 0;
+          protocolFieldChanged || removedModels.length > 0;
 
         let mutation: ClaudeMutationResult<ReturnType<typeof updateProvider>>;
         if (

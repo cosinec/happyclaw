@@ -445,22 +445,60 @@ describe('editing a model list', () => {
     });
   });
 
-  test("the default model's effort and a removed model reach runners: they stop", async () => {
+  test("a model's effort, the default's too, waits for the next launch; a removed model stops runners", async () => {
     const provider = thirdParty({
       enabled: true,
       models: [{ id: 'glm-5.3' }, { id: 'glm-5.2' }],
     });
     const retuned = await request('PATCH', `/providers/${provider.id}`, {
-      models: [{ id: 'glm-5.3', effort: 'low' }, { id: 'glm-5.2' }],
+      models: [
+        { id: 'glm-5.3', effort: 'low' },
+        { id: 'glm-5.2', effort: 'high' },
+      ],
     });
     expect(retuned.status).toBe(200);
-    expect(queue.pauseGroupsForMutation).toHaveBeenCalledTimes(1);
+    expect(retuned.body.applied).toMatchObject({ stoppedCount: 0 });
+    expect(queue.pauseGroupsForMutation).not.toHaveBeenCalled();
 
     const removed = await request('PATCH', `/providers/${provider.id}`, {
       models: [{ id: 'glm-5.3', effort: 'low' }],
     });
     expect(removed.status).toBe(200);
-    expect(queue.pauseGroupsForMutation).toHaveBeenCalledTimes(2);
+    expect(queue.pauseGroupsForMutation).toHaveBeenCalledTimes(1);
+  });
+
+  test('clearing the auth header style brings back the inference', async () => {
+    const provider = thirdParty({ enabled: true, anthropicAuthMode: 'bearer' });
+    boundSession(provider.id);
+    const cleared = await request('PATCH', `/providers/${provider.id}`, {
+      anthropicAuthMode: null,
+    });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.provider.anthropicAuthMode).toBeNull();
+    expect(runtimeConfig.getProviderById(provider.id)!.anthropicAuthMode).toBe(
+      undefined,
+    );
+    // A different header style is a protocol change.
+    expect(queue.pauseGroupsForMutation).toHaveBeenCalledTimes(1);
+    expect(db.getSession('connections-folder')).toBeUndefined();
+
+    // The test falls back again: the inferred x-api-key first, then Bearer.
+    reply = refuses('x-api-key', { status: 200, body: {} });
+    const tested = await request('POST', '/providers/test', {
+      providerId: provider.id,
+    });
+    expect(
+      seen.map((item) => (item.headers['x-api-key'] ? 'x-api-key' : 'bearer')),
+    ).toEqual(['x-api-key', 'bearer']);
+    expect(tested.body).toMatchObject({ ok: true, authMode: 'bearer' });
+
+    // Clearing a style that is not there changes nothing.
+    const legacy = thirdParty({ enabled: true });
+    const again = await request('PATCH', `/providers/${legacy.id}`, {
+      anthropicAuthMode: null,
+    });
+    expect(again.status).toBe(200);
+    expect(queue.pauseGroupsForMutation).toHaveBeenCalledTimes(1);
   });
 
   test('a new default model is still a protocol change', async () => {

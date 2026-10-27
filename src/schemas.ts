@@ -1198,7 +1198,8 @@ export const UnifiedProviderPatchSchema = z
   .object({
     name: z.string().min(1).max(64).optional(),
     anthropicBaseUrl: ProviderBaseUrlSchema.optional(),
-    anthropicAuthMode: ProviderAuthModeSchema.optional(),
+    /** Null goes back to inferring the header style from the token. */
+    anthropicAuthMode: ProviderAuthModeSchema.nullable().optional(),
     anthropicModel: ProviderDefaultModelSchema.optional(),
     /** The whole new list; models left out are removed. */
     models: ProviderModelListSchema.optional(),
