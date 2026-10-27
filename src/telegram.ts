@@ -27,11 +27,23 @@ import {
 } from './channel-address.js';
 import { resolveAdmittedChannelRoute } from './channel-admission.js';
 import {
+  isGroupSenderAdmitted,
+  type ChannelCommandMention,
+  type GroupAudienceConnectOpts,
+} from './im-group-audience.js';
+import {
+  parseConnectorRuntimeControl,
+  projectChannelInbound,
+  runSessionBreak,
+  type ChannelFollowUpConnectOpts,
+  type ChannelFollowUpOutcome,
+} from './im-connector-follow-up.js';
+import {
   PartialChannelDeliveryError,
   PhysicalDeliveryTracker,
 } from './im-delivery-progress.js';
 import { DefinitiveChannelDeliveryError } from './channel-outbox-delivery.js';
-import type { ChannelMessageMeta, NewMessage } from './types.js';
+import type { ChannelMessageMeta, FollowUpMode, NewMessage } from './types.js';
 import {
   ExactAsyncIndicatorRegistry,
   processingIndicatorKey,
@@ -43,7 +55,9 @@ export interface TelegramConnectionConfig {
   proxyUrl?: string;
 }
 
-export interface TelegramConnectOpts {
+/** Group audience senders are bare Telegram user ids. */
+export interface TelegramConnectOpts
+  extends ChannelFollowUpConnectOpts, GroupAudienceConnectOpts {
   onReady?: () => void;
   /** 收到消息后调用，让调用方自动注册未知的 Telegram 聊天 */
   onNewChat: (jid: string, name: string) => void;
@@ -63,6 +77,7 @@ export interface TelegramConnectOpts {
     chatJid: string,
     command: string,
     senderImId?: string,
+    mentions?: ChannelCommandMention[],
   ) => Promise<string | null>;
   /** 热重连时设置：丢弃 date 早于此时间戳（epoch ms）的消息，避免处理渠道关闭期间的堆积消息 */
   ignoreMessagesBefore?: number;
@@ -262,68 +277,77 @@ export function telegramNativeInboundFromMessage(
   return null;
 }
 
-export function persistTelegramNativeMediaMessage(input: {
-  id?: string;
-  targetJid: string;
-  sourceJid: string;
-  senderId: string;
-  senderName: string;
-  text: string;
-  timestamp: string;
-  agentId?: string;
-  storeMessageDirect: (
-    id: string,
-    chatJid: string,
-    sender: string,
-    senderName: string,
-    content: string,
-    timestamp: string,
-    isFromMe: boolean,
-    extra?: { sourceJid?: string },
-  ) => void;
-  notifyNewImMessage: () => void;
-  onMessagePersisted?: (
-    chatJid: string,
-    message: {
-      id: string;
-      chat_jid: string;
-      source_jid: string;
-      sender: string;
-      sender_name: string;
-      content: string;
-      timestamp: string;
-      is_from_me: boolean;
-    },
-    agentId?: string,
-  ) => void;
-}): string {
-  const id = input.id ?? crypto.randomUUID();
-  input.storeMessageDirect(
-    id,
-    input.targetJid,
-    input.senderId,
-    input.senderName,
-    input.text,
-    input.timestamp,
-    false,
-    { sourceJid: input.sourceJid },
-  );
-  input.onMessagePersisted?.(
-    input.targetJid,
-    {
-      id,
-      chat_jid: input.targetJid,
-      source_jid: input.sourceJid,
-      sender: input.senderId,
-      sender_name: input.senderName,
-      content: input.text,
-      timestamp: input.timestamp,
-      is_from_me: false,
-    },
-    input.agentId,
-  );
-  input.notifyNewImMessage();
-  return id;
+interface TelegramEntityLike {
+  type: string;
+  offset: number;
+  length: number;
+  user?: { id: number; is_bot?: boolean };
+}
+
+interface TelegramMessageLike {
+  text?: string;
+  caption?: string;
+  entities?: TelegramEntityLike[];
+  caption_entities?: TelegramEntityLike[];
+  reply_to_message?: { from?: { id: number; is_bot?: boolean } };
+}
+
+/**
+ * The text of a group message that structurally addresses this bot, with the
+ * addressing removed; null when it does not. Telegram marks the proof itself:
+ * a leading `@username` mention entity of this bot, a leading `text_mention`
+ * of its user id, or a leading `/command@username`. A reply to the bot or a
+ * hand-typed name is not proof.
+ */
+export function telegramAddressedText(
+  message: TelegramMessageLike,
+  bot: { username?: string; id?: number },
+): string | null {
+  const text = message.text ?? message.caption ?? '';
+  const entities =
+    message.text !== undefined ? message.entities : message.caption_entities;
+  const first = entities?.find((entity) => entity.offset === 0);
+  if (!first) return null;
+  const token = text.slice(0, first.length);
+  const rest = text.slice(first.length);
+  const handle = bot.username ? `@${bot.username}`.toLowerCase() : null;
+  if (first.type === 'mention' && handle && token.toLowerCase() === handle) {
+    return rest.trim();
+  }
+  if (first.type === 'text_mention' && bot.id && first.user?.id === bot.id) {
+    return rest.trim();
+  }
+  if (
+    first.type === 'bot_command' &&
+    handle &&
+    token.toLowerCase().endsWith(handle)
+  ) {
+    return (token.slice(0, token.length - handle.length) + rest).trim();
+  }
+  return null;
+}
+
+/**
+ * Members a Telegram command names, for `/allow` and `/disallow`. A plain
+ * `@username` entity carries no user id and the Bot API cannot resolve one,
+ * so only `text_mention` entities (members without a username) and the
+ * author of the replied-to message are structural. Bots are never named.
+ */
+export function telegramCommandMentions(
+  message: TelegramMessageLike,
+): ChannelCommandMention[] {
+  const ids = new Set<string>();
+  for (const entity of [
+    ...(message.entities ?? []),
+    ...(message.caption_entities ?? []),
+  ]) {
+    if (entity.type === 'text_mention' && entity.user && !entity.user.is_bot) {
+      ids.add(String(entity.user.id));
+    }
+  }
+  const repliedTo = message.reply_to_message?.from;
+  if (repliedTo && !repliedTo.is_bot) ids.add(String(repliedTo.id));
+  return [...ids].map((imId) => ({ imId }));
 }
 
 /**
@@ -440,6 +464,10 @@ interface TelegramChatDescriptor {
   id: string | number;
   type: string;
   is_forum?: boolean;
+}
+
+function isTelegramGroupChat(chat: { type: string }): boolean {
+  return chat.type === 'group' || chat.type === 'supergroup';
 }
 
 /**
@@ -722,6 +750,7 @@ export function createTelegramConnection(
   let readyFired = false;
   let connected = false;
   let botUsername: string | undefined;
+  let botUserId: number | undefined;
   const telegramApiAgent =
     config.proxyUrl && config.proxyUrl.trim()
       ? new ProxyAgent({
@@ -890,6 +919,114 @@ export function createTelegramConnection(
   }
 
   /**
+   * `/steer` or `/break` in this message. Private chats are direct; a group
+   * needs Telegram's structural proof that the bot is addressed.
+   */
+  function telegramRuntimeControl(
+    message: TelegramMessageLike,
+    chat: TelegramChatDescriptor,
+    hasAttachments: boolean,
+  ) {
+    const commandText = isTelegramGroupChat(chat)
+      ? telegramAddressedText(message, {
+          username: botUsername,
+          id: botUserId,
+        })
+      : (message.text ?? message.caption ?? '').trim();
+    return parseConnectorRuntimeControl({
+      commandText: commandText ?? '',
+      eligible: commandText !== null,
+      hasAttachments,
+    });
+  }
+
+  /** A media caption, or the guidance of a `/steer` caption. */
+  function telegramMediaCaption(
+    message: TelegramMessageLike,
+    chat: TelegramChatDescriptor,
+  ): { caption?: string; requestedMode?: FollowUpMode } {
+    const control = telegramRuntimeControl(message, chat, true);
+    return control?.kind === 'steer'
+      ? { caption: control.text, requestedMode: 'steer' }
+      : { caption: message.caption };
+  }
+
+  /**
+   * Persist one admitted input, offer it to the durable follow-up queue, then
+   * project it. A queued input is released by the host when the active run
+   * ends, so it neither wakes the poller nor starts its agent here.
+   */
+  function persistTelegramInbound(
+    opts: TelegramConnectOpts,
+    input: {
+      id: string;
+      jid: string;
+      targetJid: string;
+      sourceJid: string;
+      senderId: string;
+      senderName: string;
+      content: string;
+      timestamp: string;
+      attachmentsJson?: string;
+      agentId?: string;
+      requestedMode?: FollowUpMode;
+    },
+  ): ChannelFollowUpOutcome {
+    storeMessageDirect(
+      input.id,
+      input.targetJid,
+      input.senderId,
+      input.senderName,
+      input.content,
+      input.timestamp,
+      false,
+      { attachments: input.attachmentsJson, sourceJid: input.sourceJid },
+    );
+    const followUp = projectChannelInbound(
+      opts,
+      {
+        id: input.id,
+        chat_jid: input.targetJid,
+        source_jid: input.sourceJid,
+        sender: input.senderId,
+        sender_name: input.senderName,
+        content: input.content,
+        timestamp: input.timestamp,
+        attachments: input.attachmentsJson,
+        is_from_me: false,
+      },
+      { agentId: input.agentId, requestedMode: input.requestedMode },
+    );
+    if (followUp.shouldStartTurn) {
+      notifyNewImMessage();
+      if (input.agentId) opts.onAgentMessage?.(input.jid, input.agentId);
+    }
+    return followUp;
+  }
+
+  /**
+   * Response audience of an authorized group chat. Runs before commands and
+   * before any registration, routing or download side effect.
+   */
+  function admitTelegramGroupSender(
+    opts: TelegramConnectOpts,
+    jid: string,
+    chat: TelegramChatDescriptor,
+    senderId: number | undefined,
+    text: string | undefined,
+  ): boolean {
+    return (
+      !isTelegramGroupChat(chat) ||
+      isGroupSenderAdmitted(
+        opts,
+        jid,
+        senderId ? String(senderId) : undefined,
+        text ?? '',
+      )
+    );
+  }
+
+  /**
    * One admission path for every caption-capable Telegram media update.
    * Pairing is completed before any download/registration side effect, and the
    * asynchronous pair attempt itself lives inside this try/catch so failures
@@ -902,9 +1039,18 @@ export function createTelegramConnection(
     chat: TelegramChatDescriptor;
     caption?: string;
     kind: TelegramNativeInboundKind | 'photo' | 'document';
+    senderId?: number;
     reply: (text: string) => Promise<unknown>;
   }): Promise<boolean> {
-    if (input.opts.isChatAuthorized(input.jid)) return true;
+    if (input.opts.isChatAuthorized(input.jid)) {
+      return admitTelegramGroupSender(
+        input.opts,
+        input.jid,
+        input.chat,
+        input.senderId,
+        input.caption,
+      );
+    }
 
     const pairCode = matchTelegramPairCode(input.caption, botUsername);
     if (pairCode && input.opts.onPairAttempt) {
@@ -1150,6 +1296,44 @@ export function createTelegramConnection(
               );
               return;
             }
+            if (
+              !admitTelegramGroupSender(
+                opts,
+                jid,
+                ctx.chat as TelegramChatDescriptor,
+                ctx.from?.id,
+                text,
+              )
+            ) {
+              return;
+            }
+
+            const resolveRoute = () =>
+              resolveAdmittedChannelRoute(
+                routeJid,
+                opts.resolveEffectiveChatJid
+                  ? () => opts.resolveEffectiveChatJid!(jid, messageMeta)
+                  : undefined,
+              );
+            const runtimeControl = telegramRuntimeControl(
+              ctx.message,
+              ctx.chat as TelegramChatDescriptor,
+              false,
+            );
+            if (runtimeControl?.kind === 'break') {
+              const reply = await runSessionBreak(opts.onSessionBreak, {
+                sourceJid: jid,
+                targetJid: resolveRoute()?.targetJid,
+                senderImId: ctx.from?.id ? String(ctx.from.id) : '',
+                chatType: isTelegramGroupChat(ctx.chat) ? 'group' : 'p2p',
+              });
+              await ctx.reply(reply);
+              return;
+            }
+            const requestedFollowUpMode: FollowUpMode | undefined =
+              runtimeControl?.kind === 'steer' ? 'steer' : undefined;
+            const content =
+              runtimeControl?.kind === 'steer' ? runtimeControl.text : text;
 
             // ── 斜杠指令：拦截已知 /xxx 命令，不进入消息流 ──
             // Telegram 群聊中会追加 @BotUsername，需要去掉
@@ -1165,7 +1349,7 @@ export function createTelegramConnection(
             const tgSlashMatch = text
               .trim()
               .match(/^\/(\S+?)(?:@\S+)?(?:\s+(.*))?$/i);
-            if (tgSlashMatch && opts.onCommand) {
+            if (tgSlashMatch && opts.onCommand && !requestedFollowUpMode) {
               const cmdBody = (
                 tgSlashMatch[1] + (tgSlashMatch[2] ? ' ' + tgSlashMatch[2] : '')
               ).trim();
@@ -1177,7 +1361,12 @@ export function createTelegramConnection(
                 const senderImId = ctx.from?.id
                   ? String(ctx.from.id)
                   : undefined;
-                const reply = await opts.onCommand(jid, cmdBody, senderImId);
+                const reply = await opts.onCommand(
+                  jid,
+                  cmdBody,
+                  senderImId,
+                  telegramCommandMentions(ctx.message),
+                );
                 if (reply) {
                   await ctx.reply(reply);
                   return; // 已知命令，拦截
@@ -1200,12 +1389,7 @@ export function createTelegramConnection(
               }
             }
 
-            const resolvedRoute = resolveAdmittedChannelRoute(
-              routeJid,
-              opts.resolveEffectiveChatJid
-                ? () => opts.resolveEffectiveChatJid!(jid, messageMeta)
-                : undefined,
-            );
+            const resolvedRoute = resolveRoute();
             if (!resolvedRoute) {
               logger.warn(
                 { jid, routeJid },
@@ -1256,53 +1440,30 @@ export function createTelegramConnection(
             const timestamp = new Date(ctx.message.date * 1000).toISOString();
             const senderId = ctx.from?.id ? `tg:${ctx.from.id}` : 'tg:unknown';
             storeChatMetadata(targetJid, timestamp);
-            storeMessageDirect(
+            // The connector owns persistence; the host decides how to project it.
+            const followUp = persistTelegramInbound(opts, {
               id,
+              jid,
               targetJid,
+              sourceJid,
               senderId,
               senderName,
-              text,
+              content,
               timestamp,
-              false,
-              { sourceJid },
-            );
-
-            // The connector owns persistence; the host decides how to project it.
-            opts.onMessagePersisted?.(
-              targetJid,
+              agentId: agentRouting?.agentId ?? undefined,
+              requestedMode: requestedFollowUpMode,
+            });
+            logger.info(
               {
-                id,
-                chat_jid: targetJid,
-                source_jid: sourceJid,
-                sender: senderId,
-                sender_name: senderName,
-                content: text,
-                timestamp,
-                is_from_me: false,
+                jid,
+                effectiveJid: targetJid,
+                agentId: agentRouting?.agentId,
+                sender: senderName,
+                msgId,
+                disposition: followUp.disposition,
               },
-              agentRouting?.agentId ?? undefined,
+              'Telegram message stored',
             );
-            notifyNewImMessage();
-
-            // 触发 agent 处理
-            if (agentRouting?.agentId) {
-              opts.onAgentMessage?.(jid, agentRouting.agentId);
-              logger.info(
-                {
-                  jid,
-                  effectiveJid: targetJid,
-                  agentId: agentRouting.agentId,
-                  sender: senderName,
-                  msgId,
-                },
-                'Telegram message routed to conversation agent',
-              );
-            } else {
-              logger.info(
-                { jid, sender: senderName, msgId, routed: !!agentRouting },
-                'Telegram message stored',
-              );
-            }
           } finally {
             processingLock.release(msgId);
           }
@@ -1350,6 +1511,7 @@ export function createTelegramConnection(
                 chat: ctx.chat as TelegramChatDescriptor,
                 caption: ctx.message.caption,
                 kind: 'photo',
+                senderId: ctx.from?.id,
                 reply: (text) => ctx.reply(text),
               }))
             ) {
@@ -1428,10 +1590,11 @@ export function createTelegramConnection(
               }
             }
 
-            const text = telegramMediaMessageText(
-              imgMarker,
-              ctx.message.caption,
+            const { caption, requestedMode } = telegramMediaCaption(
+              ctx.message,
+              ctx.chat as TelegramChatDescriptor,
             );
+            const text = telegramMediaMessageText(imgMarker, caption);
 
             const id = crypto.randomUUID();
             ackReactions
@@ -1465,37 +1628,19 @@ export function createTelegramConnection(
             const timestamp = new Date(ctx.message.date * 1000).toISOString();
             const senderId = ctx.from?.id ? `tg:${ctx.from.id}` : 'tg:unknown';
             storeChatMetadata(targetJid, timestamp);
-            storeMessageDirect(
+            persistTelegramInbound(opts, {
               id,
+              jid,
               targetJid,
+              sourceJid,
               senderId,
               senderName,
-              text,
+              content: text,
               timestamp,
-              false,
-              { attachments: attachmentsJson, sourceJid },
-            );
-
-            opts.onMessagePersisted?.(
-              targetJid,
-              {
-                id,
-                chat_jid: targetJid,
-                source_jid: sourceJid,
-                sender: senderId,
-                sender_name: senderName,
-                content: text,
-                timestamp,
-                attachments: attachmentsJson,
-                is_from_me: false,
-              },
-              agentRouting?.agentId ?? undefined,
-            );
-            notifyNewImMessage();
-
-            if (agentRouting?.agentId) {
-              opts.onAgentMessage?.(jid, agentRouting.agentId);
-            }
+              attachmentsJson,
+              agentId: agentRouting?.agentId ?? undefined,
+              requestedMode,
+            });
 
             logger.info(
               { jid, sender: senderName, msgId, routed: !!agentRouting },
@@ -1552,6 +1697,7 @@ export function createTelegramConnection(
                 chat: ctx.chat as TelegramChatDescriptor,
                 caption: ctx.message.caption,
                 kind: 'document',
+                senderId: ctx.from?.id,
                 reply: (text) => ctx.reply(text),
               }))
             ) {
@@ -1584,41 +1730,26 @@ export function createTelegramConnection(
             const safeFilename = sanitizeImFilename(originalFilename);
 
             // file_size 超过上限时跳过下载
+            const { caption, requestedMode } = telegramMediaCaption(
+              ctx.message,
+              ctx.chat as TelegramChatDescriptor,
+            );
             if (doc.file_size !== undefined && doc.file_size > MAX_FILE_SIZE) {
-              const text = telegramMediaMessageText(
-                `[文件过大，未下载: ${safeFilename}]`,
-                ctx.message.caption,
-              );
-              const id = crypto.randomUUID();
-              const timestamp = new Date(ctx.message.date * 1000).toISOString();
-              const senderId = ctx.from?.id
-                ? `tg:${ctx.from.id}`
-                : 'tg:unknown';
-              storeMessageDirect(
-                id,
+              persistTelegramInbound(opts, {
+                id: crypto.randomUUID(),
+                jid,
                 targetJid,
-                senderId,
+                sourceJid,
+                senderId: ctx.from?.id ? `tg:${ctx.from.id}` : 'tg:unknown',
                 senderName,
-                text,
-                timestamp,
-                false,
-                { sourceJid },
-              );
-              opts.onMessagePersisted?.(
-                targetJid,
-                {
-                  id,
-                  chat_jid: targetJid,
-                  source_jid: sourceJid,
-                  sender: senderId,
-                  sender_name: senderName,
-                  content: text,
-                  timestamp,
-                  is_from_me: false,
-                },
-                agentRouting?.agentId ?? undefined,
-              );
-              notifyNewImMessage();
+                content: telegramMediaMessageText(
+                  `[文件过大，未下载: ${safeFilename}]`,
+                  caption,
+                ),
+                timestamp: new Date(ctx.message.date * 1000).toISOString(),
+                agentId: agentRouting?.agentId ?? undefined,
+                requestedMode,
+              });
               return;
             }
 
@@ -1639,10 +1770,7 @@ export function createTelegramConnection(
                 : `[文件下载失败: ${safeFilename}]`;
             }
 
-            const text = telegramMediaMessageText(
-              fileText,
-              ctx.message.caption,
-            );
+            const text = telegramMediaMessageText(fileText, caption);
 
             const id = crypto.randomUUID();
             ackReactions
@@ -1676,36 +1804,18 @@ export function createTelegramConnection(
             const timestamp = new Date(ctx.message.date * 1000).toISOString();
             const senderId = ctx.from?.id ? `tg:${ctx.from.id}` : 'tg:unknown';
             storeChatMetadata(targetJid, timestamp);
-            storeMessageDirect(
+            persistTelegramInbound(opts, {
               id,
+              jid,
               targetJid,
+              sourceJid,
               senderId,
               senderName,
-              text,
+              content: text,
               timestamp,
-              false,
-              { sourceJid },
-            );
-
-            opts.onMessagePersisted?.(
-              targetJid,
-              {
-                id,
-                chat_jid: targetJid,
-                source_jid: sourceJid,
-                sender: senderId,
-                sender_name: senderName,
-                content: text,
-                timestamp,
-                is_from_me: false,
-              },
-              agentRouting?.agentId ?? undefined,
-            );
-            notifyNewImMessage();
-
-            if (agentRouting?.agentId) {
-              opts.onAgentMessage?.(jid, agentRouting.agentId);
-            }
+              agentId: agentRouting?.agentId ?? undefined,
+              requestedMode,
+            });
 
             logger.info(
               { jid, sender: senderName, msgId, routed: !!agentRouting },
@@ -1760,6 +1870,7 @@ export function createTelegramConnection(
                 chat: tgChat as TelegramChatDescriptor,
                 caption: tgMessage.caption,
                 kind: inbound.kind,
+                senderId: ctx.from?.id,
                 reply: (text) => ctx.reply(text),
               }))
             ) {
@@ -1847,28 +1958,27 @@ export function createTelegramConnection(
               .catch(() => {});
             const timestamp = new Date(tgMessage.date * 1000).toISOString();
             const senderId = ctx.from?.id ? `tg:${ctx.from.id}` : 'tg:unknown';
+            const { caption, requestedMode } = telegramMediaCaption(
+              tgMessage,
+              tgChat as TelegramChatDescriptor,
+            );
             const text = telegramMediaMessageText(
               [inbound.text, fileText].filter(Boolean).join('\n'),
-              tgMessage.caption,
+              caption,
             );
             storeChatMetadata(targetJid, timestamp);
-            persistTelegramNativeMediaMessage({
+            persistTelegramInbound(opts, {
               id,
+              jid,
               targetJid,
               sourceJid,
               senderId,
               senderName,
-              text,
+              content: text,
               timestamp,
               agentId: agentRouting?.agentId ?? undefined,
-              storeMessageDirect,
-              notifyNewImMessage,
-              onMessagePersisted: opts.onMessagePersisted,
+              requestedMode,
             });
-
-            if (agentRouting?.agentId) {
-              opts.onAgentMessage?.(jid, agentRouting.agentId);
-            }
 
             logger.info(
               {
@@ -1959,6 +2069,7 @@ export function createTelegramConnection(
       // Validate credentials/network before reporting transport readiness.
       const me = await bot.api.getMe();
       botUsername = me.username;
+      botUserId = me.id;
 
       let settleInitialReady: ((ready: boolean) => void) | null = null;
       const initialReady = new Promise<boolean>((resolve) => {
@@ -2079,6 +2190,7 @@ export function createTelegramConnection(
       processingLock.dispose();
       nativeContextReported.clear();
       botUsername = undefined;
+      botUserId = undefined;
     },
 
     async sendMessage(

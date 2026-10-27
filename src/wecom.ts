@@ -48,6 +48,14 @@ import {
   WECOM_MARKDOWN_MAX_BYTES,
   WeComStreamingController,
 } from './wecom-streaming.js';
+import { isOwnerBootstrapCommand } from './im-group-audience.js';
+import {
+  offerChannelFollowUp,
+  parseConnectorRuntimeControl,
+  runSessionBreak,
+  type ChannelFollowUpConnectOpts,
+  type ChannelFollowUpOutcome,
+} from './im-connector-follow-up.js';
 
 const AUTH_TIMEOUT_MS = 15_000;
 const MESSAGE_DEDUP_TTL_MS = 30 * 60_000;
@@ -504,7 +512,7 @@ export interface WeComConnectionConfig {
   mediaDownloadTimeoutMs?: number;
 }
 
-export interface WeComConnectOpts {
+export interface WeComConnectOpts extends ChannelFollowUpConnectOpts {
   onReady?: () => void;
   onNewChat: (jid: string, name: string) => void;
   ignoreMessagesBefore?: number;
@@ -585,6 +593,8 @@ interface WeComInboundProgress {
   registered?: boolean;
   stored?: boolean;
   frameCached?: boolean;
+  /** Host follow-up decision, taken once per stored input. */
+  followUp?: ChannelFollowUpOutcome;
   broadcast?: boolean;
   notified?: boolean;
   agentNotified?: boolean;
@@ -724,6 +734,36 @@ export function createWeComConnection(
   // retry. This lets a failed transport ACK retry sendReply without executing
   // a potentially mutating command twice.
   const commandReplies = new Map<string, string | null>();
+
+  /**
+   * Run a command once per provider event. The handler may commit state and
+   * then throw, so a failure caches a terminal reply: a transport retry of
+   * the same event never replays an uncertain mutation.
+   */
+  async function settleCommandReply(
+    dedupKey: string,
+    jid: string,
+    command: string | undefined,
+    run: () => Promise<string | null>,
+  ): Promise<string | null> {
+    if (!commandReplies.has(dedupKey)) {
+      while (commandReplies.size >= MESSAGE_DEDUP_MAX) {
+        const oldest = commandReplies.keys().next().value;
+        if (oldest === undefined) break;
+        commandReplies.delete(oldest);
+      }
+      try {
+        commandReplies.set(dedupKey, (await run()) ?? null);
+      } catch (error) {
+        logger.error(
+          { ...logCtx, jid, command, error },
+          'WeCom slash command failed',
+        );
+        commandReplies.set(dedupKey, '命令执行失败，请稍后重试。');
+      }
+    }
+    return commandReplies.get(dedupKey) ?? null;
+  }
   // Exact durable input id -> original callback frame. Map insertion order is
   // the LRU order; a session removes its entry and retains the frozen frame.
   const inboundFrames = new Map<string, CachedInboundFrame>();
@@ -1225,16 +1265,9 @@ export function createWeComConnection(
     generation: number,
     signal: AbortSignal,
   ): Promise<NormalizedWeComInbound> {
+    // Group and single-chat media share one path: the same download limits,
+    // the same workspace folder and the same failure markers.
     const msgtype = body.msgtype;
-    if (
-      body.chattype === 'group' &&
-      (msgtype === 'image' ||
-        msgtype === 'voice' ||
-        msgtype === 'file' ||
-        msgtype === 'video')
-    ) {
-      return { content: '', attachments: [] };
-    }
     if (msgtype === 'text' || msgtype === 'voice') {
       return { content: extractInboundAdmissionText(body), attachments: [] };
     }
@@ -1413,13 +1446,9 @@ export function createWeComConnection(
         : undefined;
       // /owner_mention is the sole audience bootstrap exception, and only
       // while the group is genuinely unowned and not credential-quarantined.
-      const ownerBootstrap = Boolean(
+      const ownerBootstrap =
         conversation.isGroup &&
-        commandName === 'owner_mention' &&
-        registeredGroup &&
-        !registeredGroup.owner_im_id &&
-        registeredGroup.owner_claim_source !== 'transfer_reset',
-      );
+        isOwnerBootstrapCommand(admissionText, registeredGroup);
 
       if (conversation.isGroup) {
         if (
@@ -1450,38 +1479,46 @@ export function createWeComConnection(
         }
       }
 
-      if (slashMatch && opts?.onCommand) {
+      // Group callbacks exist only for an @mention of the bot and a single
+      // chat is addressed to it, so the callback itself is the proof.
+      const runtimeControl = parseConnectorRuntimeControl({
+        commandText: admissionText,
+        eligible: true,
+        hasAttachments: body.msgtype !== 'text',
+      });
+      const steerText =
+        runtimeControl?.kind === 'steer' ? runtimeControl.text : undefined;
+      const onCommand = opts?.onCommand;
+      let commandReply: string | null = null;
+      if (runtimeControl?.kind === 'break') {
+        const onSessionBreak = opts?.onSessionBreak;
+        commandReply = await settleCommandReply(dedupKey, jid, 'break', () =>
+          runSessionBreak(onSessionBreak, {
+            sourceJid: jid,
+            targetJid,
+            senderImId: fromUserId,
+            chatType: conversation.isGroup ? 'group' : 'p2p',
+          }),
+        );
+      } else if (slashMatch && onCommand && steerText === undefined) {
         const command = `${slashMatch[1]}${slashMatch[2] ? ` ${slashMatch[2]}` : ''}`;
-        if (!commandReplies.has(dedupKey)) {
-          while (commandReplies.size >= MESSAGE_DEDUP_MAX) {
-            const oldest = commandReplies.keys().next().value;
-            if (oldest === undefined) break;
-            commandReplies.delete(oldest);
-          }
-          try {
-            commandReplies.set(
-              dedupKey,
-              (await opts.onCommand(jid, command, fromUserId)) ?? null,
-            );
-          } catch (error) {
-            // The handler may have committed state before throwing. Cache a
-            // terminal error response so a transport retry never replays the
-            // uncertain command mutation.
-            logger.error(
-              { ...logCtx, jid, command: commandName, error },
-              'WeCom slash command failed',
-            );
-            commandReplies.set(dedupKey, '命令执行失败，请稍后重试。');
-          }
-        }
-        const reply = commandReplies.get(dedupKey);
-        if (reply) {
-          if (!ws) throw new Error('WeCom connection is unavailable');
-          await sendReply(ws, frame, reply);
-        }
+        commandReply = await settleCommandReply(
+          dedupKey,
+          jid,
+          commandName,
+          () => onCommand(jid, command, fromUserId),
+        );
+      }
+      if (commandReply) {
+        if (!ws) throw new Error('WeCom connection is unavailable');
+        // A failed send keeps the cached reply for the provider retry.
+        await sendReply(ws, frame, commandReply);
         commandReplies.delete(dedupKey);
         return;
       }
+      // An unknown command (no reply) is ordinary input for the Agent, as on
+      // Feishu.
+      commandReplies.delete(dedupKey);
 
       // All registration and business side effects are after admission,
       // routing, command handling, and group policy filters.
@@ -1552,10 +1589,17 @@ export function createWeComConnection(
           normalized.attachments.length > 0
             ? JSON.stringify(normalized.attachments)
             : undefined;
+        // `/steer` keeps only its guidance; media markers that follow the
+        // command text in a mixed message stay in place.
+        const normalizedContent =
+          steerText !== undefined &&
+          normalized.content.startsWith(admissionText)
+            ? steerText + normalized.content.slice(admissionText.length)
+            : normalized.content;
         stageProgressPayload(
           dedupKey,
           progress,
-          normalized.content,
+          normalizedContent,
           attachmentsJson,
           generation,
           signal,
@@ -1612,6 +1656,14 @@ export function createWeComConnection(
         cacheFrame(id, conversation.providerChatId, frame);
         progress.frameCached = true;
       }
+      progress.followUp ??= offerChannelFollowUp(opts?.onFollowUpMessage, {
+        targetJid,
+        sourceJid: jid,
+        messageId: id,
+        senderImId: senderId,
+        requestedMode: steerText === undefined ? undefined : 'steer',
+      });
+      const followUp = progress.followUp;
       if (!progress.broadcast) {
         opts?.onMessagePersisted?.(
           targetJid,
@@ -1625,10 +1677,29 @@ export function createWeComConnection(
             timestamp,
             attachments: attachmentsJson,
             is_from_me: false,
+            ...followUp.deliveryFields,
           },
           routeAgentId ?? undefined,
         );
         progress.broadcast = true;
+      }
+      if (!followUp.shouldStartTurn) {
+        // Released by the host when the active run ends.
+        if (!progress.notified) {
+          opts?.onFollowUpsChanged?.(targetJid);
+          progress.notified = true;
+        }
+        deleteProgress(dedupKey);
+        logger.info(
+          {
+            ...logCtx,
+            jid,
+            effectiveJid: targetJid,
+            disposition: followUp.disposition,
+          },
+          'WeCom message queued behind the active run',
+        );
+        return;
       }
       if (!progress.notified) {
         notifyNewImMessage();

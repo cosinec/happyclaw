@@ -4,7 +4,16 @@
  * Defines a standard interface for all IM integrations (Feishu, Telegram, etc.)
  * and provides adapter factories that wrap existing connection implementations.
  */
-import type { FeishuConnection, FeishuConnectionConfig } from './feishu.js';
+import type {
+  ConnectOptions as FeishuConnectOptions,
+  FeishuConnection,
+  FeishuConnectionConfig,
+} from './feishu.js';
+import type { FeishuBrand } from './feishu-domain.js';
+import type {
+  ChannelCommandMention,
+  GroupOwnerView,
+} from './im-group-audience.js';
 import type { FeishuConversationPlan } from './feishu-conversation-policy.js';
 import type {
   TelegramConnection,
@@ -112,6 +121,17 @@ export function appendStreamingSessionAnswer(
 
 // ─── Unified Interface ──────────────────────────────────────────
 
+/** Feishu account credentials plus the brand (Feishu or Lark) they belong to. */
+export type FeishuChannelConfig = FeishuConnectionConfig & {
+  domain?: FeishuBrand;
+};
+
+/**
+ * Feishu long-connection health beyond connect/disconnect: another program is
+ * holding this App's single long connection. `null` reports recovery.
+ */
+export type FeishuTransportIssue = { kind: 'conflict'; message: string } | null;
+
 export interface IMChannelConnectOpts {
   isChatBound?: (jid: string) => boolean;
   onReady: () => void;
@@ -139,12 +159,8 @@ export interface IMChannelConnectOpts {
     chatJid: string,
     command: string,
     senderImId?: string,
-    /** Structured provider mentions (Feishu), e.g. for /allow @user. */
-    mentions?: Array<{
-      key?: string;
-      name?: string;
-      id?: { open_id?: string; user_id?: string; union_id?: string };
-    }>,
+    /** Structured provider mentions, e.g. for /allow @user. */
+    mentions?: ChannelCommandMention[],
     /** Routed native metadata (topic/thread) of the command message. */
     messageMeta?: ChannelMessageMeta,
   ) => Promise<string | null>;
@@ -217,7 +233,7 @@ export interface IMChannelConnectOpts {
   /** Resolve registered group for a jid */
   resolveRegisteredGroup?: (
     jid: string,
-  ) => { activation_mode?: string } | undefined;
+  ) => ({ activation_mode?: string } & GroupOwnerView) | undefined;
   /** 飞书流式卡片按钮中断回调 */
   onCardInterrupt?: (
     chatJid: string,
@@ -243,6 +259,10 @@ export interface IMChannelConnectOpts {
   onWeChatConnectionStateChange?: (state: WeChatConnectionState) => void;
   /** WeCom WebSocket authentication/transport lifecycle. */
   onWeComConnectionStateChange?: (state: WeComConnectionState) => void;
+  /** Feishu: read the account owner lazily, so a first-DM claim needs no reconnect. */
+  getOwnerOpenId?: () => string | undefined;
+  /** Feishu: the App's long connection is taken elsewhere, or has recovered. */
+  onTransportIssue?: (issue: FeishuTransportIssue) => void;
 }
 
 export interface IMChannel {
@@ -344,7 +364,7 @@ export function extractChatId(jid: string): string {
 
 // ─── Feishu Adapter ─────────────────────────────────────────────
 
-export function createFeishuChannel(config: FeishuConnectionConfig): IMChannel {
+export function createFeishuChannel(config: FeishuChannelConfig): IMChannel {
   let inner: FeishuConnection | null = null;
 
   const channel: IMChannel = {
@@ -354,7 +374,8 @@ export function createFeishuChannel(config: FeishuConnectionConfig): IMChannel {
       const { createFeishuConnection } =
         await loadChannelImplementation('feishu');
       inner = createFeishuConnection(config);
-      const connected = await inner.connect({
+      const connectOptions: FeishuConnectOptions &
+        Pick<IMChannelConnectOpts, 'getOwnerOpenId' | 'onTransportIssue'> = {
         isChatBound: opts.isChatBound,
         onReady: opts.onReady,
         onNewChat: opts.onNewChat,
@@ -382,8 +403,10 @@ export function createFeishuChannel(config: FeishuConnectionConfig): IMChannel {
         shouldDeferInbound: opts.shouldDeferInbound,
         onInboundGateOpen: opts.onInboundGateOpen,
         onMessageRecalled: opts.onMessageRecalled,
-      });
-      return connected;
+        getOwnerOpenId: opts.getOwnerOpenId,
+        onTransportIssue: opts.onTransportIssue,
+      };
+      return inner.connect(connectOptions);
     },
 
     async disconnect(): Promise<void> {
@@ -645,8 +668,13 @@ export function createTelegramChannel(
           resolveEffectiveChatJid: opts.resolveEffectiveChatJid,
           onAgentMessage: opts.onAgentMessage,
           onMessagePersisted: opts.onMessagePersisted,
+          onFollowUpMessage: opts.onFollowUpMessage,
+          onFollowUpsChanged: opts.onFollowUpsChanged,
+          onSessionBreak: opts.onSessionBreak,
           onBotAddedToGroup: opts.onBotAddedToGroup,
           onBotRemovedFromGroup: opts.onBotRemovedFromGroup,
+          isSenderAllowedInGroup: opts.isSenderAllowedInGroup,
+          resolveRegisteredGroup: opts.resolveRegisteredGroup,
           normalizeIncomingJid: opts.normalizeIncomingJid,
         });
         return inner.isConnected();
@@ -808,6 +836,8 @@ export function createQQChannel(config: QQConnectionConfig): IMChannel {
           onFollowUpMessage: opts.onFollowUpMessage,
           onFollowUpsChanged: opts.onFollowUpsChanged,
           onSessionBreak: opts.onSessionBreak,
+          isSenderAllowedInGroup: opts.isSenderAllowedInGroup,
+          resolveRegisteredGroup: opts.resolveRegisteredGroup,
           normalizeIncomingJid: opts.normalizeIncomingJid,
         });
         return inner.isConnected();
@@ -996,6 +1026,9 @@ export function createWeChatChannel(
           resolveEffectiveChatJid: opts.resolveEffectiveChatJid,
           onAgentMessage: opts.onAgentMessage,
           onMessagePersisted: opts.onMessagePersisted,
+          onFollowUpMessage: opts.onFollowUpMessage,
+          onFollowUpsChanged: opts.onFollowUpsChanged,
+          onSessionBreak: opts.onSessionBreak,
           normalizeIncomingJid: opts.normalizeIncomingJid,
           isChatAuthorized: opts.isChatAuthorized,
           onPairAttempt: opts.onPairAttempt,
@@ -1159,6 +1192,9 @@ export function createWeComChannel(config: WeComConnectionConfig): IMChannel {
           resolveEffectiveChatJid: opts.resolveEffectiveChatJid,
           onAgentMessage: opts.onAgentMessage,
           onMessagePersisted: opts.onMessagePersisted,
+          onFollowUpMessage: opts.onFollowUpMessage,
+          onFollowUpsChanged: opts.onFollowUpsChanged,
+          onSessionBreak: opts.onSessionBreak,
           normalizeIncomingJid: opts.normalizeIncomingJid,
           shouldProcessGroupMessage: opts.shouldProcessGroupMessage,
           isGroupOwnerMessage: opts.isGroupOwnerMessage,
@@ -1287,10 +1323,14 @@ export function createDingTalkChannel(
           resolveEffectiveChatJid: opts.resolveEffectiveChatJid,
           onAgentMessage: opts.onAgentMessage,
           onMessagePersisted: opts.onMessagePersisted,
+          onFollowUpMessage: opts.onFollowUpMessage,
+          onFollowUpsChanged: opts.onFollowUpsChanged,
+          onSessionBreak: opts.onSessionBreak,
           onBotAddedToGroup: opts.onBotAddedToGroup,
           onBotRemovedFromGroup: opts.onBotRemovedFromGroup,
           shouldProcessGroupMessage: opts.shouldProcessGroupMessage,
           isGroupOwnerMessage: opts.isGroupOwnerMessage,
+          isSenderAllowedInGroup: opts.isSenderAllowedInGroup,
           resolveRegisteredGroup: opts.resolveRegisteredGroup,
           normalizeIncomingJid: opts.normalizeIncomingJid,
         });
@@ -1474,10 +1514,15 @@ export function createDiscordChannel(
           resolveEffectiveChatJid: opts.resolveEffectiveChatJid,
           onAgentMessage: opts.onAgentMessage,
           onMessagePersisted: opts.onMessagePersisted,
+          onFollowUpMessage: opts.onFollowUpMessage,
+          onFollowUpsChanged: opts.onFollowUpsChanged,
+          onSessionBreak: opts.onSessionBreak,
           onBotAddedToGroup: opts.onBotAddedToGroup,
           onBotRemovedFromGroup: opts.onBotRemovedFromGroup,
           shouldProcessGroupMessage: opts.shouldProcessGroupMessage,
           isGroupOwnerMessage: opts.isGroupOwnerMessage,
+          isSenderAllowedInGroup: opts.isSenderAllowedInGroup,
+          resolveRegisteredGroup: opts.resolveRegisteredGroup,
           normalizeIncomingJid: opts.normalizeIncomingJid,
         });
         return ok;
@@ -1645,11 +1690,15 @@ export function createWhatsAppChannel(
           resolveEffectiveChatJid: opts.resolveEffectiveChatJid,
           onAgentMessage: opts.onAgentMessage,
           onMessagePersisted: opts.onMessagePersisted,
+          onFollowUpMessage: opts.onFollowUpMessage,
+          onFollowUpsChanged: opts.onFollowUpsChanged,
+          onSessionBreak: opts.onSessionBreak,
           onBotAddedToGroup: opts.onBotAddedToGroup,
           onBotRemovedFromGroup: opts.onBotRemovedFromGroup,
           shouldProcessGroupMessage: opts.shouldProcessGroupMessage,
           isGroupOwnerMessage: opts.isGroupOwnerMessage,
           isSenderAllowedInGroup: opts.isSenderAllowedInGroup,
+          resolveRegisteredGroup: opts.resolveRegisteredGroup,
           onConnectionUpdate,
           normalizeIncomingJid: opts.normalizeIncomingJid,
         });

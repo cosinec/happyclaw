@@ -611,11 +611,15 @@ import {
   type ActiveFeishuContext,
   type FeishuConversationPlan,
 } from './feishu-conversation-policy.js';
+import { isUnknownFeishuSenderAllowed } from './im-audience-policy.js';
+import { applyFeishuTransportIssue } from './channel-account-transport.js';
+import { syncLegacyFeishuDefaultAccount } from './legacy-default-account-sync.js';
 import {
-  effectiveAudienceMode,
-  isSenderAllowedByAudience,
-  isUnknownFeishuSenderAllowed,
-} from './im-audience-policy.js';
+  isSenderAdmittedByGroupPolicy,
+  mentionImId,
+  type ChannelCommandMention,
+} from './im-group-audience.js';
+import { normalizeFeishuBrand } from './feishu-domain.js';
 import { logger } from './logger.js';
 import { resolveTaskOwner } from './task-utils.js';
 import { checkOwnerActive } from './owner-gate.js';
@@ -4653,7 +4657,7 @@ async function handleCommand(
   chatJid: string,
   command: string,
   senderImId?: string,
-  mentions?: Array<{ key?: string; name?: string; id?: { open_id?: string } }>,
+  mentions?: ChannelCommandMention[],
   /** Routed native metadata (topic/thread) of the command message, if known. */
   messageMeta?: ChannelMessageMeta,
 ): Promise<string | null> {
@@ -5280,7 +5284,7 @@ function handleReleaseOwnerCommand(chatJid: string): string {
 function handleAllowCommand(
   chatJid: string,
   senderImId?: string,
-  mentions?: Array<{ key?: string; name?: string; id?: { open_id?: string } }>,
+  mentions?: ChannelCommandMention[],
 ): string {
   if (!senderImId) return '无法识别发送者身份';
   let group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
@@ -5307,14 +5311,16 @@ function handleAllowCommand(
   }
 
   if (!group.owner_im_id) {
-    return '尚未识别到 owner，请先向机器人发一条私信以完成身份识别';
+    return getChannelType(chatJid) === 'feishu'
+      ? '尚未识别到 owner，请先向机器人发一条私信以完成身份识别'
+      : '尚未认领 owner，请 owner 先在群内发送 /owner_mention 认领';
   }
   if (group.owner_im_id !== senderImId) {
     return '只有 bot owner 才能修改白名单';
   }
 
   const toAdd = (mentions ?? [])
-    .map((m) => m.id?.open_id)
+    .map(mentionImId)
     .filter((id): id is string => !!id && id !== senderImId);
 
   if (toAdd.length === 0) {
@@ -5341,7 +5347,7 @@ function handleAllowCommand(
 function handleDisallowCommand(
   chatJid: string,
   senderImId?: string,
-  mentions?: Array<{ key?: string; name?: string; id?: { open_id?: string } }>,
+  mentions?: ChannelCommandMention[],
 ): string {
   if (!senderImId) return '无法识别发送者身份';
   const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
@@ -5355,7 +5361,7 @@ function handleDisallowCommand(
   }
 
   const toRemove = (mentions ?? [])
-    .map((m) => m.id?.open_id)
+    .map(mentionImId)
     .filter((id): id is string => !!id);
 
   if (toRemove.length === 0) {
@@ -5392,7 +5398,11 @@ function handleAllowlistCommand(chatJid: string): string {
     return '当前群组未启用白名单模式（所有人均可触发）';
   }
   if (allowlist.length === 0) {
-    return `白名单模式已启用，当前无人可触发。\nOwner: ${group.owner_im_id ?? '未识别（请先向机器人发一条私信）'}`;
+    const ownerHint =
+      getChannelType(chatJid) === 'feishu'
+        ? '未识别（请先向机器人发一条私信）'
+        : '未认领（请在群内发送 /owner_mention）';
+    return `白名单模式已启用，当前无人可触发。\nOwner: ${group.owner_im_id ?? ownerHint}`;
   }
 
   const ownerMark = (id: string) =>
@@ -21762,21 +21772,11 @@ function isSenderAllowedInGroup(
 
   // The explicit response audience is evaluated for p2p, ordinary groups and
   // every topic message. It is deliberately independent from mention policy.
-  if (effectiveAudienceMode(group) === 'owner_only') {
-    return isSenderAllowedByAudience(group, senderImId);
-  }
-
-  // v58 Feishu uses the explicit two-state audience policy as the source of
-  // truth. Legacy allowlists are retained only for migration/audit and for
-  // other connectors that still expose multi-member allowlists.
-  if (getChannelType(conversationJid) === 'feishu') return true;
-
-  // Keep the legacy multi-member allowlist as an additional restriction for
-  // existing installations. New UI only exposes everyone/owner-only.
-  const allowlist = group.sender_allowlist;
-  if (allowlist === undefined || allowlist === null) return true;
-  if (!senderImId) return false;
-  return allowlist.includes(senderImId);
+  return isSenderAdmittedByGroupPolicy(
+    group,
+    senderImId,
+    getChannelType(conversationJid),
+  );
 }
 
 function handleIncomingFollowUp(input: {
@@ -22454,7 +22454,7 @@ async function discardWithdrawnTurnCardsAfterConnect(
 }
 
 /**
- * Feishu `/break` is a session cutoff, not a message for the Agent. Cancel
+ * `/break` (every IM channel) is a session cutoff, not a message for the Agent. Cancel
  * everything that was already durably queued, then interrupt the exact active
  * query. Messages admitted after this synchronous cutoff remain runnable.
  */
@@ -22744,7 +22744,15 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
     scopeIncomingJids: !account.is_legacy_default,
     ignoreMessagesBefore: Date.now(),
     onMessagePersisted: broadcastNewMessage,
+    // Every connector offers its inputs to the durable follow-up queue and
+    // parses `/steer` and `/break` (CLAUDE.md §4, §6.4).
+    onFollowUpMessage: handleIncomingFollowUp,
     onFollowUpsChanged: broadcastFollowUpUpdate,
+    onSessionBreak: handleSessionBreak,
+    // Group response audience; Feishu replaces the gate with its own owner
+    // discovery, and 1:1-only WeChat never consults it.
+    isSenderAllowedInGroup,
+    resolveRegisteredGroup: getRegisteredGroup,
     onCommand: handleCommand,
     resolveGroupFolder: (jid: string) => resolveEffectiveFolder(jid),
     resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
@@ -22761,6 +22769,7 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
         {
           appId: secret.appId || '',
           appSecret: secret.appSecret || '',
+          domain: normalizeFeishuBrand(secret.domain),
           enabled: true,
         },
         onNewChat,
@@ -22778,13 +22787,22 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
               sender,
               () => secret.ownerOpenId || undefined,
             ),
-          onFollowUpMessage: handleIncomingFollowUp,
-          onSessionBreak: handleSessionBreak,
           onSessionClear: handleFeishuSessionClear,
           onSessionFresh: handleFeishuSessionFresh,
           onMessageRecalled: handleChannelMessageRecalled,
           onFollowUpCardAction: handleFollowUpCardAction,
           onCardInterrupt: handleCardInterrupt,
+          // The same mutable secret onP2pSender fills on the first DM claim.
+          getOwnerOpenId: () => secret.ownerOpenId || undefined,
+          onTransportIssue: (issue) => {
+            const latest = applyFeishuTransportIssue(account.id, issue);
+            if (!latest) return;
+            broadcastChannelAccountStatus(account.owner_user_id, account.id, {
+              transportStatus: latest.transport_status,
+              lastError: latest.last_error,
+              connectedAt: latest.connected_at,
+            });
+          },
           onP2pSender: (senderOpenId: string) => {
             // First valid DM claims this bot. Never let a later arbitrary DM
             // replace the account owner.
@@ -22828,7 +22846,10 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
           workspace.jid,
           account.is_legacy_default,
         ),
-        { ...common, onBotAddedToGroup: onNewChat },
+        {
+          ...common,
+          onBotAddedToGroup: onNewChat,
+        },
       );
     } else if (account.provider === 'qq') {
       connected = await imManager.connectUserQQ(
@@ -22846,14 +22867,7 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
           workspace.jid,
           account.is_legacy_default,
         ),
-        // Not added to `common`: the remaining channels do not forward the
-        // callback to their connector, so enabling it there would only look
-        // like queue support without providing it.
-        {
-          ...common,
-          onFollowUpMessage: handleIncomingFollowUp,
-          onSessionBreak: handleSessionBreak,
-        },
+        common,
       );
     } else if (account.provider === 'wechat') {
       const bypassProxy = secret.bypassProxy !== 'false';
@@ -22979,8 +22993,6 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
           ),
           shouldProcessGroupMessage,
           isGroupOwnerMessage,
-          isSenderAllowedInGroup,
-          resolveRegisteredGroup: getRegisteredGroup,
           onConnectionStateChange: (state) => {
             if (state.status === 'connected') {
               updateChannelAccountAuthStatus(account.id, 'authorized');
@@ -23034,7 +23046,6 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
           onBotAddedToGroup: onNewChat,
           shouldProcessGroupMessage,
           isGroupOwnerMessage,
-          resolveRegisteredGroup: getRegisteredGroup,
         },
       );
     } else if (account.provider === 'discord') {
@@ -23178,19 +23189,7 @@ function syncLegacyConfigToDefaultChannelAccount(
 ): ChannelAccount | null {
   if (channel === 'feishu') {
     const value = getUserFeishuConfig(userId);
-    return value
-      ? syncDefaultChannelAccountCredentials({
-          ownerUserId: userId,
-          provider: channel,
-          name: '默认飞书',
-          enabled: value.enabled !== false,
-          secret: {
-            appId: value.appId,
-            appSecret: value.appSecret,
-            ownerOpenId: value.ownerOpenId,
-          },
-        })
-      : null;
+    return value ? syncLegacyFeishuDefaultAccount(userId, value) : null;
   }
   if (channel === 'telegram') {
     const value = getUserTelegramConfig(userId);
