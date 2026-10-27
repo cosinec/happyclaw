@@ -617,6 +617,7 @@ import {
   isUnknownFeishuSenderAllowed,
 } from './im-audience-policy.js';
 import { applyFeishuTransportIssue } from './channel-account-transport.js';
+import { syncLegacyFeishuDefaultAccount } from './legacy-default-account-sync.js';
 import { normalizeFeishuBrand } from './feishu-domain.js';
 import { logger } from './logger.js';
 import { resolveTaskOwner } from './task-utils.js';
@@ -23192,19 +23193,7 @@ function syncLegacyConfigToDefaultChannelAccount(
 ): ChannelAccount | null {
   if (channel === 'feishu') {
     const value = getUserFeishuConfig(userId);
-    return value
-      ? syncDefaultChannelAccountCredentials({
-          ownerUserId: userId,
-          provider: channel,
-          name: '默认飞书',
-          enabled: value.enabled !== false,
-          secret: {
-            appId: value.appId,
-            appSecret: value.appSecret,
-            ownerOpenId: value.ownerOpenId,
-          },
-        })
-      : null;
+    return value ? syncLegacyFeishuDefaultAccount(userId, value) : null;
   }
   if (channel === 'telegram') {
     const value = getUserTelegramConfig(userId);
