@@ -3,10 +3,10 @@
  * (commit 7be4c57d7b, Apache-2.0; see THIRD_PARTY_NOTICES.md).
  * Modified for HappyClaw: adapted against cindy 7be4c57d7b and runs on
  * Tiptap 3.30.6.
- * Dropped: slash-command merge, `serializeAtResource`, Pi `skill:` alias and agent-resource cases.
+ * Dropped: slash-command merge, text insertion helpers, `serializeAtResource`,
+ * Pi `skill:` alias and agent-resource cases.
  */
 import { describe, expect, it } from 'vitest';
-import * as composerPalette from './composerPalette';
 import { detectComposerTrigger, filterAtResources } from './composerPalette';
 
 describe('shared composer palette model', () => {
@@ -24,36 +24,6 @@ describe('shared composer palette model', () => {
     });
     expect(detectComposerTrigger('mail@company')).toEqual({ kind: 'none' });
     expect(detectComposerTrigger('open @app now')).toEqual({ kind: 'none' });
-  });
-
-  // Skipped: the port has no text-insertion helpers (`insertSlashCommand` / `insertAtResource`).
-  it.skip('inserts selected slash commands and at resources as desktop-compatible text', () => {
-    const { insertSlashCommand, insertAtResource } =
-      composerPalette as unknown as {
-        insertSlashCommand: (
-          text: string,
-          trigger: unknown,
-          command: { name: string },
-        ) => string;
-        insertAtResource: (
-          text: string,
-          trigger: unknown,
-          item: composerPalette.ComposerAtResourceItem,
-        ) => string;
-      };
-    const slashTrigger = detectComposerTrigger('/com');
-    expect(insertSlashCommand('/com', slashTrigger, { name: 'compact' })).toBe(
-      '/compact ',
-    );
-
-    const atTrigger = detectComposerTrigger('read @ses');
-    expect(
-      insertAtResource('read @ses', atTrigger, {
-        type: 'file',
-        name: 'sessions.ts',
-        relPath: 'apps/desktop/src/main/localDb/ipc/sessions.ts',
-      }),
-    ).toBe('read @apps/desktop/src/main/localDb/ipc/sessions.ts ');
   });
 
   it('ranks @ resources with agents first for empty query and fuzzy path fallback', () => {

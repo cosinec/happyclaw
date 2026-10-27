@@ -3,15 +3,11 @@
  * (commit 7be4c57d7b, Apache-2.0; see THIRD_PARTY_NOTICES.md).
  * Modified for HappyClaw: adapted against cindy 7be4c57d7b and runs on
  * Tiptap 3.30.6.
- * Dropped: `/**
- * Source: cindy apps/desktop/src/renderer/components/new-chat/__tests__/composerRenderGate.test.ts
- * (commit 7be4c57d7b, Apache-2.0; see THIRD_PARTY_NOTICES.md).
- * Modified for HappyClaw: adapted against cindy 7be4c57d7b and runs on
- slash sigil fields and the sigil-swap assertion.
+ * Dropped: the `$` slash sigil fields and assertions, and the test-only
+ * defaults export.
  */
 import { describe, expect, it } from 'vitest';
 
-import * as composerRenderGate from './composerRenderGate';
 import {
   composerRenderSnapshot,
   shouldRefreshComposerRender,
@@ -78,18 +74,5 @@ describe('composer render gate', () => {
         composerRenderSnapshot({ kind: 'at', query: '', from: 1 }, true),
       ),
     ).toBe(true);
-  });
-
-  // Skipped: the port does not export cindy's test-only `__composerRenderGateDefaultsForTest`.
-  it.skip('keeps the ordinary update default explicit', () => {
-    const { __composerRenderGateDefaultsForTest } =
-      composerRenderGate as unknown as {
-        __composerRenderGateDefaultsForTest: {
-          ordinaryTextUpdatesRefresh: boolean;
-        };
-      };
-    expect(__composerRenderGateDefaultsForTest.ordinaryTextUpdatesRefresh).toBe(
-      false,
-    );
   });
 });
