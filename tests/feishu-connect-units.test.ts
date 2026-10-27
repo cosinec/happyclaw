@@ -34,6 +34,8 @@ function axios400(code: number, msg: string) {
   });
 }
 
+const UNSTABLE_TEXT =
+  '飞书长连接反复断开：可能是同一应用在别处也建立了长连接，也可能是网络或平台异常。';
 const CONFLICT_TEXT =
   '该飞书应用的长连接已被其他程序占用（同一 App 同时只应连接一处），消息可能被对方接走。请停用另一处连接，或为 HappyClaw 单独创建应用。';
 
@@ -68,7 +70,7 @@ describe('Feishu connection conflict monitor', () => {
     expect(report).not.toHaveBeenCalled();
   });
 
-  test('treats two reconnects without a ready connection as a conflict', () => {
+  test('two reconnects without a ready connection are reported without blaming another program', () => {
     vi.useFakeTimers();
     const report = vi.fn();
     const monitor = createFeishuConflictMonitor({ brand: 'lark', report });
@@ -79,8 +81,32 @@ describe('Feishu connection conflict monitor', () => {
     vi.advanceTimersByTime(1);
     expect(report).toHaveBeenCalledExactlyOnceWith({
       kind: 'conflict',
-      message: CONFLICT_TEXT.replace('飞书应用', 'Lark 应用'),
+      message: UNSTABLE_TEXT.replace('飞书长连接', 'Lark 长连接'),
     });
+  });
+
+  test('a refusal upgrades a suspicion to the certain text, never back', () => {
+    vi.useFakeTimers();
+    const report = vi.fn();
+    const monitor = createFeishuConflictMonitor({ brand: 'feishu', report });
+    monitor.reconnecting();
+    monitor.reconnecting();
+    vi.advanceTimersByTime(8_000);
+    expect(report).toHaveBeenLastCalledWith({
+      kind: 'conflict',
+      message: UNSTABLE_TEXT,
+    });
+    monitor.failed(new Error('code=1000040350'));
+    expect(report).toHaveBeenLastCalledWith({
+      kind: 'conflict',
+      message: CONFLICT_TEXT,
+    });
+    // More drops after the refusal keep the certain text.
+    monitor.starting();
+    monitor.reconnecting();
+    monitor.reconnecting();
+    vi.advanceTimersByTime(8_000);
+    expect(report).toHaveBeenCalledTimes(2);
   });
 
   test('a ready connection inside the window is not a conflict', () => {
@@ -142,84 +168,42 @@ describe('Feishu 「同时发送到群聊」 pairing', () => {
     messageType: 'text',
     content: JSON.stringify({ text: 'hello' }),
   };
-  const thread = { ...base, messageId: 'om_thread', threadId: 'omt_1' };
+  const thread = { ...base, messageId: 'om_thread' };
   const flat = { ...base, messageId: 'om_flat' };
 
-  function coordinator() {
+  test('the first copy to arrive runs; the other is its copy, in either order', () => {
+    const threadFirst = new FeishuDualDeliveryCoordinator();
+    expect(threadFirst.copyOf(thread)).toBeUndefined();
+    expect(threadFirst.copyOf(flat)).toBe('om_thread');
+
+    const flatFirst = new FeishuDualDeliveryCoordinator();
+    expect(flatFirst.copyOf(flat)).toBeUndefined();
+    expect(flatFirst.copyOf(thread)).toBe('om_flat');
+  });
+
+  test('the same text sent at another time, by another sender or in another chat is not a copy', () => {
     const pairing = new FeishuDualDeliveryCoordinator();
-    pairing.noteThreadActivity('acct', 'oc_group', Date.now());
-    return pairing;
-  }
-
-  test('a main-feed copy that arrives first waits for and yields to its thread twin', async () => {
-    const pairing = coordinator();
-    const flatDecision = pairing.coordinate(flat, { wait: true });
-    await expect(pairing.coordinate(thread, { wait: true })).resolves.toEqual({
-      suppress: false,
-    });
-    await expect(flatDecision).resolves.toEqual({
-      suppress: true,
-      twinMessageId: 'om_thread',
-    });
-  });
-
-  test('a main-feed copy after its thread twin is suppressed without waiting', async () => {
-    const pairing = coordinator();
-    await pairing.coordinate(thread, { wait: true });
-    await expect(pairing.coordinate(flat, { wait: true })).resolves.toEqual({
-      suppress: true,
-      twinMessageId: 'om_thread',
-    });
-  });
-
-  test('an unpaired main-feed message runs after the window; a late twin is the copy', async () => {
-    vi.useFakeTimers();
-    const pairing = coordinator();
-    const flatDecision = pairing.coordinate(flat, { wait: true });
-    await vi.advanceTimersByTimeAsync(1_000);
-    await expect(flatDecision).resolves.toEqual({ suppress: false });
-    await expect(pairing.coordinate(thread, { wait: true })).resolves.toEqual({
-      suppress: true,
-      twinMessageId: 'om_flat',
-    });
-  });
-
-  test('chats without recent thread use never delay main-feed messages', async () => {
-    const pairing = new FeishuDualDeliveryCoordinator({ pairWindowMs: 60_000 });
-    await expect(pairing.coordinate(flat, { wait: true })).resolves.toEqual({
-      suppress: false,
-    });
-  });
-
-  test('backfill decides on what was seen, without waiting', async () => {
-    const pairing = new FeishuDualDeliveryCoordinator({ pairWindowMs: 60_000 });
-    pairing.noteThreadActivity('acct', 'oc_group', Date.now());
-    await expect(pairing.coordinate(flat, { wait: false })).resolves.toEqual({
-      suppress: false,
-    });
-  });
-
-  test('the same text sent at another time, by another sender or in another chat is not a copy', async () => {
-    const pairing = coordinator();
-    await pairing.coordinate(thread, { wait: true });
+    pairing.copyOf(thread);
     for (const other of [
       { ...flat, createTimeMs: base.createTimeMs + 1 },
       { ...flat, senderOpenId: 'ou_other' },
       { ...flat, content: JSON.stringify({ text: 'hello!' }) },
       { ...flat, accountKey: 'acct-2' },
+      { ...flat, chatId: 'oc_other' },
     ]) {
-      await expect(
-        pairing.coordinate({ ...other, threadId: 'omt_2' }, { wait: true }),
-      ).resolves.toEqual({ suppress: false });
+      expect(pairing.copyOf(other)).toBeUndefined();
     }
   });
 
-  test('a redelivered event keeps its own decision', async () => {
-    const pairing = coordinator();
-    await pairing.coordinate(thread, { wait: true });
-    await expect(pairing.coordinate(thread, { wait: true })).resolves.toEqual({
-      suppress: false,
-    });
+  test('a redelivered event keeps running; a copy is remembered for ten minutes', () => {
+    vi.useFakeTimers();
+    const pairing = new FeishuDualDeliveryCoordinator();
+    pairing.copyOf(thread);
+    expect(pairing.copyOf(thread)).toBeUndefined();
+    vi.advanceTimersByTime(10 * 60 * 1000 - 1);
+    expect(pairing.copyOf(flat)).toBe('om_thread');
+    vi.advanceTimersByTime(1);
+    expect(pairing.copyOf(flat)).toBeUndefined();
   });
 });
 

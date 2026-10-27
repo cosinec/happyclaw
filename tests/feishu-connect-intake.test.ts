@@ -519,15 +519,41 @@ describe('「同时发送到群聊」 de-duplication', () => {
     expect(row?.error).toBe(`dual_delivery_copy:${thread.message.message_id}`);
   });
 
-  test('a main-feed copy that arrives first yields to the thread reply', async () => {
-    const { receive, executed } = await threadActiveConnection();
+  test('a main-feed copy that arrives first runs at once; the late thread reply is the copy', async () => {
+    const { receive, executed, accountId } = await threadActiveConnection();
     const { thread, flat } = pair(Date.now() + 1);
-    const flatDone = receive(flat);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    const started = Date.now();
+    await receive(flat);
+    // Nothing waits for a twin.
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(executed.map((e) => e.messageId)).toEqual([flat.message.message_id]);
+    // The reply anchors on the copy that ran: the group's main feed.
+    expect(executed[0].sourceJid).not.toContain('#thread:');
+
     await receive(thread);
-    await flatDone;
+    expect(executed).toHaveLength(1);
+    const row = store.getChannelInboxByExternalMessage({
+      provider: 'feishu',
+      accountId,
+      externalMessageId: thread.message.message_id,
+    });
+    expect(row?.status).toBe('ignored');
+    expect(row?.error).toBe(`dual_delivery_copy:${flat.message.message_id}`);
+  });
+
+  test('ordinary messages in a chat that uses threads are not delayed', async () => {
+    const { receive, executed } = await threadActiveConnection();
+    const started = Date.now();
+    for (const id of ['om_plain_1', 'om_plain_2', 'om_plain_3']) {
+      await receive(
+        event(chatId, id, { content: JSON.stringify({ text: id }) }, 'group'),
+      );
+    }
+    expect(Date.now() - started).toBeLessThan(500);
     expect(executed.map((e) => e.messageId)).toEqual([
-      thread.message.message_id,
+      'om_plain_1',
+      'om_plain_2',
+      'om_plain_3',
     ]);
   });
 
