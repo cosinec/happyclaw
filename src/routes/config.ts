@@ -207,7 +207,7 @@ import {
 import type { AuthUser, RegisteredGroup } from '../types.js';
 import { logger } from '../logger.js';
 import brandAssetRoutes from './brand-assets.js';
-import { testFeishuCredentials } from '../feishu-connectivity.js';
+import { testFeishuAppCredentials } from '../channel-account-connectivity.js';
 import { testProviderConnectivity } from '../provider-connectivity.js';
 import {
   buildSessionMountUpdate,
@@ -3849,9 +3849,10 @@ configRoutes.put('/user-im/feishu', authMiddleware, async (c) => {
     next.appSecret &&
     credentialsChanged
   ) {
-    const test = await testFeishuCredentials(
+    const test = await testFeishuAppCredentials(
       next.appId as string,
       next.appSecret as string,
+      current?.domain,
     );
     if (!test.ok) {
       logger.warn(
@@ -3884,6 +3885,8 @@ configRoutes.put('/user-im/feishu', authMiddleware, async (c) => {
       enabled: next.enabled as boolean | undefined,
       autoIsolateContext: next.autoIsolateContext as boolean | undefined,
       ownerOpenId: next.ownerOpenId as string | undefined,
+      // The legacy form has no brand field; a Lark account stays on Lark.
+      domain: current?.domain,
     });
     appendImConfigAudit(
       user.username,

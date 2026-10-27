@@ -10,6 +10,7 @@ import {
   type FileSignature,
 } from './file-signature.js';
 import { ASSISTANT_NAME, DATA_DIR } from './config.js';
+import type { FeishuBrand } from './feishu-domain.js';
 import { logger } from './logger.js';
 import { clearProviderQuotaObservation } from './provider-quota-observation.js';
 import {
@@ -519,6 +520,7 @@ interface StoredFeishuProviderConfigV1 {
   updatedAt: string;
   ownerOpenId?: string;
   autoIsolateContext?: boolean;
+  domain?: FeishuBrand;
   secret: EncryptedSecrets;
 }
 
@@ -3670,6 +3672,7 @@ export interface UserFeishuConfig {
   updatedAt: string | null;
   ownerOpenId?: string; // auto-detected from first DM; used as sender_allowlist seed for new groups
   autoIsolateContext?: boolean; // auto-create isolated conversation for each new IM chat
+  domain?: FeishuBrand; // Feishu (default) or Lark; picks the platform hosts
 }
 
 export interface UserTelegramConfig {
@@ -3762,6 +3765,7 @@ export function getUserFeishuConfig(userId: string): UserFeishuConfig | null {
       updatedAt: stored.updatedAt || null,
       ownerOpenId: stored.ownerOpenId || undefined,
       autoIsolateContext: stored.autoIsolateContext ?? false,
+      domain: stored.domain === 'lark' ? 'lark' : undefined,
     };
   } catch (err) {
     logger.warn({ err, userId }, 'Failed to read user Feishu config');
@@ -3780,6 +3784,7 @@ export function saveUserFeishuConfig(
     updatedAt: new Date().toISOString(),
     ownerOpenId: next.ownerOpenId,
     autoIsolateContext: next.autoIsolateContext,
+    domain: next.domain === 'lark' ? 'lark' : undefined,
   };
 
   const payload: StoredFeishuProviderConfigV1 = {
@@ -3789,6 +3794,7 @@ export function saveUserFeishuConfig(
     updatedAt: normalized.updatedAt || new Date().toISOString(),
     ownerOpenId: normalized.ownerOpenId,
     autoIsolateContext: normalized.autoIsolateContext,
+    domain: normalized.domain,
     secret: encryptChannelSecret<FeishuSecretPayload>({
       appSecret: normalized.appSecret,
     }),
