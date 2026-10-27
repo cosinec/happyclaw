@@ -1,0 +1,39 @@
+import type { Message } from '../../../stores/chat';
+
+const AGENT_MARKER = '#agent:';
+export const SENT_HISTORY_LIMIT = 50;
+
+/** The session id inside a conversation draft key, if it names one. */
+function sessionIdOf(draftKey: string): string | null {
+  const index = draftKey.indexOf(AGENT_MARKER);
+  return index < 0 ? null : draftKey.slice(index + AGENT_MARKER.length);
+}
+
+/**
+ * What this user sent in a conversation, newest first, for ↑ recall: their
+ * own messages only (not IM members or the agent), consecutive repeats once.
+ */
+export function sentMessageHistory(
+  state: {
+    messages: Record<string, Message[] | undefined>;
+    agentMessages: Record<string, Message[] | undefined>;
+  },
+  draftKey: string,
+  userId: string | undefined,
+): string[] {
+  const sessionId = sessionIdOf(draftKey);
+  const messages =
+    (sessionId ? state.agentMessages[sessionId] : state.messages[draftKey]) ??
+    [];
+  const history: string[] = [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.is_from_me || message.sender === '__system__') continue;
+    if (userId && message.sender !== userId) continue;
+    const content = message.content.trim();
+    if (!content || content === history[history.length - 1]) continue;
+    history.push(content);
+    if (history.length >= SENT_HISTORY_LIMIT) break;
+  }
+  return history;
+}

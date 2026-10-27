@@ -627,6 +627,81 @@ body {
   }
 }
 
+/* Chat composer (Tiptap). Placeholder, structured lists, chips and command
+ * pills, adapted from cindy's composer styles. The Placeholder extension marks
+ * the empty first paragraph; after a cleared document it may only carry
+ * `is-empty`, so the sole-empty-paragraph selector covers that too. */
+[data-hc-composer] .ProseMirror > p.is-editor-empty:first-child::before,
+[data-hc-composer] .ProseMirror > p.is-empty:first-child:only-child::before {
+  content: attr(data-placeholder);
+  color: var(--faint-foreground);
+  float: left;
+  height: 0;
+  pointer-events: none;
+}
+
+[data-hc-composer] .ProseMirror p {
+  margin: 0;
+}
+
+/* Markers and body text share one layout tree, so wrapped lines follow the
+ * item's content edge. Wider ordinals get a wider marker column. */
+[data-hc-composer] .ProseMirror :is(ul, ol) {
+  margin: 0;
+  --composer-list-padding: 1.5em;
+  --composer-list-marker-extra: 0em;
+  padding-inline-start: calc(
+    var(--composer-list-padding) + var(--composer-list-marker-extra)
+  );
+}
+[data-hc-composer] .ProseMirror ol[data-marker='、'] {
+  --composer-list-marker-extra: 0.7em;
+}
+[data-hc-composer] .ProseMirror ol[data-marker-digits='2'] {
+  --composer-list-padding: 2.2em;
+}
+[data-hc-composer] .ProseMirror ol[data-marker-digits='3'] {
+  --composer-list-padding: 2.8em;
+}
+[data-hc-composer] .ProseMirror ol[data-marker-digits='4'] {
+  --composer-list-padding: 3.4em;
+}
+[data-hc-composer] .ProseMirror ul {
+  list-style-type: disc;
+}
+[data-hc-composer] .ProseMirror ol {
+  list-style-type: decimal;
+}
+[data-hc-composer] .ProseMirror ol[data-marker=')'] > li::marker {
+  content: counter(list-item) ') ';
+}
+[data-hc-composer] .ProseMirror ol[data-marker='、'] > li::marker {
+  content: counter(list-item) '、';
+}
+[data-hc-composer] .ProseMirror li {
+  padding-inline-start: 0.15em;
+  overflow-wrap: anywhere;
+}
+[data-hc-composer] .ProseMirror li > p {
+  margin: 0;
+}
+
+/* Atomic chips are selected and removed as a whole. */
+[data-hc-composer] .ProseMirror .composer-chip {
+  -webkit-user-drag: element;
+}
+[data-hc-composer] .ProseMirror .composer-chip.ProseMirror-selectednode {
+  border-color: var(--ring);
+  outline: none;
+}
+
+/* A typed `/command` that names a known command or Skill. */
+[data-hc-composer] .ProseMirror .slash-cmd-pill {
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  color: var(--primary-text, var(--primary));
+}
+
 /* Native scrollbar styling is deliberately scoped to the chat context panes.
  * Mobile engines may still hide their overlay scrollbar while idle; those
  * panes render an in-flow edge hint instead of changing every scroller in the

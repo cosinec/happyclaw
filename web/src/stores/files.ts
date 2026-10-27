@@ -110,6 +110,25 @@ export function formatUploadRetryStatus(
   return null;
 }
 
+/**
+ * Workspace directory an upload of `file` lands in when the batch targets
+ * `basePath`: folder uploads keep their structure below it.
+ */
+function uploadTargetDir(basePath: string, file: File): string {
+  // For folder uploads, webkitRelativePath = "folderName/sub/file.txt"
+  const relativePath = file.webkitRelativePath;
+  const lastSlash = relativePath ? relativePath.lastIndexOf('/') : -1;
+  if (lastSlash <= 0) return basePath;
+  const dir = relativePath.substring(0, lastSlash);
+  return basePath ? `${basePath}/${dir}` : dir;
+}
+
+/** Workspace-relative path `file` is written to by an upload into `basePath`. */
+export function uploadedFilePath(basePath: string, file: File): string {
+  const dir = uploadTargetDir(basePath, file);
+  return dir ? `${dir}/${file.name}` : file.name;
+}
+
 interface FileState {
   files: Record<string, FileEntry[]>;
   currentPath: Record<string, string>;
@@ -216,18 +235,7 @@ export const useFileStore = create<FileState>((set, get) => ({
       for (let i = 0; i < files.length; i++) {
         if (uploadController.signal.aborted) throw UPLOAD_CANCELLED;
         const file = files[i];
-
-        // For folder uploads, webkitRelativePath = "folderName/sub/file.txt"
-        // Extract directory portion to preserve structure
-        const relativePath = file.webkitRelativePath;
-        let uploadPath = targetBase;
-        if (relativePath) {
-          const lastSlash = relativePath.lastIndexOf('/');
-          if (lastSlash > 0) {
-            const dir = relativePath.substring(0, lastSlash);
-            uploadPath = targetBase ? `${targetBase}/${dir}` : dir;
-          }
-        }
+        const uploadPath = uploadTargetDir(targetBase, file);
 
         set({
           uploadProgress: {

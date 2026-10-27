@@ -6,6 +6,9 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 vi.mock('../../stores/chat', () => {
   const state = {
+    groups: {},
+    messages: {},
+    agentMessages: {},
     drafts: {},
     saveDraft: vi.fn(),
     clearDraft: vi.fn(),
