@@ -952,6 +952,43 @@ describe('queue on phones', () => {
     ).toHaveLength(3);
   });
 
+  test('an edit of an item the dispatcher claimed moves into the composer', async () => {
+    const view = (items: QueuedFollowUp[]) => (
+      <MessageInput
+        groupJid="web:g1"
+        onSend={vi.fn()}
+        isRunning
+        queuedFollowUps={items}
+        onFollowUpAction={vi.fn(() => true)}
+      />
+    );
+    await render(view(queue));
+    await type('我的草稿');
+    await act(async () => {
+      (
+        panel().querySelector(
+          'button[aria-label="编辑：排队 2"]',
+        ) as HTMLElement
+      ).click();
+    });
+    const field = panel().querySelector(
+      'textarea[aria-label="编辑排队消息"]',
+    ) as HTMLTextAreaElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )!.set!.call(field, '排队 2（改过）');
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    await render(view(queue.filter((item) => item.id !== 'q2')));
+    expect(text()).toBe('我的草稿\n\n排队 2（改过）');
+    expect(container!.textContent).toContain(
+      '这条消息已开始处理，未保存的修改已移到输入框',
+    );
+  });
+
   test('the queue sits inside the composer card, above the editor', async () => {
     await render(
       <MessageInput
