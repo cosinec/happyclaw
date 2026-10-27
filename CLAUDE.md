@@ -314,7 +314,8 @@ WhatsApp、企微、微信支持 `/steer` 和 `/break`，其 `/clear` 与 `/fres
 
 - `/steer <非空消息>`：先可靠进入当前 Session 的 durable pending，再 clean interrupt
   当前 generation；当前已 pending 的普通消息与 steer 按可见顺序在下一轮合批，命令前缀
-  不进入 Agent Prompt，也不额外发送框架确认。可携带图片。
+  不进入 Agent Prompt，也不额外发送框架确认。可携带图片。目标只查已有路由，不为
+  `/steer`、`/break` 新建话题会话；目标不存在时回复目标不存在，消息不入库。
 - `/break`：必须无附件且正文精确匹配；以到达时为截止点取消此前 pending 并中断 active
   Loop，保留 transcript，之后到达的消息继续运行；固定回复 `Current task stopped.` 或
   `No active task to stop.`。只受响应对象/激活策略约束，不要求 owner。
