@@ -9,7 +9,6 @@ import type {
   FeishuConnection,
   FeishuConnectionConfig,
 } from './feishu.js';
-import type { FeishuBrand } from './feishu-domain.js';
 import type {
   ChannelCommandMention,
   GroupOwnerView,
@@ -121,10 +120,8 @@ export function appendStreamingSessionAnswer(
 
 // ─── Unified Interface ──────────────────────────────────────────
 
-/** Feishu account credentials plus the brand (Feishu or Lark) they belong to. */
-export type FeishuChannelConfig = FeishuConnectionConfig & {
-  domain?: FeishuBrand;
-};
+/** Feishu account credentials and the brand (Feishu or Lark) they belong to. */
+export type FeishuChannelConfig = FeishuConnectionConfig;
 
 /**
  * Feishu long-connection health beyond connect/disconnect: another program is
@@ -374,8 +371,7 @@ export function createFeishuChannel(config: FeishuChannelConfig): IMChannel {
       const { createFeishuConnection } =
         await loadChannelImplementation('feishu');
       inner = createFeishuConnection(config);
-      const connectOptions: FeishuConnectOptions &
-        Pick<IMChannelConnectOpts, 'getOwnerOpenId' | 'onTransportIssue'> = {
+      const connectOptions: FeishuConnectOptions = {
         isChatBound: opts.isChatBound,
         onReady: opts.onReady,
         onNewChat: opts.onNewChat,
