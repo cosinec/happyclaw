@@ -298,13 +298,13 @@ export interface ConnectOptions {
     messageId: string,
   ) => void | Promise<void>;
   /**
-   * Another program holds this app's long connection (called once per
-   * incident), or `null` once the connection is ready again. Never called
-   * while connect() is still pending.
+   * The long connection is held elsewhere (certain: Feishu refused it as over
+   * the app's limit) or keeps dropping (possibly held elsewhere, possibly an
+   * outage); called once per incident, again only to upgrade a suspicion to
+   * the certain text, and with `null` once the connection is ready again.
+   * Never called while connect() is still pending.
    */
-  onTransportIssue?: (
-    issue: { kind: 'conflict'; message: string } | null,
-  ) => void;
+  onTransportIssue?: (issue: FeishuTransportIssue | null) => void;
   /**
    * open_id of the account owner (learned from the first private chat), the
    * only recipient of missing-permission notices. Read on every notice.
