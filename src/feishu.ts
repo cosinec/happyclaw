@@ -4,6 +4,11 @@ import * as path from 'node:path';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { fenceFeishuWebSocketLifecycle } from './feishu-ws-lifecycle.js';
 import {
+  feishuSdkDomain,
+  normalizeFeishuBrand,
+  type FeishuBrand,
+} from './feishu-domain.js';
+import {
   cancelAwaitingForwardBundleRoot,
   findForwardBundleCommentTail,
   findForwardBundleCoveringComment,
@@ -154,6 +159,8 @@ export interface FeishuConnectionConfig {
   appSecret: string;
   /** Optional HappyClaw account id. The scoped source JID remains authoritative. */
   channelAccountId?: string;
+  /** Feishu (default) or Lark: picks the OpenAPI and long-connection host. */
+  domain?: FeishuBrand;
 }
 
 /** 飞书文件信息（用于下载到工作区） */
@@ -1394,6 +1401,7 @@ export function createFeishuConnection(
   // Per-instance state
   const reliabilityAccountId =
     config.channelAccountId?.trim() || `app:${config.appId}`;
+  const brand = normalizeFeishuBrand(config.domain);
   const inboxOwner = `feishu:${reliabilityAccountId}:${randomUUID()}`;
   const lastMessageIdByChat = new Map<string, string>();
   // Inbound message → chat, so a reply anchor named by the host is only used
@@ -1425,6 +1433,7 @@ export function createFeishuConnection(
     const created: lark.WSClient = new lark.WSClient({
       appId: config.appId,
       appSecret: config.appSecret,
+      domain: feishuSdkDomain(brand),
       loggerLevel: lark.LoggerLevel.info,
       // Detect silently-dead long connections instead of hanging on a
       // stale-but-OPEN socket (see FEISHU_WS_PING_TIMEOUT_SEC).
@@ -5476,6 +5485,7 @@ export function createFeishuConnection(
         appId: config.appId,
         appSecret: config.appSecret,
         appType: lark.AppType.SelfBuild,
+        domain: feishuSdkDomain(brand),
       });
 
       // Fetch bot open_id for mention detection — 带 retry 的 best-effort 拉取。
