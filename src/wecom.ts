@@ -1225,16 +1225,9 @@ export function createWeComConnection(
     generation: number,
     signal: AbortSignal,
   ): Promise<NormalizedWeComInbound> {
+    // Group and single-chat media share one path: the same download limits,
+    // the same workspace folder and the same failure markers.
     const msgtype = body.msgtype;
-    if (
-      body.chattype === 'group' &&
-      (msgtype === 'image' ||
-        msgtype === 'voice' ||
-        msgtype === 'file' ||
-        msgtype === 'video')
-    ) {
-      return { content: '', attachments: [] };
-    }
     if (msgtype === 'text' || msgtype === 'voice') {
       return { content: extractInboundAdmissionText(body), attachments: [] };
     }

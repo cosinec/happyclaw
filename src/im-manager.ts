@@ -1700,6 +1700,7 @@ export class IMConnectionManager {
       accountId?: string;
       scopeIncomingJids?: boolean;
       ignoreMessagesBefore?: number;
+      resolveGroupFolder?: (jid: string) => string | undefined;
       resolveEffectiveChatJid?: (chatJid: string) => {
         effectiveJid: string;
         agentId: string | null;
@@ -1752,6 +1753,7 @@ export class IMConnectionManager {
         isChatAuthorized: options?.isChatAuthorized,
         onPairAttempt: options?.onPairAttempt,
         onCommand: options?.onCommand,
+        resolveGroupFolder: options?.resolveGroupFolder,
         resolveEffectiveChatJid: options?.resolveEffectiveChatJid,
         onAgentMessage: options?.onAgentMessage,
         onMessagePersisted: options?.onMessagePersisted,
