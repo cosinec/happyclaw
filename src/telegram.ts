@@ -829,10 +829,6 @@ export function createTelegramConnection(
   }
 
   /**
-   * 通过 Telegram Bot API 下载文件到工作区磁盘。
-   * 返回工作区相对路径，失败返回 null。
-   */
-  /**
    * Send one rendered chunk; a real HTML parse failure is resent as plain
    * text. Any other failure is rethrown so an attempted send is never
    * duplicated.
@@ -918,6 +914,10 @@ export function createTelegramConnection(
     };
   }
 
+  /**
+   * 通过 Telegram Bot API 下载文件到工作区磁盘。
+   * 返回工作区相对路径，失败返回 null。
+   */
   async function downloadTelegramFile(
     fileId: string,
     originalFilename: string,
