@@ -2,6 +2,7 @@
 
 import { z } from 'zod';
 import { AGENT_EFFORT_LEVELS } from './agent-effort.js';
+import { MAX_PROVIDER_MODEL_ID_LENGTH } from './model-providers.js';
 import { ALL_PERMISSIONS } from './permissions.js';
 import type { Permission } from './types.js';
 import { MAX_GROUP_NAME_LEN } from './group-constants.js';
@@ -289,14 +290,21 @@ export const GroupAgentProfilePatchSchema = z.object({
 
 /**
  * Chat composer model picker: null returns the conversation to the default.
- * `model` and `effort` pick inside a ChatGPT configuration; the request replaces
- * the whole choice, so leaving them out follows the configuration's defaults.
- * The catalog decides which values are valid, so they are plain strings here.
+ * `model` picks inside any configuration, `effort` only inside a ChatGPT one;
+ * the request replaces the whole choice, so leaving them out follows the
+ * configuration's defaults. The configuration's model list (a ChatGPT
+ * catalog) decides which values are valid, so they are plain strings here.
  */
 export const SessionModelSelectionSchema = z.object({
   agentId: z.string().trim().min(1).max(128).nullable().optional(),
   modelConfigId: z.string().trim().min(1).max(128).nullable(),
-  model: z.string().trim().min(1).max(128).nullable().optional(),
+  model: z
+    .string()
+    .trim()
+    .min(1)
+    .max(MAX_PROVIDER_MODEL_ID_LENGTH)
+    .nullable()
+    .optional(),
   effort: z.string().trim().min(1).max(32).nullable().optional(),
 });
 

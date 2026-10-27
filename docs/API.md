@@ -106,34 +106,53 @@ Public：
 `default.source` 取值 `agent`（智能体绑定）、`workspace_env`（工作区自带 Provider
 环境变量）、`default`（`PUT /api/config/claude/default` 设置的全局默认）、`single`
 （唯一启用的配置）、`pool`（已启用配置间自动轮换）、`none`，顺序与运行时解析一致；
-PUT 的 `modelConfigId` 为 `null` 时恢复默认。会话选择优先于智能体绑定的模型配置，
-可以选择未启用的配置；切换后该会话的暖 Runner 在当前轮次结束后退出，下一条消息
-使用新配置。
+PUT 的 `modelConfigId` 为 `null` 时恢复默认。会话选择的（配置, 模型）优先于智能体
+绑定的（配置, 模型），可以选择未启用的配置；切换后该会话的暖 Runner 在当前轮次结束
+后退出，下一条消息使用新选择。
 
-ChatGPT 订阅配置（`kind: "codex"`）还可以在配置内选择具体模型与推理档位。GET 为
-这类选项增加 `codex`：`defaultModel`（配置自己的模型）、`defaultEffort`（不选档位时
-实际使用的档位，Agent 显式档位优先，其次是配置档位，按模型目录钳制）、`source`
-（`live` 为该账号自己的目录，其余为兜底目录）、`needsReauth`，以及
-`models[]`（`value`、`label`、`efforts`、`defaultEffort`）。`models` 来自该账号的
-实时目录并按套餐过滤，同步读取、后台刷新，不等待网络；`efforts` 按 low 到 ultra
-排序，只含当前用户可以选择的档位。响应顶层另有 `selectedModel`、`selectedEffort`：
-已存的选择若不再被目录或当前用户权限支持，按未选择返回，与 Runner 启动时的处理
-一致。其他类型的选项形状不变，旧客户端不受影响。
+每个配置都可以在配置内选择具体模型。ChatGPT 订阅以外的选项带
+`models[]`（`id`、`hidden`）：该配置的模型列表，默认模型（选项的 `model`）总在其中且
+不隐藏；`hidden: true` 的模型不在选择器中列出，但显式选择仍可使用。直通中转没有默认
+模型时 `model` 为空字符串。
+
+ChatGPT 订阅配置（`kind: "codex"`）不带 `models`，而是带 `codex`，并且还能选择推理
+档位：`defaultModel`（配置自己的模型）、`defaultEffort`（不选档位时实际使用的档位，
+Agent 显式档位优先，其次是配置档位，按模型目录钳制）、`source`（`live` 为该账号自己
+的目录，其余为兜底目录）、`needsReauth`，以及
+`models[]`（`value`、`label`、`efforts`、`defaultEffort`）。`codex.models` 来自该账号
+的实时目录并按套餐过滤，同步读取、后台刷新，不等待网络；`efforts` 按 low 到 ultra
+排序，只含当前用户可以选择的档位。
+
+响应顶层另有 `selectedModel`（所有类型）与 `selectedEffort`（仅 ChatGPT）：已存的
+模型若已不在配置的模型列表（ChatGPT 为账号目录）中，或档位不再被目录或当前用户权限
+支持，按未选择返回，与 Runner 启动时的处理一致。
 
 PUT 可以携带 `model`、`effort`，请求整体替换该会话的选择：只写 `modelConfigId`
-会清掉之前的模型和档位，换配置也不会继承旧配置的模型。`model` 必须在该账号当前
-目录内，`effort` 必须在（所选或配置自己的）模型的 `efforts` 内，且 `model` 与
-`effort` 只能用于 ChatGPT 订阅配置，并要同时给出 `modelConfigId`；否则返回 400 与
-`code`：`MODEL_UNAVAILABLE`、`EFFORT_UNSUPPORTED`、`EFFORT_RESTRICTED`、
-`MODEL_SELECTION_UNSUPPORTED`、`MODEL_CONFIG_REQUIRED`。高于 `max` 的档位（目前是
+会清掉之前的模型和档位，换配置也不会继承旧配置的模型。`model` 最长 200 个字符，
+必须在所选配置的模型列表内（可以是隐藏模型），ChatGPT 订阅则必须在该账号当前目录
+内；`effort` 只能用于 ChatGPT 订阅配置，且必须在（所选或配置自己的）模型的
+`efforts` 内；两者都要同时给出 `modelConfigId`。否则返回 400 与 `code`：
+`MODEL_NOT_IN_CONNECTION`、`MODEL_UNAVAILABLE`、`EFFORT_UNSUPPORTED`、
+`EFFORT_RESTRICTED`、`MODEL_SELECTION_UNSUPPORTED`（非 ChatGPT 配置携带 `effort`）、
+`MODEL_CONFIG_REQUIRED`。高于 `max` 的档位（目前是
 `ultra`）只允许具备 `manage_system_config` 的用户选择，GET 不列出，PUT 返回
 `EFFORT_RESTRICTED`，Runner 启动时若选择者已失去该权限则回到默认档；放宽只需改
 `CODEX_SESSION_EFFORT_CEILING`。响应附带 `drained`（被退出的暖 Runner 数）与
 `liveUpdated`（被就地改档的存活网关授权数）。
 
-换配置或换模型会让下一条消息在新的底层会话上开始，并带上最近的对话记录（加密推理只对
-签发它的模型有效）；只改档位不会，存活 Runner 的下一个上游请求就使用新档位。
-选择的 (配置, 模型, 档位) 都没变时不退出任何 Runner。
+Runner 启动时，选中的模型取代配置的默认模型成为 `ANTHROPIC_MODEL`，第三方端点的
+各档模型映射和 `[1m]` 模型的压缩窗口随之变化。模型条目带 `effort` 时以该档位运行
+（`CLAUDE_CODE_EFFORT_LEVEL`，取代配置自己的档位），智能体显式设置的档位优先；自动池
+升级到兜底模型时按兜底模型自己的条目判断。已选模型被移出列表后，按配置默认模型运行
+并记录告警，不让本轮失败。
+
+换配置或换模型（包括取消选择回到默认模型）会让下一条消息在新的底层会话上开始，并带
+上最近的对话记录：每种配置都记录会话运行的模型，一个底层会话只在一个模型上运行；
+记录这一信息之前就存在的会话视为运行在配置默认模型上，自动池升级到兜底模型档也不
+重置会话。只改档位不会重置，存活 Runner 的下一个上游请求就使用新档位。
+选择的（配置, 模型, 档位）都没变时不退出任何 Runner，按名字选中配置的默认模型也不算
+变化；已经在所选配置上运行的暖 Runner 只在不涉及模型时保留，即新旧选择都没有指定
+模型，且之前未选择时也没有运行智能体绑定的模型。
 
 `POST /api/messages` 可以携带 Web 附件和 Runtime Session 标识。`/clear` 与
 `/fresh` 会进入与 `reset-session` 相同的 owner 级破坏性检查。`/fresh` 会开启
