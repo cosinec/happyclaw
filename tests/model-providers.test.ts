@@ -212,6 +212,17 @@ describe('endpoints', () => {
     expect(modelsUrlFor('nope')).toBe('');
   });
 
+  test("a preset's model list URL is used only on the preset's own address", () => {
+    const deepseek = getModelPreset('deepseek');
+    expect(modelsUrlFor('https://API.deepseek.com/anthropic/', deepseek)).toBe(
+      'https://api.deepseek.com/models',
+    );
+    // A relay that kept the preset id must not send its key to the vendor.
+    expect(modelsUrlFor('https://relay.example.com/anthropic', deepseek)).toBe(
+      'https://relay.example.com/anthropic/v1/models',
+    );
+  });
+
   test('warns about paths Claude Code would double', () => {
     expect(describeBaseUrlProblem('https://x.com/v1')).toMatch(/\/v1/);
     expect(describeBaseUrlProblem('https://x.com/v1/messages')).toMatch(/\/v1/);
@@ -332,6 +343,42 @@ describe('upstream errors', () => {
       code({ status: 422, bodyText: 'Extra inputs are not permitted' }),
     ).toBe('WIRE_INCOMPATIBLE');
     expect(code({ status: 400, bodyText: 'bad' })).toBe('UNKNOWN');
+  });
+
+  test('a valid key a gateway restricts is not called invalid', () => {
+    expect(code({ status: 403, bodyText: '该令牌无权访问模型 kimi-k3' })).toBe(
+      'AUTH_FORBIDDEN',
+    );
+    expect(code({ status: 403, bodyText: '该令牌无权使用模型：glm-5.3' })).toBe(
+      'AUTH_FORBIDDEN',
+    );
+    expect(
+      code({
+        status: 400,
+        bodyText: "Invalid 'max_tokens': integer below minimum value",
+      }),
+    ).toBe('UNKNOWN');
+    expect(code({ status: 400, bodyText: '请求的令牌数超出模型上限' })).toBe(
+      'CONTEXT_TOO_LONG',
+    );
+    expect(code({ status: 401, bodyText: '该令牌额度已用尽' })).toBe(
+      'QUOTA_EXCEEDED',
+    );
+  });
+
+  test('a bad credential is still recognized in its usual wordings', () => {
+    for (const bodyText of [
+      'invalid x-api-key',
+      'Invalid API key provided',
+      'invalid_api_key',
+      'Invalid authentication token',
+      'API key not valid. Please pass a valid API key.',
+      '令牌无效',
+      '无效的令牌',
+      '鉴权失败',
+    ]) {
+      expect(code({ status: 403, bodyText }), bodyText).toBe('AUTH_INVALID');
+    }
   });
 
   test('only transient failures are retryable', () => {

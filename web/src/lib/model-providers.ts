@@ -757,16 +757,23 @@ export function findPresetsByBaseUrl(raw: string): ModelPreset[] {
 }
 
 /**
- * Where a connection's models are listed: the preset's own endpoint, else
- * `/models` after a versioned path, else `/v1/models`.
+ * Where a connection's models are listed: the preset's own endpoint when the
+ * connection still uses the preset's address, else `/models` after a
+ * versioned path, else `/v1/models`. A connection on another address never
+ * sends its key to the preset vendor.
  */
 export function modelsUrlFor(
   baseUrl: string,
-  preset?: Pick<ModelPreset, 'modelsUrl'> | null,
+  preset?: Pick<ModelPreset, 'baseUrl' | 'modelsUrl'> | null,
 ): string {
-  if (preset?.modelsUrl) return preset.modelsUrl;
   const normalized = normalizeProviderBaseUrl(baseUrl);
   if (!normalized) return '';
+  if (
+    preset?.modelsUrl &&
+    normalizeProviderBaseUrl(preset.baseUrl) === normalized
+  ) {
+    return preset.modelsUrl;
+  }
   return /\/v\d+$/i.test(normalized)
     ? `${normalized}/models`
     : `${normalized}/v1/models`;
@@ -913,13 +920,16 @@ const TIMEOUT_CODES = new Set([
 const MODEL_NOT_FOUND_RE =
   /model[^\n]{0,80}(not.{0,4}(found|exist)|does not exist|invalid|unknown|unsupported)|model_not_found|invalid model|模型不存在/i;
 const CONTEXT_TOO_LONG_RE =
-  /prompt is too long|maximum (?:context|prompt) length|context.{0,20}(length|window).{0,40}(exceed|too)|context_length_exceeded/i;
+  /prompt is too long|maximum (?:context|prompt) length|context.{0,20}(length|window).{0,40}(exceed|too)|context_length_exceeded|(?:令牌|token)数.{0,6}超(?:出|过)|超出.{0,6}上下文/i;
 const WIRE_RE =
   /(unknown|unexpected|unsupported|extra|unrecognized).{0,16}(field|parameter|argument|inputs?|property|request param)|extra inputs are not permitted|invalid_request_error[^\n]{0,120}(field|param)/i;
+// A bad credential, said outright. Not a bare 「令牌」 or "token": gateways
+// say 令牌 for a valid key that may not use a model, and max_tokens errors
+// contain "invalid ... token".
 const AUTH_RE =
-  /invalid.{0,10}(api.?key|token)|authentication_error|unauthorized|api key not valid|令牌|鉴权失败|认证失败/i;
+  /\binvalid[\s:'"_-]{0,3}(?:(?:x-)?api[\s_-]?key|(?:access|auth|authentication|bearer)?[\s_-]?token)\b|authentication_error|\bunauthorized\b|api key not valid|incorrect api key|(?:令牌|密钥)(?:无效|已过期|不存在|错误)|无效的?(?:令牌|密钥)|鉴权失败|认证失败/i;
 const QUOTA_RE =
-  /insufficient.{0,20}(balance|quota|credit|funds)|credit balance is too low|quota.{0,20}exceed|exceed.{0,20}quota|余额不足|额度不足|欠费/i;
+  /insufficient.{0,20}(balance|quota|credit|funds)|credit balance is too low|quota.{0,20}exceed|exceed.{0,20}quota|余额不足|额度.{0,6}(?:不足|用尽|耗尽|用完)|欠费/i;
 
 /**
  * Classifies one failed upstream request. Network errors decide first, then
@@ -943,7 +953,13 @@ export function classifyProviderError(
   }
   if (status === undefined) return { code: 'UNKNOWN', retryable: false };
 
-  if (status === 401) return { code: 'AUTH_INVALID', retryable: false };
+  if (status === 401) {
+    // Some gateways answer an exhausted key's quota with 401.
+    return {
+      code: QUOTA_RE.test(body) ? 'QUOTA_EXCEEDED' : 'AUTH_INVALID',
+      retryable: false,
+    };
+  }
   if (status === 402) return { code: 'QUOTA_EXCEEDED', retryable: false };
   if (status === 403) {
     if (QUOTA_RE.test(body))
