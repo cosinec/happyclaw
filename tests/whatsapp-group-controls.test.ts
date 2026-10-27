@@ -266,6 +266,39 @@ describe('WhatsApp group response audience', () => {
   });
 });
 
+describe('WhatsApp audience: /owner_mention is only an exception when consumed', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    harness.sockets.length = 0;
+  });
+
+  test('an /owner_mention the host does not consume is dropped', async () => {
+    seq += 1;
+    const groups: Record<string, AudienceGroup> = {
+      [GROUP_JID]: { audience_mode: 'owner_only' },
+    };
+    const connection = createWhatsAppConnection({
+      accountId: `wa-boot-${seq}`,
+      authDir: path.join(root, `auth-boot-${seq}`),
+    });
+    const onCommand = vi.fn(async () => null);
+    await connection.connect({
+      onNewChat: vi.fn(),
+      isChatAuthorized: () => true,
+      onCommand,
+      ...groupAudienceHost('whatsapp', groups),
+    });
+    const socket = harness.sockets.at(-1)!;
+    await socket.emit('messages.upsert', {
+      type: 'notify',
+      messages: [groupMessage(MEMBER, '/owner_mention run this')],
+    });
+    expect(onCommand).toHaveBeenCalledOnce();
+    expect(db.storeMessageDirect).not.toHaveBeenCalled();
+    await connection.disconnect();
+  });
+});
+
 describe('whatsAppCommandMentions', () => {
   test('normalized member JIDs, never the bot itself', () => {
     expect(

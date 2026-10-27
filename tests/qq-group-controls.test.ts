@@ -342,6 +342,39 @@ describe('QQ group response audience', () => {
   });
 });
 
+describe('QQ audience: /owner_mention is only an exception when consumed', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    harness.sockets.length = 0;
+  });
+
+  test('a multi-line /owner_mention that is not dispatched is dropped', async () => {
+    const groups: Record<string, AudienceGroup> = {
+      [GROUP_JID]: { audience_mode: 'owner_only' },
+    };
+    const onCommand = vi.fn(async () => 'claimed');
+    const connection = createQQConnection({
+      appId: 'app',
+      appSecret: 'secret',
+    });
+    await connection.connect({
+      onNewChat: vi.fn(),
+      isChatAuthorized: () => true,
+      resolveEffectiveChatJid: (jid) => ({ effectiveJid: jid, agentId: null }),
+      onCommand,
+      ...groupAudienceHost('qq', groups),
+    });
+    const socket = harness.sockets.at(-1)!;
+    await socket.emitAsync(
+      'message',
+      groupPayload({ member: 'MEMBER', content: '/owner_mention\nA\nB' }),
+    );
+    expect(onCommand).not.toHaveBeenCalled();
+    expect(db.storeMessageDirect).not.toHaveBeenCalled();
+    await connection.disconnect();
+  });
+});
+
 describe('qqGroupCommandMentions', () => {
   test('member openids in the group namespace, never the bot', () => {
     expect(

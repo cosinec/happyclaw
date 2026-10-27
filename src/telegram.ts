@@ -7,7 +7,7 @@ import { downloadHttpsBuffer } from './im-media-download.js';
 import { Agent as HttpsAgent } from 'node:https';
 import { ProxyAgent } from 'proxy-agent';
 import { storeChatMetadata, storeMessageDirect, updateChatName } from './db.js';
-import { createDedupCache, splitTextChunks } from './im-utils.js';
+import { createDedupCache } from './im-utils.js';
 import { notifyNewImMessage } from './message-notifier.js';
 import { logger } from './logger.js';
 import {
@@ -27,9 +27,14 @@ import {
 } from './channel-address.js';
 import { resolveAdmittedChannelRoute } from './channel-admission.js';
 import {
-  isGroupSenderAdmitted,
+  chunkTelegramMarkdown,
+  createTelegramRateLimitRetry,
+} from './telegram-outbound.js';
+import {
+  groupSenderAdmission,
   type ChannelCommandMention,
   type GroupAudienceConnectOpts,
+  type GroupSenderAdmission,
 } from './im-group-audience.js';
 import {
   parseConnectorRuntimeControl,
@@ -287,9 +292,31 @@ interface TelegramEntityLike {
 interface TelegramMessageLike {
   text?: string;
   caption?: string;
+  message_thread_id?: number;
   entities?: TelegramEntityLike[];
   caption_entities?: TelegramEntityLike[];
-  reply_to_message?: { from?: { id: number; is_bot?: boolean } };
+  from?: { id: number; is_bot?: boolean };
+  sender_chat?: unknown;
+  reply_to_message?: {
+    message_id?: number;
+    from?: { id: number; is_bot?: boolean };
+    sender_chat?: unknown;
+    forum_topic_created?: unknown;
+  };
+}
+
+/**
+ * The sender's identity for owner and audience checks, or undefined when it
+ * cannot be attributed to one person: anonymous group admins and messages
+ * sent as a channel arrive through shared system accounts with
+ * `sender_chat` set. Such a sender is never the owner, cannot claim it and
+ * cannot be allowlisted.
+ */
+export function telegramSenderImId(
+  message: Pick<TelegramMessageLike, 'from' | 'sender_chat'>,
+): string | undefined {
+  if (message.sender_chat || !message.from?.id) return undefined;
+  return String(message.from.id);
 }
 
 /**
@@ -345,8 +372,17 @@ export function telegramCommandMentions(
       ids.add(String(entity.user.id));
     }
   }
-  const repliedTo = message.reply_to_message?.from;
-  if (repliedTo && !repliedTo.is_bot) ids.add(String(repliedTo.id));
+  // In a forum topic every message implicitly replies to the topic's opening
+  // message; only an explicit reply names its author.
+  const replied = message.reply_to_message;
+  const implicitTopicReply =
+    !!replied?.forum_topic_created ||
+    (message.message_thread_id !== undefined &&
+      replied?.message_id === message.message_thread_id);
+  if (replied && !implicitTopicReply) {
+    const id = telegramSenderImId(replied);
+    if (id && !replied.from?.is_bot) ids.add(id);
+  }
   return [...ids].map((imId) => ({ imId }));
 }
 
@@ -668,56 +704,6 @@ function classifyTelegramSendError(err: unknown): unknown {
   );
 }
 
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-}
-
-/**
- * Convert Markdown to Telegram-compatible HTML.
- * Handles: code blocks, inline code, bold, italic, strikethrough, links, headings.
- */
-function markdownToTelegramHtml(md: string): string {
-  // Step 1: Extract code blocks to protect them from further processing
-  const codeBlocks: string[] = [];
-  let text = md.replace(/```[\s\S]*?```/g, (match) => {
-    const code = match.replace(/^```\w*\n?/, '').replace(/\n?```$/, '');
-    codeBlocks.push(`<pre><code>${escapeHtml(code)}</code></pre>`);
-    return `\x00CB${codeBlocks.length - 1}\x00`;
-  });
-
-  // Step 2: Extract inline code
-  const inlineCodes: string[] = [];
-  text = text.replace(/`([^`]+)`/g, (_, code: string) => {
-    inlineCodes.push(`<code>${escapeHtml(code)}</code>`);
-    return `\x00IC${inlineCodes.length - 1}\x00`;
-  });
-
-  // Step 3: Escape HTML in remaining text
-  text = escapeHtml(text);
-
-  // Step 4: Convert Markdown formatting
-  // Links: [text](url)
-  text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
-  // Bold: **text** or __text__
-  text = text.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
-  text = text.replace(/__(.+?)__/g, '<b>$1</b>');
-  // Strikethrough: ~~text~~ (before italic to avoid conflicts)
-  text = text.replace(/~~(.+?)~~/g, '<s>$1</s>');
-  // Italic: *text* (not preceded/followed by word chars to avoid false matches)
-  text = text.replace(/(?<!\w)\*(?!\s)(.+?)(?<!\s)\*(?!\w)/g, '<i>$1</i>');
-  // Headings: # text → bold
-  text = text.replace(/^#{1,6}\s+(.+)$/gm, '<b>$1</b>');
-
-  // Step 5: Restore code blocks and inline code
-  text = text.replace(/\x00CB(\d+)\x00/g, (_, i) => codeBlocks[Number(i)]);
-  text = text.replace(/\x00IC(\d+)\x00/g, (_, i) => inlineCodes[Number(i)]);
-
-  return text;
-}
-
 // ─── Factory Function ──────────────────────────────────────────
 
 /**
@@ -1005,25 +991,20 @@ export function createTelegramConnection(
   }
 
   /**
-   * Response audience of an authorized group chat. Runs before commands and
-   * before any registration, routing or download side effect.
+   * Response audience of an authorized chat. Runs before commands and before
+   * any registration, routing or download side effect; private chats are not
+   * gated.
    */
-  function admitTelegramGroupSender(
+  function telegramGroupAdmission(
     opts: TelegramConnectOpts,
     jid: string,
     chat: TelegramChatDescriptor,
-    senderId: number | undefined,
+    senderImId: string | undefined,
     text: string | undefined,
-  ): boolean {
-    return (
-      !isTelegramGroupChat(chat) ||
-      isGroupSenderAdmitted(
-        opts,
-        jid,
-        senderId ? String(senderId) : undefined,
-        text ?? '',
-      )
-    );
+  ): GroupSenderAdmission {
+    return isTelegramGroupChat(chat)
+      ? groupSenderAdmission(opts, jid, senderImId, text ?? '')
+      : 'admitted';
   }
 
   /**
@@ -1039,16 +1020,20 @@ export function createTelegramConnection(
     chat: TelegramChatDescriptor;
     caption?: string;
     kind: TelegramNativeInboundKind | 'photo' | 'document';
-    senderId?: number;
+    senderImId?: string;
     reply: (text: string) => Promise<unknown>;
   }): Promise<boolean> {
     if (input.opts.isChatAuthorized(input.jid)) {
-      return admitTelegramGroupSender(
-        input.opts,
-        input.jid,
-        input.chat,
-        input.senderId,
-        input.caption,
+      // Media is never dispatched as a command, so an `/owner_mention`
+      // caption from a rejected sender gets no bootstrap exception.
+      return (
+        telegramGroupAdmission(
+          input.opts,
+          input.jid,
+          input.chat,
+          input.senderImId,
+          input.caption,
+        ) === 'admitted'
       );
     }
 
@@ -1156,6 +1141,10 @@ export function createTelegramConnection(
           },
         },
       });
+      // A send Telegram refused with 429 is retried after its retry_after.
+      bot.api.config.use(
+        createTelegramRateLimitRetry({ isLive: () => !stopping }),
+      );
       // Track completed Bot API long polls, rather than inbound messages: a
       // quiet chat is healthy as long as getUpdates keeps completing.
       bot.api.config.use(async (prev, method, payload, signal) => {
@@ -1296,17 +1285,18 @@ export function createTelegramConnection(
               );
               return;
             }
-            if (
-              !admitTelegramGroupSender(
-                opts,
-                jid,
-                ctx.chat as TelegramChatDescriptor,
-                ctx.from?.id,
-                text,
-              )
-            ) {
-              return;
-            }
+            const senderImId = telegramSenderImId({
+              from: ctx.from,
+              sender_chat: ctx.message.sender_chat,
+            });
+            const admission = telegramGroupAdmission(
+              opts,
+              jid,
+              ctx.chat as TelegramChatDescriptor,
+              senderImId,
+              text,
+            );
+            if (admission === 'rejected') return;
 
             const resolveRoute = () =>
               resolveAdmittedChannelRoute(
@@ -1324,7 +1314,7 @@ export function createTelegramConnection(
               const reply = await runSessionBreak(opts.onSessionBreak, {
                 sourceJid: jid,
                 targetJid: resolveRoute()?.targetJid,
-                senderImId: ctx.from?.id ? String(ctx.from.id) : '',
+                senderImId: senderImId ?? '',
                 chatType: isTelegramGroupChat(ctx.chat) ? 'group' : 'p2p',
               });
               await ctx.reply(reply);
@@ -1358,9 +1348,6 @@ export function createTelegramConnection(
                 'Telegram slash command detected',
               );
               try {
-                const senderImId = ctx.from?.id
-                  ? String(ctx.from.id)
-                  : undefined;
                 const reply = await opts.onCommand(
                   jid,
                   cmdBody,
@@ -1388,6 +1375,8 @@ export function createTelegramConnection(
                 return;
               }
             }
+            // Admitted only as `/owner_mention`, and not consumed as it.
+            if (admission === 'bootstrap') return;
 
             const resolvedRoute = resolveRoute();
             if (!resolvedRoute) {
@@ -1511,7 +1500,10 @@ export function createTelegramConnection(
                 chat: ctx.chat as TelegramChatDescriptor,
                 caption: ctx.message.caption,
                 kind: 'photo',
-                senderId: ctx.from?.id,
+                senderImId: telegramSenderImId({
+                  from: ctx.from,
+                  sender_chat: ctx.message.sender_chat,
+                }),
                 reply: (text) => ctx.reply(text),
               }))
             ) {
@@ -1697,7 +1689,10 @@ export function createTelegramConnection(
                 chat: ctx.chat as TelegramChatDescriptor,
                 caption: ctx.message.caption,
                 kind: 'document',
-                senderId: ctx.from?.id,
+                senderImId: telegramSenderImId({
+                  from: ctx.from,
+                  sender_chat: ctx.message.sender_chat,
+                }),
                 reply: (text) => ctx.reply(text),
               }))
             ) {
@@ -1870,7 +1865,10 @@ export function createTelegramConnection(
                 chat: tgChat as TelegramChatDescriptor,
                 caption: tgMessage.caption,
                 kind: inbound.kind,
-                senderId: ctx.from?.id,
+                senderImId: telegramSenderImId({
+                  from: ctx.from,
+                  sender_chat: tgMessage.sender_chat,
+                }),
                 reply: (text) => ctx.reply(text),
               }))
             ) {
@@ -2209,15 +2207,13 @@ export function createTelegramConnection(
         : {};
 
       try {
-        // Split original markdown into chunks (leave room for HTML tag overhead)
-        const mdChunks = splitTextChunks(text, 3800);
+        const chunks = chunkTelegramMarkdown(text);
         const tracker = new PhysicalDeliveryTracker(
-          mdChunks.length + (localImagePaths?.length ?? 0),
+          chunks.length + (localImagePaths?.length ?? 0),
         );
 
-        for (const mdChunk of mdChunks) {
+        for (const { markdown: mdChunk, html } of chunks) {
           await tracker.send(async () => {
-            const html = markdownToTelegramHtml(mdChunk);
             try {
               await activeBot.api.sendMessage(target.chatId, html, {
                 parse_mode: 'HTML',

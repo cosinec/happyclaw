@@ -468,6 +468,7 @@ import {
   isOwnerProfileOwnerInput,
   OWNER_PROFILE_TRUSTED_CLAIM_SOURCES,
   ownerImIdFromDirectConversationJid,
+  ownerImIdFromPersistedSender,
   resolveTrustedDirectOwnerUpgrade,
 } from './agent-builder-turn-auth.js';
 import {
@@ -1793,9 +1794,37 @@ function broadcastFollowUpBatchUpdate(
   }
 }
 
+/**
+ * Re-admit group inputs that waited in the durable queue: a `/disallow`, an
+ * owner change or a switch to owner_only made while they waited applies to
+ * them too. A withdrawn input is cancelled and leaves the visible queue
+ * exactly like a user cancel. Private chats are not audience-gated.
+ */
+function withdrawQueuedInputsOutsideAudience(chatJid: string): void {
+  for (const item of listQueuedFollowUps(chatJid)) {
+    const sourceJid = item.source_jid;
+    if (!sourceJid || !getChannelType(sourceJid)) continue;
+    const conversationJid = channelConversationJid(
+      stripVirtualJidSuffix(sourceJid),
+    );
+    const group =
+      registeredGroups[conversationJid] ?? getRegisteredGroup(conversationJid);
+    if (isDirectImConversation(conversationJid, group)) continue;
+    const sender =
+      ownerImIdFromPersistedSender(sourceJid, item.sender) ?? undefined;
+    if (isSenderAllowedInGroup(sourceJid, sender)) continue;
+    const result = cancelFollowUp(chatJid, item.id);
+    logger.info(
+      { chatJid, messageId: item.id, withdrawn: result.ok },
+      'Queued input withdrawn: its sender is no longer in the response audience',
+    );
+  }
+}
+
 async function dispatchNextQueuedFollowUp(chatJid: string): Promise<void> {
   const reservedRunId = queue.reserveNextQuery(chatJid);
   if (!reservedRunId) return;
+  withdrawQueuedInputsOutsideAudience(chatJid);
   const items = claimNextQueuedFollowUpBatch(chatJid, reservedRunId);
   if (items.length === 0) {
     queue.releaseQueryReservation(chatJid, reservedRunId);
@@ -2107,6 +2136,7 @@ function steerQueuedFollowUpBatch(
 
 function recoverDurableFollowUps(): void {
   for (const chatJid of getQueuedFollowUpChatJids()) {
+    withdrawQueuedInputsOutsideAudience(chatJid);
     const recoveryRunId = `recovery:${crypto.randomUUID()}`;
     const items = claimNextQueuedFollowUpBatch(chatJid, recoveryRunId);
     if (items.length === 0) continue;

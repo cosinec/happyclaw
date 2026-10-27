@@ -44,9 +44,10 @@ import {
 } from './channel-admission.js';
 import { canonicalizeWhatsAppProviderConversationJid } from './whatsapp-jid.js';
 import {
-  isGroupSenderAdmitted,
+  groupSenderAdmission,
   type ChannelCommandMention,
   type GroupAudienceConnectOpts,
+  type GroupSenderAdmission,
 } from './im-group-audience.js';
 import {
   parseConnectorRuntimeControl,
@@ -865,16 +866,19 @@ export function createWhatsAppConnection(
 
       // ── Group gates: response audience → mention required → owner check ──
       const isBotMentioned = isGroup && isMentioningBot(inner, activeSock.user);
+      let audience: GroupSenderAdmission = 'admitted';
       if (isGroup) {
         const addressedText =
           isBotMentioned && text
             ? stripLeadingWhatsAppBotMention(text, inner, activeSock.user)
             : text;
-        if (
-          !isGroupSenderAdmitted(opts, chatJid, senderImId, addressedText ?? '')
-        ) {
-          return;
-        }
+        audience = groupSenderAdmission(
+          opts,
+          chatJid,
+          senderImId,
+          addressedText ?? '',
+        );
+        if (audience === 'rejected') return;
 
         if (
           opts.shouldProcessGroupMessage &&
@@ -965,6 +969,8 @@ export function createWhatsAppConnection(
           );
         }
       }
+      // Admitted only as `/owner_mention`, and not consumed as it.
+      if (audience === 'bootstrap') return;
 
       const resolvedRoute = resolveAdmittedChannelRoute(
         chatJid,

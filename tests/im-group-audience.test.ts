@@ -15,7 +15,7 @@ import {
   getChannelType,
 } from '../src/im-channel.js';
 import {
-  isGroupSenderAdmitted,
+  groupSenderAdmission,
   isOwnerBootstrapCommand,
   isSenderAdmittedByGroupPolicy,
   mentionImId,
@@ -82,7 +82,7 @@ describe('host group admission policy', () => {
 
 describe('connector gate and owner bootstrap', () => {
   test('without the host callback every sender passes (legacy connectors)', () => {
-    expect(isGroupSenderAdmitted({}, 'x', 'm', 'hi')).toBe(true);
+    expect(groupSenderAdmission({}, 'x', 'm', 'hi')).toBe('admitted');
   });
 
   test('only /owner_mention in an unowned, unquarantined group bypasses the gate', () => {
@@ -91,34 +91,45 @@ describe('connector gate and owner bootstrap', () => {
     const resolveRegisteredGroup = vi.fn();
     const admitted = (commandText: string, group?: object) => {
       resolveRegisteredGroup.mockReturnValue(group);
-      return isGroupSenderAdmitted(
+      return groupSenderAdmission(
         { isSenderAllowedInGroup: reject, resolveRegisteredGroup },
         'g',
         'm',
         commandText,
       );
     };
-    expect(admitted('/owner_mention', unowned)).toBe(true);
-    expect(admitted('  /OWNER_MENTION@happy_bot', unowned)).toBe(true);
-    expect(admitted('/status', unowned)).toBe(false);
-    expect(admitted('/owner_mention', { owner_im_id: 'o' })).toBe(false);
+    // `bootstrap` admits the message only to be consumed as the command;
+    // the connector drops it otherwise.
+    expect(admitted('/owner_mention', unowned)).toBe('bootstrap');
+    expect(admitted('  /OWNER_MENTION@happy_bot', unowned)).toBe('bootstrap');
+    expect(admitted('/owner_mention\nA\nB', unowned)).toBe('bootstrap');
+    expect(admitted('/status', unowned)).toBe('rejected');
+    expect(admitted('/owner_mention', { owner_im_id: 'o' })).toBe('rejected');
     expect(
       admitted('/owner_mention', { owner_claim_source: 'transfer_reset' }),
-    ).toBe(false);
-    expect(admitted('/owner_mention', undefined)).toBe(false);
+    ).toBe('rejected');
+    expect(admitted('/owner_mention', undefined)).toBe('rejected');
+    expect(
+      groupSenderAdmission(
+        { isSenderAllowedInGroup: () => true, resolveRegisteredGroup },
+        'g',
+        'm',
+        '/owner_mention',
+      ),
+    ).toBe('admitted');
     expect(isOwnerBootstrapCommand('/owner_mentionx', unowned)).toBe(false);
   });
 
   test('ordinary rejected messages never look the group up', () => {
     const resolveRegisteredGroup = vi.fn();
     expect(
-      isGroupSenderAdmitted(
+      groupSenderAdmission(
         { isSenderAllowedInGroup: () => false, resolveRegisteredGroup },
         'g',
         'm',
         'hello',
       ),
-    ).toBe(false);
+    ).toBe('rejected');
     expect(resolveRegisteredGroup).not.toHaveBeenCalled();
   });
 
