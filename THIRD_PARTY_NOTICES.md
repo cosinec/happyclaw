@@ -21,4 +21,7 @@ header):
 
 - `shared/model-providers.ts`: the vendor preset catalog, the model list
   parsing and the upstream error classification.
-- `web/src/components/chat/composer/cindy/`: the chat composer's editor core.
+- `web/src/components/chat/composer/cindy/`: the chat composer's editor core
+  (list nodes, punctuation and selection plugins, reference and long-paste
+  chips, Markdown serialization, palette matching, the send button) and its
+  tests.

@@ -17,7 +17,19 @@ async function openHarness(page: Page) {
   await expect(composer(page)).toBeVisible();
 }
 
-const composer = (page: Page) => page.locator('[data-hc-composer] textarea');
+/** The composer's editor (Tiptap, contenteditable). */
+const composer = (page: Page) =>
+  page.locator('[data-hc-composer] [data-composer-editor]');
+
+/** The composer's text, line breaks included. */
+const composerText = (page: Page) =>
+  composer(page).evaluate((element) =>
+    (
+      element as HTMLElement & {
+        editor: { getText: (options: { blockSeparator: string }) => string };
+      }
+    ).editor.getText({ blockSeparator: '\n' }),
+  );
 
 const harnessState = (page: Page) =>
   page.evaluate(() => {
@@ -157,29 +169,29 @@ test.describe('desktop composer', () => {
     ).toBeVisible();
 
     await switchTo(page, 'a1');
-    await expect(composer(page)).toHaveValue('');
+    await expect(composer(page)).toHaveText('');
     await expect(
       page.getByRole('button', { name: '预览图片：main-only.png' }),
     ).toHaveCount(0);
     await composer(page).fill('会话 A 的草稿');
 
     await switchTo(page, 'a2');
-    await expect(composer(page)).toHaveValue('');
+    await expect(composer(page)).toHaveText('');
     await composer(page).fill('会话 B 的草稿');
 
     await switchTo(page, null);
-    await expect(composer(page)).toHaveValue('写给主会话的草稿');
+    await expect(composer(page)).toHaveText('写给主会话的草稿');
 
     await switchTo(page, 'a1');
-    await expect(composer(page)).toHaveValue('会话 A 的草稿');
+    await expect(composer(page)).toHaveText('会话 A 的草稿');
     await composer(page).press('Enter');
-    await expect(composer(page)).toHaveValue('');
+    await expect(composer(page)).toHaveText('');
     expect((await harnessState(page)).sent).toEqual([
       { to: 'a1', content: '会话 A 的草稿', images: 0 },
     ]);
 
     await switchTo(page, 'a2');
-    await expect(composer(page)).toHaveValue('会话 B 的草稿');
+    await expect(composer(page)).toHaveText('会话 B 的草稿');
     const drafts = await page.evaluate(() =>
       (
         window as unknown as {
@@ -206,12 +218,12 @@ test.describe('desktop composer', () => {
     await composer(page).press('Enter');
     await page.keyboard.type(' second thought');
     await pasteImage(page, 'later.png');
-    await expect(composer(page)).toHaveValue('first message second thought');
+    await expect(composer(page)).toHaveText('first message second thought');
 
     await expect
       .poll(async () => (await harnessState(page)).sent.length)
       .toBe(1);
-    await expect(composer(page)).toHaveValue('second thought');
+    await expect(composer(page)).toHaveText('second thought');
     await expect(
       page.getByRole('button', { name: '预览图片：later.png' }),
     ).toBeVisible();
@@ -237,10 +249,10 @@ test.describe('desktop composer', () => {
     await composer(page).press('Enter');
     await switchTo(page, 'a1');
     await switchTo(page, null);
-    await expect(composer(page)).toHaveValue('');
+    await expect(composer(page)).toHaveText('');
 
     await page.waitForTimeout(1700);
-    await expect(composer(page)).toHaveValue('');
+    await expect(composer(page)).toHaveText('');
     await composer(page).press('Enter');
     await page.waitForTimeout(200);
     expect((await harnessState(page)).sent).toEqual([
@@ -254,12 +266,12 @@ test.describe('desktop composer', () => {
     await openHarness(page);
     await composer(page).fill('narrow window enter');
     await composer(page).press('Enter');
-    await expect(composer(page)).toHaveValue('');
+    await expect(composer(page)).toHaveText('');
 
     await callHarness(page, 'setRunning', true);
     await composer(page).fill('change direction');
     await composer(page).press('Control+Shift+Enter');
-    await expect(composer(page)).toHaveValue('');
+    await expect(composer(page)).toHaveText('');
     expect((await harnessState(page)).sent).toEqual([
       { to: 'main', content: 'narrow window enter', images: 0 },
       { to: 'main', content: 'change direction', images: 0, mode: 'steer' },
@@ -399,7 +411,10 @@ test.describe('desktop composer', () => {
     const stopCount = async () => (await harnessState(page)).stops.length;
 
     await callHarness(page, 'setRunning', true);
-    await composer(page).fill('');
+    // Clear it the way a person does (WebKit's fill('') leaves the text).
+    await composer(page).press('ControlOrMeta+a');
+    await composer(page).press('Backspace');
+    await expect(composer(page)).toHaveText('');
     await composer(page).press('Escape');
     await expect.poll(stopCount).toBe(2);
 
@@ -446,9 +461,140 @@ test.describe('desktop composer', () => {
       )
       .toBeGreaterThan(0);
   });
+  test('a long paste folds into a chip and is sent in full', async ({
+    page,
+  }) => {
+    await openHarness(page);
+    const log = Array.from({ length: 30 }, (_, i) => `log line ${i + 1}`).join(
+      '\n',
+    );
+    await composer(page).click();
+    await page.keyboard.type('看看这段日志：');
+    await composer(page).evaluate((element, text) => {
+      const transfer = new DataTransfer();
+      transfer.setData('text/plain', text);
+      element.dispatchEvent(
+        new ClipboardEvent('paste', {
+          clipboardData: transfer,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    }, log);
+    await expect(composer(page).locator('[data-pasted-text-chip]')).toHaveText(
+      '粘贴文本 · 30 行',
+    );
+    await expect(composer(page)).not.toContainText('log line 2');
+    await composer(page).press('Enter');
+    await expect
+      .poll(async () => (await harnessState(page)).sent)
+      .toEqual([{ to: 'main', content: `看看这段日志：${log}`, images: 0 }]);
+  });
+
+  test('/ offers commands and skills; @ inserts a workspace file', async ({
+    page,
+  }) => {
+    await page.route('**/api/skills', (route) =>
+      route.fulfill({
+        json: {
+          skills: [
+            {
+              id: 'review',
+              name: 'review',
+              description: '审查代码改动',
+              source: 'user',
+              effective: true,
+              enabled: true,
+              userInvocable: true,
+            },
+          ],
+        },
+      }),
+    );
+    await page.route('**/api/groups/*/files*', (route) =>
+      route.fulfill({
+        json: {
+          currentPath: '',
+          files: [
+            { name: 'docs', path: 'docs', type: 'directory' },
+            { name: 'notes.txt', path: 'notes.txt', type: 'file' },
+          ],
+        },
+      }),
+    );
+    await openHarness(page);
+    const palette = page.getByRole('listbox');
+
+    await composer(page).click();
+    await page.keyboard.type('/');
+    await expect(palette.getByRole('option')).toHaveText([
+      /^\/clear/,
+      /^\/fresh/,
+      /^\/review审查代码改动/,
+    ]);
+    await page.keyboard.type('rev');
+    await page.keyboard.press('Enter');
+    await expect(palette).toHaveCount(0);
+    await expect(composer(page)).toHaveText('/review');
+    await expect(composer(page).locator('.slash-cmd-pill')).toHaveText(
+      '/review',
+    );
+
+    await page.keyboard.type('看 @no');
+    await expect(palette.getByRole('option')).toHaveText(['notes.txt']);
+    await page.keyboard.press('Enter');
+    await expect(composer(page).locator('[data-mention-chip]')).toHaveText(
+      'notes.txt',
+    );
+    await page.keyboard.press('Enter');
+    await expect
+      .poll(async () => (await harnessState(page)).sent)
+      .toEqual([{ to: 'main', content: '/review 看 @"notes.txt"', images: 0 }]);
+  });
+
+  test('↑ recalls what was sent here; a draft survives a reload', async ({
+    page,
+  }) => {
+    await openHarness(page);
+    await composer(page).click();
+    await page.keyboard.press('ArrowUp');
+    await expect(composer(page)).toHaveText('第 10 条提问');
+    await page.keyboard.press('ArrowUp');
+    await expect(composer(page)).toHaveText('第 8 条提问');
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowDown');
+    await expect(composer(page)).toHaveText('');
+
+    await composer(page).fill('刷新以后还在');
+    await page.waitForTimeout(400);
+    await page.reload();
+    await expect(composer(page)).toHaveText('刷新以后还在');
+  });
+
+  test('clicking blank space in the card focuses the editor', async ({
+    page,
+  }) => {
+    await openHarness(page);
+    const card = await page.locator('[data-composer-card]').boundingBox();
+    const toolbar = await page.locator('[data-composer-toolbar]').boundingBox();
+    // Between the toolbar's button groups.
+    await page.mouse.click(
+      toolbar!.x + toolbar!.width / 2,
+      toolbar!.y + toolbar!.height / 2,
+    );
+    await expect(composer(page)).toBeFocused();
+    expect(card!.height).toBeGreaterThan(0);
+  });
 });
 
 test.describe('touch composer', () => {
+  // A phone: touch only, narrow, typing on a software keyboard.
+  test.use({
+    viewport: { width: 412, height: 839 },
+    isMobile: true,
+    hasTouch: true,
+  });
+
   test('a phone types a newline on Enter; mod+Enter sends', async ({
     page,
   }) => {
@@ -460,11 +606,11 @@ test.describe('touch composer', () => {
     ).toBe(true);
     await composer(page).fill('第一行');
     await composer(page).press('Enter');
-    await expect(composer(page)).toHaveValue('第一行\n');
+    await expect.poll(() => composerText(page)).toBe('第一行\n');
     expect((await harnessState(page)).sent).toEqual([]);
 
     await composer(page).press('Control+Enter');
-    await expect(composer(page)).toHaveValue('');
+    await expect(composer(page)).toHaveText('');
     expect((await harnessState(page)).sent).toEqual([
       { to: 'main', content: '第一行', images: 0 },
     ]);
@@ -589,14 +735,14 @@ test.describe('tablet composer', () => {
     ).toBe(true);
     await composer(page).fill('硬件键盘');
     await composer(page).press('Enter');
-    await expect(composer(page)).toHaveValue('');
+    await expect(composer(page)).toHaveText('');
 
     await simulateKeyboard(page, 360);
     await composer(page).fill('软键盘');
     await composer(page).press('Enter');
-    await expect(composer(page)).toHaveValue('软键盘\n');
+    await expect.poll(() => composerText(page)).toBe('软键盘\n');
     await composer(page).press('Meta+Enter');
-    await expect(composer(page)).toHaveValue('');
+    await expect(composer(page)).toHaveText('');
     expect((await harnessState(page)).sent).toEqual([
       { to: 'main', content: '硬件键盘', images: 0 },
       { to: 'main', content: '软键盘', images: 0 },

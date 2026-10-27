@@ -878,9 +878,9 @@ test('the empty state scrolls to every starter on a short viewport', async ({
   expect(reach!.lastBottom).toBeLessThanOrEqual(reach!.scrollerBottom);
 
   await starters.last().click();
-  await expect(page.locator('[data-hc-chat-view] textarea')).toHaveValue(
-    '帮我定位和修复一个 Bug',
-  );
+  await expect(
+    page.locator('[data-hc-chat-view] [data-composer-editor]'),
+  ).toHaveText('帮我定位和修复一个 Bug');
 });
 
 test('an error callout copies its message', async ({ page, context }) => {

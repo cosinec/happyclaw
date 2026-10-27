@@ -47,12 +47,20 @@ export function splitLegacyEmbeddedReferenceContent(
   };
 }
 
-export function escapeXml(value: string): string {
+/**
+ * Escape element content. Quotes only matter inside attribute values; keeping
+ * them literal in bodies leaves CLI syntax such as `@"path"` mentions intact.
+ */
+function escapeXmlText(value: string): string {
   return value
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/>/g, '&gt;');
+}
+
+/** Escape for XML, quotes included: safe in attribute values too. */
+export function escapeXml(value: string): string {
+  return escapeXmlText(value).replace(/"/g, '&quot;');
 }
 
 /** First line of every `<referenced_messages>` block. */
@@ -138,7 +146,7 @@ function formatMissingReference(
     ? ` sender="${escapeXml(reference.sender)}"`
     : '';
   const relationAttrs = contentLinkAttributes(reference.contentLink);
-  return `<referenced_message id="${escapeXml(reference.id)}"${senderAttr}${relationAttrs}>${escapeXml(body)}</referenced_message>`;
+  return `<referenced_message id="${escapeXml(reference.id)}"${senderAttr}${relationAttrs}>${escapeXmlText(body)}</referenced_message>`;
 }
 
 /**
@@ -170,15 +178,18 @@ export function formatMessages(
       .filter((reference): reference is string => !!reference);
     // Quoted bodies are escaped like every other text, so a forged
     // `</referenced_messages>` or `<message>` inside them stays plain text.
-    const referenceBlock =
+    // The body always starts a line (after the opening tag or the reference
+    // block): CLI syntax such as `@"path"` mentions only counts after
+    // whitespace, so a message that begins with one still attaches the file.
+    const bodyStart =
       references.length > 0
         ? `<referenced_messages>\n${REFERENCED_MESSAGES_NOTE}\n${references.join('\n')}\n</referenced_messages>\n`
-        : '';
+        : '\n';
 
     const formatted =
       `<message id="${escapeXml(message.id)}" sender="${escapeXml(message.sender_name)}"` +
       `${sourceAttr}${replyAttr}${relationAttrs} time="${escapeXml(message.timestamp)}">` +
-      `${referenceBlock}${escapeXml(message.content)}</message>`;
+      `${bodyStart}${escapeXmlText(message.content)}</message>`;
     knownMessageIds.add(message.id);
     return `${formatted}${defaultForwardRequest(
       message,

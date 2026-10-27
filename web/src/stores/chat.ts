@@ -288,6 +288,23 @@ function attachmentTimeoutMs(
   return computeUploadTimeoutMs(bytes);
 }
 
+/** `POST /api/messages` answered by the server itself (/clear, /fresh). */
+type ClearedResponse = { success: true; cleared: true; fresh?: true };
+type MessageCreateResponse =
+  | ClearedResponse
+  | {
+      success: true;
+      cleared?: undefined;
+      messageId: string;
+      timestamp: string;
+      ingestSequence?: number;
+      disposition: 'started' | 'queued' | 'steered';
+      runId?: string;
+    }
+  | { success: false };
+const isClearedResponse = (d: MessageCreateResponse): d is ClearedResponse =>
+  d.success === true && d.cleared === true;
+
 export interface StreamingState {
   turnId?: string;
   sessionId?: string;
@@ -3245,23 +3262,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }));
       }
 
-      type ClearedResponse = { success: true; cleared: true };
-      type MessageCreateResponse =
-        | ClearedResponse
-        | {
-            success: true;
-            messageId: string;
-            timestamp: string;
-            ingestSequence?: number;
-            disposition: 'started' | 'queued' | 'steered';
-            runId?: string;
-          }
-        | { success: false };
-      const isClearedResponse = (
-        d: MessageCreateResponse,
-      ): d is ClearedResponse =>
-        d.success === true && 'cleared' in d && d.cleared === true;
-
       const data = await api.post<MessageCreateResponse>(
         '/api/messages',
         body,
@@ -5653,13 +5653,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // main chat. WebSocket remains the push channel for the stored message
       // and stream events; a successful return now means the server really
       // persisted and classified this message as started/queued/steered.
-      const data = await api.post<{
-        success: true;
-        messageId: string;
-        timestamp: string;
-        disposition: 'started' | 'queued' | 'steered';
-        runId?: string;
-      }>(
+      const data = await api.post<MessageCreateResponse>(
         '/api/messages',
         {
           chatJid: jid,
@@ -5670,6 +5664,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         },
         attachmentTimeoutMs(normalizedAttachments),
       );
+      // /clear and /fresh were handled by the server: no message was stored
+      // and no reply is coming, so the session must not wait for one.
+      if (isClearedResponse(data)) return true;
+      if (!data.success) throw new Error('服务器返回失败');
       if (data.disposition === 'started' && data.runId) {
         get().handleRunStarted(`${jid}#agent:${agentId}`, data.runId);
       }

@@ -2,6 +2,7 @@
 
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { Editor } from '@tiptap/core';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 const env = vi.hoisted(() => ({
@@ -13,15 +14,23 @@ const env = vi.hoisted(() => ({
   /** Pending image encodes, resolved by the test. */
   encodes: [] as Array<() => void>,
   deferEncode: false,
+  /** Responses of the mocked API client, by path. */
+  api: {} as Record<string, unknown>,
 }));
 
 vi.mock('../../stores/chat', async () => {
   const { create } = await import('zustand');
   const useChatStore = create<{
+    groups: Record<string, { agent_profile_id?: string }>;
+    messages: Record<string, unknown[]>;
+    agentMessages: Record<string, unknown[]>;
     drafts: Record<string, string>;
     saveDraft: (jid: string, text: string) => void;
     clearDraft: (jid: string) => void;
   }>((set) => ({
+    groups: {},
+    messages: {},
+    agentMessages: {},
     drafts: {},
     saveDraft: (jid, text) =>
       set((s) => {
@@ -38,6 +47,22 @@ vi.mock('../../stores/chat', async () => {
       }),
   }));
   return { useChatStore };
+});
+
+vi.mock('../../api/client', () => {
+  const respond = async (path: string) => {
+    const key = Object.keys(env.api).find((prefix) => path.startsWith(prefix));
+    if (!key) throw { status: 404, message: `unexpected ${path}` };
+    return env.api[key];
+  };
+  return {
+    api: {
+      get: (path: string) => respond(path),
+      post: (path: string) => respond(path),
+    },
+    apiFetch: (path: string) => respond(path),
+    computeUploadTimeoutMs: () => 1000,
+  };
 });
 
 vi.mock('../../hooks/useDisplayMode', () => ({
@@ -79,17 +104,36 @@ vi.mock('../../lib/follow-up-preferences', () => ({
     mode === 'queue' ? 'steer' : 'queue',
 }));
 
+import { useAuthStore } from '../../stores/auth';
 import { useChatStore, type QueuedFollowUp } from '../../stores/chat';
+import { useFileStore } from '../../stores/files';
+import { serializeEditorContent } from './composer/cindy/composerContentSerialization';
+import { plainTextToComposerDocument } from './composer/cindy/composerListDocument';
+import { clearPaletteSourceCache } from './composer/paletteSources';
 import { MessageInput } from './MessageInput';
 
 (
   globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
+// Node's own (file-less) localStorage shadows the DOM one in this environment.
+const storage = new Map<string, string>();
+vi.stubGlobal('localStorage', {
+  get length() {
+    return storage.size;
+  },
+  key: (index: number) => [...storage.keys()][index] ?? null,
+  getItem: (key: string) => storage.get(key) ?? null,
+  setItem: (key: string, value: string) => void storage.set(key, value),
+  removeItem: (key: string) => void storage.delete(key),
+  clear: () => storage.clear(),
+} satisfies Storage);
+
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 let blobCount = 0;
 const revoked: string[] = [];
+const uploadFiles = vi.fn(async () => true);
 
 beforeEach(() => {
   env.touch = false;
@@ -98,8 +142,19 @@ beforeEach(() => {
   env.keyboardHeight = 0;
   env.deferEncode = false;
   env.encodes = [];
+  env.api = {};
   revoked.length = 0;
-  useChatStore.setState({ drafts: {} });
+  storage.clear();
+  clearPaletteSourceCache();
+  useChatStore.setState({
+    groups: {},
+    messages: {},
+    agentMessages: {},
+    drafts: {},
+  });
+  useAuthStore.setState({ user: null });
+  uploadFiles.mockClear();
+  useFileStore.setState({ currentPath: {}, uploadFiles });
   URL.createObjectURL = () => `blob:preview-${++blobCount}`;
   URL.revokeObjectURL = (url: string) => {
     revoked.push(url);
@@ -116,23 +171,35 @@ afterEach(async () => {
   container = null;
 });
 
-const textarea = () =>
-  container!.querySelector('textarea[placeholder]') as HTMLTextAreaElement;
+// --- Driver: the composer is a Tiptap editor (contenteditable). ---
+
+const editorEl = () =>
+  container!.querySelector('[data-composer-editor]') as HTMLElement;
+const editor = () => (editorEl() as unknown as { editor: Editor }).editor;
+/** The composer content as it would be sent. */
+const text = () => serializeEditorContent(editor()).text;
 const thumbnails = () =>
   Array.from(container!.querySelectorAll('button[aria-label^="预览图片"]'));
+const paletteRows = () =>
+  Array.from(container!.querySelectorAll('[role="option"]')).map(
+    (row) => row.textContent ?? '',
+  );
 
 async function render(ui: React.ReactNode) {
   await act(async () => root?.render(ui));
 }
 
+/** Replace the composer content, as typing it would. */
 async function type(value: string) {
   await act(async () => {
-    const setter = Object.getOwnPropertyDescriptor(
-      HTMLTextAreaElement.prototype,
-      'value',
-    )!.set!;
-    setter.call(textarea(), value);
-    textarea().dispatchEvent(new Event('input', { bubbles: true }));
+    editor().commands.setContent(plainTextToComposerDocument(value));
+  });
+}
+
+/** Insert text at the caret (keeps what is already there). */
+async function typeAtCaret(value: string) {
+  await act(async () => {
+    editor().commands.insertContent(value);
   });
 }
 
@@ -147,9 +214,34 @@ async function keyDown(key: string, init: KeyboardEventInit = {}) {
     Object.defineProperty(event, 'keyCode', { value: init.keyCode });
   }
   await act(async () => {
-    textarea().dispatchEvent(event);
+    editorEl().dispatchEvent(event);
   });
   return event;
+}
+
+/** Paste through ProseMirror's clipboard path. */
+async function paste(data: { text?: string; html?: string; files?: File[] }) {
+  const event = new Event('paste', { bubbles: true, cancelable: true });
+  Object.defineProperty(event, 'clipboardData', {
+    value: {
+      getData: (type: string) =>
+        type === 'text/plain'
+          ? (data.text ?? '')
+          : type === 'text/html'
+            ? (data.html ?? '')
+            : '',
+      items: (data.files ?? []).map((file) => ({
+        kind: 'file',
+        type: file.type,
+        getAsFile: () => file,
+      })),
+      files: data.files ?? [],
+      types: ['text/plain'],
+    },
+  });
+  await act(async () => {
+    editorEl().dispatchEvent(event);
+  });
 }
 
 async function pickImage(name: string) {
@@ -164,6 +256,22 @@ async function pickImage(name: string) {
     input.dispatchEvent(new Event('change', { bubbles: true }));
   });
 }
+
+async function pickFiles(files: File[]) {
+  const input = container!.querySelector(
+    'input[type="file"]:not([accept]):not([webkitdirectory])',
+  ) as HTMLInputElement;
+  await act(async () => {
+    Object.defineProperty(input, 'files', {
+      configurable: true,
+      value: files,
+    });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+}
+
+const wait = (ms: number) =>
+  act(() => new Promise((resolve) => setTimeout(resolve, ms)));
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -186,16 +294,16 @@ describe('conversation isolation', () => {
     expect(thumbnails()).toHaveLength(1);
 
     await render(view('web:g1#agent:a1'));
-    expect(textarea().value).toBe('');
+    expect(text()).toBe('');
     expect(thumbnails()).toHaveLength(0);
     expect(revoked).toContain('blob:preview-' + blobCount);
     expect(useChatStore.getState().drafts).toEqual({ 'web:g1': '主会话草稿' });
 
     await type('会话 A 草稿');
     await render(view('web:g1'));
-    expect(textarea().value).toBe('主会话草稿');
+    expect(text()).toBe('主会话草稿');
     await render(view('web:g1#agent:a1'));
-    expect(textarea().value).toBe('会话 A 草稿');
+    expect(text()).toBe('会话 A 草稿');
   });
 
   test('a remount keyed by conversation restores that conversation only', async () => {
@@ -211,9 +319,9 @@ describe('conversation isolation', () => {
     await type('只属于 A');
     // Unmount flushes the debounced save.
     await render(view('web:g1#agent:a2'));
-    expect(textarea().value).toBe('');
+    expect(text()).toBe('');
     await render(view('web:g1#agent:a1'));
-    expect(textarea().value).toBe('只属于 A');
+    expect(text()).toBe('只属于 A');
   });
 
   test('a send in flight is not offered again by a composer remounted for it', async () => {
@@ -229,16 +337,16 @@ describe('conversation isolation', () => {
     );
     await render(view('web:g1'));
     await type('hello main');
-    await act(() => new Promise((resolve) => setTimeout(resolve, 350)));
+    await wait(350);
     expect(useChatStore.getState().drafts).toEqual({ 'web:g1': 'hello main' });
 
     await keyDown('Enter');
     await render(view('web:g1#agent:a1'));
     await render(view('web:g1'));
-    expect(textarea().value).toBe('');
+    expect(text()).toBe('');
 
     await act(async () => pending.resolve(true));
-    expect(textarea().value).toBe('');
+    expect(text()).toBe('');
     expect(useChatStore.getState().drafts).toEqual({});
     await keyDown('Enter');
     expect(onSend).toHaveBeenCalledTimes(1);
@@ -261,9 +369,9 @@ describe('conversation isolation', () => {
     // Unmount flushes the pending draft save, minus the in-flight text.
     await render(view('web:g1#agent:a1'));
     await render(view('web:g1'));
-    expect(textarea().value).toBe('more');
+    expect(text()).toBe('more');
     await act(async () => pending.resolve(true));
-    expect(textarea().value).toBe('more');
+    expect(text()).toBe('more');
   });
 
   test('a send that fails after a remount puts its text back', async () => {
@@ -281,9 +389,9 @@ describe('conversation isolation', () => {
     await keyDown('Enter');
     await render(view('web:g1#agent:a1'));
     await render(view('web:g1'));
-    expect(textarea().value).toBe('');
+    expect(text()).toBe('');
     await act(async () => pending.resolve(false));
-    expect(textarea().value).toBe('will fail');
+    expect(text()).toBe('will fail');
   });
 
   test('an image that finishes encoding after a switch is dropped', async () => {
@@ -302,6 +410,52 @@ describe('conversation isolation', () => {
   });
 });
 
+describe('drafts across reloads', () => {
+  const persisted = () =>
+    [...storage.keys()].filter((key) =>
+      key.startsWith('happyclaw:composer-draft:'),
+    );
+
+  test('a draft survives a reload and leaves storage once sent', async () => {
+    useAuthStore.setState({ user: { id: 'u1' } as never });
+    const onSend = vi.fn(() => true);
+    const view = (key: string) => (
+      <MessageInput
+        key={key}
+        groupJid="web:g1"
+        draftKey={key}
+        onSend={onSend}
+      />
+    );
+    await render(view('web:g1'));
+    await type('刷新后还在');
+    await wait(350);
+    expect(persisted()).toHaveLength(1);
+
+    // A reload: the in-memory store starts empty.
+    await render(view('web:g1#agent:a1'));
+    useChatStore.setState({ drafts: {} });
+    await render(view('web:g1'));
+    expect(text()).toBe('刷新后还在');
+
+    await keyDown('Enter');
+    expect(onSend).toHaveBeenCalledWith('刷新后还在', undefined, undefined);
+    expect(persisted()).toHaveLength(0);
+  });
+
+  test('drafts of another user are not restored', async () => {
+    useAuthStore.setState({ user: { id: 'u1' } as never });
+    await render(<MessageInput key="a" groupJid="web:g1" onSend={vi.fn()} />);
+    await type('u1 的草稿');
+    await wait(350);
+    await render(<MessageInput key="b" groupJid="web:g2" onSend={vi.fn()} />);
+    useChatStore.setState({ drafts: {} });
+    useAuthStore.setState({ user: { id: 'u2' } as never });
+    await render(<MessageInput key="c" groupJid="web:g1" onSend={vi.fn()} />);
+    expect(text()).toBe('');
+  });
+});
+
 describe('sending', () => {
   test('text typed and images added while a send is in flight survive', async () => {
     const pending = deferred<boolean>();
@@ -315,7 +469,7 @@ describe('sending', () => {
     await pickImage('later.png');
 
     await act(async () => pending.resolve(true));
-    expect(textarea().value).toBe('second');
+    expect(text()).toBe('second');
     expect(thumbnails()).toHaveLength(1);
     expect(useChatStore.getState().drafts).toEqual({ 'web:g1': 'second' });
   });
@@ -344,10 +498,26 @@ describe('sending', () => {
     await render(<MessageInput groupJid="web:g1" onSend={onSend} />);
 
     await type('你好');
-    const ime = await keyDown('Enter', { keyCode: 229 });
-    expect(ime.defaultPrevented).toBe(false);
+    // The committing Enter of an IME neither sends nor breaks the line.
+    await keyDown('Enter', { keyCode: 229 });
     expect(onSend).not.toHaveBeenCalled();
+    expect(text()).toBe('你好');
 
+    await keyDown('Enter');
+    expect(onSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('an Enter right after an IME commit (Safari) does not send', async () => {
+    const onSend = vi.fn(() => true);
+    await render(<MessageInput groupJid="web:g1" onSend={onSend} />);
+    await type('日本語');
+    await act(async () => {
+      editorEl().dispatchEvent(new Event('compositionend', { bubbles: true }));
+    });
+    await keyDown('Enter');
+    expect(onSend).not.toHaveBeenCalled();
+    expect(text()).toBe('日本語');
+    await wait(120);
     await keyDown('Enter');
     expect(onSend).toHaveBeenCalledTimes(1);
   });
@@ -358,8 +528,11 @@ describe('sending', () => {
     env.phoneWidth = true;
     await render(<MessageInput groupJid="web:g1" onSend={onSend} isRunning />);
     await type('换行');
-    expect((await keyDown('Enter')).defaultPrevented).toBe(false);
+    await keyDown('Enter');
     expect(onSend).not.toHaveBeenCalled();
+    expect(
+      editorEl().querySelectorAll('br:not(.ProseMirror-trailingBreak)'),
+    ).toHaveLength(1);
 
     await keyDown('Enter', { ctrlKey: true });
     expect(onSend).toHaveBeenLastCalledWith('换行', undefined, 'queue');
@@ -381,10 +554,28 @@ describe('sending', () => {
     env.keyboardHeight = 360;
     await render(view());
     await type('软键盘');
-    expect((await keyDown('Enter')).defaultPrevented).toBe(false);
+    await keyDown('Enter');
     expect(onSend).toHaveBeenCalledTimes(1);
     await keyDown('Enter', { metaKey: true });
     expect(onSend).toHaveBeenCalledTimes(2);
+    expect(onSend).toHaveBeenLastCalledWith('软键盘', undefined, undefined);
+  });
+
+  test('Shift+Enter continues a list and Enter sends it as Markdown', async () => {
+    const onSend = vi.fn(() => true);
+    await render(<MessageInput groupJid="web:g1" onSend={onSend} />);
+    await type('- 第一项');
+    await act(async () => {
+      editor().commands.focus('end');
+    });
+    await keyDown('Enter', { shiftKey: true });
+    await typeAtCaret('第二项');
+    await keyDown('Enter');
+    expect(onSend).toHaveBeenCalledWith(
+      '- 第一项\n- 第二项',
+      undefined,
+      undefined,
+    );
   });
 
   test('Esc in an empty composer stops the run', async () => {
@@ -399,6 +590,305 @@ describe('sending', () => {
     );
     await keyDown('Escape');
     expect(onStop).toHaveBeenCalledTimes(1);
+  });
+
+  test('a paste over the server limit is refused before it lands', async () => {
+    const onSend = vi.fn(() => true);
+    await render(<MessageInput groupJid="web:g1" onSend={onSend} />);
+    await paste({ text: 'x'.repeat(64 * 1024 + 1) });
+    expect(text()).toBe('');
+    expect(editorEl().querySelector('[data-pasted-text-chip]')).toBeNull();
+    expect(container!.textContent).toContain('粘贴的内容超过 64K 字符上限');
+  });
+
+  test('a message that grows over the server limit is not sent', async () => {
+    const onSend = vi.fn(() => true);
+    await render(<MessageInput groupJid="web:g1" onSend={onSend} />);
+    await paste({ text: 'x'.repeat(40 * 1024) });
+    await paste({ text: 'y'.repeat(30 * 1024) });
+    await keyDown('Enter');
+    expect(onSend).not.toHaveBeenCalled();
+    expect(container!.textContent).toContain('消息超过 64K 字符上限');
+  });
+});
+
+describe('long pastes', () => {
+  test('a long paste folds into a chip and is sent as the original text', async () => {
+    const onSend = vi.fn(() => true);
+    await render(<MessageInput groupJid="web:g1" onSend={onSend} />);
+    const log = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`).join(
+      '\n',
+    );
+    await typeAtCaret('看看这段日志：');
+    await paste({ text: log });
+    const chip = editorEl().querySelector('[data-pasted-text-chip]');
+    expect(chip?.textContent).toBe('粘贴文本 · 30 行');
+    expect(editorEl().textContent).not.toContain('line 2');
+
+    await keyDown('Enter');
+    expect(onSend).toHaveBeenCalledWith(
+      `看看这段日志：${log}`,
+      undefined,
+      undefined,
+    );
+  });
+
+  test('a short multi-line paste stays text with its line breaks', async () => {
+    const onSend = vi.fn(() => true);
+    await render(<MessageInput groupJid="web:g1" onSend={onSend} />);
+    await paste({ text: 'a\nb', html: '<b>a</b><br>b' });
+    expect(editorEl().querySelector('[data-pasted-text-chip]')).toBeNull();
+    expect(text()).toBe('a\nb');
+  });
+
+  test('a pasted image becomes an attachment and its text is inserted once', async () => {
+    await render(<MessageInput groupJid="web:g1" onSend={vi.fn()} />);
+    await paste({
+      text: '截图说明',
+      files: [new File(['x'], 'shot.png', { type: 'image/png' })],
+    });
+    expect(text()).toBe('截图说明');
+    expect(thumbnails()).toHaveLength(1);
+  });
+});
+
+describe('uploaded files', () => {
+  test('the agent is told the workspace path the upload landed at', async () => {
+    const onSend = vi.fn(() => true);
+    useFileStore.setState({ currentPath: { 'web:g1': 'docs/specs' } });
+    await render(<MessageInput groupJid="web:g1" onSend={onSend} />);
+    await pickFiles([new File(['%PDF'], 'report.pdf')]);
+    expect(uploadFiles).toHaveBeenCalledWith(
+      'web:g1',
+      [expect.objectContaining({ name: 'report.pdf' })],
+      'docs/specs',
+    );
+    await type('请总结');
+    await keyDown('Enter');
+    expect(onSend).toHaveBeenCalledWith(
+      '[我上传了以下文件到工作区，请查看并使用]\n- docs/specs/report.pdf\n\n请总结',
+      undefined,
+      undefined,
+    );
+  });
+});
+
+describe('recalling sent messages', () => {
+  const sent = (content: string, sender = 'u1') => ({
+    id: content,
+    chat_jid: 'web:g1',
+    sender,
+    sender_name: 'U',
+    content,
+    timestamp: '2026-01-01T00:00:00.000Z',
+    is_from_me: false,
+  });
+
+  beforeEach(() => {
+    useAuthStore.setState({ user: { id: 'u1' } as never });
+    useChatStore.setState({
+      messages: {
+        'web:g1': [
+          sent('第一条'),
+          sent('别人发的', 'someone-else'),
+          { ...sent('助手回复'), is_from_me: true },
+          sent('第二条'),
+        ],
+      },
+    });
+  });
+
+  test('↑ in an empty composer walks back through what this user sent', async () => {
+    await render(<MessageInput groupJid="web:g1" onSend={vi.fn()} />);
+    await keyDown('ArrowUp');
+    expect(text()).toBe('第二条');
+    await keyDown('ArrowUp');
+    expect(text()).toBe('第一条');
+    // The oldest entry stays put.
+    await keyDown('ArrowUp');
+    expect(text()).toBe('第一条');
+    await keyDown('ArrowDown');
+    expect(text()).toBe('第二条');
+    await keyDown('ArrowDown');
+    expect(text()).toBe('');
+  });
+
+  test('↑ leaves a draft alone, and editing a recalled message keeps it', async () => {
+    await render(<MessageInput groupJid="web:g1" onSend={vi.fn()} />);
+    await type('草稿');
+    await keyDown('ArrowUp');
+    expect(text()).toBe('草稿');
+
+    await type('');
+    await keyDown('ArrowUp');
+    await act(async () => {
+      editor().commands.focus('end');
+    });
+    await typeAtCaret('，改一下');
+    await keyDown('ArrowDown');
+    expect(text()).toBe('第二条，改一下');
+  });
+
+  test('a session recalls only its own messages', async () => {
+    useChatStore.setState({
+      agentMessages: { a1: [sent('会话里发的')] },
+    });
+    await render(
+      <MessageInput
+        groupJid="web:g1"
+        draftKey="web:g1#agent:a1"
+        onSend={vi.fn()}
+      />,
+    );
+    await keyDown('ArrowUp');
+    expect(text()).toBe('会话里发的');
+    await keyDown('ArrowUp');
+    expect(text()).toBe('会话里发的');
+  });
+});
+
+describe('palettes', () => {
+  beforeEach(() => {
+    useChatStore.setState({
+      groups: { 'web:g1': { agent_profile_id: 'p1' } as never },
+    });
+    env.api = {
+      '/api/skills': {
+        skills: [
+          {
+            id: 'review',
+            name: 'review',
+            description: '审查代码改动',
+            effective: true,
+            enabled: true,
+            userInvocable: true,
+          },
+          {
+            id: 'internal',
+            name: 'internal',
+            description: '只给模型用',
+            effective: true,
+            enabled: true,
+            userInvocable: false,
+          },
+        ],
+      },
+      '/api/agent-profiles/p1/effective-capabilities': {
+        preview: {
+          skills: {
+            entries: [
+              { id: 'review', available: true },
+              { id: 'internal', available: true },
+              { id: 'builtin-pdf', available: true },
+            ],
+          },
+        },
+      },
+      '/api/groups/web%3Ag1/files?path=docs': {
+        files: [{ name: 'guide.md', path: 'docs/guide.md', type: 'file' }],
+      },
+      '/api/groups/web%3Ag1/files': {
+        files: [
+          { name: 'notes.txt', path: 'notes.txt', type: 'file' },
+          { name: 'docs', path: 'docs', type: 'directory' },
+          {
+            name: 'CLAUDE.md',
+            path: 'CLAUDE.md',
+            type: 'file',
+            isSystem: true,
+          },
+        ],
+      },
+    };
+  });
+
+  test('/ lists commands and invocable skills and inserts the name', async () => {
+    const onSend = vi.fn(() => true);
+    await render(
+      <MessageInput
+        groupJid="web:g1"
+        onSend={onSend}
+        onResetSession={vi.fn()}
+      />,
+    );
+    await typeAtCaret('/');
+    await wait(0);
+    expect(paletteRows()).toEqual([
+      expect.stringContaining('/clear'),
+      expect.stringContaining('/fresh'),
+      expect.stringContaining('/builtin-pdf'),
+      expect.stringContaining('/review审查代码改动'),
+    ]);
+    // The editor points at the list and its highlighted row.
+    const listbox = container!.querySelector('[role="listbox"]')!;
+    expect(editorEl().getAttribute('aria-controls')).toBe(listbox.id);
+    expect(editorEl().getAttribute('aria-activedescendant')).toBe(
+      listbox.querySelector('[aria-selected="true"]')!.id,
+    );
+
+    // Prefix matches rank before names that only contain the query.
+    await typeAtCaret('re');
+    expect(paletteRows()).toEqual([
+      expect.stringContaining('/review'),
+      expect.stringContaining('/fresh'),
+    ]);
+    await keyDown('Enter');
+    expect(paletteRows()).toEqual([]);
+    expect(text()).toBe('/review');
+    expect(onSend).not.toHaveBeenCalled();
+    expect(editorEl().querySelector('.slash-cmd-pill')?.textContent).toBe(
+      '/review',
+    );
+  });
+
+  test('/ hides the reset commands where the conversation cannot be reset', async () => {
+    await render(<MessageInput groupJid="web:g1" onSend={vi.fn()} />);
+    await typeAtCaret('/');
+    await wait(0);
+    expect(paletteRows().join()).not.toContain('/clear');
+  });
+
+  test('Esc closes the palette without stopping the run', async () => {
+    const onStop = vi.fn(() => true);
+    await render(
+      <MessageInput
+        groupJid="web:g1"
+        onSend={vi.fn()}
+        isRunning
+        onStop={onStop}
+      />,
+    );
+    await typeAtCaret('/');
+    await wait(0);
+    expect(paletteRows().length).toBeGreaterThan(0);
+    await keyDown('Escape');
+    expect(paletteRows()).toEqual([]);
+    expect(onStop).not.toHaveBeenCalled();
+  });
+
+  test('@ browses the workspace and sends the chip as a quoted path', async () => {
+    const onSend = vi.fn(() => true);
+    await render(<MessageInput groupJid="web:g1" onSend={onSend} />);
+    await typeAtCaret('看 @');
+    await wait(0);
+    expect(paletteRows()).toEqual(['docs/', 'notes.txt']);
+
+    // Tab enters a directory.
+    await keyDown('Tab');
+    await wait(0);
+    expect(text()).toBe('看 @docs/');
+    expect(paletteRows()).toEqual(['guide.mddocs/guide.md']);
+    await keyDown('Enter');
+    expect(editorEl().querySelector('[data-mention-chip]')?.textContent).toBe(
+      'guide.md',
+    );
+    await typeAtCaret('总结');
+    await keyDown('Enter');
+    expect(onSend).toHaveBeenCalledWith(
+      '看 @"docs/guide.md" 总结',
+      undefined,
+      undefined,
+    );
   });
 });
 
@@ -470,5 +960,69 @@ describe('queue on phones', () => {
     expect(
       panel().querySelectorAll('button[aria-label^="删除排队消息"]'),
     ).toHaveLength(3);
+  });
+
+  test('an edit of an item the dispatcher claimed moves into the composer', async () => {
+    const view = (items: QueuedFollowUp[], key = 'a') => (
+      <MessageInput
+        key={key}
+        groupJid="web:g1"
+        onSend={vi.fn()}
+        isRunning
+        queuedFollowUps={items}
+        onFollowUpAction={vi.fn(() => true)}
+      />
+    );
+    await render(view(queue));
+    await type('我的草稿');
+    await act(async () => {
+      (
+        panel().querySelector(
+          'button[aria-label="编辑：排队 2"]',
+        ) as HTMLElement
+      ).click();
+    });
+    const field = panel().querySelector(
+      'textarea[aria-label="编辑排队消息"]',
+    ) as HTMLTextAreaElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )!.set!.call(field, '排队 2（改过）');
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    await render(view(queue.filter((item) => item.id !== 'q2')));
+    expect(text()).toBe('我的草稿\n\n排队 2（改过）');
+    expect(container!.textContent).toContain(
+      '这条消息已开始处理，未保存的修改已移到输入框',
+    );
+
+    // It is the conversation's draft now: it survives a remount.
+    await wait(350);
+    expect(useChatStore.getState().drafts).toEqual({
+      'web:g1': '我的草稿\n\n排队 2（改过）',
+    });
+    await render(view([], 'b'));
+    expect(text()).toBe('我的草稿\n\n排队 2（改过）');
+  });
+
+  test('the queue sits inside the composer card, above the editor', async () => {
+    await render(
+      <MessageInput
+        groupJid="web:g1"
+        onSend={vi.fn()}
+        isRunning
+        queuedFollowUps={queue}
+        onFollowUpAction={vi.fn(() => true)}
+      />,
+    );
+    const card = container!.querySelector('[data-composer-card]')!;
+    expect(card.contains(panel())).toBe(true);
+    expect(
+      panel().compareDocumentPosition(editorEl()) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 });
