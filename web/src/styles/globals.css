@@ -78,6 +78,7 @@
   --color-surface-selected: var(--surface-selected);
   --color-surface-border: var(--surface-border);
   --color-faint-foreground: var(--faint-foreground);
+  --color-qr-quiet-zone: var(--qr-quiet-zone);
   --shadow-canvas: var(--canvas-shadow);
   --shadow-menu: var(--menu-shadow);
   --shadow-floating: var(--floating-shadow);
@@ -147,6 +148,8 @@
 :root {
   /* shadcn/ui semantic tokens */
   --background: #ffffff;
+  /* QR codes keep a white quiet zone in every scheme so phones can scan them. */
+  --qr-quiet-zone: #ffffff;
   --foreground: #0f172a;
   --card: #ffffff;
   --card-foreground: #0f172a;
@@ -224,6 +227,7 @@
    ===================================================== */
 html.theme-neutral {
   --background: #ffffff;
+  --qr-quiet-zone: #ffffff;
   --foreground: #18181b;
   --card: #f4f4f5;
   --card-foreground: #18181b;
@@ -260,6 +264,7 @@ html.theme-neutral {
 
 html.dark.theme-neutral {
   --background: #09090b;
+  --qr-quiet-zone: #ffffff;
   --foreground: #fafafa;
   --card: #18181b;
   --card-foreground: #fafafa;
@@ -300,6 +305,7 @@ html.dark.theme-neutral {
    ===================================================== */
 html.theme-orange {
   --background: #faf9f5;
+  --qr-quiet-zone: #ffffff;
   --foreground: #141413;
   --card: #f0eee6;
   --card-foreground: #141413;
@@ -346,6 +352,7 @@ html.theme-orange {
 
 html.dark.theme-orange {
   --background: oklch(0.145 0 0);
+  --qr-quiet-zone: #ffffff;
   --foreground: oklch(0.985 0 0);
   /* --primary below is a fill color (≈2.4:1 as text); text uses chart-2. */
   --primary-text: oklch(0.705 0.213 47.604);
@@ -428,6 +435,7 @@ html.font-anthropic .font-mono {
    ===================================================== */
 .dark {
   --background: #0f172a;
+  --qr-quiet-zone: #ffffff;
   --foreground: #e2e8f0;
   --card: #1e293b;
   --card-foreground: #e2e8f0;

@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 
 vi.mock('../web/src/api/client', () => ({
@@ -412,6 +413,30 @@ describe('channel account frontend behavior', () => {
       { id: 'legacy-default', name: '默认账号（旧版）' },
     ]);
     expect(channelAccountKey(channels[2])).toBe('legacy-default');
+  });
+
+  test('QR frames use the white quiet-zone token defined by every color scheme', () => {
+    const css = fs.readFileSync('web/src/styles/globals.css', 'utf8');
+    for (const scheme of [
+      ':root',
+      '.dark',
+      'html.theme-neutral',
+      'html.dark.theme-neutral',
+      'html.theme-orange',
+      'html.dark.theme-orange',
+    ]) {
+      const start = css.indexOf(`\n${scheme} {`);
+      const block = css.slice(start, css.indexOf('\n}', start));
+      expect(block, scheme).toContain('--qr-quiet-zone: #ffffff;');
+    }
+    for (const panel of ['FeishuRegistrationPanel', 'QrOnboardingPanel']) {
+      const source = fs.readFileSync(
+        `web/src/components/settings/channel-accounts/${panel}.tsx`,
+        'utf8',
+      );
+      expect(source, panel).toContain('bg-qr-quiet-zone');
+      expect(source, panel).not.toContain('bg-white');
+    }
   });
 
   test('MCP secret edits distinguish retain, replace, and explicit clear', () => {
