@@ -1660,6 +1660,21 @@ function injectPreparedFollowUp(
           : 'main',
       )
     : undefined;
+  // The same Feishu CLI identity a cold start would bind (the turn's Feishu
+  // account, else the workspace's), so a batch never inherits the identity of
+  // whichever Bot happened to start the warm container.
+  const feishuCliRequirement = runtime
+    ? {
+        feishuCliAccountId:
+          (runtime.effectiveGroup.executionMode || 'container') === 'container'
+            ? resolveFeishuCliBoundAccountId({
+                channelContext,
+                workspaceChannelAccountId:
+                  runtime.effectiveGroup.channel_account_id,
+              })
+            : null,
+      }
+    : {};
   // A claimed mixed-mode batch is released intact to the durable cold reader,
   // which selects a compatible prefix without consuming the remainder.
   const result = interactionBatch?.hasDeferredMessages
@@ -1720,8 +1735,13 @@ function injectPreparedFollowUp(
                 runtime.agentId ?? undefined,
               )
             : false,
-        interactionBatch
-          ? { interactionMode: interactionBatch.interactionMode }
+        runtime || interactionBatch
+          ? {
+              ...feishuCliRequirement,
+              ...(interactionBatch
+                ? { interactionMode: interactionBatch.interactionMode }
+                : {}),
+            }
           : undefined,
       );
 
