@@ -1202,6 +1202,7 @@ export function initDatabase(
       avatar_color TEXT,
       avatar_url TEXT,
       model_config_id TEXT,
+      model TEXT,
       runtime_policy TEXT NOT NULL DEFAULT '{}',
       identity_hash TEXT NOT NULL DEFAULT '',
       version INTEGER NOT NULL DEFAULT 1,
@@ -2291,6 +2292,9 @@ export function initDatabase(
       ON agent_profiles(model_config_id)
       WHERE model_config_id IS NOT NULL;
   `);
+  // v82 -> v83: a configuration offers several models and an Agent may pick
+  // one of them. NULL runs the configuration's own default model.
+  ensureColumn('agent_profiles', 'model', 'TEXT');
   // v68 -> v69: make reasoning effort an explicit Agent runtime policy. The
   // inherited default preserves every existing Provider/SDK behavior, so this
   // migration normalizes JSON only and deliberately does not bump Agent
@@ -9660,6 +9664,14 @@ function mapAgentProfileRow(row: Record<string, unknown>): AgentProfile {
       typeof row.model_config_id === 'string' && row.model_config_id
         ? row.model_config_id
         : null,
+    // A model only has a meaning inside the configuration that offers it.
+    model:
+      typeof row.model_config_id === 'string' &&
+      row.model_config_id &&
+      typeof row.model === 'string' &&
+      row.model
+        ? row.model
+        : null,
     runtime_policy: runtimePolicy,
     identity_hash: String(
       row.identity_hash ??
@@ -9993,6 +10005,8 @@ export function createAgentProfile(input: {
   avatarEmoji?: string | null;
   avatarColor?: string | null;
   modelConfigId?: string | null;
+  /** A model of `modelConfigId`'s list; ignored without a configuration. */
+  model?: string | null;
   runtimePolicy?: RuntimePolicyInput | AgentProfileRuntimePolicy | null;
 }): AgentProfile {
   const now = new Date().toISOString();
@@ -10017,9 +10031,9 @@ export function createAgentProfile(input: {
     prepareCached(`INSERT INTO agent_profiles (
         id, owner_user_id, name,
         identity_prompt, soul_prompt, agents_prompt, tools_prompt, prompt_mode,
-        include_claude_preset, avatar_emoji, avatar_color, model_config_id, runtime_policy, identity_hash, version,
+        include_claude_preset, avatar_emoji, avatar_color, model_config_id, model, runtime_policy, identity_hash, version,
         is_default, status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 'active', ?, ?)`).run(
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 'active', ?, ?)`).run(
       id,
       input.ownerUserId,
       input.name,
@@ -10032,6 +10046,7 @@ export function createAgentProfile(input: {
       input.avatarEmoji ?? null,
       input.avatarColor ?? null,
       input.modelConfigId ?? null,
+      (input.modelConfigId && input.model) || null,
       runtimePolicyJson,
       identityHash,
       now,
@@ -10065,6 +10080,8 @@ export function updateAgentProfile(
     avatarColor?: string | null;
     avatarUrl?: string | null;
     modelConfigId?: string | null;
+    /** Null runs the configuration's default; another configuration clears it. */
+    model?: string | null;
     runtimePolicy?: RuntimePolicyInput | AgentProfileRuntimePolicy | null;
     changeSource?: AgentProfilePromptVersion['change_source'];
     restoredFromVersion?: number | null;
@@ -10107,6 +10124,16 @@ export function updateAgentProfile(
       ? existing.model_config_id
       : updates.modelConfigId;
   const modelConfigChanged = nextModelConfigId !== existing.model_config_id;
+  // The model is one of the configuration's: a new configuration (or none)
+  // starts from its default unless this very update names a model.
+  const nextModel = !nextModelConfigId
+    ? null
+    : updates.model !== undefined
+      ? updates.model || null
+      : modelConfigChanged
+        ? null
+        : existing.model;
+  const modelChanged = nextModel !== existing.model;
   const nextHash = computeAgentProfileIdentityHash(
     nextPrompts,
     nextRuntimePolicy,
@@ -10120,7 +10147,7 @@ export function updateAgentProfile(
     nextPrompts.tools_prompt !== existing.tools_prompt ||
     nextPrompts.prompt_mode !== existing.prompt_mode;
   const nextVersion =
-    identityChanged || modelConfigChanged
+    identityChanged || modelConfigChanged || modelChanged
       ? existing.version + 1
       : existing.version;
   const now = new Date().toISOString();
@@ -10128,7 +10155,7 @@ export function updateAgentProfile(
     prepareCached(`UPDATE agent_profiles
        SET name = ?, identity_prompt = ?, soul_prompt = ?, agents_prompt = ?, tools_prompt = ?,
            prompt_mode = ?, include_claude_preset = ?, avatar_emoji = ?, avatar_color = ?, avatar_url = ?, model_config_id = ?,
-           runtime_policy = ?, identity_hash = ?, version = ?, updated_at = ?
+           model = ?, runtime_policy = ?, identity_hash = ?, version = ?, updated_at = ?
        WHERE id = ? AND owner_user_id = ? AND status = 'active'`).run(
       nextName,
       nextPrompts.identity_prompt,
@@ -10141,6 +10168,7 @@ export function updateAgentProfile(
       nextAvatarColor,
       nextAvatarUrl,
       nextModelConfigId,
+      nextModel,
       serializeAgentProfileRuntimePolicy(nextRuntimePolicy),
       nextHash,
       nextVersion,
@@ -10167,6 +10195,27 @@ export function updateAgentProfile(
     }
   })();
   return getAgentProfile(profileId);
+}
+
+/**
+ * Active Agents that run one of `models` of a configuration, so a model the
+ * configuration is about to drop can be refused while an Agent names it.
+ */
+export function listAgentProfilesUsingModels(
+  modelConfigId: string,
+  models: readonly string[],
+): Array<{ id: string; name: string }> {
+  if (models.length === 0) return [];
+  const rows = prepareCached(`SELECT id, name, model FROM agent_profiles
+       WHERE model_config_id = ? AND model IS NOT NULL AND status = 'active'
+       ORDER BY created_at, id`).all(modelConfigId) as Array<{
+    id: string;
+    name: string;
+    model: string;
+  }>;
+  return rows
+    .filter((row) => models.includes(row.model))
+    .map(({ id, name }) => ({ id, name }));
 }
 
 export function countAgentProfilesByModelConfigId(
