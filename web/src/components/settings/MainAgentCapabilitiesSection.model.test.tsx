@@ -247,7 +247,7 @@ describe('主 HappyClaw model within its configuration', () => {
   test('an unchanged model is not sent with another change', async () => {
     setStore(mainProfile({ model_config_id: 'official', model: 'sonnet' }));
     await render();
-    await choose(combobox('主 HappyClaw 推理努力档位'), 'High');
+    await choose(combobox('主 HappyClaw 推理努力档位'), '高');
     await save();
     expect(mocks.patch.mock.calls[0][1]).not.toHaveProperty('model');
   });
