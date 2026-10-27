@@ -47,6 +47,11 @@ import {
 } from './channel-admission.js';
 import { extractProviderTarget } from './channel-address.js';
 import {
+  isGroupSenderAdmitted,
+  type ChannelCommandMention,
+  type GroupOwnerView,
+} from './im-group-audience.js';
+import {
   ExactAsyncIndicatorRegistry,
   processingIndicatorKey,
 } from './processing-indicator.js';
@@ -64,6 +69,25 @@ const IMAGE_MAX_BASE64_SIZE = 5 * 1024 * 1024;
 
 export function isUnsupportedDiscordGroupDm(type: ChannelType): boolean {
   return type === ChannelType.GroupDM;
+}
+
+/**
+ * Members a Discord command names, for `/allow` and `/disallow`. A user
+ * counts only when the content carries their `<@id>` token: a reply ping also
+ * lands in `mentions.users` but does not name anyone. Bots never count.
+ */
+export function discordCommandMentions(
+  content: string,
+  mentionedUsers: Iterable<{ id: string; bot?: boolean }>,
+): ChannelCommandMention[] {
+  const named = new Set(
+    [...content.matchAll(/<@!?(\d+)>/g)].map((match) => match[1]),
+  );
+  const mentions: ChannelCommandMention[] = [];
+  for (const user of mentionedUsers) {
+    if (!user.bot && named.has(user.id)) mentions.push({ imId: user.id });
+  }
+  return mentions;
 }
 
 // ─── Types ──────────────────────────────────────────────────────
@@ -86,7 +110,11 @@ export interface DiscordConnectOpts {
     chatJid: string,
     command: string,
     senderImId?: string,
+    mentions?: ChannelCommandMention[],
   ) => Promise<string | null>;
+  /** Guild-channel response audience, keyed by the author's user id. */
+  isSenderAllowedInGroup?: (chatJid: string, senderImId?: string) => boolean;
+  resolveRegisteredGroup?: (jid: string) => GroupOwnerView | undefined;
   resolveGroupFolder?: (jid: string) => string | undefined;
   resolveEffectiveChatJid?: (
     chatJid: string,
@@ -534,6 +562,21 @@ export function createDiscordConnection(
 
         // Guild channel: check group filtering (must check actual @mention first)
         if (!isDM) {
+          if (
+            !isGroupSenderAdmitted({
+              chatJid: jid,
+              senderImId,
+              commandText: msg.content.replace(/<@!?\d+>/g, '').trim(),
+              isSenderAllowedInGroup: opts.isSenderAllowedInGroup,
+              resolveRegisteredGroup: opts.resolveRegisteredGroup,
+            })
+          ) {
+            logger.debug(
+              { jid, senderImId },
+              'Discord group message dropped: sender rejected by audience policy',
+            );
+            return;
+          }
           const isBotMentioned = connectedClient.user
             ? msg.mentions.has(connectedClient.user)
             : false;
@@ -583,7 +626,17 @@ export function createDiscordConnection(
             slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
           ).trim();
           try {
-            const reply = await opts.onCommand(jid, cmdBody, senderImId);
+            const reply = await opts.onCommand(
+              jid,
+              cmdBody,
+              senderImId,
+              isDM
+                ? []
+                : discordCommandMentions(
+                    msg.content,
+                    msg.mentions.users.values(),
+                  ),
+            );
             if (reply) {
               const channel = await resolveChannel(jid);
               if (channel) {

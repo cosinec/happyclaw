@@ -48,6 +48,7 @@ import {
   WECOM_MARKDOWN_MAX_BYTES,
   WeComStreamingController,
 } from './wecom-streaming.js';
+import { isOwnerBootstrapCommand } from './im-group-audience.js';
 
 const AUTH_TIMEOUT_MS = 15_000;
 const MESSAGE_DEDUP_TTL_MS = 30 * 60_000;
@@ -1406,13 +1407,9 @@ export function createWeComConnection(
         : undefined;
       // /owner_mention is the sole audience bootstrap exception, and only
       // while the group is genuinely unowned and not credential-quarantined.
-      const ownerBootstrap = Boolean(
+      const ownerBootstrap =
         conversation.isGroup &&
-        commandName === 'owner_mention' &&
-        registeredGroup &&
-        !registeredGroup.owner_im_id &&
-        registeredGroup.owner_claim_source !== 'transfer_reset',
-      );
+        isOwnerBootstrapCommand(admissionText, registeredGroup);
 
       if (conversation.isGroup) {
         if (

@@ -42,6 +42,11 @@ import {
   type PassiveReplyClaim,
 } from './qq-passive-reply.js';
 import { resolveAdmittedChannelRoute } from './channel-admission.js';
+import {
+  isGroupSenderAdmitted,
+  type ChannelCommandMention,
+  type GroupOwnerView,
+} from './im-group-audience.js';
 import { PhysicalDeliveryTracker } from './im-delivery-progress.js';
 import {
   isRuntimeControlLike,
@@ -426,7 +431,11 @@ export interface QQConnectOpts {
     chatJid: string,
     command: string,
     senderImId?: string,
+    mentions?: ChannelCommandMention[],
   ) => Promise<string | null>;
+  /** Group response audience, keyed by the `group:` member namespace. */
+  isSenderAllowedInGroup?: (chatJid: string, senderImId?: string) => boolean;
+  resolveRegisteredGroup?: (jid: string) => GroupOwnerView | undefined;
   resolveGroupFolder?: (jid: string) => string | undefined;
   resolveEffectiveChatJid?: (
     chatJid: string,
@@ -581,6 +590,24 @@ export function describeFollowUpOutcome(
       delivery_updated_at: now,
     },
   };
+}
+
+/**
+ * Group members a QQ group command names, for `/allow` and `/disallow`, in
+ * the `group:` namespace of group senders. Only structured `mentions` entries
+ * that carry a member openid count; the bot itself is never named.
+ */
+export function qqGroupCommandMentions(data: {
+  mentions?: unknown;
+}): ChannelCommandMention[] {
+  if (!Array.isArray(data.mentions)) return [];
+  const ids = new Set<string>();
+  for (const mention of data.mentions as Array<Record<string, unknown>>) {
+    if (!mention || mention.is_you === true || mention.bot === true) continue;
+    const openId = mention.member_openid;
+    if (typeof openId === 'string' && openId) ids.add(`group:${openId}`);
+  }
+  return [...ids].map((imId) => ({ imId }));
 }
 
 export function validateQQGatewayUrl(value: string): string {
@@ -2421,6 +2448,22 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
           return;
         }
 
+        if (
+          !isGroupSenderAdmitted({
+            chatJid: jid,
+            senderImId: memberOpenId ? `group:${memberOpenId}` : undefined,
+            commandText: content,
+            isSenderAllowedInGroup: opts.isSenderAllowedInGroup,
+            resolveRegisteredGroup: opts.resolveRegisteredGroup,
+          })
+        ) {
+          logger.debug(
+            { jid },
+            'QQ group message dropped: sender rejected by audience policy',
+          );
+          return;
+        }
+
         const resolvedRoute = resolveAdmittedChannelRoute(
           jid,
           opts.resolveEffectiveChatJid,
@@ -2489,6 +2532,7 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
               jid,
               cmdBody,
               memberOpenId ? `group:${memberOpenId}` : undefined,
+              qqGroupCommandMentions(data),
             );
             if (reply) {
               await sendQQMessage(

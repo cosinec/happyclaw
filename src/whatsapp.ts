@@ -43,6 +43,11 @@ import {
   resolveAdmittedChannelRoute,
 } from './channel-admission.js';
 import { canonicalizeWhatsAppProviderConversationJid } from './whatsapp-jid.js';
+import {
+  isGroupSenderAdmitted,
+  type ChannelCommandMention,
+  type GroupOwnerView,
+} from './im-group-audience.js';
 import { PhysicalDeliveryTracker } from './im-delivery-progress.js';
 import {
   ChannelInboundLifecycle,
@@ -110,6 +115,7 @@ export interface WhatsAppConnectOpts {
     chatJid: string,
     command: string,
     senderImId?: string,
+    mentions?: ChannelCommandMention[],
   ) => Promise<string | null>;
   resolveGroupFolder?: (jid: string) => string | undefined;
   resolveEffectiveChatJid?: (
@@ -125,8 +131,9 @@ export interface WhatsAppConnectOpts {
   shouldProcessGroupMessage?: (chatJid: string, senderImId?: string) => boolean;
   /** owner_mentioned mode: bot @mentioned but sender not group owner → drop */
   isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
-  /** Sender allowlist: false → drop before any further processing */
+  /** Group response audience: false → drop before any further processing */
   isSenderAllowedInGroup?: (chatJid: string, senderImId?: string) => boolean;
+  resolveRegisteredGroup?: (jid: string) => GroupOwnerView | undefined;
   /** WhatsApp 专属：连接状态变化回调（QR 出现、connected、断线等） */
   onConnectionUpdate?: (state: WhatsAppConnectionState) => void;
   normalizeIncomingJid?: (jid: string) => string | null;
@@ -848,20 +855,28 @@ export function createWhatsAppConnection(
         return;
       }
 
-      // ── Group gates: sender allowlist → mention required → owner check ──
+      // ── Group gates: response audience → mention required → owner check ──
       if (isGroup) {
+        const isBotMentioned = isMentioningBot(inner, activeSock.user);
+        const addressedText = text
+          ? stripLeadingWhatsAppBotMention(text, inner, activeSock.user)
+          : text;
         if (
-          opts.isSenderAllowedInGroup &&
-          !opts.isSenderAllowedInGroup(chatJid, senderImId)
+          !isGroupSenderAdmitted({
+            chatJid,
+            senderImId,
+            commandText: addressedText ?? '',
+            isSenderAllowedInGroup: opts.isSenderAllowedInGroup,
+            resolveRegisteredGroup: opts.resolveRegisteredGroup,
+          })
         ) {
           logger.debug(
             { chatJid, senderImId },
-            'WhatsApp dropped: sender not allowlisted',
+            'WhatsApp dropped: sender rejected by audience policy',
           );
           return;
         }
 
-        const isBotMentioned = isMentioningBot(inner, activeSock.user);
         if (
           opts.shouldProcessGroupMessage &&
           !isBotMentioned &&
@@ -884,9 +899,7 @@ export function createWhatsAppConnection(
           );
           return;
         }
-        if (isBotMentioned && text) {
-          text = stripLeadingWhatsAppBotMention(text, inner, activeSock.user);
-        }
+        text = addressedText;
       }
 
       // Control commands may repair/change a binding. Consume them before
@@ -898,7 +911,12 @@ export function createWhatsAppConnection(
           slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
         ).trim();
         try {
-          const reply = await opts.onCommand(chatJid, cmdBody, senderImId);
+          const reply = await opts.onCommand(
+            chatJid,
+            cmdBody,
+            senderImId,
+            isGroup ? whatsAppCommandMentions(inner, activeSock.user) : [],
+          );
           if (reply !== null && reply !== undefined) {
             if (sock) {
               try {
@@ -1613,16 +1631,7 @@ export function isWhatsAppSelfParticipant(
  * (e.g. `15551234567:42@s.whatsapp.net`). Compare every known self identity
  * after normalizing device suffixes and hosted aliases.
  */
-export function isMentioningBot(
-  content: proto.IMessage,
-  self: WhatsAppSelfRef,
-): boolean {
-  // Fail closed: 当 self 暂时不可用（reconnect 间隙、auth 状态未就绪），
-  // 从前的 fail-open 让 require_mention 模式短暂被绕过——攻击者可在 socket
-  // 启动毫秒级窗口中把所有群消息都被处理。一致性优先：没法确认时按"未被
-  // mention"处理，主消息处理流会丢弃。和 feishu 实现的语义对齐。
-  const identities = new Set(collectWhatsAppSelfJids(self));
-  if (identities.size === 0) return false;
+function mentionedJids(content: proto.IMessage): string[] {
   const ctx =
     content.extendedTextMessage?.contextInfo ||
     content.imageMessage?.contextInfo ||
@@ -1633,9 +1642,41 @@ export function isMentioningBot(
     content.stickerMessage?.contextInfo ||
     content.eventMessage?.contextInfo ||
     content.groupInviteMessage?.contextInfo;
-  const mentioned = ctx?.mentionedJid;
-  if (!mentioned || mentioned.length === 0) return false;
-  return mentioned.some((m) => identities.has(canonicalizeWhatsAppUserJid(m)));
+  return ctx?.mentionedJid ?? [];
+}
+
+export function isMentioningBot(
+  content: proto.IMessage,
+  self: WhatsAppSelfRef,
+): boolean {
+  // Fail closed: 当 self 暂时不可用（reconnect 间隙、auth 状态未就绪），
+  // 从前的 fail-open 让 require_mention 模式短暂被绕过——攻击者可在 socket
+  // 启动毫秒级窗口中把所有群消息都被处理。一致性优先：没法确认时按"未被
+  // mention"处理，主消息处理流会丢弃。和 feishu 实现的语义对齐。
+  const identities = new Set(collectWhatsAppSelfJids(self));
+  if (identities.size === 0) return false;
+  return mentionedJids(content).some((m) =>
+    identities.has(canonicalizeWhatsAppUserJid(m)),
+  );
+}
+
+/**
+ * Members a WhatsApp group command names, for `/allow` and `/disallow`,
+ * normalized exactly like group senders (`jidNormalizedUser`). The bot's own
+ * identities are never named.
+ */
+export function whatsAppCommandMentions(
+  content: proto.IMessage,
+  self: WhatsAppSelfRef,
+): ChannelCommandMention[] {
+  const selfIds = new Set(collectWhatsAppSelfJids(self));
+  const ids = new Set<string>();
+  for (const jid of mentionedJids(content)) {
+    if (selfIds.has(canonicalizeWhatsAppUserJid(jid))) continue;
+    const id = jidNormalizedUser(jid);
+    if (id) ids.add(id);
+  }
+  return [...ids].map((imId) => ({ imId }));
 }
 
 /** Remove a leading WhatsApp display token only when trusted message metadata

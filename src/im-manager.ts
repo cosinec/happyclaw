@@ -28,6 +28,7 @@ import type {
 } from './discord.js';
 import type { FeishuConversationPlan } from './feishu-conversation-policy.js';
 import type { FeishuBrand } from './feishu-domain.js';
+import type { ChannelCommandMention } from './im-group-audience.js';
 import type { WeChatConnectionState } from './wechat.js';
 import type { WeComConnectionConfig, WeComConnectionState } from './wecom.js';
 import type { WhatsAppConnectionState } from './whatsapp.js';
@@ -164,11 +165,7 @@ export interface ConnectFeishuOptions {
     chatJid: string,
     command: string,
     senderImId?: string,
-    mentions?: Array<{
-      key?: string;
-      name?: string;
-      id?: { open_id?: string };
-    }>,
+    mentions?: ChannelCommandMention[],
     messageMeta?: ChannelMessageMeta,
   ) => Promise<string | null>;
   resolveGroupFolder?: (chatJid: string) => string | undefined;
@@ -1476,7 +1473,7 @@ export class IMConnectionManager {
     options?: {
       accountId?: string;
       scopeIncomingJids?: boolean;
-      onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+      onCommand?: IMChannelConnectOpts['onCommand'];
       ignoreMessagesBefore?: number;
       resolveGroupFolder?: (jid: string) => string | undefined;
       resolveEffectiveChatJid?: (chatJid: string) => {
@@ -1492,6 +1489,8 @@ export class IMConnectionManager {
         chatJid: string,
         contextType: 'thread',
       ) => boolean | void | Promise<boolean | void>;
+      isSenderAllowedInGroup?: IMChannelConnectOpts['isSenderAllowedInGroup'];
+      resolveRegisteredGroup?: IMChannelConnectOpts['resolveRegisteredGroup'];
     },
   ): Promise<boolean> {
     if (!config.botToken) {
@@ -1524,6 +1523,8 @@ export class IMConnectionManager {
         onBotAddedToGroup: options?.onBotAddedToGroup,
         onBotRemovedFromGroup: options?.onBotRemovedFromGroup,
         onNativeContextDetected: options?.onNativeContextDetected,
+        isSenderAllowedInGroup: options?.isSenderAllowedInGroup,
+        resolveRegisteredGroup: options?.resolveRegisteredGroup,
       },
       options?.accountId,
       options?.scopeIncomingJids,
@@ -1547,7 +1548,7 @@ export class IMConnectionManager {
     options?: {
       accountId?: string;
       scopeIncomingJids?: boolean;
-      onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+      onCommand?: IMChannelConnectOpts['onCommand'];
       resolveGroupFolder?: (jid: string) => string | undefined;
       resolveEffectiveChatJid?: (chatJid: string) => {
         effectiveJid: string;
@@ -1559,6 +1560,8 @@ export class IMConnectionManager {
       onFollowUpMessage?: IMChannelConnectOpts['onFollowUpMessage'];
       onFollowUpsChanged?: IMChannelConnectOpts['onFollowUpsChanged'];
       onSessionBreak?: IMChannelConnectOpts['onSessionBreak'];
+      isSenderAllowedInGroup?: IMChannelConnectOpts['isSenderAllowedInGroup'];
+      resolveRegisteredGroup?: IMChannelConnectOpts['resolveRegisteredGroup'];
     },
   ): Promise<boolean> {
     if (!config.appId || !config.appSecret) {
@@ -1590,6 +1593,8 @@ export class IMConnectionManager {
         onFollowUpMessage: options?.onFollowUpMessage,
         onFollowUpsChanged: options?.onFollowUpsChanged,
         onSessionBreak: options?.onSessionBreak,
+        isSenderAllowedInGroup: options?.isSenderAllowedInGroup,
+        resolveRegisteredGroup: options?.resolveRegisteredGroup,
       },
       options?.accountId,
       options?.scopeIncomingJids,
@@ -1628,7 +1633,7 @@ export class IMConnectionManager {
       accountId?: string;
       scopeIncomingJids?: boolean;
       ignoreMessagesBefore?: number;
-      onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+      onCommand?: IMChannelConnectOpts['onCommand'];
       resolveGroupFolder?: (jid: string) => string | undefined;
       resolveEffectiveChatJid?: (chatJid: string) => {
         effectiveJid: string;
@@ -1797,7 +1802,7 @@ export class IMConnectionManager {
         chatName: string,
         code: string,
       ) => Promise<boolean>;
-      onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+      onCommand?: IMChannelConnectOpts['onCommand'];
       resolveGroupFolder?: (jid: string) => string | undefined;
       resolveEffectiveChatJid?: (chatJid: string) => {
         effectiveJid: string;
@@ -1813,10 +1818,8 @@ export class IMConnectionManager {
         senderImId?: string,
       ) => boolean;
       isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
-      isSenderAllowedInGroup?: (
-        chatJid: string,
-        senderImId?: string,
-      ) => boolean;
+      isSenderAllowedInGroup?: IMChannelConnectOpts['isSenderAllowedInGroup'];
+      resolveRegisteredGroup?: IMChannelConnectOpts['resolveRegisteredGroup'];
       normalizeIncomingJid?: (jid: string) => string | null;
       onConnectionUpdate?: (
         userId: string,
@@ -1866,6 +1869,7 @@ export class IMConnectionManager {
         shouldProcessGroupMessage: options?.shouldProcessGroupMessage,
         isGroupOwnerMessage: options?.isGroupOwnerMessage,
         isSenderAllowedInGroup: options?.isSenderAllowedInGroup,
+        resolveRegisteredGroup: options?.resolveRegisteredGroup,
         normalizeIncomingJid: options?.normalizeIncomingJid,
       },
       options?.accountId,
@@ -1973,7 +1977,7 @@ export class IMConnectionManager {
         chatName: string,
         code: string,
       ) => Promise<boolean>;
-      onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+      onCommand?: IMChannelConnectOpts['onCommand'];
       resolveGroupFolder?: (jid: string) => string | undefined;
       resolveEffectiveChatJid?: (chatJid: string) => {
         effectiveJid: string;
@@ -1989,9 +1993,8 @@ export class IMConnectionManager {
         senderImId?: string,
       ) => boolean;
       isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
-      resolveRegisteredGroup?: (
-        jid: string,
-      ) => { activation_mode?: string } | undefined;
+      isSenderAllowedInGroup?: IMChannelConnectOpts['isSenderAllowedInGroup'];
+      resolveRegisteredGroup?: IMChannelConnectOpts['resolveRegisteredGroup'];
     },
   ): Promise<boolean> {
     if (!config.clientId || !config.clientSecret) {
@@ -2032,6 +2035,7 @@ export class IMConnectionManager {
         onBotRemovedFromGroup: options?.onBotRemovedFromGroup,
         shouldProcessGroupMessage: options?.shouldProcessGroupMessage,
         isGroupOwnerMessage: options?.isGroupOwnerMessage,
+        isSenderAllowedInGroup: options?.isSenderAllowedInGroup,
         resolveRegisteredGroup: options?.resolveRegisteredGroup,
       },
       options?.accountId,
@@ -2061,7 +2065,7 @@ export class IMConnectionManager {
         chatName: string,
         code: string,
       ) => Promise<boolean>;
-      onCommand?: (chatJid: string, command: string) => Promise<string | null>;
+      onCommand?: IMChannelConnectOpts['onCommand'];
       resolveGroupFolder?: (jid: string) => string | undefined;
       resolveEffectiveChatJid?: (chatJid: string) => {
         effectiveJid: string;
@@ -2077,6 +2081,8 @@ export class IMConnectionManager {
         senderImId?: string,
       ) => boolean;
       isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
+      isSenderAllowedInGroup?: IMChannelConnectOpts['isSenderAllowedInGroup'];
+      resolveRegisteredGroup?: IMChannelConnectOpts['resolveRegisteredGroup'];
     },
   ): Promise<boolean> {
     if (!config.botToken) return false;
@@ -2103,6 +2109,8 @@ export class IMConnectionManager {
         onBotRemovedFromGroup: options?.onBotRemovedFromGroup,
         shouldProcessGroupMessage: options?.shouldProcessGroupMessage,
         isGroupOwnerMessage: options?.isGroupOwnerMessage,
+        isSenderAllowedInGroup: options?.isSenderAllowedInGroup,
+        resolveRegisteredGroup: options?.resolveRegisteredGroup,
       },
       options?.accountId,
       options?.scopeIncomingJids,

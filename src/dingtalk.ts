@@ -48,6 +48,11 @@ import {
 } from './channel-admission.js';
 import { extractProviderTarget } from './channel-address.js';
 import {
+  isGroupSenderAdmitted,
+  type ChannelCommandMention,
+  type GroupOwnerView,
+} from './im-group-audience.js';
+import {
   ExactAsyncIndicatorRegistry,
   processingIndicatorKey,
 } from './processing-indicator.js';
@@ -413,7 +418,10 @@ export interface DingTalkConnectOpts {
     chatJid: string,
     command: string,
     senderImId?: string,
+    mentions?: ChannelCommandMention[],
   ) => Promise<string | null>;
+  /** Group response audience, keyed by the robot callback's `senderId`. */
+  isSenderAllowedInGroup?: (chatJid: string, senderImId?: string) => boolean;
   resolveGroupFolder?: (jid: string) => string | undefined;
   resolveEffectiveChatJid?: (
     chatJid: string,
@@ -424,10 +432,10 @@ export interface DingTalkConnectOpts {
   onBotRemovedFromGroup?: (chatJid: string) => void;
   shouldProcessGroupMessage?: (chatJid: string, senderImId?: string) => boolean;
   isGroupOwnerMessage?: (chatJid: string, senderImId?: string) => boolean;
-  /** Resolve registered group for a jid (should return { activation_mode?: string }) */
+  /** Resolve the registered group for a jid (activation mode and owner). */
   resolveRegisteredGroup?: (
     jid: string,
-  ) => { activation_mode?: string } | undefined;
+  ) => ({ activation_mode?: string } & GroupOwnerView) | undefined;
   normalizeIncomingJid?: (jid: string) => string | null;
 }
 
@@ -1043,6 +1051,8 @@ interface DingTalkRobotMessage {
   robotCode?: string;
   /** True when this callback was delivered because the bot was @mentioned. */
   isInAtList?: boolean | string;
+  /** Members @mentioned in the message (the bot included). */
+  atUsers?: Array<{ dingtalkId?: string; staffId?: string }>;
   msgtype: string;
   originalMsgId?: string;
   text?: {
@@ -1068,6 +1078,24 @@ export function isDingTalkBotMentioned(
 ): boolean {
   const flag = (data as { isInAtList?: unknown }).isInAtList;
   return flag === true || flag === 'true';
+}
+
+/**
+ * Members a DingTalk group command names, for `/allow` and `/disallow`.
+ * `atUsers[].dingtalkId` is the same encrypted id the callback reports as
+ * `senderId`, so it is the namespace owner and allowlist entries use.
+ */
+export function dingTalkCommandMentions(data: {
+  atUsers?: unknown;
+  chatbotUserId?: string;
+}): ChannelCommandMention[] {
+  if (!Array.isArray(data.atUsers)) return [];
+  const ids = new Set<string>();
+  for (const user of data.atUsers as Array<Record<string, unknown>>) {
+    const id = user?.dingtalkId;
+    if (typeof id === 'string' && id && id !== data.chatbotUserId) ids.add(id);
+  }
+  return [...ids].map((imId) => ({ imId }));
 }
 
 function extractDingTalkAdmissionText(data: RobotMessage): string {
@@ -2252,6 +2280,21 @@ export function createDingTalkConnection(
         // or attachment download. A rejected group message has zero business
         // side effects.
         if (isGroup) {
+          if (
+            !isGroupSenderAdmitted({
+              chatJid: jid,
+              senderImId: data.senderId,
+              commandText: extractDingTalkAdmissionText(data),
+              isSenderAllowedInGroup: opts.isSenderAllowedInGroup,
+              resolveRegisteredGroup: opts.resolveRegisteredGroup,
+            })
+          ) {
+            logger.debug(
+              { jid },
+              'DingTalk group message dropped: sender rejected by audience policy',
+            );
+            return;
+          }
           const mode = opts.resolveRegisteredGroup?.(jid)?.activation_mode;
           // Like WeCom, DingTalk only pushes group messages that @ the bot, so
           // that @ must never reopen a paused group.
@@ -2823,7 +2866,12 @@ export function createDingTalkConnection(
             slashMatch[1] + (slashMatch[2] ? ' ' + slashMatch[2] : '')
           ).trim();
           try {
-            const reply = await opts.onCommand(jid, cmdBody, data.senderId);
+            const reply = await opts.onCommand(
+              jid,
+              cmdBody,
+              data.senderId,
+              isGroup ? dingTalkCommandMentions(data) : [],
+            );
             assertInboundGeneration(generation, signal);
             if (reply) {
               const plainText = markdownToPlainText(reply);

@@ -611,13 +611,14 @@ import {
   type ActiveFeishuContext,
   type FeishuConversationPlan,
 } from './feishu-conversation-policy.js';
-import {
-  effectiveAudienceMode,
-  isSenderAllowedByAudience,
-  isUnknownFeishuSenderAllowed,
-} from './im-audience-policy.js';
+import { isUnknownFeishuSenderAllowed } from './im-audience-policy.js';
 import { applyFeishuTransportIssue } from './channel-account-transport.js';
 import { syncLegacyFeishuDefaultAccount } from './legacy-default-account-sync.js';
+import {
+  isSenderAdmittedByGroupPolicy,
+  mentionImId,
+  type ChannelCommandMention,
+} from './im-group-audience.js';
 import { normalizeFeishuBrand } from './feishu-domain.js';
 import { logger } from './logger.js';
 import { resolveTaskOwner } from './task-utils.js';
@@ -4656,7 +4657,7 @@ async function handleCommand(
   chatJid: string,
   command: string,
   senderImId?: string,
-  mentions?: Array<{ key?: string; name?: string; id?: { open_id?: string } }>,
+  mentions?: ChannelCommandMention[],
   /** Routed native metadata (topic/thread) of the command message, if known. */
   messageMeta?: ChannelMessageMeta,
 ): Promise<string | null> {
@@ -5283,7 +5284,7 @@ function handleReleaseOwnerCommand(chatJid: string): string {
 function handleAllowCommand(
   chatJid: string,
   senderImId?: string,
-  mentions?: Array<{ key?: string; name?: string; id?: { open_id?: string } }>,
+  mentions?: ChannelCommandMention[],
 ): string {
   if (!senderImId) return '无法识别发送者身份';
   let group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
@@ -5310,14 +5311,16 @@ function handleAllowCommand(
   }
 
   if (!group.owner_im_id) {
-    return '尚未识别到 owner，请先向机器人发一条私信以完成身份识别';
+    return getChannelType(chatJid) === 'feishu'
+      ? '尚未识别到 owner，请先向机器人发一条私信以完成身份识别'
+      : '尚未认领 owner，请 owner 先在群内发送 /owner_mention 认领';
   }
   if (group.owner_im_id !== senderImId) {
     return '只有 bot owner 才能修改白名单';
   }
 
   const toAdd = (mentions ?? [])
-    .map((m) => m.id?.open_id)
+    .map(mentionImId)
     .filter((id): id is string => !!id && id !== senderImId);
 
   if (toAdd.length === 0) {
@@ -5344,7 +5347,7 @@ function handleAllowCommand(
 function handleDisallowCommand(
   chatJid: string,
   senderImId?: string,
-  mentions?: Array<{ key?: string; name?: string; id?: { open_id?: string } }>,
+  mentions?: ChannelCommandMention[],
 ): string {
   if (!senderImId) return '无法识别发送者身份';
   const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
@@ -5358,7 +5361,7 @@ function handleDisallowCommand(
   }
 
   const toRemove = (mentions ?? [])
-    .map((m) => m.id?.open_id)
+    .map(mentionImId)
     .filter((id): id is string => !!id);
 
   if (toRemove.length === 0) {
@@ -5395,7 +5398,11 @@ function handleAllowlistCommand(chatJid: string): string {
     return '当前群组未启用白名单模式（所有人均可触发）';
   }
   if (allowlist.length === 0) {
-    return `白名单模式已启用，当前无人可触发。\nOwner: ${group.owner_im_id ?? '未识别（请先向机器人发一条私信）'}`;
+    const ownerHint =
+      getChannelType(chatJid) === 'feishu'
+        ? '未识别（请先向机器人发一条私信）'
+        : '未认领（请在群内发送 /owner_mention）';
+    return `白名单模式已启用，当前无人可触发。\nOwner: ${group.owner_im_id ?? ownerHint}`;
   }
 
   const ownerMark = (id: string) =>
@@ -21765,21 +21772,11 @@ function isSenderAllowedInGroup(
 
   // The explicit response audience is evaluated for p2p, ordinary groups and
   // every topic message. It is deliberately independent from mention policy.
-  if (effectiveAudienceMode(group) === 'owner_only') {
-    return isSenderAllowedByAudience(group, senderImId);
-  }
-
-  // v58 Feishu uses the explicit two-state audience policy as the source of
-  // truth. Legacy allowlists are retained only for migration/audit and for
-  // other connectors that still expose multi-member allowlists.
-  if (getChannelType(conversationJid) === 'feishu') return true;
-
-  // Keep the legacy multi-member allowlist as an additional restriction for
-  // existing installations. New UI only exposes everyone/owner-only.
-  const allowlist = group.sender_allowlist;
-  if (allowlist === undefined || allowlist === null) return true;
-  if (!senderImId) return false;
-  return allowlist.includes(senderImId);
+  return isSenderAdmittedByGroupPolicy(
+    group,
+    senderImId,
+    getChannelType(conversationJid),
+  );
 }
 
 function handleIncomingFollowUp(input: {
@@ -22843,7 +22840,12 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
           workspace.jid,
           account.is_legacy_default,
         ),
-        { ...common, onBotAddedToGroup: onNewChat },
+        {
+          ...common,
+          onBotAddedToGroup: onNewChat,
+          isSenderAllowedInGroup,
+          resolveRegisteredGroup: getRegisteredGroup,
+        },
       );
     } else if (account.provider === 'qq') {
       connected = await imManager.connectUserQQ(
@@ -22868,6 +22870,8 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
           ...common,
           onFollowUpMessage: handleIncomingFollowUp,
           onSessionBreak: handleSessionBreak,
+          isSenderAllowedInGroup,
+          resolveRegisteredGroup: getRegisteredGroup,
         },
       );
     } else if (account.provider === 'wechat') {
@@ -23049,6 +23053,7 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
           onBotAddedToGroup: onNewChat,
           shouldProcessGroupMessage,
           isGroupOwnerMessage,
+          isSenderAllowedInGroup,
           resolveRegisteredGroup: getRegisteredGroup,
         },
       );
@@ -23076,6 +23081,8 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
           onBotAddedToGroup: onNewChat,
           shouldProcessGroupMessage,
           isGroupOwnerMessage,
+          isSenderAllowedInGroup,
+          resolveRegisteredGroup: getRegisteredGroup,
         },
       );
     } else if (account.provider === 'whatsapp') {
@@ -23112,6 +23119,8 @@ async function reloadChannelAccountById(accountId: string): Promise<boolean> {
           onBotAddedToGroup: onNewChat,
           shouldProcessGroupMessage,
           isGroupOwnerMessage,
+          isSenderAllowedInGroup,
+          resolveRegisteredGroup: getRegisteredGroup,
           onConnectionUpdate: (uid, connectedAccountId, state) => {
             if (state.status === 'connected') {
               updateChannelAccountAuthStatus(account.id, 'authorized');

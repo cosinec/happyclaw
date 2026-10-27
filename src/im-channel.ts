@@ -10,6 +10,10 @@ import type {
   FeishuConnectionConfig,
 } from './feishu.js';
 import type { FeishuBrand } from './feishu-domain.js';
+import type {
+  ChannelCommandMention,
+  GroupOwnerView,
+} from './im-group-audience.js';
 import type { FeishuConversationPlan } from './feishu-conversation-policy.js';
 import type {
   TelegramConnection,
@@ -155,12 +159,8 @@ export interface IMChannelConnectOpts {
     chatJid: string,
     command: string,
     senderImId?: string,
-    /** Structured provider mentions (Feishu), e.g. for /allow @user. */
-    mentions?: Array<{
-      key?: string;
-      name?: string;
-      id?: { open_id?: string; user_id?: string; union_id?: string };
-    }>,
+    /** Structured provider mentions, e.g. for /allow @user. */
+    mentions?: ChannelCommandMention[],
     /** Routed native metadata (topic/thread) of the command message. */
     messageMeta?: ChannelMessageMeta,
   ) => Promise<string | null>;
@@ -233,7 +233,7 @@ export interface IMChannelConnectOpts {
   /** Resolve registered group for a jid */
   resolveRegisteredGroup?: (
     jid: string,
-  ) => { activation_mode?: string } | undefined;
+  ) => ({ activation_mode?: string } & GroupOwnerView) | undefined;
   /** 飞书流式卡片按钮中断回调 */
   onCardInterrupt?: (
     chatJid: string,
@@ -670,6 +670,8 @@ export function createTelegramChannel(
           onMessagePersisted: opts.onMessagePersisted,
           onBotAddedToGroup: opts.onBotAddedToGroup,
           onBotRemovedFromGroup: opts.onBotRemovedFromGroup,
+          isSenderAllowedInGroup: opts.isSenderAllowedInGroup,
+          resolveRegisteredGroup: opts.resolveRegisteredGroup,
           normalizeIncomingJid: opts.normalizeIncomingJid,
         });
         return inner.isConnected();
@@ -831,6 +833,8 @@ export function createQQChannel(config: QQConnectionConfig): IMChannel {
           onFollowUpMessage: opts.onFollowUpMessage,
           onFollowUpsChanged: opts.onFollowUpsChanged,
           onSessionBreak: opts.onSessionBreak,
+          isSenderAllowedInGroup: opts.isSenderAllowedInGroup,
+          resolveRegisteredGroup: opts.resolveRegisteredGroup,
           normalizeIncomingJid: opts.normalizeIncomingJid,
         });
         return inner.isConnected();
@@ -1314,6 +1318,7 @@ export function createDingTalkChannel(
           onBotRemovedFromGroup: opts.onBotRemovedFromGroup,
           shouldProcessGroupMessage: opts.shouldProcessGroupMessage,
           isGroupOwnerMessage: opts.isGroupOwnerMessage,
+          isSenderAllowedInGroup: opts.isSenderAllowedInGroup,
           resolveRegisteredGroup: opts.resolveRegisteredGroup,
           normalizeIncomingJid: opts.normalizeIncomingJid,
         });
@@ -1501,6 +1506,8 @@ export function createDiscordChannel(
           onBotRemovedFromGroup: opts.onBotRemovedFromGroup,
           shouldProcessGroupMessage: opts.shouldProcessGroupMessage,
           isGroupOwnerMessage: opts.isGroupOwnerMessage,
+          isSenderAllowedInGroup: opts.isSenderAllowedInGroup,
+          resolveRegisteredGroup: opts.resolveRegisteredGroup,
           normalizeIncomingJid: opts.normalizeIncomingJid,
         });
         return ok;
@@ -1673,6 +1680,7 @@ export function createWhatsAppChannel(
           shouldProcessGroupMessage: opts.shouldProcessGroupMessage,
           isGroupOwnerMessage: opts.isGroupOwnerMessage,
           isSenderAllowedInGroup: opts.isSenderAllowedInGroup,
+          resolveRegisteredGroup: opts.resolveRegisteredGroup,
           onConnectionUpdate,
           normalizeIncomingJid: opts.normalizeIncomingJid,
         });

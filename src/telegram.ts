@@ -27,6 +27,11 @@ import {
 } from './channel-address.js';
 import { resolveAdmittedChannelRoute } from './channel-admission.js';
 import {
+  isGroupSenderAdmitted,
+  type ChannelCommandMention,
+  type GroupOwnerView,
+} from './im-group-audience.js';
+import {
   PartialChannelDeliveryError,
   PhysicalDeliveryTracker,
 } from './im-delivery-progress.js';
@@ -63,7 +68,11 @@ export interface TelegramConnectOpts {
     chatJid: string,
     command: string,
     senderImId?: string,
+    mentions?: ChannelCommandMention[],
   ) => Promise<string | null>;
+  /** Group response audience (owner-only / allowlist), keyed by bare user id. */
+  isSenderAllowedInGroup?: (chatJid: string, senderImId?: string) => boolean;
+  resolveRegisteredGroup?: (jid: string) => GroupOwnerView | undefined;
   /** 热重连时设置：丢弃 date 早于此时间戳（epoch ms）的消息，避免处理渠道关闭期间的堆积消息 */
   ignoreMessagesBefore?: number;
   /** 根据 jid 解析群组 folder，用于下载文件/图片到工作区 */
@@ -324,6 +333,42 @@ export function persistTelegramNativeMediaMessage(input: {
   );
   input.notifyNewImMessage();
   return id;
+}
+
+interface TelegramEntityLike {
+  type: string;
+  offset: number;
+  length: number;
+  user?: { id: number; is_bot?: boolean };
+}
+
+interface TelegramMessageLike {
+  entities?: TelegramEntityLike[];
+  caption_entities?: TelegramEntityLike[];
+  reply_to_message?: { from?: { id: number; is_bot?: boolean } };
+}
+
+/**
+ * Members a Telegram command names, for `/allow` and `/disallow`. A plain
+ * `@username` entity carries no user id and the Bot API cannot resolve one,
+ * so only `text_mention` entities (members without a username) and the
+ * author of the replied-to message are structural. Bots are never named.
+ */
+export function telegramCommandMentions(
+  message: TelegramMessageLike,
+): ChannelCommandMention[] {
+  const ids = new Set<string>();
+  for (const entity of [
+    ...(message.entities ?? []),
+    ...(message.caption_entities ?? []),
+  ]) {
+    if (entity.type === 'text_mention' && entity.user && !entity.user.is_bot) {
+      ids.add(String(entity.user.id));
+    }
+  }
+  const repliedTo = message.reply_to_message?.from;
+  if (repliedTo && !repliedTo.is_bot) ids.add(String(repliedTo.id));
+  return [...ids].map((imId) => ({ imId }));
 }
 
 /**
@@ -890,6 +935,34 @@ export function createTelegramConnection(
   }
 
   /**
+   * Response audience of an authorized group chat. Runs before commands and
+   * before any registration, routing or download side effect.
+   */
+  function admitTelegramGroupSender(
+    opts: TelegramConnectOpts,
+    jid: string,
+    chat: TelegramChatDescriptor,
+    senderId: number | undefined,
+    text: string | undefined,
+  ): boolean {
+    if (chat.type !== 'group' && chat.type !== 'supergroup') return true;
+    const admitted = isGroupSenderAdmitted({
+      chatJid: jid,
+      senderImId: senderId ? String(senderId) : undefined,
+      commandText: text ?? '',
+      isSenderAllowedInGroup: opts.isSenderAllowedInGroup,
+      resolveRegisteredGroup: opts.resolveRegisteredGroup,
+    });
+    if (!admitted) {
+      logger.debug(
+        { jid },
+        'Telegram message dropped: sender rejected by audience policy',
+      );
+    }
+    return admitted;
+  }
+
+  /**
    * One admission path for every caption-capable Telegram media update.
    * Pairing is completed before any download/registration side effect, and the
    * asynchronous pair attempt itself lives inside this try/catch so failures
@@ -902,9 +975,18 @@ export function createTelegramConnection(
     chat: TelegramChatDescriptor;
     caption?: string;
     kind: TelegramNativeInboundKind | 'photo' | 'document';
+    senderId?: number;
     reply: (text: string) => Promise<unknown>;
   }): Promise<boolean> {
-    if (input.opts.isChatAuthorized(input.jid)) return true;
+    if (input.opts.isChatAuthorized(input.jid)) {
+      return admitTelegramGroupSender(
+        input.opts,
+        input.jid,
+        input.chat,
+        input.senderId,
+        input.caption,
+      );
+    }
 
     const pairCode = matchTelegramPairCode(input.caption, botUsername);
     if (pairCode && input.opts.onPairAttempt) {
@@ -1150,6 +1232,17 @@ export function createTelegramConnection(
               );
               return;
             }
+            if (
+              !admitTelegramGroupSender(
+                opts,
+                jid,
+                ctx.chat as TelegramChatDescriptor,
+                ctx.from?.id,
+                text,
+              )
+            ) {
+              return;
+            }
 
             // ── 斜杠指令：拦截已知 /xxx 命令，不进入消息流 ──
             // Telegram 群聊中会追加 @BotUsername，需要去掉
@@ -1177,7 +1270,12 @@ export function createTelegramConnection(
                 const senderImId = ctx.from?.id
                   ? String(ctx.from.id)
                   : undefined;
-                const reply = await opts.onCommand(jid, cmdBody, senderImId);
+                const reply = await opts.onCommand(
+                  jid,
+                  cmdBody,
+                  senderImId,
+                  telegramCommandMentions(ctx.message),
+                );
                 if (reply) {
                   await ctx.reply(reply);
                   return; // 已知命令，拦截
@@ -1350,6 +1448,7 @@ export function createTelegramConnection(
                 chat: ctx.chat as TelegramChatDescriptor,
                 caption: ctx.message.caption,
                 kind: 'photo',
+                senderId: ctx.from?.id,
                 reply: (text) => ctx.reply(text),
               }))
             ) {
@@ -1552,6 +1651,7 @@ export function createTelegramConnection(
                 chat: ctx.chat as TelegramChatDescriptor,
                 caption: ctx.message.caption,
                 kind: 'document',
+                senderId: ctx.from?.id,
                 reply: (text) => ctx.reply(text),
               }))
             ) {
@@ -1760,6 +1860,7 @@ export function createTelegramConnection(
                 chat: tgChat as TelegramChatDescriptor,
                 caption: tgMessage.caption,
                 kind: inbound.kind,
+                senderId: ctx.from?.id,
                 reply: (text) => ctx.reply(text),
               }))
             ) {
