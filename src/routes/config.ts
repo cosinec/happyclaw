@@ -86,6 +86,7 @@ import {
   toPublicClaudeProviderConfig,
   appendClaudeConfigAudit,
   getProviders,
+  getProviderById,
   getEnabledProviders,
   getDefaultModelConfigId,
   getUsableDefaultProvider,
@@ -152,6 +153,7 @@ import {
   buildClaudeCodeExchangeBody,
   ClaudeCredentialInputError,
   CLAUDE_CODE_USER_AGENT,
+  CLAUDE_OAUTH_BETA,
   CLAUDE_OAUTH_PROFILE_URL,
   CLAUDE_OAUTH_TOKEN_URL,
   CLAUDE_OAUTH_USAGE_URL,
@@ -1182,7 +1184,7 @@ async function fetchOAuthUsage(
         {
           headers: {
             Authorization: `Bearer ${oauthCredentials.accessToken}`,
-            'anthropic-beta': 'oauth-2025-04-20',
+            'anthropic-beta': CLAUDE_OAUTH_BETA,
             'Content-Type': 'application/json',
           },
         },
@@ -2189,7 +2191,7 @@ function resolveCheckedConnection(
   | { connection: CheckedConnection; stored: UnifiedProvider | undefined }
   | { error: string; status: 400 | 404 } {
   const stored = draft.providerId
-    ? getProviders().find((provider) => provider.id === draft.providerId)
+    ? (getProviderById(draft.providerId) ?? undefined)
     : undefined;
   if (draft.providerId && !stored) {
     return { error: '未找到指定供应商', status: 404 };
@@ -2362,9 +2364,7 @@ async function checkSubscriptionAccount(
 ): Promise<ConnectionTestResult> {
   let token = connection.token;
   if (connection.oauth && connection.providerId) {
-    const current = getProviders().find(
-      (provider) => provider.id === connection.providerId,
-    );
+    const current = getProviderById(connection.providerId);
     if (current?.claudeOAuthLastRefreshError) {
       return unreachedTest(
         'AUTH_INVALID',
@@ -2380,8 +2380,8 @@ async function checkSubscriptionAccount(
         return unreachedTest('AUTH_INVALID', 'Claude 登录已失效，请重新登录');
       }
       token =
-        getProviders().find((provider) => provider.id === connection.providerId)
-          ?.claudeOAuthCredentials?.accessToken ?? token;
+        getProviderById(connection.providerId)?.claudeOAuthCredentials
+          ?.accessToken ?? token;
     }
   } else if (connection.oauth && connection.oauth.expiresAt <= Date.now()) {
     return unreachedTest(
@@ -2407,8 +2407,8 @@ async function checkChatGptAccount(
   }
   const failure = codexProviderCatalogFailure(provider.id);
   const reauth =
-    getProviders().find((item) => item.id === provider.id)
-      ?.codexOAuthLastRefreshError?.kind === 'reauth_required';
+    getProviderById(provider.id)?.codexOAuthLastRefreshError?.kind ===
+    'reauth_required';
   return connectionTestResult(
     {
       ok: false,
@@ -2629,7 +2629,7 @@ configRoutes.get(
   systemConfigMiddleware,
   (c) => {
     const { id } = c.req.param();
-    const provider = getProviders().find((item) => item.id === id);
+    const provider = getProviderById(id);
     if (!provider) return c.json({ error: '未找到指定供应商' }, 404);
     const status = getWebDeps()?.queue.getStatus();
     const live = status?.groups.filter((group) => group.active) ?? [];

@@ -6,7 +6,7 @@
 
 import { createRequire } from 'node:module';
 
-import { CLAUDE_OAUTH_USAGE_URL } from './claude-oauth.js';
+import { CLAUDE_OAUTH_BETA, CLAUDE_OAUTH_USAGE_URL } from './claude-oauth.js';
 import {
   classifyProviderError,
   parseModelList,
@@ -158,79 +158,112 @@ export function hintForStatus(
   return undefined;
 }
 
-export async function probeProviderModel(
-  input: ProviderConnectivityInput,
-  options: { timeoutMs?: number; fetchImpl?: typeof fetch } = {},
-): Promise<ProviderConnectivityProbe> {
-  const fetchImpl = options.fetchImpl ?? fetch;
-  // Claude Code strips the [1m] suffix before calling the API.
-  const model =
-    input.model.replace(/\[1m\]$/i, '').trim() || PASS_THROUGH_PROBE_MODEL;
-  const token = input.token.replace(/^Bearer\s+/i, '');
-  const headers: Record<string, string> = {
-    'content-type': 'application/json',
-    'anthropic-version': '2023-06-01',
-    'user-agent': claudeCodeUserAgent(),
-  };
-  for (const [name, value] of parseCustomHeaders(input.customHeaders)) {
-    headers[name.toLowerCase()] = value;
-  }
-  if (input.authMode === 'x-api-key') headers['x-api-key'] = token;
-  else headers.authorization = `Bearer ${token}`;
+// ─── Upstream requests ─────────────────────────────────────────
 
-  const controller = new AbortController();
-  const timer = setTimeout(
-    () => controller.abort(),
-    options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-  );
+interface UpstreamAnswer {
+  ok: boolean;
+  status: number | null;
+  latencyMs: number;
+  bodyText: string;
+  networkErrorCode?: string;
+  errorMessage?: string;
+}
+
+async function requestUpstream(
+  url: string,
+  init: {
+    method: 'GET' | 'POST';
+    headers: Record<string, string>;
+    body?: string;
+  },
+  options: FetchOptions & { maxBytes?: number },
+): Promise<UpstreamAnswer> {
+  const signal = AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   const startedAt = Date.now();
   try {
-    const res = await fetchImpl(buildMessagesUrl(input.baseUrl), {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model,
-        max_tokens: 16,
-        messages: [{ role: 'user', content: 'ping' }],
-      }),
-      signal: controller.signal,
-    });
+    const res = await (options.fetchImpl ?? fetch)(url, { ...init, signal });
     const latencyMs = Date.now() - startedAt;
-    if (res.ok) {
-      await res.body?.cancel().catch(() => {});
-      return { model, ok: true, status: res.status, latencyMs };
-    }
-    const bodyText = await res.text().catch(() => '');
-    const message = redact(upstreamMessage(bodyText), [token]);
-    return {
-      model,
-      ok: false,
-      status: res.status,
-      latencyMs,
-      message: message || `HTTP ${res.status}`,
-      hint: hintForStatus(res.status, message, input.authMode),
-      code: classifyProviderError({ status: res.status, bodyText }).code,
-    };
+    const bodyText = await readCapped(res, options.maxBytes ?? 64 * 1024);
+    return { ok: res.ok, status: res.status, latencyMs, bodyText };
   } catch (err) {
     const raw = err instanceof Error ? err.message : String(err);
-    const message = redact(
-      controller.signal.aborted ? `timeout: ${raw}` : raw,
-      [token],
-    );
     return {
-      model,
       ok: false,
       status: null,
       latencyMs: Date.now() - startedAt,
-      message,
-      hint: hintForStatus(null, message, input.authMode),
-      code: classifyProviderError({
-        networkErrorCode: networkErrorCodeOf(err, controller.signal.aborted),
-      }).code,
+      bodyText: '',
+      networkErrorCode: networkErrorCodeOf(err, signal.aborted),
+      errorMessage: signal.aborted ? `timeout: ${raw}` : raw,
     };
-  } finally {
-    clearTimeout(timer);
   }
+}
+
+async function readCapped(res: Response, maxBytes: number): Promise<string> {
+  if (!res.body) return '';
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (total < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      total += value.byteLength;
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  return Buffer.concat(chunks).subarray(0, maxBytes).toString('utf-8');
+}
+
+function answerProbe(
+  answer: UpstreamAnswer,
+  secrets: string[],
+  model = '',
+): ProviderConnectivityProbe {
+  if (answer.ok) {
+    return {
+      model,
+      ok: true,
+      status: answer.status,
+      latencyMs: answer.latencyMs,
+    };
+  }
+  const message = redact(
+    answer.errorMessage ?? upstreamMessage(answer.bodyText),
+    secrets.map((secret) => secret.replace(/^Bearer\s+/i, '')),
+  );
+  return {
+    model,
+    ok: false,
+    status: answer.status,
+    latencyMs: answer.latencyMs,
+    message: message || `HTTP ${answer.status}`,
+    code: classifyProviderError({
+      status: answer.status ?? undefined,
+      bodyText: answer.bodyText,
+      networkErrorCode: answer.networkErrorCode,
+    }).code,
+  };
+}
+
+/** The headers Claude Code sends: version, user agent, custom, credential. */
+function upstreamHeaders(
+  credential: string,
+  authMode: ProviderAuthMode,
+  customHeaders?: string,
+): Record<string, string> {
+  const headers: Record<string, string> = {
+    'anthropic-version': '2023-06-01',
+    'user-agent': claudeCodeUserAgent(),
+  };
+  for (const [name, value] of parseCustomHeaders(customHeaders)) {
+    headers[name.toLowerCase()] = value;
+  }
+  const token = credential.replace(/^Bearer\s+/i, '');
+  if (authMode === 'x-api-key') headers['x-api-key'] = token;
+  else headers.authorization = `Bearer ${token}`;
+  return headers;
 }
 
 /** The code undici or the abort left on a failed fetch. */
@@ -242,13 +275,45 @@ function networkErrorCodeOf(err: unknown, aborted: boolean): string {
   return err instanceof Error ? err.name : 'Error';
 }
 
+export async function probeProviderModel(
+  input: ProviderConnectivityInput,
+  options: FetchOptions = {},
+): Promise<ProviderConnectivityProbe> {
+  // Claude Code strips the [1m] suffix before calling the API.
+  const model =
+    input.model.replace(/\[1m\]$/i, '').trim() || PASS_THROUGH_PROBE_MODEL;
+  const answer = await requestUpstream(
+    buildMessagesUrl(input.baseUrl),
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...upstreamHeaders(input.token, input.authMode, input.customHeaders),
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 16,
+        messages: [{ role: 'user', content: 'ping' }],
+      }),
+    },
+    options,
+  );
+  const probe = answerProbe(answer, [input.token], model);
+  return probe.ok
+    ? probe
+    : {
+        ...probe,
+        hint: hintForStatus(answer.status, probe.message!, input.authMode),
+      };
+}
+
 /**
  * Probe the provider model and, when Haiku is mapped to a different model
  * (background calls such as titles use it), that model too.
  */
 export async function testProviderConnectivity(
   input: ProviderConnectivityInput & { haikuModel?: string },
-  options: { timeoutMs?: number; fetchImpl?: typeof fetch } = {},
+  options: FetchOptions = {},
 ): Promise<{ ok: boolean; probes: ProviderConnectivityProbe[] }> {
   const models = [input.model];
   const haiku = input.haikuModel?.trim();
@@ -355,117 +420,6 @@ function isConcreteClaudeModel(model: string): boolean {
   return /^claude-/i.test(splitOneMillionSuffix(model).model);
 }
 
-interface UpstreamAnswer {
-  ok: boolean;
-  status: number | null;
-  latencyMs: number;
-  bodyText: string;
-  networkErrorCode?: string;
-  errorMessage?: string;
-}
-
-async function getUpstream(
-  url: string,
-  headers: Record<string, string>,
-  options: FetchOptions & { maxBytes?: number },
-): Promise<UpstreamAnswer> {
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const controller = new AbortController();
-  const timer = setTimeout(
-    () => controller.abort(),
-    options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-  );
-  const startedAt = Date.now();
-  try {
-    const res = await fetchImpl(url, {
-      method: 'GET',
-      headers,
-      signal: controller.signal,
-    });
-    const bodyText = await readCapped(res, options.maxBytes ?? 64 * 1024);
-    return {
-      ok: res.ok,
-      status: res.status,
-      latencyMs: Date.now() - startedAt,
-      bodyText,
-    };
-  } catch (err) {
-    const raw = err instanceof Error ? err.message : String(err);
-    return {
-      ok: false,
-      status: null,
-      latencyMs: Date.now() - startedAt,
-      bodyText: '',
-      networkErrorCode: networkErrorCodeOf(err, controller.signal.aborted),
-      errorMessage: controller.signal.aborted ? `timeout: ${raw}` : raw,
-    };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function readCapped(res: Response, maxBytes: number): Promise<string> {
-  if (!res.body) return '';
-  const reader = res.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    while (total < maxBytes) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      total += value.byteLength;
-    }
-  } finally {
-    await reader.cancel().catch(() => {});
-  }
-  return Buffer.concat(chunks).subarray(0, maxBytes).toString('utf-8');
-}
-
-function answerProbe(
-  answer: UpstreamAnswer,
-  secrets: string[],
-): ProviderConnectivityProbe {
-  if (answer.ok) {
-    return {
-      model: '',
-      ok: true,
-      status: answer.status,
-      latencyMs: answer.latencyMs,
-    };
-  }
-  const message = redact(
-    answer.errorMessage ?? upstreamMessage(answer.bodyText),
-    secrets,
-  );
-  return {
-    model: '',
-    ok: false,
-    status: answer.status,
-    latencyMs: answer.latencyMs,
-    message: message || `HTTP ${answer.status}`,
-    code: classifyProviderError({
-      status: answer.status ?? undefined,
-      bodyText: answer.bodyText,
-      networkErrorCode: answer.networkErrorCode,
-    }).code,
-  };
-}
-
-function anthropicHeaders(
-  credential: string,
-  authMode: ProviderAuthMode,
-): Record<string, string> {
-  const token = credential.replace(/^Bearer\s+/i, '');
-  return {
-    'anthropic-version': '2023-06-01',
-    'user-agent': claudeCodeUserAgent(),
-    ...(authMode === 'x-api-key'
-      ? { 'x-api-key': token }
-      : { authorization: `Bearer ${token}` }),
-  };
-}
-
 /**
  * Official API key: a minimal message on the connection's model when it names
  * a concrete Claude model, otherwise the model list, which bills nothing.
@@ -488,9 +442,12 @@ export async function testAnthropicApiKey(
       model: result.probes[0]?.model ?? null,
     });
   }
-  const answer = await getUpstream(
+  const answer = await requestUpstream(
     `${ANTHROPIC_API_ORIGIN}/v1/models?limit=1`,
-    anthropicHeaders(input.credential, input.authMode),
+    {
+      method: 'GET',
+      headers: upstreamHeaders(input.credential, input.authMode),
+    },
     options,
   );
   return connectionTestResult(
@@ -508,12 +465,15 @@ export async function checkClaudeAccount(
   accessToken: string,
   options: FetchOptions = {},
 ): Promise<ConnectionTestResult> {
-  const answer = await getUpstream(
+  const answer = await requestUpstream(
     CLAUDE_OAUTH_USAGE_URL,
     {
-      authorization: `Bearer ${accessToken}`,
-      'anthropic-beta': 'oauth-2025-04-20',
-      'content-type': 'application/json',
+      method: 'GET',
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        'anthropic-beta': CLAUDE_OAUTH_BETA,
+        'content-type': 'application/json',
+      },
     },
     options,
   );
@@ -565,16 +525,15 @@ export async function discoverEndpointModels(
   const { result: answer, authMode } = await withAuthModeFallback(
     input.authMode,
     input.explicitAuthMode,
-    (mode) => {
-      const headers = anthropicHeaders(input.credential, mode);
-      for (const [name, value] of parseCustomHeaders(input.customHeaders)) {
-        headers[name.toLowerCase()] = value;
-      }
-      return getUpstream(input.url, headers, {
-        ...options,
-        maxBytes: MAX_MODEL_LIST_BYTES,
-      });
-    },
+    (mode) =>
+      requestUpstream(
+        input.url,
+        {
+          method: 'GET',
+          headers: upstreamHeaders(input.credential, mode, input.customHeaders),
+        },
+        { ...options, maxBytes: MAX_MODEL_LIST_BYTES },
+      ),
     (outcome) => refusedCredential(outcome.status),
   );
   let models: DiscoveredModel[] | null = null;

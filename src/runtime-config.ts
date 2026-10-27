@@ -1498,11 +1498,11 @@ function connectionListFields(provider: {
     getModelPreset(provider.presetId)
       ? provider.presetId
       : null;
-  const lastTest = normalizeProviderTestRecord(provider.lastTest);
+  // Absent fields stay undefined, which JSON leaves out of the file.
   return {
-    ...(models ? { models } : {}),
-    ...(presetId ? { presetId } : {}),
-    ...(lastTest ? { lastTest } : {}),
+    models: models ?? undefined,
+    presetId: presetId ?? undefined,
+    lastTest: normalizeProviderTestRecord(provider.lastTest) ?? undefined,
   };
 }
 
@@ -2361,9 +2361,6 @@ export function updateProvider(
       : {}),
     updatedAt: new Date().toISOString(),
   };
-  delete updated.models;
-  delete updated.presetId;
-  delete updated.lastTest;
   Object.assign(
     updated,
     connectionListFields({
