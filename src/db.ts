@@ -3735,6 +3735,21 @@ export function listQueuedFollowUps(chatJid: string): QueuedFollowUp[] {
   return rows.map(normalizeQueuedFollowUpRow);
 }
 
+/**
+ * Queued inputs that arrived from a channel chat, in queue order: the only
+ * ones whose sender can leave a group's response audience. A Web-only
+ * Session has none, so its queue drain does no per-input work.
+ */
+export function listQueuedChannelFollowUps(chatJid: string): QueuedFollowUp[] {
+  const rows = prepareCached(`${FOLLOW_UP_SELECT}
+       WHERE chat_jid = ? AND delivery_status IN ('queued', 'promoting')
+         AND source_jid IS NOT NULL AND source_jid NOT LIKE 'web:%'
+       ORDER BY delivery_priority ASC, ingest_sequence ASC`).all(
+    chatJid,
+  ) as Array<Record<string, unknown>>;
+  return rows.map(normalizeQueuedFollowUpRow);
+}
+
 export function getQueuedFollowUp(
   chatJid: string,
   messageId: string,
@@ -4082,7 +4097,7 @@ export function withdrawQueuedFollowUp(
   chatJid: string,
   messageId: string,
   updatedAt = new Date().toISOString(),
-): QueuedFollowUp | null {
+): { item: QueuedFollowUp; coveredRoots: QueuedFollowUp[] } | null {
   return db.transaction(() => {
     const item = transitionFollowUp(
       chatJid,
@@ -4092,11 +4107,18 @@ export function withdrawQueuedFollowUp(
       { updatedAt },
     );
     if (!item) return null;
+    const coveredRoots = (
+      prepareCached(`${FOLLOW_UP_SELECT}
+         WHERE chat_jid = ? AND delivery_status = 'subsumed'
+           AND delivery_run_id = ?`).all(chatJid, messageId) as Array<
+        Record<string, unknown>
+      >
+    ).map(normalizeQueuedFollowUpRow);
     prepareCached(`UPDATE messages
        SET delivery_status = 'cancelled', delivery_updated_at = ?
        WHERE chat_jid = ? AND delivery_status = 'subsumed'
          AND delivery_run_id = ?`).run(updatedAt, chatJid, messageId);
-    return item;
+    return { item, coveredRoots };
   })();
 }
 

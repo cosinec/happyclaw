@@ -254,6 +254,7 @@ import {
   cancelQueuedFollowUpsAtCutoff,
   cancelQueuedFollowUp,
   withdrawQueuedFollowUp,
+  listQueuedChannelFollowUps,
   claimNextQueuedFollowUpBatch,
   getQueuedFollowUp,
   getQueuedFollowUpChatJids,
@@ -1801,7 +1802,7 @@ function broadcastFollowUpBatchUpdate(
  * exactly like a user cancel. Private chats are not audience-gated.
  */
 function withdrawQueuedInputsOutsideAudience(chatJid: string): void {
-  for (const item of listQueuedFollowUps(chatJid)) {
+  for (const item of listQueuedChannelFollowUps(chatJid)) {
     const sender = queuedInputImSender(item);
     if (!sender) continue;
     const sourceJid = item.source_jid!;
@@ -1820,7 +1821,9 @@ function withdrawQueuedInputsOutsideAudience(chatJid: string): void {
       deliveryUpdatedAt,
     );
     if (withdrawn) {
-      settleCancelledFollowUp(chatJid, withdrawn, deliveryUpdatedAt);
+      for (const input of [withdrawn.item, ...withdrawn.coveredRoots]) {
+        settleCancelledFollowUp(chatJid, input, deliveryUpdatedAt);
+      }
     }
     logger.info(
       { chatJid, messageId: item.id, withdrawn: !!withdrawn },
