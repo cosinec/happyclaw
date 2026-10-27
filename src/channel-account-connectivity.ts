@@ -4,7 +4,7 @@ import {
   testFeishuCredentials,
   type FeishuConnectivityResult,
 } from './feishu-connectivity.js';
-import { feishuOpenBaseUrl, normalizeFeishuBrand } from './feishu-domain.js';
+import { normalizeFeishuBrand } from './feishu-domain.js';
 import { fetch as undiciFetch, ProxyAgent } from 'undici';
 import {
   configuredWeChatHttpProxy,
@@ -24,9 +24,8 @@ export function testFeishuAppCredentials(
   appSecret: string,
   domain: string | undefined,
 ): Promise<FeishuConnectivityResult> {
-  const host = feishuOpenBaseUrl(normalizeFeishuBrand(domain));
   return testFeishuCredentials(appId, appSecret, {
-    endpoint: `${host}/open-apis/auth/v3/tenant_access_token/internal`,
+    brand: normalizeFeishuBrand(domain),
   });
 }
 

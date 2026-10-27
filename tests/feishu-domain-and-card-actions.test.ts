@@ -1,4 +1,3 @@
-import * as lark from '@larksuiteoapi/node-sdk';
 import { describe, expect, test } from 'vitest';
 
 import {
@@ -32,8 +31,8 @@ describe('feishu brand hosts', () => {
     expect(feishuAccountsBaseUrl('lark')).toBe(
       'https://accounts.larksuite.com',
     );
-    expect(feishuSdkDomain('feishu')).toBe(lark.Domain.Feishu);
-    expect(feishuSdkDomain('lark')).toBe(lark.Domain.Lark);
+    expect(feishuSdkDomain('feishu')).toBe('https://open.feishu.cn');
+    expect(feishuSdkDomain('lark')).toBe('https://open.larksuite.com');
     expect(feishuAppConsoleUrl('lark', 'cli_a/b', 'auth')).toBe(
       'https://open.larksuite.com/app/cli_a%2Fb/auth',
     );
