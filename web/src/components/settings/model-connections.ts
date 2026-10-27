@@ -130,6 +130,14 @@ export function connectionStatus(
 /** The header a third-party key travels in. */
 export type ProviderAuthMode = 'bearer' | 'x-api-key';
 
+export const AUTH_MODE_LABELS: Record<ProviderAuthMode, string> = {
+  bearer: 'Authorization: Bearer',
+  'x-api-key': 'x-api-key',
+};
+
+/** How the server picks the header when none is stored. */
+export const AUTO_AUTH_MODE_HINT = `先用 ${AUTH_MODE_LABELS.bearer}，被拒绝时改用 ${AUTH_MODE_LABELS['x-api-key']}，并记住成功的那种。`;
+
 /** Fields a not-yet-saved connection is tested or listed with. */
 export interface ConnectionDraftBody {
   type: 'official' | 'third_party';
@@ -138,6 +146,8 @@ export interface ConnectionDraftBody {
   anthropicAuthToken?: string;
   anthropicApiKey?: string;
   claudeCredentialInput?: string;
+  /** A relay's environment, e.g. the custom headers its key travels in. */
+  customEnv?: Record<string, string>;
 }
 
 interface ProviderTestProbe {
@@ -307,6 +317,22 @@ export function modelBindingErrorMessage(err: unknown): string | null {
   return errorBody(err)?.code === 'MODEL_NOT_IN_CONNECTION'
     ? '所选模型已不在该模型配置的模型列表里，请重新选择模型'
     : null;
+}
+
+// ─── Reasoning effort ───
+
+/** Reasoning efforts as the composer and the connection settings name them. */
+const EFFORT_LABELS: Record<string, string> = {
+  low: '低',
+  medium: '中',
+  high: '高',
+  xhigh: '超高',
+  max: '最高',
+  ultra: '极限',
+};
+
+export function effortLabel(effort: string): string {
+  return EFFORT_LABELS[effort] ?? effort;
 }
 
 // ─── Model names ───────────────────────────────────────────────

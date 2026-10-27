@@ -278,6 +278,54 @@ describe('vendor preset', () => {
     expect(checkbox('deepseek-flash[1m]')).not.toBeNull();
   });
 
+  test('custom headers travel with the draft, and a refusal with them moves on', async () => {
+    answer({
+      [DISCOVER]: {
+        ok: false,
+        code: 'AUTH_INVALID',
+        status: 401,
+        message: 'missing X-Api-Token',
+      },
+      [TEST]: OK_TEST,
+      [PROVIDERS]: makeProvider({ id: 'relay' }),
+    });
+    await render();
+    await click(buttonContaining('自定义兼容地址'));
+    await type('#wizard-base-url', 'https://relay.example.test');
+    await type('#wizard-api-key', 'sk');
+    await click(button('添加'));
+    await type(
+      'input[aria-label="第 1 行环境变量 Key"]',
+      'ANTHROPIC_CUSTOM_HEADERS',
+    );
+    await type('textarea[aria-label="第 1 行环境变量值"]', 'X-Api-Token: t1');
+    await next();
+    expect(mocks.post).toHaveBeenCalledWith(
+      DISCOVER,
+      {
+        type: 'third_party',
+        anthropicBaseUrl: 'https://relay.example.test',
+        anthropicAuthToken: 'sk',
+        customEnv: { ANTHROPIC_CUSTOM_HEADERS: 'X-Api-Token: t1' },
+      },
+      45_000,
+    );
+    // The refusal may be about the headers, not the key: on to the models.
+    expect(field('#wizard-api-key')).toBeNull();
+    expect(text()).toContain('没能获取模型列表：密钥无效');
+    await type('input[aria-label="手动添加模型"]', 'relay-model');
+    await click(button('添加'));
+    await next();
+    await click(button('保存'));
+    await flush();
+    expect(mocks.post).toHaveBeenCalledWith(
+      PROVIDERS,
+      expect.objectContaining({
+        customEnv: { ANTHROPIC_CUSTOM_HEADERS: 'X-Api-Token: t1' },
+      }),
+    );
+  });
+
   test('a header proved by the model list wins over the test report', async () => {
     answer({
       [DISCOVER]: {

@@ -15,7 +15,7 @@ export interface DefaultProviderEnvRow {
  * explicit `[1m]` model, since a gateway capped at 200K cannot be detected.
  */
 export function isOneMillionContextModel(model: string): boolean {
-  return /\[1m\]$/i.test(model.trim());
+  return splitOneMillionSuffix(model).oneMillion;
 }
 
 /**

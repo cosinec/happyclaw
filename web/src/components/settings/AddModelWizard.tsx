@@ -38,6 +38,7 @@ import {
 import { CodexModelFields } from './CodexModelFields';
 import { ConnectionTestResult } from './ConnectionTestResult';
 import {
+  AUTO_AUTH_MODE_HINT,
   CONNECTION_KIND_LABELS,
   PROVIDERS_API,
   allowsNoDefaultModel,
@@ -58,6 +59,11 @@ import {
   type ModelCandidate,
 } from './ModelPicker';
 import { OAuthLoginPanel } from './OAuthLoginPanel';
+import {
+  ProviderEnvEditor,
+  buildProviderCustomEnv,
+  type ProviderEnvDraft,
+} from './ProviderEnvEditor';
 import { SettingsField } from './SettingsLayout';
 import { getErrorMessage, type UnifiedProviderPublic } from './types';
 import {
@@ -135,6 +141,7 @@ export function AddModelWizard({
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [credentialInput, setCredentialInput] = useState('');
+  const [env, setEnv] = useState<ProviderEnvDraft>({ overrides: {}, rows: [] });
   /** Made by an OAuth callback; later steps update it instead of creating. */
   const [created, setCreated] = useState<UnifiedProviderPublic | null>(null);
   const [detected, setDetected] = useState<ModelPreset | null>(null);
@@ -208,13 +215,24 @@ export function AddModelWizard({
       ? RELAY_PASS_THROUGH
       : OFFICIAL_PASS_THROUGH;
 
-  // Whatever identifies the credential and endpoint: a change makes the
-  // model list and the test result stale.
+  // A custom address may need its own environment, such as the custom
+  // headers its key travels in; they go with every request for the draft.
+  const envResult =
+    kind === 'custom'
+      ? buildProviderCustomEnv(true, env)
+      : { customEnv: {}, error: null };
+  const customEnv = envResult.customEnv;
+  const hasCustomHeaders = !!customEnv.ANTHROPIC_CUSTOM_HEADERS?.trim();
+
+  // Whatever the requests carry (custom headers are credentials too): a
+  // change makes the model list and the test stale. The server decides
+  // which of it matters.
   const connectionSignature = JSON.stringify([
     sourceKey(source),
     thirdParty ? effectiveBaseUrl : '',
     kind === 'claude_subscription' ? credentialInput.trim() : apiKey.trim(),
     created?.id ?? '',
+    customEnv,
   ]);
   // A saved connection is tested by id alone, so only the draft's model
   // makes a new test worth sending.
@@ -291,6 +309,7 @@ export function AddModelWizard({
           type: 'third_party',
           anthropicBaseUrl: baseUrl.trim(),
           anthropicAuthToken: apiKey.trim(),
+          ...(Object.keys(customEnv).length > 0 ? { customEnv } : {}),
         };
       case 'anthropic_api':
         return { type: 'official', anthropicApiKey: apiKey.trim() };
@@ -374,7 +393,13 @@ export function AddModelWizard({
       return 'superseded';
     }
     setDiscoveringFor(null);
-    if (next.status === 'failed' && next.code === 'AUTH_INVALID') {
+    // With custom headers the refusal may be about them, not the key: the
+    // user moves on and the test step tells.
+    if (
+      next.status === 'failed' &&
+      next.code === 'AUTH_INVALID' &&
+      !hasCustomHeaders
+    ) {
       // Asked again on the next try, so a fixed key gets through.
       discoveredFor.current = null;
       setDiscovery({ status: 'idle' });
@@ -526,7 +551,11 @@ export function AddModelWizard({
       case 'chatgpt':
         return !!created;
       case 'custom':
-        return !!normalizeProviderBaseUrl(baseUrl) && !!apiKey.trim();
+        return (
+          !!normalizeProviderBaseUrl(baseUrl) &&
+          !!apiKey.trim() &&
+          !envResult.error
+        );
       case 'preset':
       case 'anthropic_api':
         return !!apiKey.trim();
@@ -796,8 +825,15 @@ export function AddModelWizard({
             onChange={setApiKey}
             label="API Key"
             placeholder="粘贴 API Key 或 Token"
-            description="认证方式会自动识别：先用 Authorization: Bearer，被拒绝时改用 x-api-key。"
+            description={`认证方式会自动识别：${AUTO_AUTH_MODE_HINT}`}
           />
+          <ProviderEnvEditor
+            thirdParty
+            defaultModel={defaultModelId}
+            value={env}
+            onChange={setEnv}
+          />
+          <KeyError message={envResult.error} />
         </div>
       )}
 
