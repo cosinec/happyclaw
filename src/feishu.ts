@@ -15,10 +15,7 @@ import {
   parseCardActionValue,
   type AnswerQuestionPayload,
 } from './feishu-card-actions.js';
-import {
-  FeishuDualDeliveryCoordinator,
-  type FeishuDualDeliveryDecision,
-} from './feishu-dual-delivery.js';
+import { FeishuDualDeliveryCoordinator } from './feishu-dual-delivery.js';
 import {
   feishuSdkDomain,
   normalizeFeishuBrand,
@@ -1747,7 +1744,6 @@ export function createFeishuConnection(
     payload: IncomingMessagePayload,
     source: 'ws' | 'backfill',
     claim: ClaimedChannelInboxItem,
-    pairing?: Promise<FeishuDualDeliveryDecision>,
   ): Promise<InboundOutcome> {
     // Claims may wait behind rich-content work from an earlier physical event.
     // Begin renewal before entering that shared lane so the DB lease remains
@@ -1755,52 +1751,28 @@ export function createFeishuConnection(
     startInboxHeartbeat(claim);
     let outcome: InboundOutcome = 'done';
     await serializeInboundForChat(inboundLaneKey(payload), async () => {
-      // A main-feed copy waits for its thread twin inside the lane, so later
-      // messages of the chat keep their order behind it.
-      const paired = await pairing;
-      if (paired?.suppress) {
-        logger.info(
-          {
-            messageId: payload.messageId,
-            twinMessageId: paired.twinMessageId,
-            chatId: payload.chatId,
-          },
-          'Suppressed the second copy of a Feishu thread reply also sent to the chat',
-        );
-        ignoreClaimedInbound(
-          claim,
-          payload,
-          `dual_delivery_copy:${paired.twinMessageId}`,
-        );
-        return;
-      }
       outcome = await processClaimedIncomingMessage(payload, source, claim);
     });
     return outcome;
   }
 
   /**
-   * 「同时发送到群聊」 turns one thread reply into two group events. Only live
-   * events wait for a twin; backfill decides on what was already seen.
+   * 「同时发送到群聊」 turns one thread reply into two group events; the one
+   * that arrived first runs. Returns the message this event is a copy of.
    */
-  function pairDualDelivery(
+  function dualDeliveryTwin(
     payload: IncomingMessagePayload,
-    source: 'ws' | 'backfill',
-  ): Promise<FeishuDualDeliveryDecision> | undefined {
+  ): string | undefined {
     if (payload.chatType !== 'group' || payload.origin) return undefined;
-    return feishuDualDelivery.coordinate(
-      {
-        accountKey: reliabilityAccountId,
-        chatId: payload.chatId,
-        messageId: payload.messageId,
-        threadId: payload.threadId,
-        senderOpenId: payload.senderOpenId,
-        createTimeMs: payload.createTimeMs,
-        messageType: payload.messageType,
-        content: payload.content,
-      },
-      { wait: source === 'ws' },
-    );
+    return feishuDualDelivery.copyOf({
+      accountKey: reliabilityAccountId,
+      chatId: payload.chatId,
+      messageId: payload.messageId,
+      senderOpenId: payload.senderOpenId,
+      createTimeMs: payload.createTimeMs,
+      messageType: payload.messageType,
+      content: payload.content,
+    });
   }
 
   function rememberChatProgress(
@@ -2209,14 +2181,6 @@ export function createFeishuConnection(
             expectedPosition: cursor.position,
             expectedTieBreaker: cursor.tieBreaker,
           });
-          continue;
-        }
-        if (cursor.scope === FEISHU_THREAD_CURSOR_SCOPE && cursor.chatId) {
-          feishuDualDelivery.noteThreadActivity(
-            reliabilityAccountId,
-            parseFeishuRouteTarget(cursor.chatId).chatId,
-            cursor.position,
-          );
           continue;
         }
         if (cursor.scope !== FEISHU_CURSOR_SCOPE || !cursor.chatId) continue;
@@ -3236,12 +3200,16 @@ export function createFeishuConnection(
       );
       return recorded.item.id;
     }
-    await processClaimedInboundSerialized(
-      payload,
-      source,
-      claim,
-      pairDualDelivery(payload, source),
-    );
+    const twin = dualDeliveryTwin(payload);
+    if (twin) {
+      logger.info(
+        { messageId, twinMessageId: twin, chatId, source },
+        'Suppressed the second copy of a Feishu thread reply also sent to the chat',
+      );
+      ignoreClaimedInbound(claim, payload, `dual_delivery_copy:${twin}`);
+      return recorded.item.id;
+    }
+    await processClaimedInboundSerialized(payload, source, claim);
     return recorded.item.id;
   }
 
