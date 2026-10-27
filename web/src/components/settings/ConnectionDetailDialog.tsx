@@ -387,9 +387,12 @@ function ConnectionSettings({
   );
   const [env, setEnv] = useState<ProviderEnvDraft>(initialEnv);
   const savedAuthMode = provider.anthropicAuthMode ?? 'auto';
-  const [authMode, setAuthMode] = useState<ProviderAuthMode | 'auto'>(
-    savedAuthMode,
-  );
+  // Null until the user picks one: the select follows the saved header,
+  // which a test may store (a reload brings it in) while this is open.
+  const [authModeDraft, setAuthModeDraft] = useState<
+    ProviderAuthMode | 'auto' | null
+  >(null);
+  const authMode = authModeDraft ?? savedAuthMode;
   const [saving, setSaving] = useState(false);
   const baseUrlProblem =
     kind === 'custom' ? describeBaseUrlProblem(baseUrl) : null;
@@ -441,6 +444,7 @@ function ConnectionSettings({
         await saveConnectionSecrets(provider.id, secrets);
       }
       setSecret('');
+      setAuthModeDraft(null);
       setNotice('连接设置已保存；建议测试一次连接');
       // A new credential changes masked fields the PATCH answer lacks.
       onChanged(Object.keys(secrets).length > 0 ? undefined : saved);
@@ -628,7 +632,9 @@ function ConnectionSettings({
                 id="connection-auth-mode"
                 value={authMode}
                 onChange={(event) =>
-                  setAuthMode(event.target.value as ProviderAuthMode | 'auto')
+                  setAuthModeDraft(
+                    event.target.value as ProviderAuthMode | 'auto',
+                  )
                 }
                 disabled={saving}
                 className="w-full sm:w-72"

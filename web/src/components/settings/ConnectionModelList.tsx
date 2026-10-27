@@ -257,7 +257,7 @@ export function ConnectionModelList({
                     }
                     disabled={disabled}
                     aria-label={`${entry.id} 的推理档位`}
-                    title="智能体设置了推理档位时以智能体为准"
+                    title="下次启动会话时生效；智能体设置了推理档位时以智能体为准"
                     className="w-28 font-mono text-caption"
                   >
                     <NativeSelectOption value="">档位默认</NativeSelectOption>
@@ -334,6 +334,11 @@ export function ConnectionModelList({
             );
           })}
         </ul>
+      )}
+      {models.length > 0 && (
+        <p className="text-caption text-muted-foreground">
+          推理档位下次启动会话时生效；智能体设置了推理档位时以智能体为准。
+        </p>
       )}
 
       <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
