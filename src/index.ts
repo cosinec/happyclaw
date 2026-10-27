@@ -21990,6 +21990,38 @@ function queueSerializationKey(groupJid: string): string {
 }
 
 /**
+ * The queue JID of the Session a card answers for. The card is keyed by its
+ * reply route (topic and root included) and the chat's own folder is not the
+ * bound workspace's, so resolve the Session as `/break` does: an `#agent:`
+ * route names its Session, any other route answers for the chat's bound main
+ * Session. Null when that Session is gone.
+ */
+function cardSessionJid(
+  cardJid: string,
+  conversationJid: string,
+): string | null {
+  const agentSep = cardJid.indexOf('#agent:');
+  if (agentSep >= 0) {
+    const agentId = cardJid.slice(agentSep + 7);
+    const agent = getAgent(agentId);
+    return agent?.chat_jid ? `${agent.chat_jid}#agent:${agentId}` : null;
+  }
+  const lookup = (jid: string) =>
+    registeredGroups[jid] ?? getRegisteredGroup(jid);
+  const group = lookup(conversationJid);
+  if (!group) return null;
+  const target = resolveBoundChatTarget(
+    conversationJid,
+    group,
+    lookup,
+    getAgent,
+    findGroupNameByFolder,
+    resolveWorkspaceJid,
+  );
+  return target && target.agentId === null ? target.targetChatJid : null;
+}
+
+/**
  * 飞书流式卡片按钮中断回调。
  * 仅由飞书卡片按钮触发，不涉及自动关键词检测。
  */
@@ -22007,14 +22039,8 @@ function handleCardInterrupt(
   ) {
     return { ok: false, message: '你没有中断这个会话的权限。' };
   }
-  // The card is keyed by its reply route, whose topic and root suffixes the
-  // queue never sees: interrupt the Session the route belongs to.
-  const agentSep = chatJid.indexOf('#agent:');
-  const sessionJid =
-    agentSep >= 0
-      ? `${sourceChatJid}${chatJid.slice(agentSep)}`
-      : sourceChatJid;
-  const interrupted = queue.interruptQuery(sessionJid);
+  const sessionJid = cardSessionJid(chatJid, sourceChatJid);
+  const interrupted = sessionJid ? queue.interruptQuery(sessionJid) : false;
   if (!interrupted) {
     return { ok: false, message: '当前回复已经结束，无需中断。' };
   }
