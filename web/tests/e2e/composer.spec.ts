@@ -821,4 +821,31 @@ test.describe('tablet composer', () => {
       { to: 'main', content: '软键盘', images: 0 },
     ]);
   });
+
+  test('an empty conversation keeps the composer docked above the keyboard', async ({
+    page,
+  }) => {
+    await page.goto(`${HARNESS_PATH}?empty=1`);
+    const root = page.locator('[data-hc-composer]');
+    const card = page.locator('[data-composer-card]');
+    const heading = page.getByRole('heading', { name: '今天想做什么？' });
+    await expect(heading).toBeVisible();
+    // Wide, but touch: no centring.
+    await expect(root).toHaveAttribute('data-composer-layout', 'docked');
+    const viewport = page.viewportSize()!;
+    const docked = (await card.boundingBox())!;
+    expect(viewport.height - (docked.y + docked.height)).toBeLessThan(40);
+    expect(
+      (await page.locator('[data-hc-starter]').last().boundingBox())!.y,
+    ).toBeLessThan(docked.y);
+
+    // The docked bar makes room for a software keyboard.
+    await simulateKeyboard(page, 360);
+    await expect
+      .poll(async () => {
+        const box = (await card.boundingBox())!;
+        return viewport.height - (box.y + box.height);
+      })
+      .toBeGreaterThan(300);
+  });
 });
