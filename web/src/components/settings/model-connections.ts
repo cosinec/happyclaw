@@ -10,7 +10,6 @@ import {
 import { api } from '../../api/client';
 import { formatSessionTime } from '../../lib/session-presentation';
 import { confirmDialog } from '../../stores/confirm';
-import type { ProviderAuthMode } from '../../utils/provider-env-import';
 import type { UnifiedProviderPublic } from './types';
 
 /**
@@ -127,6 +126,9 @@ export function connectionStatus(
 }
 
 // ─── Requests ──────────────────────────────────────────────────
+
+/** The header a third-party key travels in. */
+export type ProviderAuthMode = 'bearer' | 'x-api-key';
 
 /** Fields a not-yet-saved connection is tested or listed with. */
 export interface ConnectionDraftBody {

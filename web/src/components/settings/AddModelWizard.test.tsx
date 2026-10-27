@@ -175,7 +175,6 @@ describe('vendor preset', () => {
         anthropicBaseUrl: 'https://api.deepseek.com/anthropic',
         anthropicAuthToken: 'sk-ds',
         anthropicModel: 'deepseek-flash[1m]',
-        customEnv: {},
       },
       60_000,
     );
@@ -196,7 +195,6 @@ describe('vendor preset', () => {
       anthropicAuthToken: 'sk-ds',
       anthropicModel: 'deepseek-flash[1m]',
       models: [{ id: 'deepseek-flash[1m]' }, { id: 'deepseek-v4-pro[1m]' }],
-      customEnv: {},
       enabled: false,
       anthropicAuthMode: 'bearer',
     });
@@ -406,7 +404,7 @@ describe('custom address', () => {
     expect(text()).not.toContain('看起来是');
   });
 
-  test('a pasted alias fills the draft and saves its model and environment', async () => {
+  test('a custom address finishes with a model typed by hand when listing fails', async () => {
     answer({
       [DISCOVER]: {
         ok: false,
@@ -414,42 +412,32 @@ describe('custom address', () => {
         status: 404,
         message: '',
       },
-      // No header reported: the alias's own one is kept.
+      // No header proved anywhere: none is saved, the server keeps its rule.
       [TEST]: { ...OK_TEST, authMode: undefined },
-      [PROVIDERS]: makeProvider({ id: 'dcc', name: 'dcc' }),
+      [PROVIDERS]: makeProvider({ id: 'relay' }),
     });
     await render();
     await click(buttonContaining('自定义兼容地址'));
-    await type(
-      'textarea[aria-label="粘贴 alias 或环境变量"]',
-      'alias dcc="CLAUDE_CODE_AUTO_COMPACT_WINDOW=786432 ANTHROPIC_BASE_URL=https://relay.example.test/anthropic ANTHROPIC_AUTH_TOKEN=sk-fake ANTHROPIC_MODEL=deepseek-v4-pro[1m] ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek-v4-flash[1m] claude"',
-    );
-    await click(button('解析'));
-    await click(button('填入表单'));
-    expect(field('#wizard-base-url')?.value).toBe(
-      'https://relay.example.test/anthropic',
-    );
+    // Importing a pasted alias is not offered.
+    expect(text()).not.toContain('导入');
+    expect(document.querySelector('textarea')).toBeNull();
+    await type('#wizard-base-url', 'https://relay.example.test/anthropic');
+    await type('#wizard-api-key', 'sk-fake');
     await next();
     expect(text()).toContain('没能获取模型列表：地址不对');
-    expect(checkbox('deepseek-v4-pro[1m]')?.getAttribute('aria-checked')).toBe(
-      'true',
-    );
+    await type('input[aria-label="手动添加模型"]', 'deepseek-v4-pro[1m]');
+    await click(button('添加'));
     await next();
     await click(button('保存'));
     await flush();
     expect(mocks.post).toHaveBeenCalledWith(PROVIDERS, {
-      name: 'dcc',
+      name: 'relay.example.test',
       type: 'third_party',
       anthropicBaseUrl: 'https://relay.example.test/anthropic',
       anthropicAuthToken: 'sk-fake',
       anthropicModel: 'deepseek-v4-pro[1m]',
       models: [{ id: 'deepseek-v4-pro[1m]' }],
-      customEnv: {
-        CLAUDE_CODE_AUTO_COMPACT_WINDOW: '786432',
-        ANTHROPIC_DEFAULT_HAIKU_MODEL: 'deepseek-v4-flash[1m]',
-      },
       enabled: false,
-      anthropicAuthMode: 'bearer',
     });
   });
 

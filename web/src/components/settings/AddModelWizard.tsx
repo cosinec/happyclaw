@@ -28,10 +28,6 @@ import {
 } from '@/lib/model-providers';
 import { cn } from '@/lib/utils';
 import { api } from '../../api/client';
-import type {
-  ProviderAuthMode,
-  ProviderEnvImport,
-} from '../../utils/provider-env-import';
 import { buildDefaultProviderEnv } from '../../utils/provider-model';
 import {
   codexDefaultsPatch,
@@ -51,6 +47,7 @@ import {
   testOutcome,
   updateConnection,
   type ConnectionDraftBody,
+  type ProviderAuthMode,
   type TestOutcome,
 } from './model-connections';
 import {
@@ -61,7 +58,6 @@ import {
   type ModelCandidate,
 } from './ModelPicker';
 import { OAuthLoginPanel } from './OAuthLoginPanel';
-import { ProviderEnvImportPanel } from './ProviderEnvImportPanel';
 import { SettingsField } from './SettingsLayout';
 import { getErrorMessage, type UnifiedProviderPublic } from './types';
 import {
@@ -139,11 +135,6 @@ export function AddModelWizard({
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [credentialInput, setCredentialInput] = useState('');
-  /** Environment a pasted alias carries; edited later in the detail. */
-  const [importedEnv, setImportedEnv] = useState<Record<string, string>>({});
-  const [importedName, setImportedName] = useState<string | null>(null);
-  const [importedAuthMode, setImportedAuthMode] =
-    useState<ProviderAuthMode | null>(null);
   /** Made by an OAuth callback; later steps update it instead of creating. */
   const [created, setCreated] = useState<UnifiedProviderPublic | null>(null);
   const [detected, setDetected] = useState<ModelPreset | null>(null);
@@ -225,11 +216,11 @@ export function AddModelWizard({
     kind === 'claude_subscription' ? credentialInput.trim() : apiKey.trim(),
     created?.id ?? '',
   ]);
-  // A saved connection is tested by id alone, so only the draft's model and
-  // environment make a new test worth sending.
+  // A saved connection is tested by id alone, so only the draft's model
+  // makes a new test worth sending.
   const testSignature = created
     ? connectionSignature
-    : JSON.stringify([connectionSignature, defaultModelId, importedEnv]);
+    : JSON.stringify([connectionSignature, defaultModelId]);
   const latest = useRef({ connectionSignature, testSignature });
   latest.current = { connectionSignature, testSignature };
 
@@ -241,7 +232,7 @@ export function AddModelWizard({
   const chooseSource = (next: WizardSource) => {
     if (sourceKey(next) !== sourceKey(source)) {
       // A different vendor starts from its own models; models typed by hand
-      // (or imported) stay, and so does a default the user set among them.
+      // stay, and so does a default the user set among them.
       const manual = candidates.filter(
         (candidate) => candidate.origin === 'manual',
       );
@@ -284,35 +275,6 @@ export function AddModelWizard({
     }, 400);
     return () => clearTimeout(timer);
   }, [kind, baseUrl, dismissedUrl]);
-
-  const applyImport = (imported: ProviderEnvImport) => {
-    if (imported.name) setImportedName(imported.name);
-    if (imported.baseUrl) setBaseUrl(imported.baseUrl);
-    if (imported.token) setApiKey(imported.token);
-    if (imported.authMode) setImportedAuthMode(imported.authMode);
-    // Blank prefilled overrides mean "use the default"; never persist them.
-    setImportedEnv({
-      ...imported.customEnv,
-      ...Object.fromEntries(
-        Object.entries(imported.envOverrides).filter(([, value]) =>
-          value.trim(),
-        ),
-      ),
-    });
-    if (imported.model) {
-      const model = imported.model;
-      setCandidates((current) => [
-        ...current.filter((candidate) => candidate.base !== model),
-        {
-          base: model,
-          oneMillion: imported.oneMillionContext,
-          picked: true,
-          origin: 'manual',
-        },
-      ]);
-      setDefaultBase(model);
-    }
-  };
 
   // ─── Discovery ───
   const draftBody = (): ConnectionDraftBody => {
@@ -461,7 +423,6 @@ export function AddModelWizard({
       : {
           ...draftBody(),
           anthropicModel: defaultModelId,
-          ...(thirdParty ? { customEnv: importedEnv } : {}),
         };
     const settle = (outcome: TestOutcome | null, error: string | null) => {
       if (
@@ -495,7 +456,7 @@ export function AddModelWizard({
     created?.name ??
     preset?.name ??
     (kind === 'custom'
-      ? importedName || hostnameOf(baseUrl) || CONNECTION_KIND_LABELS.custom
+      ? hostnameOf(baseUrl) || CONNECTION_KIND_LABELS.custom
       : CONNECTION_KIND_LABELS[kind ?? 'custom']);
   // Same rule the server applies: join the pool when nothing else is in it.
   // A connection an OAuth login made already carries the server's choice;
@@ -534,10 +495,7 @@ export function AddModelWizard({
       } else {
         // A model list the endpoint answered proves the header; the test's
         // report counts only when the list did not.
-        const authMode =
-          discoveredAuthMode ??
-          currentTest?.outcome?.authMode ??
-          importedAuthMode;
+        const authMode = discoveredAuthMode ?? currentTest?.outcome?.authMode;
         const body: Record<string, unknown> = {
           name: trimmedName,
           ...draftBody(),
@@ -545,10 +503,7 @@ export function AddModelWizard({
           models,
           enabled: poolEnabled,
         };
-        if (thirdParty) {
-          body.customEnv = importedEnv;
-          if (authMode) body.anthropicAuthMode = authMode;
-        }
+        if (thirdParty && authMode) body.anthropicAuthMode = authMode;
         provider = await api.post<UnifiedProviderPublic>(PROVIDERS_API, body);
         // The draft test was not stored; test the saved connection so its
         // status is on record.
@@ -599,12 +554,9 @@ export function AddModelWizard({
     setStep('models');
   };
 
-  const compactWindow =
-    importedEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW ||
-    buildDefaultProviderEnv(defaultModelId).find(
-      (row) => row.key === 'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
-    )?.value;
-  const importedCount = Object.keys(importedEnv).length;
+  const compactWindow = buildDefaultProviderEnv(defaultModelId).find(
+    (row) => row.key === 'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
+  )?.value;
 
   const footer = (
     <>
@@ -780,7 +732,6 @@ export function AddModelWizard({
 
       {step === 'connect' && kind === 'custom' && (
         <div className="space-y-4">
-          <ProviderEnvImportPanel onApply={applyImport} />
           <SettingsField
             label="服务地址"
             htmlFor="wizard-base-url"
@@ -909,10 +860,8 @@ export function AddModelWizard({
                 <dd className="text-foreground">
                   系统预填 Claude Code 运行环境：Opus / Sonnet / Haiku / 子
                   Agent 跟随默认模型，压缩窗口{' '}
-                  {Number(compactWindow).toLocaleString('en-US')} tokens
-                  {importedCount > 0 &&
-                    `；另有 ${importedCount} 项导入的环境变量`}
-                  。保存后可在连接设置里调整。
+                  {Number(compactWindow).toLocaleString('en-US')}{' '}
+                  tokens。保存后可在连接设置里调整。
                 </dd>
               </>
             )}
