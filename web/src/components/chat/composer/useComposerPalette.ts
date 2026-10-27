@@ -109,10 +109,12 @@ export function useComposerPalette({
     setSlashCommandRoster(editor, roster);
   }, [editor, roster]);
 
-  // Listings are kept while the palette is open; the next `@` lists again
-  // (the source caches briefly), so new files show up.
+  // Listings are kept while the palette is open; the next `@` lists again,
+  // so new files show up.
   useEffect(() => {
-    if (!open) setDirectories({});
+    if (!open) {
+      setDirectories((prev) => (Object.keys(prev).length > 0 ? {} : prev));
+    }
   }, [open]);
 
   useEffect(() => {

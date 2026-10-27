@@ -39,13 +39,21 @@ import {
 } from '../../lib/follow-up-preferences';
 import { noteComposerInput } from '../../lib/composer-activity';
 import { SHORTCUTS } from '../../lib/shortcuts';
-import { composerTextAfterSend, isGlobalStopEscape } from './composer-helpers';
+import {
+  composerTextAfterSend,
+  isGlobalStopEscape,
+  MAX_MESSAGE_CHARS,
+  withUploadedFiles,
+} from './composer-helpers';
 import {
   isComposerBlankPointerTarget,
   resolveComposerBlankFocusIntent,
 } from './composer/cindy/composerBlankPointerFocus';
 import { serializeEditorContent } from './composer/cindy/composerContentSerialization';
-import { composerDocIsEmpty } from './composer/cindy/composerDocState';
+import {
+  composerDocIsEmpty,
+  docContainsAtomChip,
+} from './composer/cindy/composerDocState';
 import {
   handleComposerListEnter,
   handleStructuredListBackspace,
@@ -128,10 +136,6 @@ const FOCUS_HANDOFF_MS = 1000;
 // A visual viewport at least this much shorter than the layout viewport means
 // a software keyboard is up (a hardware keyboard's shortcut bar is smaller).
 const SOFT_KEYBOARD_MIN_PX = 150;
-// The server rejects longer message bodies (src/schemas.ts).
-const MAX_MESSAGE_CHARS = 64 * 1024;
-// An Enter this soon after an IME commit belongs to the commit (Safari).
-const COMPOSITION_ENTER_GUARD_MS = 100;
 let focusHandoffAt = Number.NEGATIVE_INFINITY;
 let handledFocusRequest = { nonce: 0, at: Number.NEGATIVE_INFINITY };
 let handledDraftRequestNonce = 0;
@@ -176,11 +180,13 @@ export const MessageInput = memo(function MessageInput({
   const agentProfileId = useChatStore((s) =>
     groupJid ? s.groups[groupJid]?.agent_profile_id : undefined,
   );
-  const storedDraft = useChatStore((s) =>
-    draftTarget ? s.drafts[draftTarget] : undefined,
+  // Read once: the composer follows later changes through a subscription
+  // (see the adoption effect) instead of re-rendering on its own saves.
+  const [storedAtMount] = useState(() =>
+    draftTarget ? useChatStore.getState().drafts[draftTarget] : undefined,
   );
   const [initial] = useState(() =>
-    initialDraft(draftTarget, storedDraft, userId),
+    initialDraft(draftTarget, storedAtMount, userId),
   );
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -215,9 +221,10 @@ export const MessageInput = memo(function MessageInput({
   const inFlightSendRef = useRef<{ key: string; text: string } | null>(null);
   // The stored draft as this instance last wrote or adopted it, and the
   // composer text at the last adoption (see the adoption effect).
-  const knownDraftRef = useRef(storedDraft ?? '');
+  const knownDraftRef = useRef(storedAtMount ?? '');
   const adoptedContentRef = useRef(initial.text);
-  const compositionEndAtRef = useRef(0);
+  // A programmatic replacement, not typing: no activity signal, no save.
+  const replacingRef = useRef(false);
   // ↑/↓ recall while browsing: the entry shown, the document it put in the
   // editor, and the user's own draft it replaced.
   const recallRef = useRef<{
@@ -257,10 +264,13 @@ export const MessageInput = memo(function MessageInput({
       ).trim();
       if (key === draftTargetRef.current) knownDraftRef.current = value;
       saveDraft(key, value);
-      // The document keeps chips; it describes the draft only while nothing
-      // was cut from the text.
+      // The document is kept for its chips (text alone rebuilds the rest),
+      // and describes the draft only while nothing was cut from the text.
       const doc =
-        editor && !editor.isDestroyed && value === text.trim()
+        editor &&
+        !editor.isDestroyed &&
+        value === text.trim() &&
+        docContainsAtomChip(editor.state.doc)
           ? editor.getJSON()
           : undefined;
       writePersistedDraft(userIdRef.current ?? null, key, value, doc);
@@ -326,27 +336,32 @@ export const MessageInput = memo(function MessageInput({
     handlers: {
       onKeyDown: (view, event) => handleEditorKeyDown(view, event),
       onPasteImages: (files) => void attachments.addPastedImages(files),
+      onPasteTooLong: () =>
+        showSendError('粘贴的内容超过 64K 字符上限，请改为上传文件', 6000),
       onDocChange: (current) => {
-        noteComposerInput();
         latestTextRef.current = serializeEditorContent(current).text;
         // Editing a recalled message makes it the user's own draft.
         if (!recallRef.current?.doc.eq(current.state.doc)) {
           recallRef.current = null;
         }
+        if (replacingRef.current) return;
+        noteComposerInput();
         debouncedSaveDraft(current);
-      },
-      onCompositionEnd: () => {
-        compositionEndAtRef.current = Date.now();
       },
     },
   });
 
   /**
-   * Replace what the composer holds and adopt it as the draft. The change
-   * handler updates the text (and saves it) synchronously.
+   * Replace what the composer holds with a draft that is already stored and
+   * adopt it. The change handler updates the text synchronously.
    */
   const setEditorText = (text: string, doc?: JSONContent | null) => {
-    restoreComposerDocument(editor, composerDocFor(text, doc));
+    replacingRef.current = true;
+    try {
+      restoreComposerDocument(editor, composerDocFor(text, doc));
+    } finally {
+      replacingRef.current = false;
+    }
     adoptedContentRef.current = latestTextRef.current;
   };
 
@@ -394,8 +409,11 @@ export const MessageInput = memo(function MessageInput({
       draftTimerRef.current = undefined;
     }
     persistDraft(previous, latestTextRef.current, editor);
-    const next = initialDraft(draftTarget, storedDraft, userIdRef.current);
-    knownDraftRef.current = storedDraft ?? '';
+    const stored = draftTarget
+      ? useChatStore.getState().drafts[draftTarget]
+      : undefined;
+    const next = initialDraft(draftTarget, stored, userIdRef.current);
+    knownDraftRef.current = stored ?? '';
     setEditorText(next.text, next.doc);
     recallRef.current = null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -405,13 +423,16 @@ export const MessageInput = memo(function MessageInput({
   // its send resolves (the text comes back after a failure). Follow such a
   // change while nothing has been typed here since.
   useEffect(() => {
-    const next = storedDraft ?? '';
-    if (next === knownDraftRef.current) return;
-    knownDraftRef.current = next;
-    if (latestTextRef.current !== adoptedContentRef.current) return;
-    setEditorText(next, draftTarget ? draftDocFor(draftTarget, next) : null);
+    if (!draftTarget) return;
+    return useChatStore.subscribe((state) => {
+      const next = state.drafts[draftTarget] ?? '';
+      if (next === knownDraftRef.current) return;
+      knownDraftRef.current = next;
+      if (latestTextRef.current !== adoptedContentRef.current) return;
+      setEditorText(next, draftDocFor(draftTarget, next));
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [storedDraft]);
+  }, [draftTarget]);
 
   // On unmount, flush a draft save that is still waiting on its debounce,
   // so the last keystrokes before leaving the conversation are kept.
@@ -510,13 +531,6 @@ export const MessageInput = memo(function MessageInput({
   };
 
   function handleEditorKeyDown(view: EditorView, event: KeyboardEvent) {
-    // ProseMirror owns keys during its composition. Safari and some Android
-    // IMEs deliver the committing Enter after compositionend, marked only by
-    // keyCode 229: swallow it, so it neither sends nor breaks the line.
-    if (view.composing) return false;
-    if (event.isComposing || event.keyCode === 229) {
-      return event.key === 'Enter';
-    }
     if (palette.captureKey(event)) return true;
     if (event.key === 'Escape') {
       if (!showStop) return false;
@@ -540,9 +554,6 @@ export const MessageInput = memo(function MessageInput({
       return true;
     }
     if (event.key !== 'Enter') return false;
-    if (Date.now() - compositionEndAtRef.current < COMPOSITION_ENTER_GUARD_MS) {
-      return true;
-    }
     if (event.metaKey || event.ctrlKey) {
       void handleSend(
         event.shiftKey && isRunning
@@ -576,12 +587,10 @@ export const MessageInput = memo(function MessageInput({
 
     // 先组装 message 但不立刻清空 pendingFiles/pendingImages，
     // 让 onSend 失败时用户的附件也能保留、可以重试。
-    let message = trimmed;
-    if (sentFiles.length > 0) {
-      const list = sentFiles.map((f) => `- ${f.path}`).join('\n');
-      const prefix = `[我上传了以下文件到工作区，请查看并使用]\n${list}`;
-      message = message ? `${prefix}\n\n${message}` : prefix;
-    }
+    const message = withUploadedFiles(
+      trimmed,
+      sentFiles.map((file) => file.path),
+    );
     if (message.length > MAX_MESSAGE_CHARS) {
       showSendError(
         '消息超过 64K 字符上限，请精简内容，长文本可以改为上传文件',

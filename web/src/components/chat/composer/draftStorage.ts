@@ -25,6 +25,7 @@ export const MAX_ENTRIES = 50;
 
 // The latest document per draft key in this tab, including drafts too large
 // to persist, so a remounted composer restores chips without a reload.
+// Least recently written first; capped like the stored drafts.
 const docs = new Map<string, PersistedDraft>();
 
 function storage(): Storage | null {
@@ -100,25 +101,30 @@ export function writePersistedDraft(
   text: string,
   doc?: JSONContent,
 ): void {
-  if (text) docs.set(key, { text, doc });
-  else docs.delete(key);
+  docs.delete(key);
+  if (text) {
+    docs.set(key, { text, doc });
+    if (docs.size > MAX_ENTRIES) docs.delete(docs.keys().next().value!);
+  }
   const store = storage();
   if (!store || !owner) return;
   const name = entryKey(owner, key);
   try {
-    if (!text) {
+    let body =
+      text && text.length <= MAX_ENTRY_CHARS
+        ? JSON.stringify({ text, doc })
+        : '';
+    // Too large with its chips: keep the text alone if that fits.
+    if (body.length > MAX_ENTRY_CHARS) body = JSON.stringify({ text });
+    if (!body || body.length > MAX_ENTRY_CHARS) {
       store.removeItem(name);
       return;
     }
-    let value = JSON.stringify({ text, doc, at: Date.now() });
-    if (value.length > MAX_ENTRY_CHARS) {
-      // Too large with its chips: keep the text alone if that fits.
-      value = JSON.stringify({ text, at: Date.now() });
-    }
-    if (value.length > MAX_ENTRY_CHARS) {
-      store.removeItem(name);
-      return;
-    }
+    // The write time goes last, into the already serialized object; an
+    // unchanged draft is not written again.
+    const unchanged = `${body.slice(0, -1)},"at":`;
+    if (store.getItem(name)?.startsWith(unchanged)) return;
+    const value = `${unchanged}${Date.now()}}`;
     const others = otherEntryNames(store, name);
     evictOldest(store, others, others.length - (MAX_ENTRIES - 1));
     try {

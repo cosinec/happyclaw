@@ -195,6 +195,21 @@ describe('sentMessageHistory', () => {
       '会话',
     ]);
   });
+
+  it('recalls the text of a message, not the uploaded-file announcement', () => {
+    const state = {
+      messages: {
+        'web:g1': [
+          message(
+            '[我上传了以下文件到工作区，请查看并使用]\n- a.pdf\n\n总结一下',
+          ),
+          message('[我上传了以下文件到工作区，请查看并使用]\n- b.pdf'),
+        ],
+      },
+      agentMessages: {},
+    };
+    expect(sentMessageHistory(state, 'web:g1', 'u1')).toEqual(['总结一下']);
+  });
 });
 
 describe('splitWorkspaceQuery', () => {

@@ -1,4 +1,5 @@
 import type { Message } from '../../../stores/chat';
+import { withoutUploadedFiles } from '../composer-helpers';
 
 const AGENT_MARKER = '#agent:';
 const SENT_HISTORY_LIMIT = 50;
@@ -11,7 +12,8 @@ function sessionIdOf(draftKey: string): string | null {
 
 /**
  * What this user sent in a conversation, newest first, for ↑ recall: their
- * own messages only (not IM members or the agent), consecutive repeats once.
+ * own messages only (not IM members or the agent), consecutive repeats once,
+ * without the uploaded-file announcement (the files are not attached again).
  */
 export function sentMessageHistory(
   state: {
@@ -30,7 +32,7 @@ export function sentMessageHistory(
     const message = messages[i];
     if (message.is_from_me || message.sender === '__system__') continue;
     if (userId && message.sender !== userId) continue;
-    const content = message.content.trim();
+    const content = withoutUploadedFiles(message.content).trim();
     if (!content || content === history[history.length - 1]) continue;
     history.push(content);
     if (history.length >= SENT_HISTORY_LIMIT) break;

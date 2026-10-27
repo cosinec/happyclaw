@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Editor, JSONContent } from '@tiptap/core';
-import { useEditor } from '@tiptap/react';
+import { useEditor, type UseEditorOptions } from '@tiptap/react';
 import Document from '@tiptap/extension-document';
 import Paragraph from '@tiptap/extension-paragraph';
 import Text from '@tiptap/extension-text';
 import HardBreak from '@tiptap/extension-hard-break';
 import { History } from '@tiptap/extension-history';
 import { Placeholder } from '@tiptap/extension-placeholder';
-import { Fragment, Slice } from '@tiptap/pm/model';
-import { TextSelection } from '@tiptap/pm/state';
+import { Fragment, Slice, type Node as PMNode } from '@tiptap/pm/model';
+import { TextSelection, type EditorState } from '@tiptap/pm/state';
 import type { EditorView } from '@tiptap/pm/view';
 
 import { CjkPunctDecoration } from './cindy/CjkPunctDecoration';
@@ -45,6 +45,7 @@ import {
 } from './cindy/PastedTextChipNode';
 import { SlashCommandDecoration } from './cindy/SlashCommandDecoration';
 import { WindowsSelectionReplacement } from './cindy/WindowsSelectionReplacement';
+import { MAX_MESSAGE_CHARS } from '../composer-helpers';
 import { insertPlainText, readComposerTrigger } from './composerDocument';
 
 interface ComposerEditorHandlers {
@@ -52,10 +53,10 @@ interface ComposerEditorHandlers {
   onKeyDown: (view: EditorView, event: KeyboardEvent) => boolean;
   /** Images pasted from the clipboard. */
   onPasteImages: (files: File[]) => void;
+  /** Pasted text alone exceeded what one message may carry. */
+  onPasteTooLong: () => void;
   /** The document changed (typing, paste or a programmatic edit). */
   onDocChange: (editor: Editor) => void;
-  /** An IME composition was committed. */
-  onCompositionEnd: () => void;
 }
 
 interface ComposerEditorOptions {
@@ -65,6 +66,9 @@ interface ComposerEditorOptions {
   handlers: ComposerEditorHandlers;
 }
 
+// An Enter this soon after an IME commit belongs to the commit (Safari).
+const COMPOSITION_ENTER_GUARD_MS = 100;
+
 const isWindows = () =>
   typeof navigator !== 'undefined' && /Win/i.test(navigator.platform);
 
@@ -72,7 +76,7 @@ const isWindows = () =>
  * The composer's Tiptap editor: paragraphs, hard breaks, structured lists and
  * atomic chips, no marks. React re-renders only when the open `/`/`@` run or
  * the empty/non-empty state changes; ordinary keystrokes stay inside
- * ProseMirror.
+ * ProseMirror. Keys that belong to an IME never reach `onKeyDown`.
  */
 export function useComposerEditor({
   content,
@@ -88,115 +92,148 @@ export function useComposerEditor({
   const popupAriaRef = useRef<Record<string, string>>({});
   const [snapshot, setSnapshot] = useState<ComposerRenderSnapshot | null>(null);
   const snapshotRef = useRef<ComposerRenderSnapshot | null>(null);
+  // Emptiness of the last document seen; selection-only transactions keep it.
+  const emptinessRef = useRef<{ doc: PMNode; hasMessage: boolean } | null>(
+    null,
+  );
   // Typing a list marker through IME or paste skips input rules; promote it
   // after the transaction, once per microtask.
   const listPromotionQueuedRef = useRef(false);
+  const compositionEndAtRef = useRef(0);
   const editorRef = useRef<Editor | null>(null);
 
-  const refresh = (editor: Editor) => {
-    const next = composerRenderSnapshot(
-      readComposerTrigger(editor.state),
-      !composerDocIsEmpty(editor.state.doc),
+  const snapshotOf = (state: EditorState) => {
+    let emptiness = emptinessRef.current;
+    if (emptiness?.doc !== state.doc) {
+      emptiness = {
+        doc: state.doc,
+        hasMessage: !composerDocIsEmpty(state.doc),
+      };
+      emptinessRef.current = emptiness;
+    }
+    return composerRenderSnapshot(
+      readComposerTrigger(state),
+      emptiness.hasMessage,
     );
+  };
+
+  const refresh = (editor: Editor) => {
+    const next = snapshotOf(editor.state);
     if (shouldRefreshComposerRender(snapshotRef.current, next)) {
       snapshotRef.current = next;
       setSnapshot(next);
     }
   };
 
-  const editor = useEditor(
-    {
-      immediatelyRender: true,
-      shouldRerenderOnTransaction: false,
-      editable,
-      content,
-      extensions: [
-        Document,
-        Paragraph,
-        Text,
-        ComposerListItem,
-        ComposerBulletList,
-        ComposerOrderedList,
-        HardBreak,
-        History,
-        Placeholder.configure({
-          placeholder: () => placeholderRef.current,
-          showOnlyWhenEditable: false,
-          showOnlyCurrent: false,
-        }),
-        MentionChipNode,
-        PastedTextChipNode,
-        WindowsSelectionReplacement.configure({ enabled: isWindows() }),
-        EmptyDocSelectionGuard,
-        CjkPunctDecoration,
-        SlashCommandDecoration,
-      ],
-      editorProps: {
-        attributes: () => ({
-          role: 'textbox',
-          'aria-multiline': 'true',
-          'aria-label': placeholderRef.current,
-          'aria-autocomplete': 'list',
-          ...popupAriaRef.current,
-          'data-composer-editor': '',
-          class:
-            'max-h-36 min-h-6 w-full overflow-y-auto text-base leading-6 break-words whitespace-pre-wrap text-foreground outline-none lg:text-body-lg',
-        }),
-        clipboardTextSerializer: (slice) =>
-          serializeEditorSlice(editorRef.current, slice),
-        handleKeyDown: (view, event) =>
-          handlersRef.current.onKeyDown(view, event),
-        handlePaste: (view, event) => handlePaste(view, event),
-        handleDOMEvents: {
-          keydown: (view, event) => {
-            // ProseMirror hands Chrome on Android no Enter keydown at all
-            // (plain Enter comes back as a synthetic key after the DOM
-            // change). A modified Enter is never IME input: take it here so
-            // Mod+Enter still sends there.
-            if (
-              event.key !== 'Enter' ||
-              !(event.metaKey || event.ctrlKey) ||
-              view.composing ||
-              !handlersRef.current.onKeyDown(view, event)
-            ) {
-              return false;
-            }
-            event.preventDefault();
-            return true;
-          },
-          compositionend: (view) => {
-            handlersRef.current.onCompositionEnd();
-            // The final IME commit can bypass input rules. Wait until
-            // ProseMirror releases its native composition DOM, then promote a
-            // trailing Markdown list row if one was committed as plain text.
-            setTimeout(() => {
-              if (view.isDestroyed || view.composing) return;
-              promoteTrailingPlainListParagraph(view);
-            }, 0);
+  /**
+   * Keys that belong to an IME. ProseMirror keeps keys during its own
+   * composition; Safari and some Android IMEs deliver the committing Enter
+   * after compositionend, marked only by keyCode 229 or by its timing.
+   */
+  const isImeKey = (view: EditorView, event: KeyboardEvent) =>
+    view.composing ||
+    event.isComposing ||
+    event.keyCode === 229 ||
+    (event.key === 'Enter' &&
+      Date.now() - compositionEndAtRef.current < COMPOSITION_ENTER_GUARD_MS);
+
+  // Built once: `useEditor` compares options on every render and re-applies
+  // them (two view updates) when anything differs. Changing values are read
+  // through refs.
+  const [options] = useState<UseEditorOptions>(() => ({
+    immediatelyRender: true,
+    shouldRerenderOnTransaction: false,
+    editable,
+    content,
+    extensions: [
+      Document,
+      Paragraph,
+      Text,
+      ComposerListItem,
+      ComposerBulletList,
+      ComposerOrderedList,
+      HardBreak,
+      History,
+      Placeholder.configure({
+        placeholder: () => placeholderRef.current,
+        showOnlyWhenEditable: false,
+        showOnlyCurrent: false,
+      }),
+      MentionChipNode,
+      PastedTextChipNode,
+      WindowsSelectionReplacement.configure({ enabled: isWindows() }),
+      EmptyDocSelectionGuard,
+      CjkPunctDecoration,
+      SlashCommandDecoration,
+    ],
+    editorProps: {
+      attributes: () => ({
+        role: 'textbox',
+        'aria-multiline': 'true',
+        'aria-label': placeholderRef.current,
+        'aria-autocomplete': 'list',
+        ...popupAriaRef.current,
+        'data-composer-editor': '',
+        class:
+          'max-h-36 min-h-6 w-full overflow-y-auto text-base leading-6 break-words whitespace-pre-wrap text-foreground outline-none lg:text-body-lg',
+      }),
+      clipboardTextSerializer: (slice) =>
+        serializeEditorSlice(editorRef.current, slice),
+      handleKeyDown: (view, event) =>
+        // An IME's Enter neither sends nor breaks the line.
+        isImeKey(view, event)
+          ? event.key === 'Enter'
+          : handlersRef.current.onKeyDown(view, event),
+      handlePaste: (view, event) => handlePaste(view, event),
+      handleDOMEvents: {
+        keydown: (view, event) => {
+          // ProseMirror hands Chrome on Android no Enter keydown at all
+          // (plain Enter comes back as a synthetic key after the DOM
+          // change). A modified Enter is never IME input: take it here so
+          // Mod+Enter still sends there.
+          if (
+            event.key !== 'Enter' ||
+            !(event.metaKey || event.ctrlKey) ||
+            isImeKey(view, event) ||
+            !handlersRef.current.onKeyDown(view, event)
+          ) {
             return false;
-          },
+          }
+          event.preventDefault();
+          return true;
+        },
+        compositionend: (view) => {
+          compositionEndAtRef.current = Date.now();
+          // The final IME commit can bypass input rules. Wait until
+          // ProseMirror releases its native composition DOM, then promote a
+          // trailing Markdown list row if one was committed as plain text.
+          setTimeout(() => {
+            if (view.isDestroyed || view.composing) return;
+            promoteTrailingPlainListParagraph(view);
+          }, 0);
+          return false;
         },
       },
-      onTransaction: ({ editor: current }) => refresh(current),
-      onUpdate: ({ editor: current }) => {
-        if (
-          !current.view.composing &&
-          !listPromotionQueuedRef.current &&
-          hasTrailingPlainListParagraph(current.view)
-        ) {
-          listPromotionQueuedRef.current = true;
-          queueMicrotask(() => {
-            listPromotionQueuedRef.current = false;
-            if (!current.isDestroyed && !current.view.composing) {
-              promoteTrailingPlainListParagraph(current.view);
-            }
-          });
-        }
-        handlersRef.current.onDocChange(current);
-      },
     },
-    [],
-  );
+    onTransaction: ({ editor: current }) => refresh(current),
+    onUpdate: ({ editor: current }) => {
+      if (
+        !current.view.composing &&
+        !listPromotionQueuedRef.current &&
+        hasTrailingPlainListParagraph(current.view)
+      ) {
+        listPromotionQueuedRef.current = true;
+        queueMicrotask(() => {
+          listPromotionQueuedRef.current = false;
+          if (!current.isDestroyed && !current.view.composing) {
+            promoteTrailingPlainListParagraph(current.view);
+          }
+        });
+      }
+      handlersRef.current.onDocChange(current);
+    },
+  }));
+  const editor = useEditor(options, []);
   editorRef.current = editor;
 
   useEffect(() => {
@@ -242,7 +279,7 @@ export function useComposerEditor({
       // Images become attachments; any text on the same clipboard is
       // inserted exactly once by us.
       event.preventDefault();
-      if (text) insertClipboardText(view, text);
+      if (text) insertText(view, text);
       handlersRef.current.onPasteImages(images);
       return true;
     }
@@ -250,19 +287,20 @@ export function useComposerEditor({
     if (html && htmlCarriesOwnChipMarkup(html)) return false;
     if (!text) return false;
     event.preventDefault();
-    insertClipboardText(view, text);
+    insertText(view, text);
     return true;
+  }
+
+  /** Clipboard text, unless it alone is more than a message may carry. */
+  function insertText(view: EditorView, text: string) {
+    if (text.length > MAX_MESSAGE_CHARS) handlersRef.current.onPasteTooLong();
+    else insertClipboardText(view, text);
   }
 
   return {
     editor,
     setPopupAria,
-    snapshot:
-      snapshot ??
-      composerRenderSnapshot(
-        readComposerTrigger(editor.state),
-        !composerDocIsEmpty(editor.state.doc),
-      ),
+    snapshot: snapshot ?? snapshotOf(editor.state),
   };
 }
 

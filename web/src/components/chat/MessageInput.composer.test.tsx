@@ -592,10 +592,20 @@ describe('sending', () => {
     expect(onStop).toHaveBeenCalledTimes(1);
   });
 
-  test('a message over the server limit is not sent', async () => {
+  test('a paste over the server limit is refused before it lands', async () => {
     const onSend = vi.fn(() => true);
     await render(<MessageInput groupJid="web:g1" onSend={onSend} />);
     await paste({ text: 'x'.repeat(64 * 1024 + 1) });
+    expect(text()).toBe('');
+    expect(editorEl().querySelector('[data-pasted-text-chip]')).toBeNull();
+    expect(container!.textContent).toContain('粘贴的内容超过 64K 字符上限');
+  });
+
+  test('a message that grows over the server limit is not sent', async () => {
+    const onSend = vi.fn(() => true);
+    await render(<MessageInput groupJid="web:g1" onSend={onSend} />);
+    await paste({ text: 'x'.repeat(40 * 1024) });
+    await paste({ text: 'y'.repeat(30 * 1024) });
     await keyDown('Enter');
     expect(onSend).not.toHaveBeenCalled();
     expect(container!.textContent).toContain('消息超过 64K 字符上限');

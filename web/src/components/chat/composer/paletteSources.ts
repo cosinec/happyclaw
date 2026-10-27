@@ -1,8 +1,8 @@
 /**
  * Data behind the composer's `/` and `@` palettes: HappyClaw's own commands,
  * the Skills the workspace's Agent can use, and workspace directory listings.
- * Results are cached per workspace for a short while, so switching sessions
- * does not refetch them.
+ * Skill lists are cached per workspace for a short while, so switching
+ * sessions does not refetch them; listings are read fresh for each `@`.
  */
 import { api } from '../../../api/client';
 import { listWorkspaceFiles } from '../../../stores/files';
@@ -47,7 +47,9 @@ interface CacheEntry<T> {
 }
 
 const skillCache = new Map<string, CacheEntry<SlashCommandItem[]>>();
-const directoryCache = new Map<string, CacheEntry<WorkspaceEntry[]>>();
+// A huge directory (dependencies, build output) is browsed by narrowing the
+// path; ranking every entry on each keystroke would stall typing.
+const MAX_LISTED_ENTRIES = 1000;
 
 function cached<T>(
   cache: Map<string, CacheEntry<T>>,
@@ -66,17 +68,9 @@ function cached<T>(
   return value;
 }
 
-/** Forget cached palette data (tests). */
+/** Forget cached skill lists (tests). */
 export function clearPaletteSourceCache(): void {
   skillCache.clear();
-  directoryCache.clear();
-}
-
-/** Forget a workspace's listings, e.g. after uploading into it. */
-export function forgetWorkspaceListings(workspaceJid: string): void {
-  for (const key of directoryCache.keys()) {
-    if (key.startsWith(`${workspaceJid}|`)) directoryCache.delete(key);
-  }
 }
 
 /** What the workspace's Agent actually loads (owners only). */
@@ -139,25 +133,24 @@ export function loadWorkspaceSkills(
 }
 
 /** One directory level of the workspace, directories first. */
-export function loadWorkspaceDirectory(
+export async function loadWorkspaceDirectory(
   workspaceJid: string,
   dir: string,
 ): Promise<WorkspaceEntry[]> {
-  return cached(directoryCache, `${workspaceJid}|${dir}`, 15_000, async () => {
-    const data = await listWorkspaceFiles(workspaceJid, dir);
-    return data.files
-      .filter((file) => !file.isSystem)
-      .map((file) => ({
-        type: file.type === 'directory' ? ('dir' as const) : ('file' as const),
-        name: file.name,
-        relPath: file.path.replace(/\\/g, '/').replace(/\/+$/, ''),
-      }))
-      .sort(
-        (a, b) =>
-          (a.type === b.type ? 0 : a.type === 'dir' ? -1 : 1) ||
-          a.name.localeCompare(b.name),
-      );
-  });
+  const data = await listWorkspaceFiles(workspaceJid, dir);
+  return data.files
+    .filter((file) => !file.isSystem)
+    .map((file) => ({
+      type: file.type === 'directory' ? ('dir' as const) : ('file' as const),
+      name: file.name,
+      relPath: file.path.replace(/\\/g, '/').replace(/\/+$/, ''),
+    }))
+    .sort(
+      (a, b) =>
+        (a.type === b.type ? 0 : a.type === 'dir' ? -1 : 1) ||
+        a.name.localeCompare(b.name),
+    )
+    .slice(0, MAX_LISTED_ENTRIES);
 }
 
 /** Split an `@` query into the directory to list and the name filter. */

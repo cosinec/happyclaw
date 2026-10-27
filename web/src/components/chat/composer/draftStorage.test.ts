@@ -102,6 +102,18 @@ describe('persisted composer drafts', () => {
     expect(readPersistedDraft('u1', 'web:g3')?.text).toBe('draft 3');
   });
 
+  it('does not write an unchanged draft again', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    writePersistedDraft('u1', 'web:g1', 'same');
+    const first = [...storage.values()][0];
+    vi.setSystemTime(2_000);
+    writePersistedDraft('u1', 'web:g1', 'same');
+    expect([...storage.values()][0]).toBe(first);
+    writePersistedDraft('u1', 'web:g1', 'changed');
+    expect(readPersistedDraft('u1', 'web:g1')?.text).toBe('changed');
+  });
+
   it('only offers a remembered document for the text it was written with', () => {
     writePersistedDraft(null, 'web:g9', 'a', doc);
     expect(draftDocFor('web:g9', 'a')).toEqual(doc);

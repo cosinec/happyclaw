@@ -4,7 +4,6 @@ import { toast } from 'sonner';
 import { useStableCallback } from '@/hooks/useStableCallback';
 import { prepareImageForUpload } from '../../../lib/image-upload';
 import { uploadedFilePath, useFileStore } from '../../../stores/files';
-import { forgetWorkspaceListings } from './paletteSources';
 
 export interface PendingFile {
   /** Workspace-relative path the upload landed at; told to the agent. */
@@ -163,7 +162,6 @@ export function useComposerAttachments({
     const basePath = useFileStore.getState().currentPath[workspaceJid] || '';
     const ok = await uploadFiles(workspaceJid, files, basePath);
     if (!ok) return;
-    forgetWorkspaceListings(workspaceJid);
     stageFiles(
       target,
       files.map((file) => ({
