@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import type { ProviderWithHealth } from './types';
+import { makeProvider } from './test-helpers';
 
 (
   globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
@@ -13,16 +14,37 @@ import type { ProviderWithHealth } from './types';
 const mocks = vi.hoisted(() => ({
   get: vi.fn(),
   put: vi.fn(),
+  post: vi.fn(),
+  patch: vi.fn(),
   del: vi.fn(),
   setNotice: vi.fn(),
   setError: vi.fn(),
+  wizard: vi.fn(),
+  detail: vi.fn(),
 }));
 
 vi.mock('../../api/client', () => ({
-  api: { get: mocks.get, put: mocks.put, post: vi.fn(), delete: mocks.del },
+  api: {
+    get: mocks.get,
+    put: mocks.put,
+    post: mocks.post,
+    patch: mocks.patch,
+    delete: mocks.del,
+  },
 }));
-// The editor is not under test; keep its catalog requests out of the way.
-vi.mock('./ProviderEditor', () => ({ ProviderEditor: () => null }));
+// The wizard and the detail have their own tests; record what they are given.
+vi.mock('./AddModelWizard', () => ({
+  AddModelWizardDialog: (props: unknown) => {
+    mocks.wizard(props);
+    return null;
+  },
+}));
+vi.mock('./ConnectionDetailDialog', () => ({
+  ConnectionDetailDialog: (props: unknown) => {
+    mocks.detail(props);
+    return null;
+  },
+}));
 
 const { ClaudeProviderSection } = await import('./ClaudeProviderSection');
 
@@ -30,11 +52,12 @@ let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
 beforeEach(() => {
+  vi.clearAllMocks();
   mocks.get.mockReset();
   mocks.put.mockReset();
+  mocks.post.mockReset();
+  mocks.patch.mockReset();
   mocks.del.mockReset();
-  mocks.setNotice.mockReset();
-  mocks.setError.mockReset();
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -48,22 +71,14 @@ afterEach(async () => {
 });
 
 function provider(id: string, enabled: boolean): ProviderWithHealth {
-  return {
+  return makeProvider({
     id,
     name: `配置 ${id}`,
-    type: 'third_party',
     enabled,
-    weight: 1,
     anthropicBaseUrl: `https://${id}.example.test`,
     anthropicModel: `${id}-model`,
-    anthropicAuthMode: 'bearer',
-    hasAnthropicAuthToken: true,
-    hasAnthropicApiKey: false,
-    hasClaudeCodeOauthToken: false,
-    hasClaudeOAuthCredentials: false,
-    hasCodexOAuthCredentials: false,
-    health: null,
-  } as ProviderWithHealth;
+    models: [{ id: `${id}-model` }],
+  });
 }
 
 function listing(defaultModelConfigId: string | null) {
@@ -218,5 +233,190 @@ describe('ClaudeProviderSection default model', () => {
     );
 
     expect(mocks.setNotice).toHaveBeenCalledWith('已删除模型配置「配置 b」');
+  });
+});
+
+describe('ClaudeProviderSection connections', () => {
+  const lastProps = (mock: typeof mocks.wizard) =>
+    mock.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+
+  test('adding opens the wizard with the enabled count, and a saved connection reloads the list', async () => {
+    mocks.get.mockResolvedValue(listing(null));
+    await render();
+    expect(lastProps(mocks.wizard).open).toBe(false);
+    await act(async () =>
+      [...document.querySelectorAll<HTMLButtonElement>('button')]
+        .find((button) => button.textContent?.includes('添加模型连接'))!
+        .click(),
+    );
+    const props = lastProps(mocks.wizard);
+    expect(props.open).toBe(true);
+    expect(props.enabledCount).toBe(1);
+
+    mocks.get.mockClear();
+    await act(async () =>
+      (props.onClose as (result: unknown) => void)({
+        saved: { id: 'n', name: '新连接' },
+        verified: false,
+        created: null,
+      }),
+    );
+    expect(mocks.setNotice).toHaveBeenCalledWith(
+      '已添加模型连接「新连接」，尚未验证',
+    );
+    expect(mocks.get).toHaveBeenCalledWith('/api/config/claude/providers');
+    expect(lastProps(mocks.wizard).open).toBe(false);
+  });
+
+  test('leaving the wizard after an OAuth login says the connection exists', async () => {
+    mocks.get.mockResolvedValue(listing(null));
+    await render();
+    await act(async () =>
+      (lastProps(mocks.wizard).onClose as (result: unknown) => void)({
+        saved: null,
+        verified: false,
+        created: { id: 'c', name: '官方 Claude (OAuth)' },
+      }),
+    );
+    expect(mocks.setNotice).toHaveBeenCalledWith(
+      expect.stringContaining('已创建模型连接「官方 Claude (OAuth)」'),
+    );
+  });
+
+  test('a row opens its detail with the fresh record', async () => {
+    mocks.get.mockResolvedValue(listing(null));
+    await render();
+    expect(lastProps(mocks.detail).provider).toBeNull();
+    await act(async () =>
+      (
+        document.querySelectorAll('[data-slot="list-row"]')[1] as HTMLElement
+      ).click(),
+    );
+    expect((lastProps(mocks.detail).provider as ProviderWithHealth).id).toBe(
+      'b',
+    );
+  });
+
+  test('the row test stores the result and reports a failure with its next step', async () => {
+    mocks.get.mockResolvedValue(listing(null));
+    mocks.post.mockResolvedValue({
+      ok: false,
+      probes: [{ model: 'a-model', ok: false, status: 402, latencyMs: 30 }],
+      code: 'QUOTA_EXCEEDED',
+    });
+    await render();
+    await act(async () =>
+      document
+        .querySelectorAll<HTMLButtonElement>('button[aria-label="更多操作"]')[0]
+        .dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+        ),
+    );
+    await act(async () =>
+      [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')]
+        .find((node) => node.textContent?.includes('测试连接'))!
+        .click(),
+    );
+    expect(mocks.post).toHaveBeenCalledWith(
+      '/api/config/claude/providers/test',
+      { providerId: 'a' },
+      60_000,
+    );
+    expect(mocks.setError).toHaveBeenCalledWith(
+      expect.stringContaining('「配置 a」余额或额度不足'),
+    );
+  });
+
+  test('a stored test result and a saved field update the row without a reload', async () => {
+    mocks.get.mockResolvedValue(listing(null));
+    mocks.post.mockResolvedValue({
+      ok: true,
+      probes: [],
+      code: null,
+      record: {
+        ok: true,
+        code: null,
+        status: 200,
+        model: 'a-model',
+        latencyMs: 30,
+        at: new Date().toISOString(),
+      },
+    });
+    await render();
+    mocks.get.mockClear();
+    await act(async () =>
+      document
+        .querySelectorAll<HTMLButtonElement>('button[aria-label="更多操作"]')[0]
+        .dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+        ),
+    );
+    await act(async () =>
+      [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')]
+        .find((node) => node.textContent?.includes('测试连接'))!
+        .click(),
+    );
+    const rows = () =>
+      [...document.querySelectorAll('[data-slot="list-row"]')].map(
+        (row) => row.textContent ?? '',
+      );
+    expect(rows()[0]).toContain('已连接');
+
+    // What the detail saved comes back as fields of that connection.
+    await act(async () =>
+      (lastProps(mocks.detail).onChanged as (update: unknown) => void)({
+        id: 'b',
+        name: '改过的名字',
+      }),
+    );
+    expect(rows()[1]).toContain('改过的名字');
+    expect(mocks.get).not.toHaveBeenCalled();
+
+    // Without fields (a new credential) the list is read again.
+    await act(async () => (lastProps(mocks.detail).onChanged as () => void)());
+    expect(mocks.get).toHaveBeenCalledWith('/api/config/claude/providers');
+  });
+
+  test('weights are editable under the weighted strategy and saved per connection', async () => {
+    const weighted = {
+      ...listing(null),
+      providers: [provider('a', true), provider('b', true)],
+      balancing: {
+        strategy: 'weighted-round-robin',
+        unhealthyThreshold: 3,
+        recoveryIntervalMs: 300_000,
+      },
+    };
+    mocks.get.mockResolvedValue(weighted);
+    mocks.patch.mockResolvedValue({ provider: provider('b', true) });
+    await render();
+    await act(async () =>
+      document
+        .querySelector<HTMLButtonElement>(
+          'button[aria-controls="balancing-settings-panel"]',
+        )!
+        .click(),
+    );
+    const input = document.querySelector<HTMLInputElement>(
+      'input[aria-label="「配置 b」的权重"]',
+    )!;
+    expect(input.value).toBe('1');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, '250');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input.focus();
+      input.blur();
+    });
+    // Clamped to the server's 1–100 range.
+    expect(mocks.patch).toHaveBeenCalledWith(
+      '/api/config/claude/providers/b',
+      { weight: 100 },
+      120_000,
+    );
   });
 });

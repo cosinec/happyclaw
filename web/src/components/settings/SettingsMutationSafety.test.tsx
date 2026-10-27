@@ -83,6 +83,8 @@ describe('BalancingSettings accessibility and persistence timing', () => {
           }}
           hasDefault={false}
           onChange={onChange}
+          pool={[]}
+          onWeightChange={vi.fn()}
           disabled={false}
           saving={false}
         />,

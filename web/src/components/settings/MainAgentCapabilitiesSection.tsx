@@ -30,6 +30,13 @@ import {
 } from '../../utils/agent-runtime-policy';
 import { SettingsGroup, SettingsRow, SettingsSection } from './SettingsLayout';
 import { SettingsFormFooter } from './SettingsFormControls';
+import {
+  AgentModelSelect,
+  hasModelLists,
+  modelBindingChanges,
+} from './AgentModelSelect';
+import { modelBindingErrorMessage } from './model-connections';
+import { getErrorMessage } from './types';
 
 type CapabilityMode = 'inherit' | 'custom' | 'disabled';
 
@@ -65,6 +72,7 @@ export function MainAgentCapabilitiesSection() {
   const [mcpMode, setMcpMode] = useState<CapabilityMode>('inherit');
   const [mcpIds, setMcpIds] = useState<string[]>([]);
   const [modelConfigId, setModelConfigId] = useState('inherit');
+  const [model, setModel] = useState<string | null>(null);
   const [effort, setEffort] = useState<AgentEffortLevel>('inherit');
   const [saving, setSaving] = useState(false);
 
@@ -82,6 +90,7 @@ export function MainAgentCapabilitiesSection() {
     setMcpMode(profile.runtime_policy.mcp.mode);
     setMcpIds(normalizeMcpPolicyReferences(profile.runtime_policy.mcp.ids));
     setModelConfigId(profile.model_config_id ?? 'inherit');
+    setModel(profile.model ?? null);
     setEffort(profile.runtime_policy.reasoning?.effort ?? 'inherit');
   }, [profile?.id, profile?.updated_at]);
 
@@ -115,11 +124,16 @@ export function MainAgentCapabilitiesSection() {
     ids: hostSkillIds,
   });
   const capabilityError = managedSkillsError ?? hostSkillsError;
+  const persistedModelConfigId =
+    modelConfigId === 'inherit' ? null : modelConfigId;
+  // An automatic configuration has no model of its own to pin.
+  const persistedModel = persistedModelConfigId ? model : null;
+  const modelChanged = !!profile && persistedModel !== (profile.model ?? null);
 
   const dirty =
     !!profile &&
-    ((modelConfigId === 'inherit' ? null : modelConfigId) !==
-      profile.model_config_id ||
+    (persistedModelConfigId !== profile.model_config_id ||
+      modelChanged ||
       effort !== (profile.runtime_policy.reasoning?.effort ?? 'inherit') ||
       skillsMode !== profile.runtime_policy.skills.mode ||
       JSON.stringify(skillIds) !==
@@ -164,7 +178,8 @@ export function MainAgentCapabilitiesSection() {
     setSaving(true);
     try {
       await api.patch(`/api/agent-profiles/${encodeURIComponent(profile.id)}`, {
-        model_config_id: modelConfigId === 'inherit' ? null : modelConfigId,
+        model_config_id: persistedModelConfigId,
+        ...modelBindingChanges(profile, persistedModelConfigId, model),
         runtime_policy: {
           reasoning: { effort },
           skills: {
@@ -178,7 +193,10 @@ export function MainAgentCapabilitiesSection() {
       await loadProfiles();
       toast.success('主 HappyClaw 模型、推理档位与能力已保存');
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : '保存能力失败');
+      toast.error(
+        modelBindingErrorMessage(error) ??
+          getErrorMessage(error, '保存能力失败'),
+      );
     } finally {
       setSaving(false);
     }
@@ -222,7 +240,14 @@ export function MainAgentCapabilitiesSection() {
               label="模型配置"
               description="Home 工作区、主会话、独立会话与定时任务都会继承该选择。自动选择只使用已启用配置；未启用的配置仍可在这里显式使用。"
               control={
-                <Select value={modelConfigId} onValueChange={setModelConfigId}>
+                <Select
+                  value={modelConfigId}
+                  onValueChange={(next) => {
+                    setModelConfigId(next);
+                    // A model belongs to its configuration.
+                    setModel(null);
+                  }}
+                >
                   <SelectTrigger
                     aria-label="主 HappyClaw 模型配置"
                     className="w-full sm:w-64"
@@ -248,6 +273,22 @@ export function MainAgentCapabilitiesSection() {
                 </Select>
               }
             />
+            {hasModelLists(modelConfigs) && (
+              <SettingsRow
+                label="模型"
+                description="在所选模型配置里选择模型；连接默认跟随该配置设为默认的模型。自动选择模型配置时无法指定。"
+                control={
+                  <AgentModelSelect
+                    configs={modelConfigs}
+                    configId={modelConfigId}
+                    value={model}
+                    onChange={setModel}
+                    ariaLabel="主 HappyClaw 模型"
+                    className="w-full sm:w-64"
+                  />
+                }
+              />
+            )}
             <SettingsRow
               label="推理努力档位"
               description="跟随模型配置时保留 Provider 环境或 SDK 默认值；显式档位会覆盖该默认值。"

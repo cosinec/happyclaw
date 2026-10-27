@@ -51,6 +51,12 @@ import {
   SettingsGroup,
   SettingsRow,
 } from '@/components/settings/SettingsLayout';
+import {
+  AgentModelSelect,
+  hasModelLists,
+  modelBindingChanges,
+} from '@/components/settings/AgentModelSelect';
+import { modelBindingErrorMessage } from '@/components/settings/model-connections';
 import { cn } from '@/lib/utils';
 import { confirmDialog } from '@/stores/confirm';
 import {
@@ -290,6 +296,8 @@ export function AgentProfilesPage() {
   const [promptMode, setPromptMode] =
     useState<AgentProfilePromptMode>('append');
   const [modelConfigId, setModelConfigId] = useState('inherit');
+  // The model within that configuration; null runs its default.
+  const [model, setModel] = useState<string | null>(null);
   const [effort, setEffort] = useState<AgentEffortLevel>('inherit');
   const [assistantSection, setAssistantSection] =
     useState<AgentPromptSection>('identity');
@@ -559,6 +567,7 @@ export function AgentProfilesPage() {
       });
       setPromptMode('append');
       setModelConfigId('inherit');
+      setModel(null);
       setAvatarEmoji(null);
       setAvatarColor(null);
       setAvatarUrl(null);
@@ -575,6 +584,7 @@ export function AgentProfilesPage() {
     });
     setPromptMode(selected.prompt_mode);
     setModelConfigId(selected.model_config_id ?? 'inherit');
+    setModel(selected.model ?? null);
     setAvatarEmoji(selected.avatar_emoji);
     setAvatarColor(selected.avatar_color);
     setAvatarUrl(selected.avatar_url);
@@ -589,6 +599,10 @@ export function AgentProfilesPage() {
     });
   }, [draftMode, loadProfileGovernance, selected?.id]);
 
+  const persistedModelConfigId =
+    modelConfigId === 'inherit' ? null : modelConfigId;
+  // An automatic configuration has no model of its own to pin.
+  const persistedModel = persistedModelConfigId ? model : null;
   const dirty =
     !draftMode &&
     !!selected &&
@@ -598,8 +612,8 @@ export function AgentProfilesPage() {
       agentsPrompt !== selected.agents_prompt ||
       toolsPrompt !== selected.tools_prompt ||
       promptMode !== selected.prompt_mode ||
-      (modelConfigId === 'inherit' ? null : modelConfigId) !==
-        selected.model_config_id ||
+      persistedModelConfigId !== selected.model_config_id ||
+      persistedModel !== (selected.model ?? null) ||
       avatarEmoji !== selected.avatar_emoji ||
       avatarColor !== selected.avatar_color ||
       !sameRuntimePolicy(currentRuntimePolicy, selected.runtime_policy));
@@ -613,6 +627,7 @@ export function AgentProfilesPage() {
       !!toolsPrompt.trim() ||
       promptMode !== 'append' ||
       modelConfigId !== 'inherit' ||
+      model !== null ||
       avatarEmoji !== null ||
       avatarColor !== null ||
       !sameRuntimePolicy(currentRuntimePolicy, DEFAULT_RUNTIME_POLICY));
@@ -672,6 +687,8 @@ export function AgentProfilesPage() {
   }, [draftMode, draftStep]);
 
   const getErrorMessage = (err: unknown, fallback: string) => {
+    const modelError = modelBindingErrorMessage(err);
+    if (modelError) return modelError;
     if (err instanceof Error) return err.message;
     if (err && typeof err === 'object' && 'message' in err) {
       const message = (err as { message?: unknown }).message;
@@ -767,6 +784,7 @@ export function AgentProfilesPage() {
       });
       setPromptMode(draft.prompt_mode);
       setModelConfigId('inherit');
+      setModel(null);
       setAvatarEmoji(null);
       setAvatarColor(null);
       setAvatarUrl(null);
@@ -796,6 +814,7 @@ export function AgentProfilesPage() {
     });
     setPromptMode('append');
     setModelConfigId('inherit');
+    setModel(null);
     setAvatarEmoji(null);
     setAvatarColor(null);
     setAvatarUrl(null);
@@ -833,7 +852,9 @@ export function AgentProfilesPage() {
         prompt_mode: promptMode,
         avatar_emoji: avatarEmoji,
         avatar_color: avatarColor,
-        model_config_id: modelConfigId === 'inherit' ? null : modelConfigId,
+        model_config_id: persistedModelConfigId,
+        // Left out unless pinned, so an older server never sees the field.
+        ...(persistedModel ? { model: persistedModel } : {}),
         runtime_policy: currentRuntimePolicy,
       });
       setCreateDescription('');
@@ -872,11 +893,10 @@ export function AgentProfilesPage() {
       if (avatarColor !== selected.avatar_color) {
         changes.avatar_color = avatarColor;
       }
-      const persistedModelConfigId =
-        modelConfigId === 'inherit' ? null : modelConfigId;
-      if (persistedModelConfigId !== selected.model_config_id) {
-        changes.model_config_id = persistedModelConfigId;
-      }
+      Object.assign(
+        changes,
+        modelBindingChanges(selected, persistedModelConfigId, model),
+      );
       if (!sameRuntimePolicy(currentRuntimePolicy, selected.runtime_policy)) {
         changes.runtime_policy = currentRuntimePolicy;
       }
@@ -1776,7 +1796,11 @@ export function AgentProfilesPage() {
                     control={
                       <Select
                         value={modelConfigId}
-                        onValueChange={setModelConfigId}
+                        onValueChange={(next) => {
+                          setModelConfigId(next);
+                          // A model belongs to its configuration.
+                          setModel(null);
+                        }}
                       >
                         <SelectTrigger
                           aria-label="智能体模型配置"
@@ -1803,6 +1827,22 @@ export function AgentProfilesPage() {
                       </Select>
                     }
                   />
+                  {hasModelLists(modelConfigs) && (
+                    <AgentControlRow
+                      label="模型"
+                      description="在所选模型配置里选择模型；连接默认跟随该配置设为默认的模型。自动选择模型配置时无法指定。"
+                      control={
+                        <AgentModelSelect
+                          configs={modelConfigs}
+                          configId={modelConfigId}
+                          value={model}
+                          onChange={setModel}
+                          ariaLabel="智能体模型"
+                          className="w-full"
+                        />
+                      }
+                    />
+                  )}
                   <AgentControlRow
                     label="推理努力档位"
                     description="“跟随模型配置”保留 Provider 高级设置中的 CLAUDE_CODE_EFFORT_LEVEL；显式档位通过 Agent SDK 传入并覆盖该环境变量。不支持所选档位的模型会由 Claude 静默降级，实际值可在会话的 CLAUDE_EFFORT 环境变量中查看。"
@@ -1963,9 +2003,14 @@ export function AgentProfilesPage() {
                             ? defaultModelName
                               ? `跟随默认模型（${defaultModelName}）`
                               : `自动选择已启用模型（当前 ${enabledModelCount} 个）`
-                            : (modelConfigs.find(
-                                (item) => item.id === modelConfigId,
-                              )?.name ?? '不可用模型配置')
+                            : [
+                                modelConfigs.find(
+                                  (item) => item.id === modelConfigId,
+                                )?.name ?? '不可用模型配置',
+                                persistedModel,
+                              ]
+                                .filter(Boolean)
+                                .join(' · ')
                         }
                       />
                       <SummaryItem

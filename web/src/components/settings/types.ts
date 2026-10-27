@@ -1,3 +1,8 @@
+import type {
+  ProviderModelEntry,
+  ProviderTestRecord,
+} from '@/lib/model-providers';
+
 // ─── 统一供应商类型 (V4) ─────────────────────────────────────
 
 export interface UnifiedProviderPublic {
@@ -46,6 +51,12 @@ export interface UnifiedProviderPublic {
   /** Effort the gateway applies when the Agent does not choose one. */
   codexDefaultEffort?: string | null;
   customEnv: Record<string, string>;
+  /** The connection's effective model list; [] for ChatGPT (it uses its catalog). */
+  models: ProviderModelEntry[];
+  /** The MODEL_PRESETS id the connection started from. */
+  presetId: string | null;
+  /** The outcome of the last connection test. */
+  lastTest: ProviderTestRecord | null;
   updatedAt: string;
 }
 

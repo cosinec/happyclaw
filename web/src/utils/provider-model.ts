@@ -1,35 +1,12 @@
-const ONE_MILLION_CONTEXT_SUFFIX = '[1m]';
-const ONE_MILLION_CONTEXT_SUFFIX_RE = /(?:\[1m\])+$/i;
-
-export interface ProviderModelSelection {
-  model: string;
-  oneMillionContext: boolean;
-}
+import {
+  splitOneMillionSuffix,
+  withOneMillionSuffix,
+} from '@/lib/model-providers';
 
 export interface DefaultProviderEnvRow {
   key: string;
   value: string;
   source: 'model' | 'context' | 'default';
-}
-
-/** Convert a stored provider model into the editable model name and context toggle. */
-export function parseProviderModel(value: string): ProviderModelSelection {
-  const normalized = value.trim();
-  const oneMillionContext = ONE_MILLION_CONTEXT_SUFFIX_RE.test(normalized);
-  return {
-    model: normalized.replace(ONE_MILLION_CONTEXT_SUFFIX_RE, '').trim(),
-    oneMillionContext,
-  };
-}
-
-/** Build the single model value injected into Claude Code's environment. */
-export function buildProviderModel(
-  value: string,
-  oneMillionContext: boolean,
-): string {
-  const model = parseProviderModel(value).model;
-  if (!model) return '';
-  return oneMillionContext ? `${model}${ONE_MILLION_CONTEXT_SUFFIX}` : model;
 }
 
 /**
@@ -41,12 +18,17 @@ export function isOneMillionContextModel(model: string): boolean {
   return /\[1m\]$/i.test(model.trim());
 }
 
-/** Build the editable defaults prefilled for third-party providers. */
+/**
+ * The editable defaults prefilled for a third-party connection, derived from
+ * its default model (`[1m]` included when it runs with the 1M window).
+ */
 export function buildDefaultProviderEnv(
-  value: string,
-  oneMillionContext: boolean,
+  defaultModel: string,
 ): DefaultProviderEnvRow[] {
-  const model = buildProviderModel(value, oneMillionContext);
+  const model = withOneMillionSuffix(
+    defaultModel,
+    splitOneMillionSuffix(defaultModel).oneMillion,
+  );
   return [
     { key: 'ANTHROPIC_DEFAULT_OPUS_MODEL', value: model, source: 'model' },
     { key: 'ANTHROPIC_DEFAULT_SONNET_MODEL', value: model, source: 'model' },
