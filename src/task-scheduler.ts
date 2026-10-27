@@ -212,6 +212,7 @@ function toRunnerAgentProfile(profile: AgentProfile | undefined) {
     identityPrompt: buildAgentProfilePrompt(profile),
     includeClaudePreset: profile.prompt_mode === 'append',
     modelConfigId: profile.model_config_id,
+    model: profile.model,
     runtimePolicy: profile.runtime_policy,
   };
 }

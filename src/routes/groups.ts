@@ -111,9 +111,11 @@ import { hasPermission } from '../permissions.js';
 import {
   buildCodexSelectionView,
   chatGptDefaultModel,
+  listConnectionModels,
   readStoredChoice,
   validateSessionChoice,
   type CodexSelectionView,
+  type ConnectionModelChoice,
 } from '../session-model-overrides.js';
 import { clearTargetAgentBindingsForDeletedAgents } from '../im-context-isolation.js';
 import { getChannelType } from '../im-channel.js';
@@ -2244,8 +2246,9 @@ groupRoutes.post('/:jid/reset-session', authMiddleware, async (c) => {
 });
 
 // ─── 会话模型选择（聊天输入框的模型选择器） ──────────────────────────
-// Session-level pick of a saved model configuration. No selection means the
-// conversation follows the default: the Agent's model configuration, else the
+// Session-level pick of a saved model configuration and, optionally, one of
+// its models. No selection means the conversation follows the default: the
+// Agent's model configuration (and model), else the global default, else the
 // automatic pool of enabled configurations.
 
 type SessionModelSelectionScope =
@@ -2339,6 +2342,7 @@ function buildSessionModelSelectionPayload(
   }
 
   const codexViews = new Map<string, CodexSelectionView>();
+  const modelLists = new Map<string, ConnectionModelChoice[]>();
   const options = providers.map((provider) => {
     const option = {
       id: provider.id,
@@ -2350,7 +2354,13 @@ function buildSessionModelSelectionPayload(
       // key) would fail every turn; the picker shows it but cannot pick it.
       usable: providerHasCredentials(provider),
     };
-    if (!provider.codexOAuthCredentials) return option;
+    if (!provider.codexOAuthCredentials) {
+      // The picker lists the visible ones; a hidden model stays pickable by
+      // a choice that already names it.
+      const models = listConnectionModels(provider);
+      modelLists.set(provider.id, models);
+      return { ...option, models };
+    }
     // The list is the account's own once its catalog has been fetched; ask for
     // a fresher one without making the picker wait for it.
     maybeRefreshCodexProviderCatalog(provider.id, {
@@ -2370,12 +2380,21 @@ function buildSessionModelSelectionPayload(
   const view = selectedModelConfigId
     ? codexViews.get(selectedModelConfigId)
     : undefined;
-  // A stored model or effort the catalog or the chooser's permission no longer
-  // backs reads as unset, exactly as a runner launch would treat it.
+  const models = selectedModelConfigId
+    ? modelLists.get(selectedModelConfigId)
+    : undefined;
+  // A stored model or effort the list, the catalog or the chooser's permission
+  // no longer backs reads as unset, exactly as a runner launch would treat it.
   const selected =
     stored && view
       ? readStoredChoice(view, stored, canExceedCeiling)
-      : { model: null, effort: null };
+      : {
+          model:
+            stored?.model && models?.some((entry) => entry.id === stored.model)
+              ? stored.model
+              : null,
+          effort: null,
+        };
 
   return {
     selectedModelConfigId,
@@ -2395,10 +2414,11 @@ function buildSessionModelSelectionPayload(
  *
  * A different configuration or model starts a new SDK session on the next
  * message, so the warm runner is retired (one already on the chosen
- * configuration is spared only when no model is involved). A different effort
- * needs no restart at all: the gateway reads it per request, so the live
- * runners of the chosen configuration are pointed at it and keep running.
- * Choosing nothing new does nothing.
+ * configuration is spared only when no model is involved: neither choice
+ * names one, and a conversation that had picked nothing did not run the
+ * Agent's). A different effort needs no restart at all: the gateway reads it
+ * per request, so the live runners of the chosen configuration are pointed at
+ * it and keep running. Choosing nothing new does nothing.
  */
 function applySessionChoiceChange(
   deps: NonNullable<ReturnType<typeof getWebDeps>>,
@@ -2419,14 +2439,25 @@ function applySessionChoiceChange(
   ): string => {
     if (!choice?.modelConfigId) return '';
     const provider = providers.find((item) => item.id === choice.modelConfigId);
-    const model = provider?.codexOAuthCredentials
-      ? (choice.model ?? chatGptDefaultModel(provider))
-      : '';
+    const model = !provider
+      ? ''
+      : provider.codexOAuthCredentials
+        ? (choice.model ?? chatGptDefaultModel(provider))
+        : (choice.model ?? provider.anthropicModel);
     return `${choice.modelConfigId}\u0000${model}`;
   };
   let drained = 0;
   if (launchKey(previous) !== launchKey(next)) {
-    const target = previous?.model || next.model ? null : next.modelConfigId;
+    const profile = peekAgentProfileForWorkspace(
+      group.folder,
+      group.created_by,
+    );
+    const ranAgentModel =
+      !previous && !!profile?.model_config_id && !!profile.model;
+    const target =
+      previous?.model || next.model || ranAgentModel
+        ? null
+        : next.modelConfigId;
     drained = deps.queue.drainRunnersForModelSelection(
       agentId ? [`${jid}#agent:${agentId}`] : getJidsByFolder(group.folder),
       target,
