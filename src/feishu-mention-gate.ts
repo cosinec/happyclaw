@@ -27,6 +27,11 @@ export interface MentionGateInput {
   botOpenId: string;
   /** 消息附带的 @mention 列表 */
   mentions: MentionGateMention[] | undefined;
+  /**
+   * The input is addressed to the Bot by its structure rather than an
+   * @mention (a click on the Bot's own card button); it counts as mentioned.
+   */
+  addressedToBot?: boolean;
   /** 群 jid（仅用于把上下文透传给两个回调） */
   chatJid: string;
   /** 发送者 open_id（用于 owner 判断） */
@@ -143,12 +148,13 @@ export function evaluateMentionGate(
     return ALLOW;
   }
 
-  if (!input.botOpenId) {
-    return { allow: false, reason: 'bot_open_id_missing' };
-  }
-
-  if (!isBotMentioned(input.botOpenId, input.mentions)) {
-    return { allow: false, reason: 'not_mentioned' };
+  if (!input.addressedToBot) {
+    if (!input.botOpenId) {
+      return { allow: false, reason: 'bot_open_id_missing' };
+    }
+    if (!isBotMentioned(input.botOpenId, input.mentions)) {
+      return { allow: false, reason: 'not_mentioned' };
+    }
   }
 
   if (
