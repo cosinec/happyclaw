@@ -263,6 +263,10 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
 走正常入站管线（受众、owner、激活检查照旧，命令不解析），重复点击幂等；本轮结束后的
 终态卡片保留按钮。
 
+Telegram 默认流式：回复期间约每 1.5 秒编辑一条进度消息，结束后另发最终答复并删除
+进度消息；账号选项 `streamingMode: 'off'` 关闭。用户回复某条消息时，被回复内容作为
+引用上下文交给 Agent（受保护内容、服务消息与话题隐式回复除外）。
+
 原生上下文映射持久化在 `im_context_bindings`。工作区群聊挂载使用
 `channel_mounts`，Agent/会话挂载使用 `agent_channel_mounts`；兼容字段仍双写，
 迁移期间不得只更新其中一侧。
