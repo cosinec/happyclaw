@@ -48,7 +48,10 @@ import {
   WECOM_MARKDOWN_MAX_BYTES,
   WeComStreamingController,
 } from './wecom-streaming.js';
-import { isOwnerBootstrapCommand } from './im-group-audience.js';
+import {
+  groupSenderAdmission,
+  isOwnerBootstrapCommand,
+} from './im-group-audience.js';
 import {
   offerChannelFollowUp,
   parseConnectorRuntimeControl,
@@ -1449,15 +1452,19 @@ export function createWeComConnection(
       const ownerBootstrap =
         conversation.isGroup &&
         isOwnerBootstrapCommand(admissionText, registeredGroup);
+      // The message passed a gate only as `/owner_mention`: it must be
+      // consumed as that command, never stored as ordinary input.
+      let bootstrapOnly = false;
 
       if (conversation.isGroup) {
-        if (
-          opts?.isSenderAllowedInGroup &&
-          !opts.isSenderAllowedInGroup(jid, fromUserId) &&
-          !ownerBootstrap
-        ) {
-          return;
-        }
+        const audience = groupSenderAdmission(
+          opts ?? {},
+          jid,
+          fromUserId,
+          admissionText,
+        );
+        if (audience === 'rejected') return;
+        bootstrapOnly = audience === 'bootstrap';
 
         const mode = registeredGroup?.activation_mode;
         if (mode === 'disabled') return;
@@ -1472,10 +1479,10 @@ export function createWeComConnection(
         }
         if (
           mode === 'owner_mentioned' &&
-          !ownerBootstrap &&
           !opts?.isGroupOwnerMessage?.(jid, fromUserId)
         ) {
-          return;
+          if (!ownerBootstrap) return;
+          bootstrapOnly = true;
         }
       }
 
@@ -1519,6 +1526,7 @@ export function createWeComConnection(
       // An unknown command (no reply) is ordinary input for the Agent, as on
       // Feishu.
       commandReplies.delete(dedupKey);
+      if (bootstrapOnly) return;
 
       // All registration and business side effects are after admission,
       // routing, command handling, and group policy filters.

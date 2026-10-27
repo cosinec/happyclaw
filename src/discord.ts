@@ -47,9 +47,10 @@ import {
 } from './channel-admission.js';
 import { extractProviderTarget } from './channel-address.js';
 import {
-  isGroupSenderAdmitted,
+  groupSenderAdmission,
   type ChannelCommandMention,
   type GroupAudienceConnectOpts,
+  type GroupSenderAdmission,
 } from './im-group-audience.js';
 import {
   parseConnectorRuntimeControl,
@@ -587,12 +588,11 @@ export function createDiscordConnection(
         const unmentionedContent = msg.content.replace(/<@!?\d+>/g, '').trim();
 
         // Guild channel: check group filtering (must check actual @mention first)
+        const audience: GroupSenderAdmission = isDM
+          ? 'admitted'
+          : groupSenderAdmission(opts, jid, senderImId, unmentionedContent);
         if (!isDM) {
-          if (
-            !isGroupSenderAdmitted(opts, jid, senderImId, unmentionedContent)
-          ) {
-            return;
-          }
+          if (audience === 'rejected') return;
           const isBotMentioned = connectedClient.user
             ? msg.mentions.has(connectedClient.user)
             : false;
@@ -701,6 +701,8 @@ export function createDiscordConnection(
             return;
           }
         }
+        // Admitted only as `/owner_mention`, and not consumed as it.
+        if (audience === 'bootstrap') return;
 
         const resolvedRoute = resolveAdmittedChannelRoute(
           jid,
@@ -1149,6 +1151,22 @@ export function createDiscordConnection(
             if (admission.kind === 'deny') {
               await interaction.editReply(
                 '此聊天尚未配对。请先在 Web 设置页生成配对码。',
+              );
+              return;
+            }
+            // A native command is consumed as a command, so the
+            // `/owner_mention` bootstrap is the only exception, as on text.
+            if (
+              !isDM &&
+              groupSenderAdmission(
+                opts,
+                jid,
+                interaction.user.id,
+                `/${cmdBody}`,
+              ) === 'rejected'
+            ) {
+              await interaction.editReply(
+                '⚠️ 本频道只响应指定成员，命令未执行。',
               );
               return;
             }

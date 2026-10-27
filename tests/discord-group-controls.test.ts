@@ -261,6 +261,99 @@ describe('Discord guild response audience', () => {
   });
 });
 
+describe('Discord audience: /owner_mention and native commands', () => {
+  let connection: ReturnType<typeof createDiscordConnection> | null = null;
+  let groups: Record<string, AudienceGroup>;
+  let onCommand: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    discord.listeners.clear();
+    groups = {};
+    onCommand = vi.fn(async (_jid: string, command: string) =>
+      command.startsWith('owner_mention') ? 'claimed' : 'status text',
+    );
+  });
+
+  afterEach(async () => {
+    await connection?.disconnect();
+    connection = null;
+  });
+
+  async function connect(group: AudienceGroup) {
+    groups[GUILD_JID] = group;
+    connection = createDiscordConnection({ botToken: 'test-token' });
+    await connection.connect({
+      onNewChat: vi.fn(),
+      isChatAuthorized: () => true,
+      resolveEffectiveChatJid: (jid: string) => ({
+        effectiveJid: jid,
+        agentId: null,
+      }),
+      onCommand,
+      ...groupAudienceHost('discord', groups),
+    });
+  }
+
+  function interaction(user: string, commandName: string, enabled?: string) {
+    return {
+      isChatInputCommand: () => true,
+      channel: { type: discord.ChannelType.GuildText, name: 'general' },
+      guildId: 'guild-1',
+      channelId: 'chan-1',
+      user: { id: user, displayName: user },
+      commandName,
+      options: {
+        getString: (name: string) => (name === 'enabled' ? enabled : null),
+      },
+      deferReply: vi.fn(async () => undefined),
+      editReply: vi.fn(async () => undefined),
+    };
+  }
+
+  test('a multi-line /owner_mention that is not dispatched is dropped', async () => {
+    await connect({ audience_mode: 'owner_only' });
+    const handler = discord.listeners.get('messageCreate')![0]!;
+    await handler(
+      guildMsg({
+        author: '2',
+        content: `<@${BOT}> /owner_mention\nA\nB`,
+        mentioned: [{ id: BOT, bot: true }],
+      }),
+    );
+    expect(onCommand).not.toHaveBeenCalled();
+    expect(storeMessageDirect).not.toHaveBeenCalled();
+  });
+
+  test('native slash commands pass the same audience gate', async () => {
+    await connect({ audience_mode: 'owner_only', owner_im_id: '1' });
+    const handler = discord.listeners.get('interactionCreate')![0]!;
+
+    const outsider = interaction('2', 'status');
+    await handler(outsider);
+    expect(onCommand).not.toHaveBeenCalled();
+    expect(outsider.editReply).toHaveBeenCalledWith(
+      '⚠️ 本频道只响应指定成员，命令未执行。',
+    );
+
+    const toggle = interaction('2', 'require_mention', 'false');
+    await handler(toggle);
+    expect(onCommand).not.toHaveBeenCalled();
+
+    await handler(interaction('1', 'status'));
+    expect(onCommand).toHaveBeenCalledWith(GUILD_JID, 'status', '1');
+  });
+
+  test('a native /owner_mention can claim an unowned owner_only channel', async () => {
+    await connect({ audience_mode: 'owner_only' });
+    const handler = discord.listeners.get('interactionCreate')![0]!;
+    await handler(interaction('2', 'status'));
+    expect(onCommand).not.toHaveBeenCalled();
+    await handler(interaction('2', 'owner_mention'));
+    expect(onCommand).toHaveBeenCalledWith(GUILD_JID, 'owner_mention', '2');
+  });
+});
+
 describe('discordCommandMentions', () => {
   test('only users named by a mention token, never bots or reply pings', () => {
     expect(

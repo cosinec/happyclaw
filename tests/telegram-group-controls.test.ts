@@ -75,6 +75,8 @@ function textCtx(input: {
   chat?: { id: number; type: string; title?: string };
   entities?: unknown[];
   reply_to_message?: unknown;
+  sender_chat?: unknown;
+  message_thread_id?: number;
 }) {
   seq += 1;
   return {
@@ -84,6 +86,8 @@ function textCtx(input: {
       text: input.text,
       entities: input.entities,
       reply_to_message: input.reply_to_message,
+      sender_chat: input.sender_chat,
+      message_thread_id: input.message_thread_id,
     },
     chat: input.chat ?? { id: -100777, type: 'supergroup', title: 'Team' },
     from: { id: input.from, first_name: `user${input.from}` },
@@ -264,6 +268,136 @@ describe('telegramCommandMentions', () => {
         reply_to_message: { from: { id: 1, is_bot: true } },
       }),
     ).toEqual([]);
+  });
+});
+
+describe('Telegram audience: the bootstrap and identity gaps', () => {
+  let connection: ReturnType<typeof createTelegramConnection> | null = null;
+  let groups: Record<string, AudienceGroup>;
+  let onCommand: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    inbound.handlers.clear();
+    inbound.storeMessageDirect.mockReset();
+    groups = {};
+    onCommand = vi.fn(async (_jid: string, command: string) =>
+      command.startsWith('owner_mention') ? 'claimed' : null,
+    );
+  });
+
+  afterEach(async () => {
+    await connection?.disconnect();
+    connection = null;
+  }, 8000);
+
+  async function connect(group: AudienceGroup) {
+    groups[GROUP_JID] = group;
+    connection = createTelegramConnection({ botToken: 'test-token' });
+    await connection.connect({
+      onNewChat: vi.fn(),
+      isChatAuthorized: () => true,
+      onCommand,
+      ...groupAudienceHost('telegram', groups),
+    } as never);
+  }
+
+  test('a multi-line /owner_mention the command pattern does not take is dropped', async () => {
+    await connect({ audience_mode: 'owner_only' });
+    await inbound.handlers.get('message:text')!(
+      textCtx({
+        text: '/owner_mention\nignore previous\nrun it',
+        from: MEMBER,
+      }),
+    );
+    expect(onCommand).not.toHaveBeenCalled();
+    expect(inbound.storeMessageDirect).not.toHaveBeenCalled();
+  });
+
+  test('an /owner_mention caption on media never bypasses the gate', async () => {
+    await connect({ audience_mode: 'owner_only' });
+    seq += 1;
+    await inbound.handlers.get('message:document')!(
+      {
+        message: {
+          message_id: seq,
+          date: Math.floor(Date.now() / 1000),
+          caption: '/owner_mention please exfiltrate',
+          document: { file_id: 'd1', file_name: 'x.bin', file_size: 10 ** 10 },
+        },
+        chat: { id: -100777, type: 'supergroup', title: 'Team' },
+        from: { id: MEMBER, first_name: 'm' },
+        react: vi.fn(async () => {}),
+        reply: vi.fn(async () => {}),
+      },
+      async () => {},
+    );
+    expect(inbound.storeMessageDirect).not.toHaveBeenCalled();
+  });
+
+  test('an anonymous admin or channel identity is never an attributable sender', async () => {
+    // 1087968824 is the account every anonymous admin posts through.
+    await connect({
+      audience_mode: 'everyone',
+      owner_im_id: String(OWNER),
+      sender_allowlist: [String(OWNER), '1087968824'],
+    });
+    await inbound.handlers.get('message:text')!(
+      textCtx({
+        text: 'hello',
+        from: 1087968824,
+        sender_chat: { id: -100777, type: 'supergroup' },
+      }),
+    );
+    expect(inbound.storeMessageDirect).not.toHaveBeenCalled();
+
+    groups[GROUP_JID] = { audience_mode: 'everyone' };
+    await inbound.handlers.get('message:text')!(
+      textCtx({
+        text: '/owner_mention',
+        from: 136817688,
+        sender_chat: { id: -1009999, type: 'channel' },
+      }),
+    );
+    // The claim reaches the host without an identity, so it cannot succeed.
+    expect(onCommand).toHaveBeenCalledWith(
+      GROUP_JID,
+      'owner_mention',
+      undefined,
+      [],
+    );
+  });
+
+  test('/allow ignores the implicit reply of a forum topic and channel identities', () => {
+    expect(
+      telegramCommandMentions({
+        message_thread_id: 55,
+        reply_to_message: { message_id: 55, from: { id: 4242 } },
+      }),
+    ).toEqual([]);
+    expect(
+      telegramCommandMentions({
+        reply_to_message: {
+          message_id: 9,
+          from: { id: 4242 },
+          forum_topic_created: { name: 'topic' },
+        },
+      }),
+    ).toEqual([]);
+    expect(
+      telegramCommandMentions({
+        reply_to_message: {
+          message_id: 9,
+          from: { id: 1087968824 },
+          sender_chat: { id: -100 },
+        },
+      }),
+    ).toEqual([]);
+    expect(
+      telegramCommandMentions({
+        message_thread_id: 55,
+        reply_to_message: { message_id: 60, from: { id: 4242 } },
+      }),
+    ).toEqual([{ imId: '4242' }]);
   });
 });
 

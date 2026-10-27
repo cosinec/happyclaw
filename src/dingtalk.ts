@@ -48,10 +48,11 @@ import {
 } from './channel-admission.js';
 import { extractProviderTarget } from './channel-address.js';
 import {
-  isGroupSenderAdmitted,
+  groupSenderAdmission,
   type ChannelCommandMention,
   type GroupAudienceConnectOpts,
   type GroupOwnerView,
+  type GroupSenderAdmission,
 } from './im-group-audience.js';
 import {
   describeFollowUpOutcome,
@@ -2288,8 +2289,22 @@ export function createDingTalkConnection(
         // Mention/owner gating runs before routing, registration, cache writes,
         // or attachment download. A rejected group message has zero business
         // side effects.
+        let audience: GroupSenderAdmission = 'admitted';
         if (isGroup) {
-          if (!isGroupSenderAdmitted(opts, jid, data.senderId, admissionText)) {
+          audience = groupSenderAdmission(
+            opts,
+            jid,
+            data.senderId,
+            admissionText,
+          );
+          // Only a plain text message can be dispatched as `/owner_mention`;
+          // never download media for a sender outside the audience.
+          if (
+            audience === 'rejected' ||
+            (audience === 'bootstrap' &&
+              (data.msgtype !== 'text' ||
+                (data as DingTalkRobotMessage).text?.isReplyMsg))
+          ) {
             return;
           }
           const mode = opts.resolveRegisteredGroup?.(jid)?.activation_mode;
@@ -2917,6 +2932,8 @@ export function createDingTalkConnection(
             return;
           }
         }
+        // Admitted only as `/owner_mention`, and not consumed as it.
+        if (audience === 'bootstrap') return;
 
         // Route was resolved before registration and media download.
         const id = crypto.randomUUID();

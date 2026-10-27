@@ -43,7 +43,7 @@ import {
 } from './qq-passive-reply.js';
 import { resolveAdmittedChannelRoute } from './channel-admission.js';
 import {
-  isGroupSenderAdmitted,
+  groupSenderAdmission,
   type ChannelCommandMention,
   type GroupAudienceConnectOpts,
 } from './im-group-audience.js';
@@ -2351,16 +2351,13 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
           return;
         }
 
-        if (
-          !isGroupSenderAdmitted(
-            opts,
-            jid,
-            memberOpenId ? `group:${memberOpenId}` : undefined,
-            content,
-          )
-        ) {
-          return;
-        }
+        const admission = groupSenderAdmission(
+          opts,
+          jid,
+          memberOpenId ? `group:${memberOpenId}` : undefined,
+          content,
+        );
+        if (admission === 'rejected') return;
 
         const resolvedRoute = resolveAdmittedChannelRoute(
           jid,
@@ -2448,6 +2445,8 @@ export function createQQConnection(config: QQConnectionConfig): QQConnection {
             return;
           }
         }
+        // Admitted only as `/owner_mention`, and not consumed as it.
+        if (admission === 'bootstrap') return;
 
         // Handle attachments (images / files)
         let attachmentsJson: string | undefined;

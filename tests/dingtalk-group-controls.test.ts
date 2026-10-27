@@ -248,6 +248,33 @@ describe('DingTalk group response audience', () => {
       { imId: 'MEMBER' },
     ]);
   });
+
+  test('a multi-line /owner_mention that is not dispatched is dropped', async () => {
+    const { deliver } = await connect({ audience_mode: 'owner_only' });
+    await deliver(
+      downstream({ senderId: 'MEMBER', content: '/owner_mention\nA\nB' }),
+    );
+    expect(onCommand).not.toHaveBeenCalled();
+    expect(storeMessageDirect).not.toHaveBeenCalled();
+  });
+
+  test('a rich-text /owner_mention is never downloaded or stored', async () => {
+    const { deliver } = await connect({ audience_mode: 'owner_only' });
+    const message = downstream({ senderId: 'MEMBER', content: '' });
+    const payload = JSON.parse(message.data);
+    payload.msgtype = 'richText';
+    delete payload.text;
+    payload.content = {
+      richText: [
+        { text: '/owner_mention' },
+        { type: 'picture', downloadCode: 'code-1' },
+      ],
+    };
+    await deliver({ ...message, data: JSON.stringify(payload) });
+    expect(onCommand).not.toHaveBeenCalled();
+    expect(storeMessageDirect).not.toHaveBeenCalled();
+    expect(https.request).not.toHaveBeenCalled();
+  });
 });
 
 describe('dingTalkCommandMentions', () => {

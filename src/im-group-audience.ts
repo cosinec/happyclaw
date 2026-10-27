@@ -96,32 +96,43 @@ function isOwnerClaimable(group: GroupOwnerView | undefined): boolean {
 }
 
 /**
- * Whether a message in a group chat may reach commands, the Agent or any
- * side effect. Call it only for group chats, after pairing/authorization and
- * before commands, mention gates, registration and downloads. A connector
- * without the host callback admits everyone (unchanged legacy behavior).
+ * How a group message passes the response audience:
+ * - `admitted`: the sender is in the audience;
+ * - `bootstrap`: the sender is not, but the message is `/owner_mention` in a
+ *   group that can still be claimed. It may only be consumed as that command;
+ *   the connector must drop it if it does not dispatch it (media caption,
+ *   a multi-line text its command pattern does not match, no handler);
+ * - `rejected`: drop it before any side effect.
+ */
+export type GroupSenderAdmission = 'admitted' | 'bootstrap' | 'rejected';
+
+/**
+ * Response audience of a message in a group chat. Call it only for group
+ * chats, after pairing/authorization and before commands, mention gates,
+ * registration and downloads. A connector without the host callback admits
+ * everyone (unchanged legacy behavior).
  *
  * @param commandText message text after removing a leading structured bot
  *   mention; only consulted for the `/owner_mention` bootstrap.
  */
-export function isGroupSenderAdmitted(
+export function groupSenderAdmission(
   opts: GroupAudienceConnectOpts,
   chatJid: string,
   senderImId: string | undefined,
   commandText: string,
-): boolean {
-  if (!opts.isSenderAllowedInGroup) return true;
-  if (opts.isSenderAllowedInGroup(chatJid, senderImId)) return true;
+): GroupSenderAdmission {
+  if (!opts.isSenderAllowedInGroup) return 'admitted';
+  if (opts.isSenderAllowedInGroup(chatJid, senderImId)) return 'admitted';
   // Look the group up only for the one message that may bypass the gate.
   if (
     isOwnerMentionCommand(commandText) &&
     isOwnerClaimable(opts.resolveRegisteredGroup?.(chatJid))
   ) {
-    return true;
+    return 'bootstrap';
   }
   logger.debug(
     { chatJid },
     'Group message dropped: sender rejected by audience policy',
   );
-  return false;
+  return 'rejected';
 }
