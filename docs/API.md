@@ -481,17 +481,29 @@ PersonalAgent 应用）。`POST` 请求体 `{ name?, brand? }`，向飞书申请
 
 ## Provider 与系统配置
 
-Provider：
+Provider（模型连接：一份凭据和一个端点，提供一组模型）：
 
 - `GET /api/config/claude`
-- `GET|POST /api/config/claude/providers`；创建请求可用
-  `claudeCredentialInput` 提交官方凭据原文（`.credentials.json` 内容或
-  setup-token），由服务端解析，格式无效时返回 400；官方 Provider 同一时刻只保留
-  OAuth、setup-token、API Key 中的一种
+- `GET|POST /api/config/claude/providers`；公开 Provider 带 `models`
+  （`{ id, hidden?, effort? }[]`，默认模型 `anthropicModel` 总在其中且不隐藏；
+  ChatGPT 订阅为 `[]`，模型取自其目录）、`presetId`（起步的厂商预设，无则 `null`）
+  和 `lastTest`（最近一次测试 `{ ok, code, status, model, latencyMs, at }`，未测过
+  为 `null`；端点、认证方式或凭据变更后清空）。创建请求可带 `models`、`presetId`
+  （未知预设 400），`models` 不含默认模型时把它加在最前；模型名不能含空白。
+  每种类型创建时都必须带凭据，否则 400 `{ error: '新建模型配置需要凭据' }`；
+  未指定 `enabled` 时，只有当前没有已启用的连接才默认启用，两个 OAuth 回调新建
+  连接时同样如此，均不自动设为全局默认。可用 `claudeCredentialInput` 提交官方
+  凭据原文（`.credentials.json` 内容或 setup-token），由服务端解析，格式无效时
+  返回 400；官方 Provider 同一时刻只保留 OAuth、setup-token、API Key 中的一种
 - `PATCH|DELETE /api/config/claude/providers/:id`，第三方 Provider 的 PATCH
   可同时携带 `anthropicAuthToken` / `clearAnthropicAuthToken`，与其他字段在同一
   请求内提交；删除 ChatGPT 订阅型 Provider 后在后台尽力吊销其 refresh token，
-  吊销结果不影响响应
+  吊销结果不影响响应。PATCH 的 `models` 是完整的新列表（未列出的即移除），
+  `presetId: null` 清除预设；只改模型的显示/隐藏、推理档位或新增模型时不停
+  Runner、不清会话；改 `anthropicModel` 仍按协议字段处理，未带 `models` 时旧默认
+  模型保留在列表中。移除（含切换 1M 改名）仍被智能体使用的模型返回 409
+  `{ error, code: 'MODEL_IN_USE', agents: [{ id, name }] }`；会话里选了被移除模型的
+  在下次运行时回到连接的默认模型
 - `PUT /api/config/claude/providers/:id/secrets`，同样接受
   `claudeCredentialInput`；凭据变更只排空该 Provider 的 Runner
 - `POST /api/config/claude/providers/:id/toggle`，没有可用凭据的 Provider
@@ -505,9 +517,40 @@ Provider：
   `defaultModelConfigId`（无默认为 `null`）
 - `POST /api/config/claude/providers/:id/duplicate`，服务端连同加密密钥复制为
   停用的新 Provider；OAuth 授权的 Provider 拒绝复制
-- `POST /api/config/claude/providers/test`，按草稿字段（可选 `providerId`
-  回退到已保存的端点与密钥）向第三方端点发送一次最小 `/v1/messages` 请求，
-  返回每个模型的状态码、耗时和脱敏错误摘要，不回传密钥；按用户限流
+- `POST /api/config/claude/providers/test`，测试任意类型的连接。请求体为
+  `providerId`（未填字段回退到已保存的连接与凭据）或草稿：`type`、`presetId`、
+  `anthropicBaseUrl`、`anthropicAuthToken`、`anthropicAuthMode`、`anthropicApiKey`、
+  `claudeCredentialInput`、`anthropicModel`、`customEnv`，均可选（缺省 `type` 视为
+  `third_party`；预设草稿可不带地址，按预设地址与其第一个模型测试；
+  `claudeCredentialInput` 只用于测试，从不保存）。第三方端点发一次最小
+  `/v1/messages`（另测不同的 Haiku 映射），未指定认证方式时 Bearer 被 401/403
+  拒绝会改用 `x-api-key` 再试一次；官方 API Key 在默认模型是具体的 `claude-*`
+  模型时发一次最小消息，否则读 `GET /v1/models`（不计费）；Claude 订阅
+  （OAuth、setup-token）只做不计费的账号检查，已保存的授权到期时先续期，粘贴的
+  已过期授权不续期、返回 `UNKNOWN`；ChatGPT 订阅拉取一次实时模型目录。响应为
+  `{ ok, probes, code, authMode?, record }`，每个 probe 为
+  `{ model, ok, status, latencyMs, message?, hint?, code? }`：`code` 为 `ProviderErrorCode`（通过为 `null`），`authMode`
+  为端点接受的认证方式（被拒时不返回），`record` 即 `ProviderTestRecord`，账号
+  检查的 `model` 为 `null`、其 probe 的 `model` 为空串。`message` 是脱敏且不超过
+  300 字的上游摘录，从不含密钥；日志只记上游 origin。带 `providerId` 且测试的
+  正是已保存的连接（草稿未改端点、凭据、认证方式或环境变量）时，`record` 存为该
+  连接的 `lastTest`（审计 `test_provider`，不停 Runner、不清会话）；没有认证方式
+  的旧连接同时记下端点接受的方式，与原先推断的不同时只排空该连接的 Runner。
+  与 `discover-models` 共用每用户每分钟 10 次的限额，超出返回 429
+- `POST /api/config/claude/providers/discover-models`，获取连接的模型列表，
+  请求体同上（不含 `anthropicModel`、`customEnv`）。第三方端点读
+  `modelsUrlFor(地址, 预设)`（自定义地址恰好匹配一个预设时用该预设的列表地址），
+  认证方式回退同测试；官方 API Key 读 `https://api.anthropic.com/v1/models`；
+  Claude 订阅不发请求，返回内置别名；ChatGPT 订阅返回其模型目录。成功为
+  `{ ok: true, models, source, authMode? }`，`models` 为
+  `{ id, name?, contextWindow? }[]`，`source` 为 `endpoint`、`builtin` 或
+  `catalog`；失败仍为 200
+  `{ ok: false, code, status, message }`：列表地址 404 为 `ENDPOINT_NOT_FOUND`，
+  返回内容不是模型列表为 `UNKNOWN`
+- `GET /api/config/claude/providers/:id/impact`，返回
+  `{ activeRunners, stoppedRunners }`：正在使用该连接的 Runner 数，以及修改其
+  协议字段（端点、密钥、认证方式、默认模型、环境变量）时实际会停掉的 Runner 数
+  （连接已启用、被智能体绑定或被会话选用时为全部存活 Runner，否则为 0）
 - `POST /api/config/claude/providers/:id/reset-health`
 - `GET /api/config/claude/providers/health`
 - `GET /api/config/claude/providers/:id/usage`，读不到用量时以 `status`
