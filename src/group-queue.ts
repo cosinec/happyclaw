@@ -77,7 +77,10 @@ function resolveFeishuCliIdentityRequirement(
       accountId: requirements.feishuCliAccountId ?? null,
     };
   }
-  if (channelContext !== undefined) {
+  // Only a Feishu turn names a Bot. Another channel's turn context (Telegram,
+  // QQ, ...) imposes no Feishu CLI identity, exactly like an input without
+  // one: it must not drain a runner started with the workspace's Bot.
+  if (channelContext?.provider === 'feishu') {
     return {
       specified: true,
       accountId: resolveFeishuCliBoundAccountId({ channelContext }),

@@ -237,7 +237,10 @@ export interface ConnectFeishuOptions {
 /** Durable follow-up queue and `/steer`/`/break` host callbacks. */
 type ConnectorQueueOptions = Pick<
   IMChannelConnectOpts,
-  'onFollowUpMessage' | 'onFollowUpsChanged' | 'onSessionBreak'
+  | 'onFollowUpMessage'
+  | 'onFollowUpsChanged'
+  | 'onSessionBreak'
+  | 'lookupEffectiveChatJid'
 >;
 
 /** Group response-audience host callbacks. */
@@ -526,6 +529,24 @@ export class IMConnectionManager {
                 ...resolved,
                 ...(resolved.sourceJid
                   ? { sourceJid: scope(resolved.sourceJid) }
+                  : {}),
+              };
+            },
+          }
+        : {}),
+      ...(opts.lookupEffectiveChatJid
+        ? {
+            lookupEffectiveChatJid: (
+              jid: string,
+              meta?: ChannelMessageMeta,
+            ) => {
+              if (!inboundAllowed()) return null;
+              const found = opts.lookupEffectiveChatJid!(scope(jid), meta);
+              if (!found) return null;
+              return {
+                ...found,
+                ...(found.sourceJid
+                  ? { sourceJid: scope(found.sourceJid) }
                   : {}),
               };
             },
@@ -1506,6 +1527,7 @@ export class IMConnectionManager {
         ignoreMessagesBefore: options?.ignoreMessagesBefore,
         resolveGroupFolder: options?.resolveGroupFolder,
         resolveEffectiveChatJid: options?.resolveEffectiveChatJid,
+        lookupEffectiveChatJid: options?.lookupEffectiveChatJid,
         onAgentMessage: options?.onAgentMessage,
         onMessagePersisted: options?.onMessagePersisted,
         onFollowUpMessage: options?.onFollowUpMessage,
@@ -1853,6 +1875,7 @@ export class IMConnectionManager {
         onCommand: options?.onCommand,
         resolveGroupFolder: options?.resolveGroupFolder,
         resolveEffectiveChatJid: options?.resolveEffectiveChatJid,
+        lookupEffectiveChatJid: options?.lookupEffectiveChatJid,
         onAgentMessage: options?.onAgentMessage,
         onMessagePersisted: options?.onMessagePersisted,
         onFollowUpMessage: options?.onFollowUpMessage,
@@ -2098,6 +2121,7 @@ export class IMConnectionManager {
         onCommand: options?.onCommand,
         resolveGroupFolder: options?.resolveGroupFolder,
         resolveEffectiveChatJid: options?.resolveEffectiveChatJid,
+        lookupEffectiveChatJid: options?.lookupEffectiveChatJid,
         onAgentMessage: options?.onAgentMessage,
         onMessagePersisted: options?.onMessagePersisted,
         onFollowUpMessage: options?.onFollowUpMessage,

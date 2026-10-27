@@ -14,6 +14,7 @@ import type {
   GroupOwnerView,
 } from './im-group-audience.js';
 import type { FeishuConversationPlan } from './feishu-conversation-policy.js';
+import type { FeishuTransportIssue } from './feishu-connection-conflict.js';
 import type {
   TelegramConnection,
   TelegramConnectionConfig,
@@ -124,12 +125,6 @@ export function appendStreamingSessionAnswer(
 /** Feishu account credentials and the brand (Feishu or Lark) they belong to. */
 export type FeishuChannelConfig = FeishuConnectionConfig;
 
-/**
- * Feishu long-connection health beyond connect/disconnect: another program is
- * holding this App's single long connection. `null` reports recovery.
- */
-export type FeishuTransportIssue = { kind: 'conflict'; message: string } | null;
-
 export interface IMChannelConnectOpts {
   isChatBound?: (jid: string) => boolean;
   onReady: () => void;
@@ -173,6 +168,12 @@ export interface IMChannelConnectOpts {
     agentId: string | null;
     sourceJid?: string;
   } | null;
+  /**
+   * The bound target a chat (or native topic) already has, or null. Never
+   * creates a topic Session or upgrades a mount, so a runtime control
+   * (/break, /steer) aimed at an unseen topic leaves nothing behind.
+   */
+  lookupEffectiveChatJid?: IMChannelConnectOpts['resolveEffectiveChatJid'];
   /** 当 IM 消息被路由到 conversation agent 后调用，触发 agent 处理 */
   onAgentMessage?: (baseChatJid: string, agentId: string) => void;
   onFollowUpMessage?: (input: {
@@ -251,8 +252,8 @@ export interface IMChannelConnectOpts {
   onWeComConnectionStateChange?: (state: WeComConnectionState) => void;
   /** Feishu: read the account owner lazily, so a first-DM claim needs no reconnect. */
   getOwnerOpenId?: () => string | undefined;
-  /** Feishu: the App's long connection is taken elsewhere, or has recovered. */
-  onTransportIssue?: (issue: FeishuTransportIssue) => void;
+  /** Feishu: the App's long connection is taken elsewhere, or `null`: recovered. */
+  onTransportIssue?: (issue: FeishuTransportIssue | null) => void;
 }
 
 export interface IMChannel {
@@ -656,6 +657,7 @@ export function createTelegramChannel(
           ignoreMessagesBefore: opts.ignoreMessagesBefore,
           resolveGroupFolder: opts.resolveGroupFolder,
           resolveEffectiveChatJid: opts.resolveEffectiveChatJid,
+          lookupEffectiveChatJid: opts.lookupEffectiveChatJid,
           onAgentMessage: opts.onAgentMessage,
           onMessagePersisted: opts.onMessagePersisted,
           onFollowUpMessage: opts.onFollowUpMessage,
@@ -1507,6 +1509,7 @@ export function createDiscordChannel(
           onCommand: opts.onCommand,
           resolveGroupFolder: opts.resolveGroupFolder,
           resolveEffectiveChatJid: opts.resolveEffectiveChatJid,
+          lookupEffectiveChatJid: opts.lookupEffectiveChatJid,
           onAgentMessage: opts.onAgentMessage,
           onMessagePersisted: opts.onMessagePersisted,
           onFollowUpMessage: opts.onFollowUpMessage,
@@ -1683,6 +1686,7 @@ export function createWhatsAppChannel(
           ignoreMessagesBefore: opts.ignoreMessagesBefore,
           resolveGroupFolder: opts.resolveGroupFolder,
           resolveEffectiveChatJid: opts.resolveEffectiveChatJid,
+          lookupEffectiveChatJid: opts.lookupEffectiveChatJid,
           onAgentMessage: opts.onAgentMessage,
           onMessagePersisted: opts.onMessagePersisted,
           onFollowUpMessage: opts.onFollowUpMessage,

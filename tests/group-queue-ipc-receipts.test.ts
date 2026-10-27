@@ -223,6 +223,38 @@ describe('GroupQueue IPC delivery receipts', () => {
     expect(fs.existsSync(path.join(inputDir(), '_drain'))).toBe(false);
   });
 
+  test.each(['telegram', 'qq', 'dingtalk', 'discord', 'whatsapp', 'wecom'])(
+    'keeps a warm Bot-bound container for a %s turn',
+    async (provider) => {
+      await startRunner({
+        containerName: 'happyclaw-bot-a',
+        feishuCliAccountId: 'account-a',
+      });
+
+      expect(
+        queue.sendMessage(
+          JID,
+          `queued ${provider} input`,
+          undefined,
+          undefined,
+          `${provider}:chat-1`,
+          undefined,
+          undefined,
+          {
+            schemaVersion: 1,
+            provider,
+            channelAccountId: `${provider}-account`,
+            sourceJid: `${provider}:chat-1`,
+            chat: { id: 'chat-1', type: 'group' },
+            message: { id: 'm-1' },
+          },
+        ),
+      ).toBe('sent');
+      expect(readPayloads()).toHaveLength(1);
+      expect(fs.existsSync(path.join(inputDir(), '_drain'))).toBe(false);
+    },
+  );
+
   test('restarts a Bot-bound container for an explicitly unbound request', async () => {
     await startRunner({
       containerName: 'happyclaw-bot-a',

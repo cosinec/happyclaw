@@ -5,6 +5,12 @@ vi.mock('../src/logger.js', () => ({
 }));
 
 import { finalizeChannelCardAfterDelivery } from '../src/channel-card-finalization.js';
+import {
+  registerMessageIdMapping,
+  registerStreamingSession,
+  resolveJidByMessageId,
+  unregisterStreamingSession,
+} from '../src/feishu-streaming-card.js';
 import { DefinitiveChannelDeliveryError } from '../src/channel-outbox-delivery.js';
 import { PartialChannelDeliveryError } from '../src/im-delivery-progress.js';
 import { classifyImSendFailure } from '../src/im-send-retry-policy.js';
@@ -229,6 +235,47 @@ describe('TelegramStreamingController', () => {
     await other.abort();
     expect(recalled.messages.size).toBe(0);
   });
+});
+
+describe('Telegram streaming in the host session registry', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  test.each([
+    ['completed', (s: TelegramStreamingController) => s.complete('final')],
+    ['recalled', (s: TelegramStreamingController) => s.abort()],
+  ] as const)(
+    'a %s answer leaves no message id mapped',
+    async (name, settle) => {
+      const jid = `telegram:registry-${name}`;
+      const created: string[] = [];
+      // What the host does: map every created message to the session's chat.
+      const session = new TelegramStreamingController(
+        fakeTransport().transport,
+        {
+          onCardCreated: (id) => {
+            created.push(id);
+            registerMessageIdMapping(id, jid);
+          },
+        },
+      );
+      registerStreamingSession(jid, session);
+      session.append(`${'a'.repeat(1000)}\n`.repeat(6));
+      await vi.advanceTimersByTimeAsync(0);
+      await settle(session);
+      // Two progress messages (deleted by now), plus the final if completed.
+      expect(created.length).toBe(name === 'completed' ? 3 : 2);
+      for (const id of created) expect(resolveJidByMessageId(id)).toBe(jid);
+
+      unregisterStreamingSession(jid, session);
+      for (const id of created)
+        expect(resolveJidByMessageId(id)).toBeUndefined();
+    },
+  );
 });
 
 describe('Telegram streaming under host card finalization', () => {

@@ -53,9 +53,11 @@ import {
   type GroupSenderAdmission,
 } from './im-group-audience.js';
 import {
+  existingControlTarget,
   parseConnectorRuntimeControl,
   projectChannelInbound,
   runSessionBreak,
+  STEER_TARGET_MISSING_REPLY,
   type ChannelFollowUpConnectOpts,
 } from './im-connector-follow-up.js';
 import {
@@ -141,6 +143,10 @@ export interface DiscordConnectOpts
   ) => Promise<string | null>;
   resolveGroupFolder?: (jid: string) => string | undefined;
   resolveEffectiveChatJid?: (
+    chatJid: string,
+  ) => { effectiveJid: string; agentId: string | null } | null;
+  /** The route a chat already has; never creates one. */
+  lookupEffectiveChatJid?: (
     chatJid: string,
   ) => { effectiveJid: string; agentId: string | null } | null;
   onAgentMessage?: (baseChatJid: string, agentId: string) => void;
@@ -644,13 +650,18 @@ export function createDiscordConnection(
           eligible: addressedText !== null,
           hasAttachments: inboundAttachments.length > 0,
         });
+        // A runtime control acts on the Session the chat already has.
+        const lookup = opts.lookupEffectiveChatJid;
+        const controlTarget = () =>
+          existingControlTarget(
+            jid,
+            !!opts.resolveEffectiveChatJid,
+            lookup && (() => lookup(jid)),
+          );
         if (runtimeControl?.kind === 'break') {
           const reply = await runSessionBreak(opts.onSessionBreak, {
             sourceJid: jid,
-            targetJid: resolveAdmittedChannelRoute(
-              jid,
-              opts.resolveEffectiveChatJid,
-            )?.targetJid,
+            targetJid: controlTarget(),
             senderImId,
             chatType: isDM ? 'p2p' : 'group',
           });
@@ -661,6 +672,12 @@ export function createDiscordConnection(
               await channel.send(chunk);
             }
           }
+          return;
+        }
+        if (runtimeControl?.kind === 'steer' && !controlTarget()) {
+          inboundLifecycle.assertCurrent(lease);
+          const channel = await resolveChannel(jid);
+          if (channel) await channel.send(STEER_TARGET_MISSING_REPLY);
           return;
         }
         const requestedFollowUpMode =

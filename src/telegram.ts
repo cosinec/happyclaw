@@ -46,9 +46,11 @@ import {
   type GroupSenderAdmission,
 } from './im-group-audience.js';
 import {
+  existingControlTarget,
   parseConnectorRuntimeControl,
   projectChannelInbound,
   runSessionBreak,
+  STEER_TARGET_MISSING_REPLY,
   type ChannelFollowUpConnectOpts,
   type ChannelFollowUpOutcome,
 } from './im-connector-follow-up.js';
@@ -109,6 +111,8 @@ export interface TelegramConnectOpts
     agentId: string | null;
     sourceJid?: string;
   } | null;
+  /** The route a chat or topic already has; never creates one. */
+  lookupEffectiveChatJid?: TelegramConnectOpts['resolveEffectiveChatJid'];
   /** 当 IM 消息被路由到 conversation agent 后调用，触发 agent 处理 */
   onAgentMessage?: (baseChatJid: string, agentId: string) => void;
   /** Project a message that has already committed to the host-owned store. */
@@ -1075,6 +1079,44 @@ export function createTelegramConnection(
     });
   }
 
+  /**
+   * The Session a runtime control in this chat or topic acts on: the route
+   * it already has. A topic seen for the first time gets none created.
+   */
+  function telegramControlTarget(
+    opts: TelegramConnectOpts,
+    jid: string,
+    routeJid: string,
+    messageMeta: ChannelMessageMeta | undefined,
+  ): string | undefined {
+    return existingControlTarget(
+      routeJid,
+      !!opts.resolveEffectiveChatJid,
+      opts.lookupEffectiveChatJid &&
+        (() => opts.lookupEffectiveChatJid!(jid, messageMeta)),
+    );
+  }
+
+  /** Answer a `/steer` caption whose chat or topic has no Session yet. */
+  async function steerHasNoTarget(
+    opts: TelegramConnectOpts,
+    message: TelegramMessageLike,
+    chat: TelegramChatDescriptor,
+    route: { jid: string; routeJid: string; messageMeta?: ChannelMessageMeta },
+    reply: (text: string) => Promise<unknown>,
+  ): Promise<boolean> {
+    if (telegramRuntimeControl(message, chat, true)?.kind !== 'steer') {
+      return false;
+    }
+    if (
+      telegramControlTarget(opts, route.jid, route.routeJid, route.messageMeta)
+    ) {
+      return false;
+    }
+    await reply(STEER_TARGET_MISSING_REPLY);
+    return true;
+  }
+
   /** A media caption, or the guidance of a `/steer` caption. */
   function telegramMediaCaption(
     message: TelegramMessageLike,
@@ -1486,14 +1528,20 @@ export function createTelegramConnection(
               ctx.chat as TelegramChatDescriptor,
               false,
             );
+            const controlTarget = () =>
+              telegramControlTarget(opts, jid, routeJid, messageMeta);
             if (runtimeControl?.kind === 'break') {
               const reply = await runSessionBreak(opts.onSessionBreak, {
                 sourceJid: jid,
-                targetJid: resolveRoute()?.targetJid,
+                targetJid: controlTarget(),
                 senderImId: senderImId ?? '',
                 chatType: isTelegramGroupChat(ctx.chat) ? 'group' : 'p2p',
               });
               await ctx.reply(reply);
+              return;
+            }
+            if (runtimeControl?.kind === 'steer' && !controlTarget()) {
+              await ctx.reply(STEER_TARGET_MISSING_REPLY);
               return;
             }
             const requestedFollowUpMode: FollowUpMode | undefined =
@@ -1685,6 +1733,17 @@ export function createTelegramConnection(
                 }),
                 reply: (text) => ctx.reply(text),
               }))
+            ) {
+              return;
+            }
+            if (
+              await steerHasNoTarget(
+                opts,
+                ctx.message,
+                ctx.chat as TelegramChatDescriptor,
+                { jid, routeJid, messageMeta },
+                (text) => ctx.reply(text),
+              )
             ) {
               return;
             }
@@ -1880,6 +1939,17 @@ export function createTelegramConnection(
             ) {
               return;
             }
+            if (
+              await steerHasNoTarget(
+                opts,
+                ctx.message,
+                ctx.chat as TelegramChatDescriptor,
+                { jid, routeJid, messageMeta },
+                (text) => ctx.reply(text),
+              )
+            ) {
+              return;
+            }
 
             const resolvedRoute = resolveAdmittedChannelRoute(
               routeJid,
@@ -2060,6 +2130,17 @@ export function createTelegramConnection(
                 }),
                 reply: (text) => ctx.reply(text),
               }))
+            ) {
+              return;
+            }
+            if (
+              await steerHasNoTarget(
+                opts,
+                tgMessage,
+                tgChat as TelegramChatDescriptor,
+                { jid, routeJid, messageMeta },
+                (text) => ctx.reply(text),
+              )
             ) {
               return;
             }

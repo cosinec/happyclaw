@@ -66,6 +66,7 @@ function reloadHarness(provider: Provider, secret: Record<string, string>) {
     handleCommand: vi.fn(),
     resolveEffectiveFolder: vi.fn(),
     buildResolveEffectiveChatJid: vi.fn(() => vi.fn()),
+    buildLookupEffectiveChatJid: vi.fn(() => vi.fn()),
     buildOnAgentMessage: vi.fn(() => vi.fn()),
     buildOnNativeContextDetected: vi.fn(() => vi.fn()),
     buildOnBotRemovedFromGroup: vi.fn(() => vi.fn()),
@@ -166,6 +167,23 @@ describe('the durable follow-up queue and runtime controls reach every connector
         h.globals.broadcastFollowUpUpdate,
       );
       expect(options.onSessionBreak).toBe(h.globals.handleSessionBreak);
+    },
+  );
+});
+
+describe('runtime controls look their target up without creating it', () => {
+  test.each(['telegram', 'discord', 'whatsapp'] as const)(
+    '%s receives the lookup-only router next to the creating one',
+    async (provider) => {
+      const h = reloadHarness(provider, { botToken: 'token' });
+      const { options } = await h.connect();
+      const build = h.globals.buildLookupEffectiveChatJid as ReturnType<
+        typeof vi.fn
+      >;
+      expect(options.lookupEffectiveChatJid).toBe(build.mock.results[0].value);
+      expect(options.lookupEffectiveChatJid).not.toBe(
+        options.resolveEffectiveChatJid,
+      );
     },
   );
 });

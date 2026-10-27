@@ -98,6 +98,22 @@ describe('chunkTelegramMarkdown', () => {
     expect(chunks[1].markdown.startsWith('```ts\n')).toBe(true);
   });
 
+  test('a block cut more than once leaves the prose after it as prose', () => {
+    const code = Array.from({ length: 700 }, (_, i) => `row ${i} <x>`).join(
+      '\n',
+    );
+    const chunks = chunkTelegramMarkdown(
+      `intro\n\`\`\`py\n${code}\n\`\`\`\nafter prose`,
+    );
+    expect(chunks.length).toBeGreaterThanOrEqual(3);
+    for (const chunk of chunks) {
+      expect(chunk.html).not.toContain('```');
+      expect(chunk.html).toMatch(/^(intro\n)?<pre><code[^>]*>row /);
+      expect(chunk.html).toContain('</code></pre>');
+    }
+    expect(chunks.at(-1)!.html).toMatch(/<\/code><\/pre>\n?after prose$/);
+  });
+
   test('rendering stays the Markdown subset Telegram parses', () => {
     expect(markdownToTelegramHtml('`a<b>` [x](https://e.x) ~~s~~')).toBe(
       '<code>a&lt;b&gt;</code> <a href="https://e.x">x</a> <s>s</s>',

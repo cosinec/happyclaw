@@ -128,7 +128,15 @@ describe('the follow-up callbacks are forwarded down to every connector', () => 
   const onFollowUpMessage = vi.fn(() => ({ disposition: 'started' as const }));
   const onFollowUpsChanged = vi.fn();
   const onSessionBreak = vi.fn(async () => 'ok');
-  const callbacks = { onFollowUpMessage, onFollowUpsChanged, onSessionBreak };
+  const lookupEffectiveChatJid = vi.fn(() => null);
+  const callbacks = {
+    onFollowUpMessage,
+    onFollowUpsChanged,
+    onSessionBreak,
+    lookupEffectiveChatJid,
+  };
+  // The connectors whose runtime controls resolve their own target.
+  const looksUpControlTarget = new Set(['telegram', 'discord', 'whatsapp']);
 
   test.each([
     [
@@ -188,7 +196,7 @@ describe('the follow-up callbacks are forwarded down to every connector', () => 
           callbacks,
         ),
     ],
-  ] as const)('im-manager: %s', async (_provider, connectUser) => {
+  ] as const)('im-manager: %s', async (provider, connectUser) => {
     const manager = new IMConnectionManager();
     const connect = vi.spyOn(manager, 'connectChannel').mockResolvedValue(true);
     await connectUser(manager);
@@ -196,6 +204,9 @@ describe('the follow-up callbacks are forwarded down to every connector', () => 
     expect(opts.onFollowUpMessage).toBe(onFollowUpMessage);
     expect(opts.onFollowUpsChanged).toBe(onFollowUpsChanged);
     expect(opts.onSessionBreak).toBe(onSessionBreak);
+    if (looksUpControlTarget.has(provider)) {
+      expect(opts.lookupEffectiveChatJid).toBe(lookupEffectiveChatJid);
+    }
   });
 
   test.each([
@@ -255,6 +266,11 @@ describe('the follow-up callbacks are forwarded down to every connector', () => 
       expect(captured.opts?.onFollowUpMessage).toBe(onFollowUpMessage);
       expect(captured.opts?.onFollowUpsChanged).toBe(onFollowUpsChanged);
       expect(captured.opts?.onSessionBreak).toBe(onSessionBreak);
+      if (looksUpControlTarget.has(provider)) {
+        expect(captured.opts?.lookupEffectiveChatJid).toBe(
+          lookupEffectiveChatJid,
+        );
+      }
     } finally {
       restore();
     }

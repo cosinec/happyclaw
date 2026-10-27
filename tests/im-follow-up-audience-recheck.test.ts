@@ -86,7 +86,8 @@ function hostHarness(registeredGroups: Record<string, Group>) {
   const globals: Record<string, unknown> = {
     queue,
     registeredGroups,
-    listQueuedFollowUps: db.listQueuedFollowUps,
+    listQueuedFollowUps: vi.fn(db.listQueuedFollowUps),
+    listQueuedChannelFollowUps: vi.fn(db.listQueuedChannelFollowUps),
     getQueuedFollowUp: db.getQueuedFollowUp,
     getQueuedFollowUpChatJids: db.getQueuedFollowUpChatJids,
     setMessageFollowUp: db.setMessageFollowUp,
@@ -291,6 +292,21 @@ describe('the queue drain re-admits waiting inputs', () => {
     const after = statuses(chatJid);
     expect(after.get('om_note')).toBe('cancelled');
     expect(after.get('om_root')).toBe('cancelled');
+    // The root is settled like the note: announced, Turn closed, unmarked.
+    for (const id of ['om_note', 'om_root']) {
+      expect(h.globals.broadcastFollowUpUpdate).toHaveBeenCalledWith(
+        chatJid,
+        expect.objectContaining({ id, delivery_status: 'cancelled' }),
+      );
+      expect(
+        h.globals.closeRetryWaitTurnsForWithdrawnInputs,
+      ).toHaveBeenCalledWith(null, [id], 'Queued input cancelled');
+      expect(h.globals.clearStandaloneProcessingIndicator).toHaveBeenCalledWith(
+        chatJid,
+        sourceJid,
+        id,
+      );
+    }
   });
 
   test('Web, system and other non-channel inputs are never audience-checked', async () => {
@@ -317,6 +333,13 @@ describe('the queue drain re-admits waiting inputs', () => {
     expect(
       [...statuses(chatJid).values()].filter((s) => s === 'cancelled'),
     ).toEqual([]);
+    // Only channel-sourced rows are read for the recheck, never the queue.
+    expect(h.globals.listQueuedFollowUps).not.toHaveBeenCalled();
+    expect(
+      (
+        h.globals.listQueuedChannelFollowUps as ReturnType<typeof vi.fn>
+      ).mock.results[0].value.map((item: QueuedFollowUp) => item.id),
+    ).toEqual(['web-to-feishu', 'web-to-telegram', 'system-input']);
     expect(
       h.globals.closeRetryWaitTurnsForWithdrawnInputs,
     ).not.toHaveBeenCalled();
