@@ -88,6 +88,14 @@ const settleAnimations = (scope: Locator) =>
     ),
   );
 
+/** Times ChatView handed back to the page. */
+const harnessBacks = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as { composerHarness: { backs: number } })
+        .composerHarness.backs,
+  );
+
 /** A row of the phone's + sheet. */
 const plusAction = (page: Page, name: string) =>
   page
@@ -643,6 +651,17 @@ test.describe('desktop composer', () => {
     expect(await card.boundingBox()).toEqual(idle);
   });
 
+  test('back in a narrow desktop window steps to the session list', async ({
+    page,
+  }) => {
+    await openHarness(page);
+    await page.setViewportSize({ width: 700, height: 800 });
+    await page.getByRole('button', { name: '返回' }).click();
+    // Not a phone: the workspace's sessions, still inside ChatView.
+    await expect(page.locator('header h2').first()).toBeHidden();
+    expect(await harnessBacks(page)).toBe(0);
+  });
+
   test('a docked composer is about 120px tall, with no conversation title in its row', async ({
     page,
   }) => {
@@ -936,6 +955,23 @@ test.describe('touch composer', () => {
     // Bar and card move together.
     const after = (await bar.boundingBox())!;
     expect(Math.round(before[0].y - after.y)).toBe(300);
+  });
+
+  test('back on a phone goes straight to the list, from a session too', async ({
+    page,
+  }) => {
+    await openHarness(page);
+    const back = page.getByRole('button', { name: '返回' });
+    const title = page.locator('header h2').first();
+    await back.click();
+    // ChatPage's list path, not the ?sessions=1 level it would redirect.
+    await expect.poll(() => harnessBacks(page)).toBe(1);
+    await expect(title).toBeVisible();
+
+    await switchTo(page, 'a1');
+    await back.click();
+    await expect.poll(() => harnessBacks(page)).toBe(2);
+    await expect(page.locator('header h2').first()).toHaveText('会话 A');
   });
 
   test('a phone keeps a compact card and leaves the context ring off its row', async ({
