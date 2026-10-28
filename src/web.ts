@@ -3712,13 +3712,14 @@ export function broadcastRunStarted(
  * now, read from its transcript unless given (a cleared conversation passes
  * NO_CONTEXT_USAGE). Never throws: the ring is a display.
  */
-export function broadcastContextUsage(
+export async function broadcastContextUsage(
   groupFolder: string,
   agentId: string | null,
   usage?: SessionContextUsage,
-): void {
+): Promise<void> {
   try {
-    const value = usage ?? readSessionContextUsage(groupFolder, agentId);
+    const value =
+      usage ?? (await readSessionContextUsage(groupFolder, agentId));
     for (const jid of getJidsByFolder(groupFolder)) {
       if (!jid.startsWith('web:')) continue;
       safeBroadcast(
@@ -3741,9 +3742,9 @@ export function broadcastContextUsage(
 }
 
 // A cleared conversation shows an empty ring until its next turn.
-onConversationContextCleared((groupFolder, agentId) =>
-  broadcastContextUsage(groupFolder, agentId, NO_CONTEXT_USAGE),
-);
+onConversationContextCleared((groupFolder, agentId) => {
+  void broadcastContextUsage(groupFolder, agentId, NO_CONTEXT_USAGE);
+});
 
 export function broadcastRunFinished(
   chatJid: string,

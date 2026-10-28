@@ -191,11 +191,7 @@ import {
 } from './feishu-cli-runtime.js';
 import { assertValidWorkspaceFolderName } from './workspace-folder.js';
 import { resolveRunnerLivenessTimeouts } from './runner-liveness.js';
-import {
-  removeProviderEffortEnv,
-  resolveAgentSdkEffort,
-  type SdkAgentEffort,
-} from './agent-effort.js';
+import { applyLaunchEffortEnv, resolveAgentSdkEffort } from './agent-effort.js';
 
 /**
  * 宿主机的 ~/.claude.json 路径。
@@ -990,6 +986,13 @@ export function replaceHostMcpServersEnv(
 interface ResolvedProvider {
   config: ClaudeProviderConfig;
   customEnv: Record<string, string>;
+  /**
+   * The effort this conversation picked. It is set as CLAUDE_CODE_EFFORT_LEVEL
+   * even over an Agent's own effort: Claude Code ranks that variable above
+   * the SDK `effort` option the runner passes for the Agent, so the Agent
+   * profile the runner sees (and hashes) stays as stored.
+   */
+  conversationEffort?: string;
 }
 
 type RunnerAgentProfile = NonNullable<ContainerInput['agentProfile']>;
@@ -1702,8 +1705,7 @@ export interface PoolProviderSelection {
   /**
    * The reasoning effort this conversation picked. A ChatGPT launch mints it
    * into the gateway grant, never into the runner's environment; any other
-   * launch runs Claude Code at it (CLAUDE_CODE_EFFORT_LEVEL, and in place of
-   * the Agent's own effort, see withConversationEffort).
+   * launch runs Claude Code at it (resolved.conversationEffort).
    */
   sessionEffort?: string;
 }
@@ -1763,10 +1765,9 @@ function withSessionModel(
  * pick, the Agent's own effort, the effort configured for the model the
  * launch really runs on (a pool's fallback tier is judged as itself), the
  * configuration's CLAUDE_CODE_EFFORT_LEVEL. The first and third go into the
- * environment here; the Agent's still wins over the model's when the
- * environment is built (removeProviderEffortEnv), and the conversation's
- * then replaces the Agent's (withConversationEffort). ChatGPT subscriptions
- * take their effort from the gateway and keep no list.
+ * environment here; when it is built (applyLaunchEffortEnv) the Agent's
+ * replaces the model's, and the conversation's stays over the Agent's.
+ * ChatGPT subscriptions take their effort from the gateway and keep no list.
  */
 function withModelEffort(
   selection: PoolProviderSelection,
@@ -1788,39 +1789,9 @@ function withModelEffort(
     resolved: {
       config,
       customEnv: { ...customEnv, CLAUDE_CODE_EFFORT_LEVEL: effort },
-    },
-  };
-}
-
-/**
- * A conversation's effort replaces the Agent's for this launch, everywhere
- * the Agent's is read (the environment, the SDK `effort` option). ChatGPT
- * launches carry theirs in the gateway grant instead.
- */
-export function withConversationEffort(
-  input: ContainerInput,
-  selection: PoolProviderSelection | null,
-): ContainerInput {
-  const effort = selection?.sessionEffort;
-  if (
-    !effort ||
-    isCodexGatewayBaseUrl(selection.resolved.config.anthropicBaseUrl) ||
-    !input.agentProfile
-  ) {
-    return input;
-  }
-  const policy = input.agentProfile.runtimePolicy;
-  return {
-    ...input,
-    agentProfile: {
-      ...input.agentProfile,
-      runtimePolicy: {
-        ...policy,
-        reasoning: {
-          ...policy?.reasoning,
-          effort: effort as SdkAgentEffort,
-        },
-      } as AgentProfileRuntimePolicy,
+      ...(selection.sessionEffort
+        ? { conversationEffort: selection.sessionEffort }
+        : {}),
     },
   };
 }
@@ -2592,8 +2563,11 @@ function prepareVolumeMounts(
     effectiveContainerOverride,
     resolvedProvider?.customEnv,
   );
-  const agentEffort = resolveAgentSdkEffort(agentProfile?.runtimePolicy);
-  removeProviderEffortEnv(envLines, agentEffort);
+  applyLaunchEffortEnv(
+    envLines,
+    resolveAgentSdkEffort(agentProfile?.runtimePolicy),
+    resolvedProvider?.conversationEffort,
+  );
   // Agent policy is authoritative; do not inherit global/custom runtime env.
   for (let index = envLines.length - 1; index >= 0; index -= 1) {
     if (
@@ -3272,10 +3246,7 @@ export async function runContainerAgent(
   let providerFailureTerminal: boolean | undefined;
   let providerFailureMaintenance = false;
   let healthyInputTurnCompleted = false;
-  input = withConversationEffort(
-    applyProviderSwitchToInput(input, poolResult, sessionAgentId),
-    poolResult,
-  );
+  input = applyProviderSwitchToInput(input, poolResult, sessionAgentId);
 
   const workspaceMemoryCapabilityScope: WorkspaceMemoryCapabilityScope = {
     groupFolder: group.folder,
@@ -4414,10 +4385,7 @@ export async function runHostAgent(
   let hostProviderFailureMaintenance = false;
   let hostHealthyInputTurnCompleted = false;
   let hostOauthLaunch: OAuthLaunchSnapshot | null = null;
-  input = withConversationEffort(
-    applyProviderSwitchToInput(input, hostPoolResult, sessionAgentId),
-    hostPoolResult,
-  );
+  input = applyProviderSwitchToInput(input, hostPoolResult, sessionAgentId);
 
   const workspaceMemoryCapabilityScope: WorkspaceMemoryCapabilityScope = {
     groupFolder: group.folder,
@@ -4455,10 +4423,11 @@ export async function runHostAgent(
         : containerOverride,
       hostPoolResult?.resolved.customEnv,
     );
-    const agentEffort = resolveAgentSdkEffort(
-      input.agentProfile?.runtimePolicy,
+    applyLaunchEffortEnv(
+      envLines,
+      resolveAgentSdkEffort(input.agentProfile?.runtimePolicy),
+      hostPoolResult?.resolved.conversationEffort,
     );
-    removeProviderEffortEnv(envLines, agentEffort);
     const injectsAnthropicAuthToken = envLines.some((line) =>
       line.startsWith('ANTHROPIC_AUTH_TOKEN='),
     );

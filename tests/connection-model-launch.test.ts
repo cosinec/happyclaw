@@ -327,9 +327,14 @@ describe("a model's own effort", () => {
     expect(selection.sessionEffort).toBe('low');
     expect(envOf(selection)('CLAUDE_CODE_EFFORT_LEVEL')).toBe('low');
 
-    // The Agent's own effort is replaced for this launch, so the runner's
-    // SDK effort and the environment agree on the conversation's.
-    const agent = {
+    // Over an Agent's own effort too, through the environment, which Claude
+    // Code ranks above the SDK effort the runner passes for the Agent. The
+    // Agent profile the runner sees, and hashes, stays as stored.
+    const runtimePolicy = db.normalizeAgentProfileRuntimePolicy({
+      reasoning: { effort: 'max' },
+    });
+    const stored = JSON.stringify(runtimePolicy);
+    const env = envOf(selection, {
       id: 'agent',
       name: 'Agent',
       version: 1,
@@ -337,22 +342,10 @@ describe("a model's own effort", () => {
       identityHash: '',
       identityPrompt: '',
       includeClaudePreset: true,
-      runtimePolicy: db.normalizeAgentProfileRuntimePolicy({
-        reasoning: { effort: 'max' },
-      }),
-    };
-    const input = runner.withConversationEffort(
-      {
-        prompt: '',
-        groupFolder: FOLDER,
-        chatJid: 'web:model-launch',
-        isMain: true,
-        agentProfile: agent,
-      } as never,
-      selection,
-    );
-    expect(input.agentProfile?.runtimePolicy?.reasoning?.effort).toBe('low');
-    expect(agent.runtimePolicy.reasoning?.effort).toBe('max');
+      runtimePolicy,
+    });
+    expect(env('CLAUDE_CODE_EFFORT_LEVEL')).toBe('low');
+    expect(JSON.stringify(runtimePolicy)).toBe(stored);
   });
 
   test('an effort the model does not take is ignored', () => {

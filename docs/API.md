@@ -121,8 +121,9 @@ PUT 的 `modelConfigId` 为 `null` 时恢复默认。会话选择的（配置, �
 中列出，但显式选择仍可使用。`efforts` 与 `contextWindow` 来自模型能力表
 （`modelCapabilities`），没有 `efforts` 的模型不能选推理档位；`defaultEffort` 是不选
 档位时运行的档位：智能体显式档位，其次该模型在连接里配置的档位，其次连接环境变量
-`CLAUDE_CODE_EFFORT_LEVEL`（第三方端点缺省 `max`），最后是模型自己的默认档位。直通
-中转没有默认模型时 `model` 为空字符串。
+`CLAUDE_CODE_EFFORT_LEVEL`（第三方端点缺省 `max`）；都没有时由 Claude Code 自行决定，
+不返回 `defaultEffort`（`default.effort` 为 `null`）。直通中转没有默认模型时 `model`
+为空字符串。
 
 ChatGPT 订阅配置（`kind: "codex"`）不带 `models`，而是带 `codex`，并且还能选择推理
 档位：`defaultModel`（配置自己的模型）、`defaultEffort`（不选档位时实际使用的档位，
@@ -143,8 +144,10 @@ PUT 可以携带 `model`、`effort`，请求整体替换该会话的选择：只
 `EFFORT_NOT_SUPPORTED`；两者都要同时给出 `modelConfigId`。否则返回 400 与 `code`：
 `MODEL_NOT_IN_CONNECTION`、`EFFORT_NOT_SUPPORTED`、`MODEL_UNAVAILABLE`、
 `EFFORT_UNSUPPORTED`、`EFFORT_RESTRICTED`、`MODEL_CONFIG_REQUIRED`。会话档位优先于
-智能体档位，其次模型配置的档位，最后是连接环境变量；ChatGPT 以外只改档位时退出暖
-Runner（下一条消息重启），但保留 SDK 会话。高于 `max` 的档位（目前是
+智能体档位，其次模型配置的档位，最后是连接环境变量；会话档位写入
+`CLAUDE_CODE_EFFORT_LEVEL`（Claude Code 让它优先于 Runner 为智能体传的 SDK `effort`），
+不改动交给 Runner 的智能体配置。ChatGPT 以外只改档位时退出暖 Runner（下一条消息
+重启），但保留 SDK 会话。高于 `max` 的档位（目前是
 `ultra`）只允许具备 `manage_system_config` 的用户选择，GET 不列出，PUT 返回
 `EFFORT_RESTRICTED`，Runner 启动时若选择者已失去该权限则回到默认档；放宽只需改
 `CODEX_SESSION_EFFORT_CEILING`。响应附带 `drained`（被退出的暖 Runner 数）与
@@ -156,8 +159,10 @@ Runner（下一条消息重启），但保留 SDK 会话。高于 `max` 的档�
 （`/clear`、`/fresh`、重置会话）或刚压缩上下文时全部为 `null`。数据在宿主侧从会话
 当前 SDK 会话的 transcript 读取：`usedTokens` 是最后一次主线程请求的 input + cache
 read + cache creation（不含子代理请求），`model` 是该请求的上游模型，`updatedAt` 是
-那次回复写入的时间；`contextWindow` 优先用 Claude Code 本进程上报的窗口（同一模型），
-否则 `[1m]` 模型为 1M，否则为模型窗口与 200K 中的较小者；`percentage` 保留一位小数。
+那次回复写入的时间；`contextWindow` 依次取 Claude Code 本进程上报的窗口（同一模型）、
+连接的 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`、`[1m]` 模型的 1M、官方连接下模型自己的窗口，
+其余为模型窗口与 200K 中的较小者；用量超过该窗口时改用模型窗口，仍超过则
+`percentage` 记为 100。`percentage` 保留一位小数。
 每个回合完成后，以及会话被清除时，工作区的 Web 会话收到 WebSocket 消息
 `{ type: 'context_usage', chatJid, agentId?, usedTokens, contextWindow, percentage, model, updatedAt }`。
 
