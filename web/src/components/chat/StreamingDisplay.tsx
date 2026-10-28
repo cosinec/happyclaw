@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import {
+  runTurnAnswered,
   shouldRecoverStaleWaiting,
   useChatStore,
   type StreamingState,
@@ -506,6 +507,11 @@ export function StreamingDisplay({
   const stopping = useChatStore(
     (s) => !settled && !!s.stopRequests[runtimeJid],
   );
+  // The run's turn ended in place (its reply is in the list) and the run is
+  // only closing: there is nothing to show until another turn of it streams.
+  const turnAnswered = useChatStore(
+    (s) => !settled && runTurnAnswered(s, runtimeJid),
+  );
   // Fire-and-forget spawn Agents retain Assistant streaming semantics even in
   // a proactive Workspace. The Workspace contract applies to main and
   // conversation Agent loops.
@@ -753,6 +759,7 @@ export function StreamingDisplay({
   // Waiting but no stream data: the identity row carries the visible status;
   // keep a one-shot live region for assistive tech (the timer is not live).
   if (isWaiting && !hasStreamData) {
+    if (turnAnswered) return null;
     const status = (
       <span role="status" aria-live="polite" className="sr-only">
         正在准备回复…

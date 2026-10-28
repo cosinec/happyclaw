@@ -276,3 +276,62 @@ describe('StreamingDisplay, the classic layout', () => {
     expect(text()).not.toContain('已处理');
   });
 });
+
+describe('StreamingDisplay, a run whose turn already ended', () => {
+  // The reply is in the list and the run is only closing (the CLI exits a
+  // moment later): the live slot shows nothing, not "preparing" or a spinner.
+  const run = (answered?: string) => ({
+    [JID]: {
+      chatJid: JID,
+      runId: 'run-1',
+      startedAt: new Date(Date.now() - 5000).toISOString(),
+      phase: 'running' as const,
+      ...(answered ? { answered } : {}),
+    },
+  });
+
+  const show = async (
+    answered: string | undefined,
+    streaming?: StreamingState,
+    proactive = false,
+  ) => {
+    useChatStore.setState({
+      streaming: streaming ? { [JID]: streaming } : {},
+      activeRuns: run(answered),
+      groups: proactive
+        ? {
+            [JID]: {
+              name: 'Proactive',
+              folder: 'proactive',
+              added_at: '2026-10-10T00:00:00.000Z',
+              interaction_mode: 'proactive',
+              process_visibility: 'activity',
+            } as never,
+          }
+        : {},
+    });
+    await act(async () => {
+      root.render(
+        <StreamingDisplay
+          groupJid={JID}
+          isWaiting
+          interactionMode={proactive ? 'proactive' : 'assistant'}
+        />,
+      );
+    });
+  };
+
+  afterEach(() => useChatStore.setState({ groups: {} }));
+
+  it('shows nothing once the turn ended, though the run still closes', async () => {
+    await show(undefined);
+    expect(text()).toContain('正在准备回复');
+    await show('input-1');
+    expect(container.innerHTML).toBe('');
+  });
+
+  it('shows the next turn of the same run as it streams', async () => {
+    await show('input-1', state({ inputTurnId: 'input-2' }));
+    expect(card()?.getAttribute('data-mode')).toBe('live');
+  });
+});

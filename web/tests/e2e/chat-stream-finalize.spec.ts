@@ -283,6 +283,66 @@ test('a pinned reader sees the reply swap to its final with no blank frame or ro
   await expect(reply.getByRole('button', { name: /执行详情/ })).toHaveCount(0);
 });
 
+test('a final that lands while the run still closes takes the card away at once', async ({
+  page,
+}) => {
+  await openHarness(page);
+  await streamTimelineReply(page, 'run-closing');
+  const stop = page.getByRole('button', { name: '停止当前运行' });
+  await expect(stop).toBeVisible();
+  await startSampling(page, 'Paragraph 59:');
+
+  // The final first, while the run is still closing.
+  await page.evaluate(
+    ({ chatJid, content }) =>
+      window.__chatScroll.wsEmit('new_message', {
+        chatJid,
+        message: {
+          id: 'final-run-closing',
+          chat_jid: chatJid,
+          sender: 'happyclaw-agent',
+          sender_name: '测试智能体',
+          content,
+          timestamp: new Date().toISOString(),
+          is_from_me: true,
+          source_kind: 'sdk_final',
+          finalization_reason: 'completed',
+          turn_id: 'turn-1',
+        },
+      }),
+    { chatJid: JID, content: REPLY },
+  );
+  await page.waitForTimeout(800);
+
+  // Nothing of the card is left, not even a "preparing" row, while the run
+  // is still there to stop.
+  const block = page.locator('[data-hc-streaming-block]');
+  await expect(block).toHaveText('');
+  await expect(stop).toBeVisible();
+  const reply = page
+    .locator('[data-index]')
+    .filter({ hasText: 'Paragraph 59:' });
+  await expect(
+    reply.locator('[data-hc-process-card][data-mode="settled"]'),
+  ).toContainText(/2 个工具.*2 段思考/);
+
+  // run_finished brings nothing back.
+  await page.evaluate(() => window.__chatScroll.runFinished('run-closing'));
+  await page.waitForTimeout(600);
+  const frames = await page.evaluate(() => {
+    window.__sampling = false;
+    return window.__frames;
+  });
+  await expect(block).toHaveText('');
+  await expect(stop).toHaveCount(0);
+
+  expect(frames.at(-1)?.final).toBe(true);
+  expect(frames.filter((f) => !f.whole)).toEqual([]);
+  // A pinned reader stays at the end through the swap.
+  expect(Math.max(...frames.map((f) => f.gap))).toBeLessThan(30);
+  await expect(page.getByRole('button', { name: /^回到底部/ })).toHaveCount(0);
+});
+
 test('a reader scrolled into the reply keeps their place through the finish', async ({
   page,
 }) => {

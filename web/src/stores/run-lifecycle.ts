@@ -3,6 +3,11 @@ export interface ClientActiveRun {
   runId: string;
   startedAt: string;
   phase: 'preparing' | 'running';
+  /**
+   * The input whose turn already ended in place (its final, or a proactive
+   * turn's end): the run is still closing, and nothing of it is left to show.
+   */
+  answered?: string;
 }
 
 export type ClientActiveRuns = Record<string, ClientActiveRun>;

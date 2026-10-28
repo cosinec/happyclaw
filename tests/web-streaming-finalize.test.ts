@@ -1023,3 +1023,343 @@ describe('the steps cache across a finish', () => {
     ]);
   });
 });
+
+describe('a final that arrives while its run is still closing', () => {
+  // A final can reach the Web while its run is still closing, before
+  // run_finished. The live card of that very turn settles in place; anything
+  // else is left alone.
+  interface Turn {
+    turnId: string;
+    inputTurnId?: string;
+  }
+
+  function streamTurn(
+    runId: string,
+    turn: Turn,
+    agentId?: string,
+    answer = '最终答案。',
+  ) {
+    emit(
+      { eventType: 'thinking_delta', text: `想一想 ${runId}`, ...turn },
+      runId,
+      agentId,
+    );
+    flushRaf();
+    emit(
+      {
+        eventType: 'tool_use_start',
+        toolName: 'Bash',
+        toolUseId: `tool-${runId}`,
+        toolInputSummary: 'ls',
+        ...turn,
+      },
+      runId,
+      agentId,
+    );
+    emit(
+      { eventType: 'tool_use_end', toolUseId: `tool-${runId}`, ...turn },
+      runId,
+      agentId,
+    );
+    // The last frame is still waiting for rAF when the final arrives.
+    emit({ eventType: 'text_delta', text: answer, ...turn }, runId, agentId);
+  }
+
+  /** What is on screen after each store update one call makes. */
+  function updatesOf(fn: () => void, runtimeJid = JID, agentId?: string) {
+    const updates: Array<{ live: boolean; settled: boolean; ids: string[] }> =
+      [];
+    const unsubscribe = useChatStore.subscribe((s) =>
+      updates.push({
+        live: agentId ? !!s.agentStreaming[agentId] : !!s.streaming[JID],
+        settled: !!s.settledStreaming[runtimeJid],
+        ids: (agentId ? s.agentMessages[agentId] : s.messages[JID]).map(
+          (m) => m.id,
+        ),
+      }),
+    );
+    fn();
+    unsubscribe();
+    return updates;
+  }
+
+  it('settles a cold start in place, in one update, and run_finished brings nothing back', () => {
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    // A cold start's turn is its input: the frames need not name it.
+    streamTurn('run-a', { turnId: 'turn-1' });
+
+    const updates = updatesOf(() =>
+      useChatStore
+        .getState()
+        .handleWsNewMessage(JID, finalMessage('final-1', '最终答案。')),
+    );
+    // The flushed frame, then one update: the reply in, the card out.
+    expect(updates.at(-1)).toEqual({
+      live: false,
+      settled: false,
+      ids: ['final-1'],
+    });
+    expect(updates.filter((u) => u.ids.length > 0)).toHaveLength(1);
+
+    let state = useChatStore.getState();
+    expect(state.thinkingCache['final-1']).toBe('想一想 run-a');
+    expect(state.stepsCache['final-1']?.steps.length).toBeGreaterThan(0);
+    expect(
+      state.traceCache['final-1']?.some((e) => e.title === '工具 Bash'),
+    ).toBe(true);
+    // The run is still closing: the composer can stop it, and its card shows
+    // nothing meanwhile.
+    expect(state.activeRuns[JID]?.answered).toBe('turn-1');
+    expect(state.waiting[JID]).toBe(true);
+
+    useChatStore.getState().handleRunFinished(JID, 'run-a');
+    state = useChatStore.getState();
+    expect(state.settledStreaming[JID]).toBeUndefined();
+    expect(state.streaming[JID]).toBeUndefined();
+    expect(state.waiting[JID]).toBe(false);
+    expect(state.activeRuns[JID]).toBeUndefined();
+  });
+
+  it("settles a warm turn by the input its frames name, not the Runner's own turn", () => {
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    streamTurn('run-a', {
+      turnId: 'presentation-7',
+      inputTurnId: 'delivery-7',
+    });
+
+    useChatStore.getState().handleWsNewMessage(
+      JID,
+      finalMessage('final-7', '最终答案。', {
+        turn_id: 'delivery-7',
+      }),
+    );
+    const state = useChatStore.getState();
+    expect(state.streaming[JID]).toBeUndefined();
+    expect(state.stepsCache['final-7']?.steps.length).toBeGreaterThan(0);
+    expect(state.activeRuns[JID]?.answered).toBe('delivery-7');
+  });
+
+  it("keeps a warm turn's card when nothing names its input: no guessing", () => {
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    streamTurn('run-a', { turnId: 'presentation-8' });
+
+    useChatStore
+      .getState()
+      .handleWsNewMessage(
+        JID,
+        finalMessage('final-8', '最终答案。', { turn_id: 'delivery-8' }),
+      );
+    const state = useChatStore.getState();
+    expect(state.streaming[JID]?.partialText).toBe('最终答案。');
+    expect(state.activeRuns[JID]?.answered).toBeUndefined();
+    // run_finished settles it as before.
+    useChatStore.getState().handleRunFinished(JID, 'run-a');
+    expect(useChatStore.getState().settledStreaming[JID]).toBeDefined();
+  });
+
+  it('leaves the stream of a newer turn alone when an older final arrives', () => {
+    useChatStore.getState().handleRunStarted(JID, 'run-b');
+    streamTurn(
+      'run-b',
+      { turnId: 'turn-b', inputTurnId: 'input-b' },
+      undefined,
+      'B 的回答',
+    );
+    flushRaf();
+
+    useChatStore
+      .getState()
+      .handleWsNewMessage(
+        JID,
+        finalMessage('final-a', 'A 的回答', { turn_id: 'input-a' }),
+      );
+    const state = useChatStore.getState();
+    expect(state.streaming[JID]?.partialText).toBe('B 的回答');
+    expect(state.thinkingCache['final-a']).toBeUndefined();
+    expect(state.stepsCache['final-a']).toBeUndefined();
+    expect(state.activeRuns[JID]?.answered).toBeUndefined();
+    expect(state.waiting[JID]).toBe(true);
+  });
+
+  it("settles a failover attempt's card, and drops the replaced attempt's", () => {
+    const turn = { turnId: 'turn-f', inputTurnId: 'input-f' };
+    useChatStore.getState().handleRunStarted(JID, 'attempt-1');
+    streamTurn('attempt-1', turn, undefined, '第一次');
+    // The provider failed over: a new attempt of the same input.
+    useChatStore.getState().handleRunStarted(JID, 'attempt-2');
+    expect(useChatStore.getState().settledStreaming[JID]?.runId).toBe(
+      'attempt-1',
+    );
+    streamTurn('attempt-2', turn, undefined, '第二次');
+
+    const updates = updatesOf(() =>
+      useChatStore
+        .getState()
+        .handleWsNewMessage(
+          JID,
+          finalMessage('final-f', '第二次', { turn_id: 'input-f' }),
+        ),
+    );
+    expect(updates.at(-1)).toEqual({
+      live: false,
+      settled: false,
+      ids: ['final-f'],
+    });
+    const state = useChatStore.getState();
+    // The reply is the second attempt's, and so is its process.
+    expect(state.thinkingCache['final-f']).toBe('想一想 attempt-2');
+    expect(state.activeRuns[JID]?.answered).toBe('input-f');
+
+    useChatStore.getState().handleRunFinished(JID, 'attempt-2');
+    expect(useChatStore.getState().settledStreaming[JID]).toBeUndefined();
+  });
+
+  it('keeps a stopped card to the stop rule, and a truncated part to its continuation', () => {
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    streamTurn('run-a', { turnId: 'turn-1' });
+    flushRaf();
+    useChatStore.getState().handleWsNewMessage(
+      JID,
+      finalMessage('part-1', '最终答案。', {
+        finalization_reason: 'truncated',
+      }),
+    );
+    let state = useChatStore.getState();
+    // The continuation of the same turn still streams into this card.
+    expect(state.streaming[JID]?.partialText).toBe('最终答案。');
+    expect(state.activeRuns[JID]?.answered).toBeUndefined();
+
+    emit({ eventType: 'status', statusText: 'interrupted' }, 'run-a');
+    useChatStore.getState().handleWsNewMessage(
+      JID,
+      finalMessage('stopped-1', '最终答案。', {
+        source_kind: 'interrupt_partial',
+        finalization_reason: 'interrupted',
+      }),
+    );
+    state = useChatStore.getState();
+    expect(state.streaming[JID]).toBeUndefined();
+    expect(state.thinkingCache['stopped-1']).toBe('想一想 run-a');
+    // A stop is not a turn that ended by itself.
+    expect(state.activeRuns[JID]?.answered).toBeUndefined();
+  });
+
+  it('never settles on a send_message reply: the turn goes on after it', () => {
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    streamTurn('run-a', { turnId: 'turn-1' });
+    useChatStore.getState().handleWsNewMessage(
+      JID,
+      finalMessage('interim-1', '先说一句', {
+        source_kind: 'sdk_send_message',
+      }),
+    );
+    const state = useChatStore.getState();
+    expect(state.streaming[JID]?.partialText).toBe('最终答案。');
+    expect(state.thinkingCache['interim-1']).toBeUndefined();
+    expect(state.activeRuns[JID]?.answered).toBeUndefined();
+  });
+
+  it('settles a group-mode scheduled task in place on its result, and only on its own', () => {
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    streamTurn('run-a', { turnId: 'sched-turn', inputTurnId: 'sched-input' });
+
+    // An isolated task posts its result here while this turn streams.
+    useChatStore.getState().handleWsNewMessage(
+      JID,
+      finalMessage('isolated-1', '别的任务', {
+        source_kind: 'scheduled_task_result',
+        turn_id: 'isolated-input',
+      }),
+      undefined,
+      'scheduled_task',
+    );
+    let state = useChatStore.getState();
+    expect(state.streaming[JID]?.partialText).toBe('最终答案。');
+    expect(state.thinkingCache['isolated-1']).toBeUndefined();
+
+    useChatStore.getState().handleWsNewMessage(
+      JID,
+      finalMessage('sched-1', '## 定时任务结果', {
+        source_kind: 'scheduled_task_result',
+        turn_id: 'sched-input',
+      }),
+      undefined,
+      'scheduled_task',
+    );
+    state = useChatStore.getState();
+    expect(state.streaming[JID]).toBeUndefined();
+    expect(state.thinkingCache['sched-1']).toBe('想一想 run-a');
+    expect(state.activeRuns[JID]?.answered).toBe('sched-input');
+  });
+
+  it('settles a session reply in place, its tab still running until run_finished', () => {
+    useChatStore.setState({ agentWaiting: { [AGENT]: true } });
+    useChatStore.getState().handleRunStarted(AGENT_JID, 'run-a');
+    streamTurn('run-a', { turnId: 'p-s', inputTurnId: 'input-s' }, AGENT);
+
+    const updates = updatesOf(
+      () =>
+        useChatStore.getState().handleWsNewMessage(
+          JID,
+          finalMessage('agent-final', '最终答案。', {
+            chat_jid: AGENT_JID,
+            turn_id: 'input-s',
+          }),
+          AGENT,
+        ),
+      AGENT_JID,
+      AGENT,
+    );
+    expect(updates.at(-1)).toEqual({
+      live: false,
+      settled: false,
+      ids: ['agent-final'],
+    });
+    let state = useChatStore.getState();
+    expect(state.thinkingCache['agent-final']).toBe('想一想 run-a');
+    expect(state.agentWaiting[AGENT]).toBe(true);
+    expect(state.activeRuns[AGENT_JID]?.answered).toBe('input-s');
+
+    useChatStore.getState().handleRunFinished(AGENT_JID, 'run-a');
+    state = useChatStore.getState();
+    expect(state.settledStreaming[AGENT_JID]).toBeUndefined();
+    expect(state.agentWaiting[AGENT]).toBe(false);
+  });
+
+  it('settles in place when the reply comes back by refresh after a reconnect', async () => {
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    streamTurn('run-a', { turnId: 'p-r', inputTurnId: 'input-r' });
+    flushRaf();
+    apiGetMock.mockResolvedValueOnce({
+      messages: [finalMessage('final-r', '最终答案。', { turn_id: 'input-r' })],
+    });
+    await useChatStore.getState().refreshMessages(JID);
+
+    const state = useChatStore.getState();
+    expect(state.streaming[JID]).toBeUndefined();
+    expect(state.thinkingCache['final-r']).toBe('想一想 run-a');
+    expect(state.waiting[JID]).toBe(true);
+    expect(state.activeRuns[JID]?.answered).toBe('input-r');
+  });
+
+  it('settles a session reply in place on refresh too', async () => {
+    useChatStore.setState({ agentWaiting: { [AGENT]: true } });
+    useChatStore.getState().handleRunStarted(AGENT_JID, 'run-a');
+    streamTurn('run-a', { turnId: 'p-sr', inputTurnId: 'input-sr' }, AGENT);
+    flushRaf();
+    apiGetMock.mockResolvedValueOnce({
+      messages: [
+        finalMessage('agent-r', '最终答案。', {
+          chat_jid: AGENT_JID,
+          turn_id: 'input-sr',
+        }),
+      ],
+    });
+    await useChatStore.getState().refreshAgentMessages(JID, AGENT);
+
+    const state = useChatStore.getState();
+    expect(state.agentStreaming[AGENT]).toBeUndefined();
+    expect(state.thinkingCache['agent-r']).toBe('想一想 run-a');
+    expect(state.activeRuns[AGENT_JID]?.answered).toBe('input-sr');
+  });
+});
