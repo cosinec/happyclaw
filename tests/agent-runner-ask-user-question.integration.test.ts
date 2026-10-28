@@ -13,6 +13,7 @@ import {
   RUNNER_DISALLOWED_BUILTIN_TOOLS,
   runnerCanUseTool,
   silenceShadowedCanUseToolWarning,
+  SUBAGENT_ASK_USER_QUESTION_RESULT,
 } from '../container/agent-runner/src/builtin-tool-policy.js';
 import { QUESTION_DEFERRED_MARK } from '../src/stream-steps.js';
 
@@ -120,14 +121,23 @@ interface AgentRequest {
   messages: Array<{ role: string; content: unknown }>;
 }
 
-function startUpstream(
-  firstCall: Block = {
-    type: 'tool_use',
-    id: 'toolu_ask_1',
-    name: 'AskUserQuestion',
-    input: QUESTION_INPUT,
-  },
-) {
+/** The scripted model: the blocks answering one agent request. */
+type Respond = (request: AgentRequest, index: number) => Block[];
+
+/** The first request makes `call`; every later one replies. */
+const callFirst =
+  (call: Block): Respond =>
+  (_request, index) =>
+    index === 0 ? [call] : [{ type: 'text', text: REPLY }];
+
+const ASK_CALL: Block = {
+  type: 'tool_use',
+  id: 'toolu_ask_1',
+  name: 'AskUserQuestion',
+  input: QUESTION_INPUT,
+};
+
+function startUpstream(respond: Respond) {
   const agentRequests: AgentRequest[] = [];
   let calls = 0;
   const server = http.createServer((req, res) => {
@@ -147,15 +157,14 @@ function startUpstream(
       let blocks: Block[] = [{ type: 'text', text: 'ok' }];
       let stop = 'end_turn';
       if (body.tools?.length) {
-        agentRequests.push({
+        const request = {
           tools: body.tools.map((tool) => tool.name),
           messages: body.messages ?? [],
-        });
-        if (agentRequests.length === 1) {
-          blocks = [firstCall];
+        };
+        agentRequests.push(request);
+        blocks = respond(request, agentRequests.length - 1);
+        if (blocks.some((block) => block.type === 'tool_use')) {
           stop = 'tool_use';
-        } else {
-          blocks = [{ type: 'text', text: REPLY }];
         }
       }
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
@@ -200,12 +209,12 @@ type ToolResultBlock = {
 
 /** One runner-shaped turn against the scripted upstream. */
 async function runTurn(
-  firstCall?: Block,
+  respond: Respond = callFirst(ASK_CALL),
   hooks?: NonNullable<
     Parameters<typeof runnerSdk.query>[0]['options']
   >['hooks'],
 ) {
-  const upstream = await startUpstream(firstCall);
+  const upstream = await startUpstream(respond);
   try {
     const stream = runnerSdk.query({
       prompt: singleUserMessage('问我午饭吃什么'),
@@ -313,6 +322,25 @@ describe('AskUserQuestion in the runner', () => {
     ).toBe(true);
   });
 
+  test('a sub-agent asking is told to report the question to its parent', async () => {
+    const options = {
+      signal: new AbortController().signal,
+      toolUseID: 'toolu_sub',
+      requestId: 'req_sub',
+      agentID: 'agent_sub_1',
+    };
+    await expect(
+      runnerCanUseTool('AskUserQuestion', QUESTION_INPUT, options),
+    ).resolves.toEqual({
+      behavior: 'deny',
+      message: SUBAGENT_ASK_USER_QUESTION_RESULT,
+    });
+    // Not the deferred answer: the step list shows no question for it.
+    expect(SUBAGENT_ASK_USER_QUESTION_RESULT).not.toContain(
+      QUESTION_DEFERRED_MARK,
+    );
+  });
+
   test('the model receives the deferred result and ends the turn with its reply', async () => {
     const run = await runTurn();
     expect(run.result).toMatchObject({ subtype: 'success', result: REPLY });
@@ -327,15 +355,58 @@ describe('AskUserQuestion in the runner', () => {
     );
   }, 60_000);
 
+  test("a sub-agent's question never gets the deferred answer", async () => {
+    const task = 'Find out what the user wants for lunch.';
+    const isSubagent = (request: AgentRequest) =>
+      JSON.stringify(request.messages[0]?.content).includes(task);
+    const answered = (request: AgentRequest, toolUseId: string) =>
+      JSON.stringify(request.messages).includes(`"tool_use_id":"${toolUseId}"`);
+    const run = await runTurn((request) => {
+      if (isSubagent(request)) {
+        return answered(request, 'toolu_sub_ask')
+          ? [{ type: 'text', text: 'Lunch is open: 面条 or 米饭.' }]
+          : [{ ...ASK_CALL, id: 'toolu_sub_ask' } as Block];
+      }
+      return answered(request, 'toolu_agent_1')
+        ? [{ type: 'text', text: REPLY }]
+        : [
+            {
+              type: 'tool_use',
+              id: 'toolu_agent_1',
+              name: 'Agent',
+              input: {
+                description: 'Ask about lunch',
+                prompt: task,
+                subagent_type: 'general-purpose',
+              },
+            },
+          ];
+    });
+    expect(run.result).toMatchObject({ subtype: 'success', result: REPLY });
+    const [subagentFirst] = run.agentRequests.filter(isSubagent);
+    expect(subagentFirst).toBeDefined();
+    const toolResult = run.toolResult('toolu_sub_ask');
+    expect(toolResult?.is_error).toBe(true);
+    const content = JSON.stringify(toolResult?.content);
+    expect(content).not.toContain(QUESTION_DEFERRED_MARK);
+    // Claude CLI 2.1.296 withholds the tool from sub-agents itself; should a
+    // sub-agent get it again, the runner's refusal answers instead.
+    expect(content).toContain(
+      subagentFirst.tools.includes('AskUserQuestion')
+        ? SUBAGENT_ASK_USER_QUESTION_RESULT
+        : 'not available inside subagents',
+    );
+  }, 60_000);
+
   test('a call a hook sends for approval stays denied, as without the handler', async () => {
     const target = path.join(cwd, 'guarded.txt');
     const run = await runTurn(
-      {
+      callFirst({
         type: 'tool_use',
         id: 'toolu_write_1',
         name: 'Write',
         input: { file_path: target, content: 'should not be written' },
-      },
+      }),
       {
         PreToolUse: [
           {

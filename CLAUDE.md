@@ -205,6 +205,9 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
   确认的调用（如 Hook 返回 `ask`）与没有它时一样被拒绝。Runner 没有交互作答通道：
   AskUserQuestion 立即以「已向用户展示、下一条消息作答」的结果返回，模型在回复里复述
   问题和选项后结束本轮；Web 卡片和飞书按钮只是作答捷径，用户的回答作为下一条消息到达。
+  只有主 Agent 能提问：子代理（`agentID` 非空）的 AskUserQuestion 被拒绝，要求它把
+  问题交回主 Agent，Runner 也不把它的问题推给 Web 或飞书卡片；当前 CLI 本身就不给
+  子代理这个工具。
 - 一次运行绑定的模型配置按固定顺序解析（`container-runner.ts` 的
   `resolvePinnedModelConfigId`）：会话手选 → 智能体绑定 → 全局默认
   （`defaultModelConfigId`，工作区自带 Provider 环境变量时让位）→ 唯一启用的配置 →

@@ -41,6 +41,19 @@ export const ASK_USER_QUESTION_DEFERRED_RESULT =
   'its options, so the user can answer from any channel.';
 
 /**
+ * Tool result of an AskUserQuestion call a sub-agent makes. Only the main
+ * agent's reply reaches the user, so the sub-agent reports the question back
+ * and the main agent decides whether to ask. Claude CLI 2.1.296 already
+ * withholds the tool from sub-agents; this keeps the answer right should one
+ * get it again. It does not start with QUESTION_DEFERRED_MARK, so the call
+ * shows no question.
+ */
+export const SUBAGENT_ASK_USER_QUESTION_RESULT =
+  'Sub-agents cannot ask the user, and this question was not shown. Do not ' +
+  'ask again with this tool: finish with what you have and report the open ' +
+  'question to the parent agent, which decides whether to ask the user.';
+
+/**
  * Tool result of any other call that asked for approval. bypassPermissions
  * approves ordinary calls before the handler is consulted, so what reaches it
  * asked for a person on purpose (e.g. a hook answering `ask`); without a
@@ -52,15 +65,22 @@ export const APPROVAL_UNAVAILABLE_RESULT =
 
 /**
  * The CLI registers AskUserQuestion only when the host answers permission
- * requests. AskUserQuestion is answered with the deferred result above;
- * every other request is denied, as it was without a handler.
+ * requests. The main agent's AskUserQuestion is answered with the deferred
+ * result above and a sub-agent's (`agentID` set) is refused; every other
+ * request is denied, as it was without a handler.
  */
-export const runnerCanUseTool: CanUseTool = async (toolName) => ({
+export const runnerCanUseTool: CanUseTool = async (
+  toolName,
+  _input,
+  { agentID },
+) => ({
   behavior: 'deny',
   message:
-    toolName === 'AskUserQuestion'
-      ? ASK_USER_QUESTION_DEFERRED_RESULT
-      : APPROVAL_UNAVAILABLE_RESULT,
+    toolName !== 'AskUserQuestion'
+      ? APPROVAL_UNAVAILABLE_RESULT
+      : agentID
+        ? SUBAGENT_ASK_USER_QUESTION_RESULT
+        : ASK_USER_QUESTION_DEFERRED_RESULT,
 });
 
 /**
