@@ -27,7 +27,8 @@ export type WebCapability =
   | 'menu'
   | 'haptic'
   | 'theme'
-  | 'navbar';
+  | 'navbar'
+  | 'shortcuts';
 
 export type NativeCapability = WebCapability | 'share' | 'picker' | 'passkey';
 
@@ -154,6 +155,8 @@ export interface NativeToWebPayloads {
   'nav.select': { tabId: string };
   'nav.back': Record<string, never>;
   'nav.action': { id: string };
+  /** A home-screen quick action the web handles (e.g. `new-conversation`). */
+  'app.shortcut': { id: string };
   'confirm.result': { confirmed: boolean };
   'menu.result': { selected: string | null };
   'app.lifecycle': { state: 'active' | 'inactive' | 'background' };
@@ -220,6 +223,7 @@ const payloadValidators: {
   'nav.select': (p) => typeof p.tabId === 'string',
   'nav.back': () => true,
   'nav.action': (p) => typeof p.id === 'string',
+  'app.shortcut': (p) => typeof p.id === 'string',
   'confirm.result': (p) => typeof p.confirmed === 'boolean',
   'menu.result': (p) => p.selected === null || typeof p.selected === 'string',
   'app.lifecycle': (p) =>

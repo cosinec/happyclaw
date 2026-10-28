@@ -7,6 +7,7 @@ import {
   releaseNativeChrome,
 } from './layout';
 import { currentNativeNavBar, subscribeNativeNavBar } from './nav-bar';
+import { emitNativeShortcut } from './shortcuts';
 import {
   buildTabDeclarations,
   describeRoute,
@@ -97,6 +98,7 @@ export function installNativeBridge(router: AppRouter) {
       'haptic',
       'theme',
       'navbar',
+      'shortcuts',
     ],
     build: import.meta.env.VITE_BUILD_ID || import.meta.env.MODE,
     onCommit: () => {
@@ -180,6 +182,7 @@ export function installNativeBridge(router: AppRouter) {
     const parent = PUSHED_ROUTES[router.state.location.pathname]?.parent;
     if (parent) void router.navigate(parent, { replace: true });
   });
+  session.on('app.shortcut', ({ id }) => emitNativeShortcut(id));
   session.on('nav.action', ({ id }) => {
     if (id === 'page') currentNativeNavBar()?.action?.onPress();
   });

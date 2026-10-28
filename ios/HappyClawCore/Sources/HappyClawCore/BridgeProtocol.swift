@@ -11,7 +11,7 @@ public enum BridgeProtocol {
   /// `window.webkit.messageHandlers.<name>` registered by the shell.
   public static let handlerName = "happyclaw"
   /// Capabilities the shell offers to the web (subset of web's list).
-  public static let shellCapabilities = ["layout", "tabs", "confirm", "menu", "haptic", "theme", "navbar"]
+  public static let shellCapabilities = ["layout", "tabs", "confirm", "menu", "haptic", "theme", "navbar", "shortcuts"]
 
   /// Highest version both sides speak, or nil when there is none.
   public static func negotiate(_ webVersions: [Int]) -> Int? {
@@ -314,6 +314,7 @@ public enum NativeMessage: Equatable, Sendable {
   case navSelect(tabId: String)
   case navBack
   case navAction(id: String)
+  case appShortcut(id: String)
   case confirmResult(id: String, confirmed: Bool)
   case menuResult(id: String, selected: String?)
   case lifecycle(LifecycleState)
@@ -327,6 +328,7 @@ public enum NativeMessage: Equatable, Sendable {
     case .navSelect: "nav.select"
     case .navBack: "nav.back"
     case .navAction: "nav.action"
+    case .appShortcut: "app.shortcut"
     case .confirmResult: "confirm.result"
     case .menuResult: "menu.result"
     case .lifecycle: "app.lifecycle"
@@ -369,7 +371,7 @@ extension BridgeProtocol {
       return envelope(P(tabId: tabId))
     case .navBack:
       return envelope(Empty())
-    case let .navAction(id):
+    case let .navAction(id), let .appShortcut(id):
       struct P: Encodable { var id: String }
       return envelope(P(id: id))
     case let .confirmResult(id, confirmed):

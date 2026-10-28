@@ -31,6 +31,8 @@ final class ShellModel {
   /// Page background, so the navigation bar matches whatever palette is on.
   private(set) var webBackground: RGBColor?
   private(set) var webBuild: String?
+  /// What the web said it handles in bridge.hello.
+  private(set) var webCapabilities: Set<String> = []
   private(set) var lastError: String?
 
   var path: [ShellRoute] = []
@@ -183,6 +185,26 @@ final class ShellModel {
     send(.navAction(id: action.id))
   }
 
+  /// Runs a pending home-screen quick action once native chrome is active;
+  /// until then (cold launch, web still loading) it stays in the inbox.
+  func deliverQuickAction() {
+    let inbox = QuickActionInbox.shared
+    guard let action = inbox.pending, session.isNativeChromeActive else { return }
+    inbox.pending = nil
+    path.removeAll()
+    sheet = nil
+    switch action {
+    case QuickAction.newConversation where webCapabilities.contains("shortcuts"):
+      send(.appShortcut(id: action))
+    case QuickAction.newConversation, QuickAction.tasks:
+      // An older web without shortcut support still gets a sensible tab.
+      let tab = action == QuickAction.tasks ? "tasks" : "chat"
+      if tabs.contains(where: { $0.id == tab }) { send(.navSelect(tabId: tab)) }
+    default:
+      break
+    }
+  }
+
   func sheetDismissed() {
     guard let file = sharedFile else { return }
     // A new share may already be on screen; keep its file.
@@ -257,8 +279,9 @@ final class ShellModel {
     }
 
     switch message {
-    case let .hello(versions, _, build):
+    case let .hello(versions, capabilities, build):
       webBuild = build
+      webCapabilities = Set(capabilities)
       apply(session.receiveHello(versions: versions, shell: ShellBuild.info))
       // The web commits native chrome on its first layout after welcome.
       if let version = session.version {
@@ -270,6 +293,7 @@ final class ShellModel {
     case let .ready(id):
       apply(session.receiveReady(session: id))
       layoutChanged()
+      deliverQuickAction()
     case let .tabs(tabs, more):
       self.tabs = tabs
       self.more = more
