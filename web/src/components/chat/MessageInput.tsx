@@ -125,9 +125,10 @@ interface MessageInputProps {
   contextUsage?: ReactNode;
   /**
    * The run's status (phase, elapsed time), directly above the card while
-   * docked. Its row is reserved only while a run is active and grows
-   * upward from the bottom-anchored card, so it never moves the card; on a
-   * phone it rides with the floating dock and counts in its height.
+   * docked. Its row is always reserved there, idle included (the bar then
+   * renders nothing), so a run starting or ending never moves the card or
+   * the list's bottom row; on a phone it rides with the floating dock and
+   * counts in its height.
    */
   statusBar?: ReactNode;
   /** Stop the active run when the composer has no follow-up to send. */
@@ -999,7 +1000,10 @@ export const MessageInput = memo(function MessageInput({
       >
         <UploadProgress />
 
-        {statusBar && !centered && isRunning && (
+        {/* Reserved whenever docked, run or not (cindy's activity frame):
+            starting, switching or ending a status never moves the card or
+            changes the list's bottom room. */}
+        {statusBar && !centered && (
           <div
             data-composer-status-bar
             className="mb-1.5 flex h-8 items-center *:min-w-0 *:flex-1"

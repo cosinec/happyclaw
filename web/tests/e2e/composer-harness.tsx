@@ -301,16 +301,22 @@ function BareComposer() {
           setRunning(false);
           return true;
         }}
-        statusBar={
-          <div
-            data-testid="status-bar-probe"
-            className="flex h-7 items-center justify-between rounded-full border border-surface-border px-3 text-caption"
-          >
-            <span>思考中</span>
-            <span>12s</span>
-          </div>
-        }
+        statusBar={<StatusProbe running={running} />}
       />
+    </div>
+  );
+}
+
+/** Like RunStatusBar: pills while a run is active, nothing when idle. */
+function StatusProbe({ running }: { running: boolean }) {
+  if (!running) return null;
+  return (
+    <div
+      data-testid="status-bar-probe"
+      className="flex h-7 items-center justify-between rounded-full border border-surface-border px-3 text-caption"
+    >
+      <span>思考中</span>
+      <span>12s</span>
     </div>
   );
 }
