@@ -93,6 +93,8 @@ const harness = {
   uploads: [] as string[][],
   stops: [] as string[],
   resets: [] as Array<{ jid: string; agentId: string | null }>,
+  /** Times ChatView handed back to the page (ChatPage's list). */
+  backs: 0,
   queueActions: [] as Array<{ id: string; action: string; content?: string }>,
   sendDelayMs: 0,
   switchTo: (_id: string | null) => {},
@@ -324,7 +326,12 @@ createRoot(document.getElementById('root')!).render(
         <BareComposer />
       ) : (
         // onBack renders the phone header's back button.
-        <ChatView groupJid={groupJid} onBack={() => undefined} />
+        <ChatView
+          groupJid={groupJid}
+          onBack={() => {
+            harness.backs += 1;
+          }}
+        />
       )}
     </main>
   </MemoryRouter>,

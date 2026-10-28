@@ -19,6 +19,7 @@ import {
 } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { useMediaQuery } from '../../hooks/useMediaQuery';
+import { useIsPhone } from '../layout/phone';
 import { isMessageVisibleInTimeline } from '../../lib/message-timeline';
 import { MessageList } from './MessageList';
 import {
@@ -316,6 +317,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const [searchParams, setSearchParams] = useSearchParams();
   const urlAgentId = searchParams.get('agent') || null;
   const mobileSessionsVisible = searchParams.get('sessions') === '1';
+  const isPhone = useIsPhone();
   const selectTab = useCallback(
     (id: string | null) => {
       setSearchParams(
@@ -981,6 +983,12 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   }, [canUseTerminal]);
 
   const handleBackAction = () => {
+    // A phone has one list (workspaces with their sessions): back goes
+    // straight there. Narrow windows step back to this workspace's sessions.
+    if (isPhone && onBack) {
+      onBack();
+      return;
+    }
     if (!mobileSessionsVisible) {
       setSearchParams(
         (prev) => {

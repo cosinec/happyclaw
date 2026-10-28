@@ -32,6 +32,7 @@ import {
 } from '../../stores/chat';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
 import { useMediaQuery } from '../../hooks/useMediaQuery';
+import { useIsPhone } from '../layout/phone';
 import {
   alternateFollowUpMode,
   FOLLOW_UP_MODE_KEY,
@@ -316,7 +317,7 @@ export const MessageInput = memo(function MessageInput({
   // Too narrow for every tool beside a readable model name.
   const foldToolbarActions = useMediaQuery('(max-width: 479px)');
   // A phone: cindy's floating dock, a pill at rest that opens into the card.
-  const phoneDock = useMediaQuery('(max-width: 1023px) and (pointer: coarse)');
+  const phoneDock = useIsPhone();
   const isWideViewport = useMediaQuery('(min-width: 1024px)');
 
   // iOS keyboard adaptation

@@ -10,6 +10,8 @@ const env = vi.hoisted(() => ({
   phoneWidth: false,
   /** `(max-width: 479px)`: reset and terminal fold into the + menu. */
   narrow: false,
+  /** useIsPhone: touch and narrower than 1024px. */
+  phone: false,
   /** `(min-width: 1024px)`: tablets in landscape, desktops. */
   wide: false,
   keyboardHeight: 0,
@@ -69,6 +71,10 @@ vi.mock('../../api/client', () => {
 
 vi.mock('../../hooks/useDisplayMode', () => ({
   useDisplayMode: () => ({ mode: 'default' }),
+}));
+
+vi.mock('../layout/phone', () => ({
+  useIsPhone: () => env.phone,
 }));
 
 vi.mock('../../hooks/useMediaQuery', () => ({
@@ -143,6 +149,7 @@ beforeEach(() => {
   env.touch = false;
   env.phoneWidth = false;
   env.narrow = false;
+  env.phone = false;
   env.wide = false;
   env.keyboardHeight = 0;
   env.deferEncode = false;
@@ -452,8 +459,19 @@ describe('status bar', () => {
 });
 
 describe('phone dock', () => {
-  test('rests as a pill and opens into the card with focus or content', async () => {
+  test('follows the shared phone hook (touch and narrower than 1024px)', async () => {
+    // Touch alone is a tablet; the dock waits for useIsPhone.
     env.touch = true;
+    await render(<MessageInput groupJid="web:g1" onSend={vi.fn()} />);
+    const root = () => container!.querySelector('[data-hc-composer]')!;
+    expect(root().hasAttribute('data-composer-dock')).toBe(false);
+    env.phone = true;
+    await render(<MessageInput groupJid="web:g1" onSend={vi.fn()} />);
+    expect(root().getAttribute('data-composer-dock')).toBe('pill');
+  });
+
+  test('rests as a pill and opens into the card with focus or content', async () => {
+    env.phone = true;
     await render(
       <MessageInput
         groupJid="web:g1"
@@ -487,7 +505,7 @@ describe('phone dock', () => {
   });
 
   test('a sheet the card opened does not fold it; leaving for the page does', async () => {
-    env.touch = true;
+    env.phone = true;
     let expanded = true;
     const view = () => (
       <MessageInput
@@ -520,7 +538,7 @@ describe('phone dock', () => {
   });
 
   test('publishes its height for the list it floats over', async () => {
-    env.touch = true;
+    env.phone = true;
     container!.setAttribute('data-composer-dock-host', '');
     await render(<MessageInput groupJid="web:g1" onSend={vi.fn()} />);
     // The card and its 24px feathered edge; the keyboard lift separately.
@@ -530,7 +548,7 @@ describe('phone dock', () => {
     expect(container!.style.getPropertyValue('--composer-dock-lift')).toContain(
       'var(--keyboard-height',
     );
-    env.touch = false;
+    env.phone = false;
     await render(<MessageInput groupJid="web:g1" onSend={vi.fn()} />);
     expect(container!.style.getPropertyValue('--composer-dock-height')).toBe(
       '',
