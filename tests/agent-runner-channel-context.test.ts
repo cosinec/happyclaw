@@ -5,10 +5,10 @@ import path from 'node:path';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 
 import {
-  formatChannelTurnContextForPrompt,
   normalizeChannelTurnContext,
   type ChannelTurnContext,
 } from '../container/agent-runner/src/types.js';
+import { TurnNoteLedger } from '../container/agent-runner/src/turn-notes.js';
 import {
   createMcpTools,
   untrustedChannelDataNote,
@@ -168,7 +168,11 @@ describe('Agent Runner channel turn context', () => {
   });
 
   test('creates a compact host-verified per-turn prompt block', () => {
-    const prompt = formatChannelTurnContextForPrompt(feishuContext());
+    const prompt = new TurnNoteLedger().stage('turn-1', {
+      memory: null,
+      ownerProfile: null,
+      channelContext: feishuContext(),
+    }).channel;
     expect(prompt).toContain(
       '<channel_context source="happyclaw_host" trust="verified">',
     );
