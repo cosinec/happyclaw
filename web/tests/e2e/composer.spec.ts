@@ -762,7 +762,7 @@ test.describe('touch composer', () => {
     await openHarness(page);
     await page.setViewportSize({ width: 390, height: 839 });
     const toolbar = page.locator('[data-composer-toolbar]');
-    const plus = toolbar.getByRole('button', { name: '添加文件' });
+    const plus = toolbar.getByRole('button', { name: '更多操作' });
     // Only + is left on the row.
     await expect(
       toolbar.locator('[data-composer-tools]').getByRole('button'),
