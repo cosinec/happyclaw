@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useRef,
@@ -49,6 +50,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { IconButton } from '@/components/common/IconButton';
+import { SegmentedControl } from '@/components/common/SegmentedControl';
 import { vendorOfConnection, vendorOfModel } from '../brand/vendor';
 import { VendorTile } from '../brand/VendorTile';
 import { api } from '../../api/client';
@@ -351,6 +353,35 @@ export function resolveEffortContext(
 }
 
 /**
+ * What the effort control shows, and what a screen reader hears: the picked
+ * level, else the default's (marked as such), else 默认 alone when Claude
+ * Code picks the level itself.
+ */
+function effortShown(context: EffortContext): {
+  level: string | null;
+  spoken: string;
+} {
+  const level = context.effort ?? context.defaultEffort;
+  const spoken = context.effort
+    ? effortLabel(context.effort)
+    : context.defaultEffort
+      ? `默认（${effortLabel(context.defaultEffort)}）`
+      : '默认';
+  return { level, spoken };
+}
+
+/** The `phone:` variant: below the desktop layout and driven by touch. */
+const PHONE_QUERY = '(max-width: 1023px) and (pointer: coarse)';
+
+/**
+ * A phone's single control for model and effort, after cindy's model pill:
+ * a filled 34px pill, 12px medium text. The model name truncates first; the
+ * level after it stays whole.
+ */
+const PHONE_PILL_CLASS =
+  'inline-flex h-[34px] max-w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-full border border-surface-border bg-muted pr-2.5 pl-1.5 text-caption font-medium text-foreground transition-colors duration-100 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none active:bg-surface-hover disabled:cursor-default data-[state=open]:bg-surface-hover';
+
+/**
  * The composer's model and effort controls: plain text at rest, a filled
  * pill on hover or while open. Labels truncate; tooltips carry the full name.
  */
@@ -410,8 +441,11 @@ export function ModelSelector({
   const canManageModels = useAuthStore((s) =>
     s.hasPermission('manage_system_config'),
   );
-  // Phones get the same panel in a bottom sheet.
-  const phone = useMediaQuery('(max-width: 639px)');
+  // A phone gets one pill for model and effort and picks the effort in the
+  // sheet; a narrow window keeps the desktop controls but the sheet too.
+  const phone = useMediaQuery(PHONE_QUERY);
+  const narrow = useMediaQuery('(max-width: 639px)');
+  const inSheet = phone || narrow;
   const [selection, setSelection] = useState<SessionModelSelection | null>(
     null,
   );
@@ -587,12 +621,24 @@ export function ModelSelector({
   };
 
   const disabled = !canChange || saving;
+  const effortDisabled =
+    disabled || (!!effortContext && !!optionStatus(effortContext.option));
+  const shown = effortContext ? effortShown(effortContext) : null;
   const panel = (
     <ModelPanel
       selection={selection}
       pinnedModel={pinnedModel}
       selectedKey={selectedKey}
       disabled={disabled}
+      effort={
+        phone
+          ? effortContext && {
+              context: effortContext,
+              disabled: effortDisabled,
+              onPick: pickEffort,
+            }
+          : undefined
+      }
       onPick={(row) => {
         handleOpenChange(false);
         pickRow(row);
@@ -608,57 +654,87 @@ export function ModelSelector({
     />
   );
 
-  // Phones open the same panel as a bottom sheet; both roots hand the
-  // trigger its open state and popup semantics.
-  const Root = phone ? Sheet : Popover;
-  const Trigger = phone ? SheetTrigger : PopoverTrigger;
+  const mark = saving ? (
+    <Loader2 className="size-5 shrink-0 animate-spin p-0.5" />
+  ) : inUse.option ? (
+    <VendorTile
+      size="sm"
+      vendor={vendorOf(inUse.option, inUse.model)}
+      name={inUse.option.name}
+    />
+  ) : (
+    <span className="flex size-5 shrink-0 items-center justify-center rounded-md bg-surface-selected text-muted-foreground">
+      <Sparkles className="size-3" aria-hidden="true" />
+    </span>
+  );
+  const chevron = canChange && (
+    <ChevronDown
+      className="size-3.5 shrink-0 text-muted-foreground"
+      aria-hidden="true"
+    />
+  );
+
+  // A sheet on phones and narrow windows, a popover otherwise; both roots
+  // hand the trigger its open state and popup semantics.
+  const Root = inSheet ? Sheet : Popover;
+  const Trigger = inSheet ? SheetTrigger : PopoverTrigger;
   return (
     <>
       <Root open={open} onOpenChange={handleOpenChange}>
-        <Tooltip
-          open={modelTooltip.open}
-          onOpenChange={modelTooltip.onOpenChange}
-        >
-          <Trigger asChild>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                disabled={disabled}
-                aria-label={`模型：${fullLabel}`}
-                // A disabled button gets no tooltip; the title still reads.
-                title={disabled ? tooltip : undefined}
-                {...modelTooltip.triggerProps}
-                className={cn(TRIGGER_CLASS, 'max-w-[240px]')}
-              >
-                {saving ? (
-                  <Loader2 className="size-5 shrink-0 animate-spin p-0.5" />
-                ) : inUse.option ? (
-                  <VendorTile
-                    size="sm"
-                    vendor={vendorOf(inUse.option, inUse.model)}
-                    name={inUse.option.name}
-                  />
-                ) : (
-                  <span className="flex size-5 shrink-0 items-center justify-center rounded-md bg-surface-selected text-muted-foreground">
-                    <Sparkles className="size-3" aria-hidden="true" />
-                  </span>
-                )}
-                <span className="min-w-0 truncate">{triggerName}</span>
-                {canChange && (
-                  <ChevronDown
-                    className="size-3.5 shrink-0 text-muted-foreground"
-                    aria-hidden="true"
-                  />
-                )}
-              </button>
-            </TooltipTrigger>
-          </Trigger>
-          <TooltipContent side="top">{tooltip}</TooltipContent>
-        </Tooltip>
         {phone ? (
+          <Trigger asChild>
+            <button
+              type="button"
+              disabled={disabled}
+              aria-label={`模型：${fullLabel}${
+                shown ? `，推理等级：${shown.spoken}` : ''
+              }`}
+              data-model-pill=""
+              className={PHONE_PILL_CLASS}
+            >
+              {mark}
+              <span className="min-w-0 truncate">{triggerName}</span>
+              {shown?.level && (
+                <span className="flex shrink-0 items-center gap-1.5 whitespace-nowrap">
+                  <span className="text-muted-foreground" aria-hidden="true">
+                    ·
+                  </span>
+                  {effortLabel(shown.level)}
+                </span>
+              )}
+              {chevron}
+            </button>
+          </Trigger>
+        ) : (
+          <Tooltip
+            open={modelTooltip.open}
+            onOpenChange={modelTooltip.onOpenChange}
+          >
+            <Trigger asChild>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  disabled={disabled}
+                  aria-label={`模型：${fullLabel}`}
+                  // A disabled button gets no tooltip; the title still reads.
+                  title={disabled ? tooltip : undefined}
+                  {...modelTooltip.triggerProps}
+                  className={cn(TRIGGER_CLASS, 'max-w-[240px]')}
+                >
+                  {mark}
+                  <span className="min-w-0 truncate">{triggerName}</span>
+                  {chevron}
+                </button>
+              </TooltipTrigger>
+            </Trigger>
+            <TooltipContent side="top">{tooltip}</TooltipContent>
+          </Tooltip>
+        )}
+        {inSheet ? (
           <SheetContent
             side="bottom"
-            className="gap-0 p-0 data-[side=bottom]:h-[80dvh]"
+            detents
+            className="gap-0 p-0"
             // Focus the sheet, not the search field: a phone keyboard would
             // cover the list.
             onOpenAutoFocus={(event) => {
@@ -686,10 +762,10 @@ export function ModelSelector({
           </PopoverContent>
         )}
       </Root>
-      {effortContext && (
+      {effortContext && !phone && (
         <EffortMenu
           context={effortContext}
-          disabled={disabled || !!optionStatus(effortContext.option)}
+          disabled={effortDisabled}
           onPick={pickEffort}
         />
       )}
@@ -706,14 +782,9 @@ interface EffortMenuProps {
 /** The reasoning effort of the model in use, next to the model control. */
 function EffortMenu({ context, disabled, onPick }: EffortMenuProps) {
   const tooltip = useQuietTooltip();
-  const level = context.effort ?? context.defaultEffort;
+  const { level, spoken } = effortShown(context);
   // The accessible name carries the level the control shows.
-  const current = context.effort
-    ? effortLabel(context.effort)
-    : context.defaultEffort
-      ? `默认（${effortLabel(context.defaultEffort)}）`
-      : '默认';
-  const name = `推理等级：${current}，选择推理等级`;
+  const name = `推理等级：${spoken}，选择推理等级`;
   return (
     <DropdownMenu onOpenChange={tooltip.onMenuOpenChange}>
       <Tooltip open={tooltip.open} onOpenChange={tooltip.onOpenChange}>
@@ -790,6 +861,16 @@ interface ModelPanelProps {
   pinnedModel: string | null;
   selectedKey: string;
   disabled: boolean;
+  /**
+   * A phone picks the effort here, under the model in use; null when that
+   * model takes none. Undefined leaves the effort to the control beside the
+   * model.
+   */
+  effort?: {
+    context: EffortContext;
+    disabled: boolean;
+    onPick: (effort: string | null) => void;
+  } | null;
   /** Null picks the default. */
   onPick: (row: ModelRow | null) => void;
   onManage: (() => void) | null;
@@ -805,9 +886,17 @@ function ModelPanel({
   pinnedModel,
   selectedKey,
   disabled,
+  effort,
   onPick,
   onManage,
 }: ModelPanelProps) {
+  const effortRow = effort && (
+    <EffortSegments
+      context={effort.context}
+      disabled={effort.disabled}
+      onPick={effort.onPick}
+    />
+  );
   const [query, setQuery] = useState('');
   const [rail, setRail] = useState<string>('all');
   const listRef = useRef<HTMLDivElement>(null);
@@ -923,31 +1012,34 @@ function ModelPanel({
               detail={defaultHint(selection)}
             />
           )}
+          {showDefault && selectedKey === DEFAULT_ROW_KEY && effortRow}
           {rows.map((row) => {
             const { model, oneMillion } = splitOneMillionSuffix(row.id);
             const status = optionStatus(row.option);
             return (
-              <RowButton
-                key={row.key}
-                checked={row.key === selectedKey}
-                disabled={disabled || !!status}
-                onClick={() => onPick(row)}
-                mark={
-                  <VendorTile
-                    vendor={vendorOf(row.option, row.id)}
-                    name={row.option.name}
-                  />
-                }
-                title={model || '由中转站决定'}
-                detail={[
-                  row.option.name,
-                  oneMillion ? '1M 上下文' : null,
-                  row.note,
-                  status,
-                ]
-                  .filter(Boolean)
-                  .join(' · ')}
-              />
+              <Fragment key={row.key}>
+                <RowButton
+                  checked={row.key === selectedKey}
+                  disabled={disabled || !!status}
+                  onClick={() => onPick(row)}
+                  mark={
+                    <VendorTile
+                      vendor={vendorOf(row.option, row.id)}
+                      name={row.option.name}
+                    />
+                  }
+                  title={model || '由中转站决定'}
+                  detail={[
+                    row.option.name,
+                    oneMillion ? '1M 上下文' : null,
+                    row.note,
+                    status,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}
+                />
+                {row.key === selectedKey && effortRow}
+              </Fragment>
             );
           })}
           {rows.length === 0 && !showDefault && (
@@ -960,7 +1052,9 @@ function ModelPanel({
 
       <div className="shrink-0 space-y-1 border-t border-surface-border px-3 py-2">
         <p className="text-micro leading-4 text-muted-foreground">
-          切换模型会开启新的底层会话，并自动带上最近的对话记录；推理等级在输入框旁调整。
+          {effort === undefined
+            ? '切换模型会开启新的底层会话，并自动带上最近的对话记录；推理等级在输入框旁调整。'
+            : '切换模型会开启新的底层会话，并自动带上最近的对话记录。'}
         </p>
         {onManage && (
           <button
@@ -974,6 +1068,55 @@ function ModelPanel({
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * A phone's effort choice: 默认 and the model's levels as a segmented row
+ * under the model in use. A pick applies in place; the sheet stays open.
+ */
+function EffortSegments({
+  context,
+  disabled,
+  onPick,
+}: {
+  context: EffortContext;
+  disabled: boolean;
+  onPick: (effort: string | null) => void;
+}) {
+  return (
+    // The fieldset only disables the levels; the segmented group names them.
+    <fieldset
+      data-effort-segments=""
+      role="none"
+      disabled={disabled}
+      className="min-w-0 space-y-1 pt-0.5 pr-2 pb-2 pl-[2.875rem] disabled:opacity-50"
+    >
+      <p className="text-micro text-muted-foreground" aria-hidden="true">
+        推理等级
+        {context.defaultEffort &&
+          ` · 默认${effortLabel(context.defaultEffort)}`}
+      </p>
+      <SegmentedControl
+        label={
+          context.defaultEffort
+            ? `推理等级（默认${effortLabel(context.defaultEffort)}）`
+            : '推理等级'
+        }
+        size="sm"
+        value={context.effort ?? DEFAULT_EFFORT}
+        options={[
+          { value: DEFAULT_EFFORT, label: '默认' },
+          ...context.efforts.map((level) => ({
+            value: level,
+            label: effortLabel(level),
+          })),
+        ]}
+        onChange={(value) => {
+          if (!disabled) onPick(value === DEFAULT_EFFORT ? null : value);
+        }}
+      />
+    </fieldset>
   );
 }
 

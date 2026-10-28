@@ -105,9 +105,14 @@ const modelButton = (page: Page) =>
 /** A model row of the open panel, by the model it names. */
 const modelRow = (page: Page, model: string) =>
   page.locator(`[data-model-row][title="${model}"]`);
-/** The reasoning effort control next to the model. */
+/** The reasoning effort control next to the model (not on a phone). */
 const effortButton = (page: Page) =>
   page.locator('[data-hc-composer] button[aria-label$="选择推理等级"]');
+/** A phone's level, in the segmented row under the model in the sheet. */
+const effortSegment = (page: Page, label: string) =>
+  page
+    .locator('[data-effort-segments]')
+    .getByRole('button', { name: label, exact: true });
 const effortItem = (page: Page, label: string) =>
   page.getByRole('menuitemradio', { name: label, exact: true });
 
@@ -275,20 +280,31 @@ test.describe('phone model sheet', () => {
 test.describe('model picker', () => {
   test('fits the composer row without pushing the send button off a phone', async ({
     page,
+    isMobile,
   }) => {
     await openHarness(page, {
       selectedModelConfigId: 'chatgpt',
       selectedModel: 'gpt-6-astra',
       selectedEffort: 'high',
     });
-    // The model, then its own effort control.
     await expect(modelButton(page)).toContainText('gpt-6-astra');
-    await expect(effortButton(page)).toContainText('高');
-    const boxes = await Promise.all([
-      modelButton(page).boundingBox(),
-      effortButton(page).boundingBox(),
-    ]);
-    expect(boxes[0]!.x).toBeLessThan(boxes[1]!.x);
+    if (isMobile) {
+      // A phone: one pill, 「模型 · 档位」, whose name says both.
+      await expect(modelButton(page)).toContainText('高');
+      await expect(modelButton(page)).toHaveAttribute(
+        'aria-label',
+        /，推理等级：高$/,
+      );
+      await expect(effortButton(page)).toHaveCount(0);
+    } else {
+      // The model, then its own effort control.
+      await expect(effortButton(page)).toContainText('高');
+      const boxes = await Promise.all([
+        modelButton(page).boundingBox(),
+        effortButton(page).boundingBox(),
+      ]);
+      expect(boxes[0]!.x).toBeLessThan(boxes[1]!.x);
+    }
     await expectRowFits(page);
 
     for (const width of [412, 360, 320]) {
@@ -300,6 +316,7 @@ test.describe('model picker', () => {
 
   test('picking a model, then an effort, saves both for the conversation', async ({
     page,
+    isMobile,
   }) => {
     const { puts } = await openHarness(page);
 
@@ -321,27 +338,47 @@ test.describe('model picker', () => {
     });
     await expect(modelButton(page)).toContainText('gpt-6-astra');
 
-    await effortButton(page).click();
-    // gpt-6-astra offers everything up to max here, after 默认.
-    await expect(page.getByRole('menuitemradio')).toHaveCount(
-      1 + EFFORTS.length,
-    );
-    await effortItem(page, '超高').click();
+    if (isMobile) {
+      // A phone picks the level in the sheet, under the model in use.
+      await modelButton(page).click();
+      await expect(
+        page.locator('[data-effort-segments]').getByRole('button'),
+      ).toHaveCount(1 + EFFORTS.length);
+      await effortSegment(page, '超高').click();
+    } else {
+      await effortButton(page).click();
+      // gpt-6-astra offers everything up to max here, after 默认.
+      await expect(page.getByRole('menuitemradio')).toHaveCount(
+        1 + EFFORTS.length,
+      );
+      await effortItem(page, '超高').click();
+    }
     await expect.poll(() => puts.length).toBe(2);
     expect(puts[1]).toMatchObject({
       modelConfigId: 'chatgpt',
       model: 'gpt-6-astra',
       effort: 'xhigh',
     });
-    await expect(effortButton(page)).toContainText('超高');
+    if (isMobile) {
+      // Applied in place: the sheet stays open on the pressed level.
+      await expect(effortSegment(page, '超高')).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      );
+      await expect(modelButton(page)).toContainText('超高');
+    } else {
+      await expect(effortButton(page)).toContainText('超高');
+      await modelButton(page).click();
+    }
 
     // A model without that level puts the effort back to its default.
-    await modelButton(page).click();
     await modelRow(page, 'gpt-5.5').click();
     await expect.poll(() => puts.length).toBe(3);
     expect(puts[2]).toMatchObject({ model: 'gpt-5.5', effort: null });
     await expect(modelButton(page)).toContainText('gpt-5.5');
-    await expect(effortButton(page)).toContainText('中');
+    await expect(
+      isMobile ? modelButton(page) : effortButton(page),
+    ).toContainText('中');
   });
 
   test('the panel stays inside a small screen', async ({ page }) => {
