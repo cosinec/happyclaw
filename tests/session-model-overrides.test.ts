@@ -320,13 +320,27 @@ describe('resolveSessionLaunchOverrides', () => {
       model: 'glm-old',
     });
     expect(glm()).toEqual({ model: 'glm-old' });
-    // An effort is a ChatGPT choice; a stored one never applies here.
+    expect(mocks.logger.warn).not.toHaveBeenCalled();
+    // An effort goes with a model that takes it...
+    setProviders(chatGpt('gpt'), {
+      ...thirdParty('glm'),
+      models: [{ id: 'glm-model' }, { id: 'glm-air' }, { id: 'glm-5.3' }],
+    });
+    db.setSessionModelSelection('grp', null, 'glm', 'member-1', {
+      model: 'glm-5.3',
+      effort: 'high',
+    });
+    expect(glm()).toEqual({ model: 'glm-5.3', effort: 'high' });
+    // ...and is ignored, with a warning, on one that takes none.
     db.setSessionModelSelection('grp', null, 'glm', 'member-1', {
       model: 'glm-air',
       effort: 'high',
     });
     expect(glm()).toEqual({ model: 'glm-air' });
-    expect(mocks.logger.warn).not.toHaveBeenCalled();
+    expect(mocks.logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ providerId: 'glm', effort: 'high' }),
+      expect.any(String),
+    );
   });
 
   test('within another configuration, a model it dropped is ignored, quietly when predicting', () => {

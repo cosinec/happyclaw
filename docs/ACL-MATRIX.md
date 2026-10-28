@@ -92,7 +92,7 @@ token（Runner/查询退出即吊销），并拒绝带 `Forwarded`、`X-Forwarde
 - 列表中的工作区投影
 - 读取消息与文件，以及回合的思考摘要与执行轨迹
   （`GET /api/groups/:jid/turn-traces/:turnId`，主动模式工作区另按下述过程可见性过滤）
-- 查看会话当前使用的模型配置
+- 查看会话当前使用的模型配置与上下文占用（`GET /api/groups/:jid/context-usage`）
 - 发送普通消息
 - 查看 Runtime Session、绑定和项目能力
 - 打开 Web 终端前的资源检查

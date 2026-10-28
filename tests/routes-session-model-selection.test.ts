@@ -250,7 +250,17 @@ describe('GET /:jid/model-selection', () => {
         enabled: true,
         model: 'opus',
         usable: true,
-        models: [{ id: 'opus', hidden: false }],
+        // What the model takes, from its capabilities; with no effort of its
+        // own and no endpoint default, the model's own default effort.
+        models: [
+          {
+            id: 'opus',
+            hidden: false,
+            efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+            defaultEffort: 'medium',
+            contextWindow: 1_000_000,
+          },
+        ],
       },
       {
         id: 'chatgpt',
@@ -267,10 +277,18 @@ describe('GET /:jid/model-selection', () => {
         enabled: false,
         model: 'glm-5.3[1m]',
         usable: true,
+        // A third-party endpoint runs at max unless a model says otherwise;
+        // a model without known capabilities offers no efforts to pick.
         models: [
-          { id: 'glm-5.3[1m]', hidden: false },
-          { id: 'glm-5.3-air', hidden: false },
-          { id: 'glm-5.3-legacy', hidden: true },
+          {
+            id: 'glm-5.3[1m]',
+            hidden: false,
+            efforts: ['low', 'high', 'max'],
+            defaultEffort: 'max',
+            contextWindow: 1_000_000,
+          },
+          { id: 'glm-5.3-air', hidden: false, defaultEffort: 'low' },
+          { id: 'glm-5.3-legacy', hidden: true, defaultEffort: 'max' },
         ],
       },
       {
@@ -280,7 +298,15 @@ describe('GET /:jid/model-selection', () => {
         enabled: false,
         model: 'glm-5.3',
         usable: false,
-        models: [{ id: 'glm-5.3', hidden: false }],
+        models: [
+          {
+            id: 'glm-5.3',
+            hidden: false,
+            efforts: ['low', 'high', 'max'],
+            defaultEffort: 'high',
+            contextWindow: 1_000_000,
+          },
+        ],
       },
     ]);
     expect(
@@ -298,6 +324,7 @@ describe('GET /:jid/model-selection', () => {
       source: 'default',
       modelConfigId: 'glm',
       model: 'glm-5.3[1m]',
+      effort: 'max',
       enabledCount: 2,
     });
     expect(body.selectedModelConfigId).toBeNull();
@@ -410,15 +437,23 @@ describe('GET /:jid/model-selection', () => {
     expect(body.selectedEffort).toBe('ultra');
   });
 
-  test('a configuration that is not ChatGPT never reports an effort, nor a model it does not offer', async () => {
+  test('a model the list no longer offers, or an effort the model does not take, reads as unset', async () => {
+    // The stale model runs the default, which takes `high`.
     db.setSessionModelSelection(GROUP_FOLDER, null, 'glm', OWNER_ID, {
       model: 'gpt-6-astra',
       effort: 'high',
     });
-    const { body } = await call('GET');
-    expect(body).toMatchObject({
+    expect((await call('GET')).body).toMatchObject({
       selectedModelConfigId: 'glm',
       selectedModel: null,
+      selectedEffort: 'high',
+    });
+    db.setSessionModelSelection(GROUP_FOLDER, null, 'glm', OWNER_ID, {
+      model: 'glm-5.3-air',
+      effort: 'high',
+    });
+    expect((await call('GET')).body).toMatchObject({
+      selectedModel: 'glm-5.3-air',
       selectedEffort: null,
     });
   });
@@ -714,7 +749,7 @@ describe('PUT /:jid/model-selection inside a ChatGPT configuration', () => {
     expect(mocks.drainCalls).toEqual([]);
   });
 
-  test('only a ChatGPT configuration has efforts to pick; any other offers only its own models', async () => {
+  test('a model outside the list, an effort the model does not take, a model without a configuration are refused', async () => {
     const other = await call('PUT', '', {
       modelConfigId: 'glm',
       model: 'gpt-6-astra',
@@ -722,12 +757,10 @@ describe('PUT /:jid/model-selection inside a ChatGPT configuration', () => {
     expect(other.status).toBe(400);
     expect(other.body).toMatchObject({ code: 'MODEL_NOT_IN_CONNECTION' });
     const effortOnly = await call('PUT', '', {
-      modelConfigId: 'official',
-      effort: 'high',
+      modelConfigId: 'glm',
+      effort: 'medium',
     });
-    expect(effortOnly.body).toMatchObject({
-      code: 'MODEL_SELECTION_UNSUPPORTED',
-    });
+    expect(effortOnly.body).toMatchObject({ code: 'EFFORT_NOT_SUPPORTED' });
     const orphan = await call('PUT', '', {
       modelConfigId: null,
       model: 'gpt-6-astra',
@@ -799,15 +832,49 @@ describe('model-selection inside a configuration that is not ChatGPT', () => {
     expect(mocks.drainCalls).toEqual([]);
   });
 
-  test('an effort stays a ChatGPT choice', async () => {
+  test('an effort goes with a model that takes it', async () => {
+    // glm-5.3-air has no known efforts, though it is configured to run low.
     const refused = await call('PUT', '', {
       modelConfigId: 'glm',
       model: 'glm-5.3-air',
       effort: 'low',
     });
     expect(refused.status).toBe(400);
-    expect(refused.body).toMatchObject({ code: 'MODEL_SELECTION_UNSUPPORTED' });
+    expect(refused.body).toMatchObject({ code: 'EFFORT_NOT_SUPPORTED' });
     expect(detail()).toBeNull();
+
+    // Without a model, the configuration's default model decides.
+    const accepted = await call('PUT', '', {
+      modelConfigId: 'glm',
+      effort: 'low',
+    });
+    expect(accepted.status).toBe(200);
+    expect(accepted.body).toMatchObject({
+      selectedModel: null,
+      selectedEffort: 'low',
+    });
+    expect(detail()).toMatchObject({ model: null, effort: 'low' });
+  });
+
+  test('an effort-only change retires the runner but keeps the model', async () => {
+    await call('PUT', '', { modelConfigId: 'glm', model: 'glm-5.3[1m]' });
+    mocks.drainCalls = [];
+    const raised = await call('PUT', '', {
+      modelConfigId: 'glm',
+      model: 'glm-5.3[1m]',
+      effort: 'max',
+    });
+    expect(raised.status).toBe(200);
+    expect(raised.body.drained).toBe(1);
+    // Every runner of the conversation, even one on this configuration.
+    expect(mocks.drainCalls).toEqual([{ jids: [GROUP_JID], target: null }]);
+    mocks.drainCalls = [];
+    await call('PUT', '', {
+      modelConfigId: 'glm',
+      model: 'glm-5.3[1m]',
+      effort: 'max',
+    });
+    expect(mocks.drainCalls).toEqual([]);
   });
 
   test('accepts a model id up to the shared length limit', async () => {

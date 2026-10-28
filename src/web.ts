@@ -93,6 +93,12 @@ import {
 } from './db.js';
 import { getGroupAllowedUserIds } from './group-broadcast-acl.js';
 import {
+  NO_CONTEXT_USAGE,
+  onConversationContextCleared,
+  readSessionContextUsage,
+  type SessionContextUsage,
+} from './session-context-usage.js';
+import {
   hasBoundWorkspaceReference,
   resolveBoundWorkspaceJid,
 } from './workspace-attribution.js';
@@ -3700,6 +3706,44 @@ export function broadcastRunStarted(
     allowedUserIds,
   );
 }
+
+/**
+ * Tell the Web chats of a workspace how full one conversation's context is
+ * now, read from its transcript unless given (a cleared conversation passes
+ * NO_CONTEXT_USAGE). Never throws: the ring is a display.
+ */
+export function broadcastContextUsage(
+  groupFolder: string,
+  agentId: string | null,
+  usage?: SessionContextUsage,
+): void {
+  try {
+    const value = usage ?? readSessionContextUsage(groupFolder, agentId);
+    for (const jid of getJidsByFolder(groupFolder)) {
+      if (!jid.startsWith('web:')) continue;
+      safeBroadcast(
+        {
+          type: 'context_usage',
+          chatJid: jid,
+          ...(agentId ? { agentId } : {}),
+          ...value,
+        },
+        isHostGroupJid(jid),
+        getGroupAllowedUserIds(jid),
+      );
+    }
+  } catch (err) {
+    logger.warn(
+      { err, groupFolder, agentId },
+      'Failed to publish conversation context usage',
+    );
+  }
+}
+
+// A cleared conversation shows an empty ring until its next turn.
+onConversationContextCleared((groupFolder, agentId) =>
+  broadcastContextUsage(groupFolder, agentId, NO_CONTEXT_USAGE),
+);
 
 export function broadcastRunFinished(
   chatJid: string,
