@@ -26,7 +26,10 @@ final class AnchoredMenuPresenter {
     guard #available(iOS 17.4, *), let host, let anchor = request.anchor else { return false }
     finish(selected: nil)
 
-    let button = AnchorButton(frame: CGRect(x: anchor.x, y: anchor.y, width: anchor.width, height: anchor.height))
+    // iOS 26 grows a button's menu out of the button itself, covering it.
+    // The stand-in is a sliver under the web control, so the menu opens
+    // below it and the control stays visible.
+    let button = AnchorButton(frame: CGRect(x: anchor.x, y: anchor.y + anchor.height + 4, width: anchor.width, height: 2))
     button.accessibilityElementsHidden = true
     button.showsMenuAsPrimaryAction = true
     button.menu = UIMenu(
@@ -59,12 +62,17 @@ final class AnchoredMenuPresenter {
   private func element(for item: MenuItemDeclaration, button: AnchorButton) -> UIMenuElement {
     let image = item.symbol.flatMap { UIImage(systemName: $0) }
     if let children = item.children {
-      return UIMenu(
+      var options: UIMenu.Options = item.inline == true ? .displayInline : []
+      // A radio group: the parent row shows the current choice.
+      if children.contains(where: { $0.checked != nil }) { options.insert(.singleSelection) }
+      let menu = UIMenu(
         title: item.title,
         image: image,
-        options: item.inline == true ? .displayInline : [],
+        options: options,
         children: children.map { element(for: $0, button: button) }
       )
+      if item.inline != true { menu.subtitle = children.first { $0.checked == true }?.title }
+      return menu
     }
     var attributes: UIMenuElement.Attributes = []
     if item.destructive == true { attributes.insert(.destructive) }
