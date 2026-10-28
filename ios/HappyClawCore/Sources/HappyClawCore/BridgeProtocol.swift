@@ -1,0 +1,338 @@
+import Foundation
+
+/// Wire format shared with `web/src/native/protocol.ts`. Both sides change
+/// together; `ios/README.md` documents every message.
+///
+/// Envelope: `{ "v": Int, "type": String, "id"?: String, "payload": {...} }`.
+/// Only declarations and results cross the bridge — never business data.
+public enum BridgeProtocol {
+  /// Versions this shell speaks.
+  public static let supportedVersions: ClosedRange<Int> = 1...1
+  /// `window.webkit.messageHandlers.<name>` registered by the shell.
+  public static let handlerName = "happyclaw"
+  /// Capabilities the shell offers to the web (subset of web's list).
+  public static let shellCapabilities = ["layout", "tabs", "confirm", "menu", "haptic", "theme"]
+
+  /// Highest version both sides speak, or nil when there is none.
+  public static func negotiate(_ webVersions: [Int]) -> Int? {
+    webVersions.filter { supportedVersions.contains($0) }.max()
+  }
+}
+
+// MARK: - Shared value types
+
+public struct Insets: Codable, Equatable, Sendable {
+  public var top: Double
+  public var right: Double
+  public var bottom: Double
+  public var left: Double
+
+  public static let zero = Insets(top: 0, right: 0, bottom: 0, left: 0)
+
+  public init(top: Double, right: Double, bottom: Double, left: Double) {
+    self.top = top
+    self.right = right
+    self.bottom = bottom
+    self.left = left
+  }
+}
+
+public struct TabDeclaration: Codable, Equatable, Sendable, Identifiable, Hashable {
+  public var id: String
+  public var title: String
+  /// SF Symbol name.
+  public var symbol: String
+  public var path: String
+
+  public init(id: String, title: String, symbol: String, path: String) {
+    self.id = id
+    self.title = title
+    self.symbol = symbol
+    self.path = path
+  }
+}
+
+public struct RouteState: Codable, Equatable, Sendable {
+  public var path: String
+  public var title: String?
+  public var tabId: String?
+  public var canGoBack: Bool
+  public var tabBar: Bool
+
+  public init(path: String, title: String?, tabId: String?, canGoBack: Bool, tabBar: Bool) {
+    self.path = path
+    self.title = title
+    self.tabId = tabId
+    self.canGoBack = canGoBack
+    self.tabBar = tabBar
+  }
+}
+
+public struct ConfirmRequest: Codable, Equatable, Sendable {
+  public var title: String
+  public var message: String
+  public var confirmText: String
+  public var cancelText: String
+  public var destructive: Bool
+}
+
+public struct MenuItemDeclaration: Codable, Equatable, Sendable, Identifiable {
+  public var id: String
+  public var title: String
+  public var symbol: String?
+  public var destructive: Bool?
+  public var disabled: Bool?
+}
+
+public struct MenuRequest: Codable, Equatable, Sendable {
+  public var title: String?
+  public var message: String?
+  public var items: [MenuItemDeclaration]
+}
+
+public enum HapticStyle: String, Codable, Sendable {
+  case light, medium, success, warning, error
+}
+
+public enum ColorSchemeName: String, Codable, Sendable {
+  case light, dark
+}
+
+public enum BridgeErrorCode: String, Codable, Sendable {
+  case invalidMessage = "invalid_message"
+  case unsupportedType = "unsupported_type"
+  case versionUnsupported = "version_unsupported"
+  case notReady = "not_ready"
+  case busy
+  case cancelled
+}
+
+// MARK: - Web → native
+
+public enum WebMessage: Equatable, Sendable {
+  case hello(versions: [Int], capabilities: [String], build: String)
+  case ready(session: String)
+  case tabs(tabs: [TabDeclaration], more: [TabDeclaration])
+  case routeChanged(RouteState)
+  case themeChanged(ColorSchemeName)
+  case confirmRequest(id: String, ConfirmRequest)
+  case menuRequest(id: String, MenuRequest)
+  case haptic(HapticStyle)
+  case error(code: String, message: String, ref: String?)
+}
+
+public struct DecodedWebMessage: Equatable, Sendable {
+  public var version: Int
+  public var message: WebMessage
+}
+
+public enum BridgeDecodeError: Error, Equatable {
+  case invalidEnvelope
+  case unsupportedVersion(Int, ref: String?)
+  case unknownType(String, ref: String?)
+  case invalidPayload(String, ref: String?)
+
+  public var code: BridgeErrorCode {
+    switch self {
+    case .invalidEnvelope, .invalidPayload: .invalidMessage
+    case .unsupportedVersion: .versionUnsupported
+    case .unknownType: .unsupportedType
+    }
+  }
+
+  public var ref: String? {
+    switch self {
+    case .invalidEnvelope: nil
+    case .unsupportedVersion(_, let ref), .unknownType(_, let ref), .invalidPayload(_, let ref): ref
+    }
+  }
+}
+
+private struct RawEnvelope: Decodable {
+  var v: Int
+  var type: String
+  var id: String?
+}
+
+private struct PayloadEnvelope<P: Decodable>: Decodable {
+  var payload: P
+}
+
+private struct HelloPayload: Decodable {
+  struct Client: Decodable { var build: String }
+  var versions: [Int]
+  var capabilities: [String]
+  var client: Client
+}
+
+private struct ReadyPayload: Decodable { var session: String }
+private struct TabsPayload: Decodable {
+  var tabs: [TabDeclaration]
+  var more: [TabDeclaration]
+}
+private struct ThemePayload: Decodable { var scheme: ColorSchemeName }
+private struct HapticPayload: Decodable { var style: HapticStyle }
+private struct ErrorPayload: Decodable {
+  var code: String
+  var message: String
+  var ref: String?
+}
+
+extension BridgeProtocol {
+  /// Decode a web → native envelope from JSON data.
+  ///
+  /// `bridge.hello` is accepted at any version so the shell can answer an
+  /// incompatible web build with `bridge.reject` instead of silence.
+  public static func decode(_ data: Data) throws(BridgeDecodeError) -> DecodedWebMessage {
+    let decoder = JSONDecoder()
+    guard let raw = try? decoder.decode(RawEnvelope.self, from: data) else {
+      throw .invalidEnvelope
+    }
+    if raw.type != "bridge.hello", !supportedVersions.contains(raw.v) {
+      throw .unsupportedVersion(raw.v, ref: raw.id)
+    }
+
+    func payload<P: Decodable>(_: P.Type) throws(BridgeDecodeError) -> P {
+      do {
+        return try decoder.decode(PayloadEnvelope<P>.self, from: data).payload
+      } catch {
+        throw .invalidPayload(raw.type, ref: raw.id)
+      }
+    }
+    func requestId() throws(BridgeDecodeError) -> String {
+      guard let id = raw.id, !id.isEmpty else { throw .invalidPayload(raw.type, ref: nil) }
+      return id
+    }
+
+    let message: WebMessage
+    switch raw.type {
+    case "bridge.hello":
+      let p = try payload(HelloPayload.self)
+      message = .hello(versions: p.versions, capabilities: p.capabilities, build: p.client.build)
+    case "bridge.ready":
+      message = .ready(session: try payload(ReadyPayload.self).session)
+    case "chrome.tabs":
+      let p = try payload(TabsPayload.self)
+      message = .tabs(tabs: p.tabs, more: p.more)
+    case "route.changed":
+      message = .routeChanged(try payload(RouteState.self))
+    case "theme.changed":
+      message = .themeChanged(try payload(ThemePayload.self).scheme)
+    case "confirm.request":
+      message = .confirmRequest(id: try requestId(), try payload(ConfirmRequest.self))
+    case "menu.request":
+      message = .menuRequest(id: try requestId(), try payload(MenuRequest.self))
+    case "haptic":
+      message = .haptic(try payload(HapticPayload.self).style)
+    case "bridge.error":
+      let p = try payload(ErrorPayload.self)
+      message = .error(code: p.code, message: p.message, ref: p.ref)
+    default:
+      throw .unknownType(raw.type, ref: raw.id)
+    }
+    return DecodedWebMessage(version: raw.v, message: message)
+  }
+}
+
+// MARK: - Native → web
+
+public struct ShellInfo: Codable, Equatable, Sendable {
+  public var platform = "ios"
+  public var version: String
+  public var build: String
+  public var os: String
+
+  public init(version: String, build: String, os: String) {
+    self.version = version
+    self.build = build
+    self.os = os
+  }
+}
+
+public enum LifecycleState: String, Codable, Sendable {
+  case active, inactive, background
+}
+
+public enum NativeMessage: Equatable, Sendable {
+  case welcome(session: String, version: Int, capabilities: [String], shell: ShellInfo)
+  case reject(message: String)
+  case layout(contentInsets: Insets, safeArea: Insets, keyboard: Double)
+  case navSelect(tabId: String)
+  case navBack
+  case confirmResult(id: String, confirmed: Bool)
+  case menuResult(id: String, selected: String?)
+  case lifecycle(LifecycleState)
+  case error(code: BridgeErrorCode, message: String, ref: String?)
+
+  public var type: String {
+    switch self {
+    case .welcome: "bridge.welcome"
+    case .reject: "bridge.reject"
+    case .layout: "layout.update"
+    case .navSelect: "nav.select"
+    case .navBack: "nav.back"
+    case .confirmResult: "confirm.result"
+    case .menuResult: "menu.result"
+    case .lifecycle: "app.lifecycle"
+    case .error: "bridge.error"
+    }
+  }
+}
+
+private struct OutboundEnvelope<P: Encodable>: Encodable {
+  var v: Int
+  var type: String
+  var id: String?
+  var payload: P
+}
+
+private struct Empty: Encodable {}
+
+extension BridgeProtocol {
+  /// Encode a native → web envelope as JSON data.
+  public static func encode(_ message: NativeMessage, version: Int) -> Data {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    func envelope<P: Encodable>(_ payload: P, id: String? = nil) -> Data {
+      // Encoding plain value types cannot fail.
+      try! encoder.encode(OutboundEnvelope(v: version, type: message.type, id: id, payload: payload))
+    }
+
+    switch message {
+    case let .welcome(session, negotiated, capabilities, shell):
+      struct P: Encodable { var session: String; var version: Int; var capabilities: [String]; var shell: ShellInfo }
+      return envelope(P(session: session, version: negotiated, capabilities: capabilities, shell: shell))
+    case let .reject(text):
+      struct P: Encodable { var code = "version_unsupported"; var message: String; var supported: [Int] }
+      return envelope(P(message: text, supported: Array(supportedVersions)))
+    case let .layout(contentInsets, safeArea, keyboard):
+      struct P: Encodable { var contentInsets: Insets; var safeArea: Insets; var keyboard: Double }
+      return envelope(P(contentInsets: contentInsets, safeArea: safeArea, keyboard: keyboard))
+    case let .navSelect(tabId):
+      struct P: Encodable { var tabId: String }
+      return envelope(P(tabId: tabId))
+    case .navBack:
+      return envelope(Empty())
+    case let .confirmResult(id, confirmed):
+      struct P: Encodable { var confirmed: Bool }
+      return envelope(P(confirmed: confirmed), id: id)
+    case let .menuResult(id, selected):
+      // `selected: null` must be present on the wire, so encode explicitly.
+      struct P: Encodable {
+        var selected: String?
+        func encode(to encoder: Encoder) throws {
+          var c = encoder.container(keyedBy: CodingKeys.self)
+          try c.encode(selected, forKey: .selected)
+        }
+        enum CodingKeys: String, CodingKey { case selected }
+      }
+      return envelope(P(selected: selected), id: id)
+    case let .lifecycle(state):
+      struct P: Encodable { var state: LifecycleState }
+      return envelope(P(state: state))
+    case let .error(code, text, ref):
+      struct P: Encodable { var code: BridgeErrorCode; var message: String; var ref: String? }
+      return envelope(P(code: code, message: text, ref: ref))
+    }
+  }
+}

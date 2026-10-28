@@ -1,0 +1,13 @@
+// Settings shared by Debug and Release. Signing identity and bundle id are
+// personal: put overrides in Config/Local.xcconfig (git-ignored), see
+// Config/Local.xcconfig.example and ios/README.md.
+
+MARKETING_VERSION = 0.1.0
+CURRENT_PROJECT_VERSION = 1
+
+HAPPYCLAW_BUNDLE_ID = com.example.happyclaw
+PRODUCT_BUNDLE_IDENTIFIER = $(HAPPYCLAW_BUNDLE_ID)
+CODE_SIGN_STYLE = Automatic
+DEVELOPMENT_TEAM =
+
+#include? "Local.xcconfig"
