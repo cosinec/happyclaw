@@ -120,10 +120,8 @@ import {
   type CodexSelectionView,
 } from '../session-model-overrides.js';
 import { clearTargetAgentBindingsForDeletedAgents } from '../im-context-isolation.js';
-import {
-  notifyConversationContextCleared,
-  readSessionContextUsage,
-} from '../session-context-usage.js';
+import { notifyConversationContextCleared } from '../context-usage-events.js';
+import { readSessionContextUsage } from '../session-context-usage.js';
 import { getChannelType } from '../im-channel.js';
 import { buildUnmountUpdate } from '../channel-mount-service.js';
 import {

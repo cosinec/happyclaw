@@ -92,9 +92,9 @@ import {
   setMessageFollowUp,
 } from './db.js';
 import { getGroupAllowedUserIds } from './group-broadcast-acl.js';
+import { onConversationContextCleared } from './context-usage-events.js';
 import {
   NO_CONTEXT_USAGE,
-  onConversationContextCleared,
   readSessionContextUsage,
   type SessionContextUsage,
 } from './session-context-usage.js';

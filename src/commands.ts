@@ -12,7 +12,7 @@ import {
   getMessageCursor,
 } from './db.js';
 import { logger } from './logger.js';
-import { notifyConversationContextCleared } from './session-context-usage.js';
+import { notifyConversationContextCleared } from './context-usage-events.js';
 import { clearSessionFiles } from './session-files.js';
 import type { NewMessage, MessageCursor } from './types.js';
 

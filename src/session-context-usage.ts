@@ -217,22 +217,3 @@ export async function readSessionContextUsage(
     updatedAt: last.at,
   };
 }
-
-type ClearedListener = (groupFolder: string, agentId: string | null) => void;
-const clearedListeners = new Set<ClearedListener>();
-
-/** Called whenever a conversation's context is cleared (the Web is told). */
-export function onConversationContextCleared(
-  listener: ClearedListener,
-): () => void {
-  clearedListeners.add(listener);
-  return () => clearedListeners.delete(listener);
-}
-
-/** A /clear, /fresh or session reset emptied this conversation's context. */
-export function notifyConversationContextCleared(
-  groupFolder: string,
-  agentId: string | null,
-): void {
-  for (const listener of clearedListeners) listener(groupFolder, agentId);
-}
