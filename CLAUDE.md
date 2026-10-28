@@ -486,6 +486,7 @@ make install
 make dev
 make start
 make typecheck
+make lint
 make test
 make build
 npm run self-test
@@ -528,6 +529,7 @@ npm run self-test
 npm run format:changed
 npm run docs:check
 make typecheck
+make lint
 make test
 make build
 git diff --check

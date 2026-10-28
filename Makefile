@@ -165,6 +165,9 @@ typecheck-web:
 typecheck-agent-runner:
 	cd container/agent-runner && $(RUN) tsc --noEmit
 
+lint: ## Web ESLint（只有 error 会失败）
+	cd web && $(RUN) eslint .
+
 test: ## 运行单元测试
 	$(RUN) vitest run
 
