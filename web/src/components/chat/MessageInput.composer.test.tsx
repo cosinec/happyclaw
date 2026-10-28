@@ -8,6 +8,8 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 const env = vi.hoisted(() => ({
   touch: false,
   phoneWidth: false,
+  /** `(max-width: 479px)`: reset and terminal fold into the + menu. */
+  narrow: false,
   /** `(min-width: 1024px)`: tablets in landscape, desktops. */
   wide: false,
   keyboardHeight: 0,
@@ -73,9 +75,11 @@ vi.mock('../../hooks/useMediaQuery', () => ({
   useMediaQuery: (query: string) =>
     query.includes('pointer')
       ? env.touch
-      : query.includes('min-width: 1024px')
-        ? env.wide
-        : env.phoneWidth,
+      : query.includes('479px')
+        ? env.narrow
+        : query.includes('min-width: 1024px')
+          ? env.wide
+          : env.phoneWidth,
 }));
 
 vi.mock('@/hooks/useKeyboardHeight', () => ({
@@ -138,6 +142,7 @@ const uploadFiles = vi.fn(async () => true);
 beforeEach(() => {
   env.touch = false;
   env.phoneWidth = false;
+  env.narrow = false;
   env.wide = false;
   env.keyboardHeight = 0;
   env.deferEncode = false;
@@ -455,10 +460,87 @@ describe('layout', () => {
       [{ transform: 'translateY(-400px)' }, { transform: 'none' }],
       expect.any(Object),
     );
-    expect(card.querySelector('.min-h-\\[86px\\]')).not.toBeNull();
+    // About 120px at rest in a conversation; a phone keeps it lower.
+    expect(card.querySelector('.sm\\:min-h-\\[118px\\]')).not.toBeNull();
+    expect(card.querySelector('.min-h-\\[96px\\]')).not.toBeNull();
     // Later commits leave the docked card alone.
     await render(view('docked', 'c'));
     expect(animate).toHaveBeenCalledTimes(1);
+  });
+
+  test('the context ring has its own row under a docked card, off phones', async () => {
+    const ring = <span data-testid="ring" />;
+    await render(
+      <MessageInput
+        groupJid="web:g1"
+        onSend={vi.fn()}
+        layout="docked"
+        contextUsage={ring}
+      />,
+    );
+    const footer = container!.querySelector('[data-composer-footer]')!;
+    expect(footer.querySelector('[data-testid="ring"]')).not.toBeNull();
+    // Kept at a fixed height whatever the ring renders, so it never moves
+    // the card.
+    expect(footer.classList).toContain('h-5');
+    expect(
+      container!.querySelector('[data-composer-card]')!.contains(footer),
+    ).toBe(false);
+
+    await render(
+      <MessageInput
+        groupJid="web:g1"
+        onSend={vi.fn()}
+        layout="centered"
+        contextUsage={ring}
+      />,
+    );
+    expect(container!.querySelector('[data-composer-footer]')).toBeNull();
+
+    // Not mounted on a phone, so it does not load either.
+    env.phoneWidth = true;
+    await render(
+      <MessageInput
+        groupJid="web:g1"
+        onSend={vi.fn()}
+        layout="docked"
+        contextUsage={ring}
+      />,
+    );
+    expect(container!.querySelector('[data-testid="ring"]')).toBeNull();
+  });
+
+  test('a narrow row keeps only + and folds reset and terminal into its menu', async () => {
+    const toolbar = () => container!.querySelector('[data-composer-toolbar]')!;
+    const labels = () =>
+      [...toolbar().querySelectorAll('[data-composer-tools] button')].map(
+        (button) => button.getAttribute('aria-label'),
+      );
+    const props = {
+      groupJid: 'web:g1',
+      onSend: vi.fn(),
+      onResetSession: vi.fn(),
+      onToggleTerminal: vi.fn(),
+    };
+    await render(<MessageInput {...props} />);
+    expect(labels()).toEqual(['添加文件', '清除当前会话上下文', '终端']);
+    env.narrow = true;
+    await render(<MessageInput {...props} placeholder="b" />);
+    expect(labels()).toEqual(['添加文件']);
+  });
+
+  test('clearing the context shows a brush', async () => {
+    await render(
+      <MessageInput
+        groupJid="web:g1"
+        onSend={vi.fn()}
+        onResetSession={vi.fn()}
+      />,
+    );
+    const button = container!.querySelector(
+      'button[aria-label="清除当前会话上下文"]',
+    )!;
+    expect(button.querySelector('svg.lucide-paintbrush')).not.toBeNull();
   });
 
   test('the slide starts where the card is when it docks', async () => {

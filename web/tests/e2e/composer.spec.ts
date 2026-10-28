@@ -43,6 +43,21 @@ const harnessState = (page: Page) =>
     };
   });
 
+/** A `context-usage` answer (or push payload). */
+const contextUsage = (
+  usedTokens: number | null,
+  contextWindow: number | null,
+) => ({
+  usedTokens,
+  contextWindow,
+  percentage:
+    usedTokens !== null && contextWindow
+      ? (usedTokens / contextWindow) * 100
+      : null,
+  model: usedTokens === null ? null : 'claude-opus-5-5',
+  updatedAt: usedTokens === null ? null : new Date().toISOString(),
+});
+
 const callHarness = (page: Page, method: string, ...args: unknown[]) =>
   page.evaluate(
     ([name, params]) => {
@@ -564,6 +579,79 @@ test.describe('desktop composer', () => {
     await expect(composer(page)).toHaveText('帮我定位和修复一个 Bug');
   });
 
+  test('a docked composer is about 120px tall, with no conversation title in its row', async ({
+    page,
+  }) => {
+    await openHarness(page);
+    const card = (await page.locator('[data-composer-card]').boundingBox())!;
+    expect(card.height).toBeGreaterThanOrEqual(118);
+    expect(card.height).toBeLessThan(130);
+
+    await switchTo(page, 'a1');
+    const toolbar = page.locator('[data-composer-toolbar]');
+    await expect(toolbar).toBeVisible();
+    await expect(toolbar).not.toContainText('会话 A');
+    await expect(toolbar.locator('[title^="发送到"]')).toHaveCount(0);
+  });
+
+  test('the context ring sits under the card on the right without moving it', async ({
+    page,
+  }) => {
+    // What the server holds; a push updates it as a finished turn would.
+    const server: Record<string, ReturnType<typeof contextUsage>> = {
+      main: contextUsage(null, null),
+      a1: contextUsage(150_000, 200_000),
+    };
+    await page.route('**/api/groups/*/context-usage*', (route) => {
+      const session = new URL(route.request().url()).searchParams.get(
+        'agentId',
+      );
+      return route.fulfill({ json: server[session ?? 'main'] });
+    });
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await openHarness(page);
+    const card = page.locator('[data-composer-card]');
+    const ring = page.locator('[data-context-usage]');
+    // Nothing ran yet: no ring, its row already in place.
+    await expect(page.locator('[data-composer-footer]')).toBeVisible();
+    await expect(ring).toHaveCount(0);
+    const before = (await card.boundingBox())!;
+
+    server.main = contextUsage(120_000, 1_000_000);
+    await callHarness(page, 'pushContextUsage', server.main);
+    await expect(ring).toHaveText('12%');
+    expect(await card.boundingBox()).toEqual(before);
+    const box = (await ring.boundingBox())!;
+    expect(box.y).toBeGreaterThanOrEqual(before.y + before.height);
+    expect(before.x + before.width - (box.x + box.width)).toBeLessThan(12);
+    // Less motion: no fade, no sweep.
+    expect(
+      await ring.evaluate((element) => [
+        getComputedStyle(element).animationName,
+        getComputedStyle(element.querySelectorAll('circle')[1])
+          .transitionProperty,
+      ]),
+    ).toEqual(['none', 'none']);
+
+    await ring.hover();
+    await expect(page.getByRole('tooltip')).toHaveText(
+      '上下文 已用 120K / 1M（12%）',
+    );
+
+    // A session shows its own usage, and its own pushes.
+    await switchTo(page, 'a1');
+    await expect(ring).toHaveText('75%');
+    server.a1 = contextUsage(192_000, 200_000);
+    await callHarness(page, 'pushContextUsage', {
+      agentId: 'a1',
+      ...server.a1,
+    });
+    await expect(ring).toHaveText('96%');
+    await expect(ring).toHaveClass(/\btext-error\b/);
+    await switchTo(page, null);
+    await expect(ring).toHaveText('12%');
+  });
+
   test('/ offers commands and skills; @ inserts a workspace file', async ({
     page,
   }) => {
@@ -666,6 +754,78 @@ test.describe('touch composer', () => {
     viewport: { width: 412, height: 839 },
     isMobile: true,
     hasTouch: true,
+  });
+
+  test('a narrow row folds clear-context and terminal into the + menu', async ({
+    page,
+  }) => {
+    await openHarness(page);
+    await page.setViewportSize({ width: 390, height: 839 });
+    const toolbar = page.locator('[data-composer-toolbar]');
+    const plus = toolbar.getByRole('button', { name: '添加文件' });
+    // Only + is left on the row.
+    await expect(
+      toolbar.locator('[data-composer-tools]').getByRole('button'),
+    ).toHaveCount(1);
+
+    // Clearing still asks first.
+    await plus.click();
+    await page.getByRole('menuitem', { name: '清除上下文' }).click();
+    const confirm = page.getByRole('alertdialog');
+    await expect(confirm).toBeVisible();
+    await confirm.getByRole('button', { name: '清除', exact: true }).click();
+    await expect(confirm).toHaveCount(0);
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { composerHarness: { resets: unknown[] } })
+              .composerHarness.resets,
+        ),
+      )
+      .toEqual([{ jid: 'web:e2e-composer', agentId: null }]);
+    // The menu-to-dialog hand-off leaves the page usable.
+    await composer(page).click();
+    await page.keyboard.type('还能输入');
+    await expect(composer(page)).toHaveText('还能输入');
+
+    await plus.click();
+    await page.getByRole('menuitem', { name: '终端' }).click();
+    await expect(page.getByRole('dialog', { name: '终端' })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('dialog', { name: '终端' })).toHaveCount(0);
+
+    // The terminal belongs to the main conversation only.
+    await switchTo(page, 'a1');
+    await plus.click();
+    await expect(
+      page.getByRole('menuitem', { name: '清除上下文' }),
+    ).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: '终端' })).toHaveCount(0);
+    await page.keyboard.press('Escape');
+
+    // Wider than 480px the actions are buttons again.
+    await page.setViewportSize({ width: 600, height: 839 });
+    await expect(
+      toolbar.getByRole('button', { name: '清除当前会话上下文' }),
+    ).toBeVisible();
+  });
+
+  test('a phone keeps a compact card and leaves the context ring off its row', async ({
+    page,
+  }) => {
+    let requests = 0;
+    await page.route('**/api/groups/*/context-usage*', (route) => {
+      requests += 1;
+      return route.fulfill({ json: contextUsage(120_000, 1_000_000) });
+    });
+    await openHarness(page);
+    await page.waitForLoadState('networkidle');
+    // No room on the phone row: the ring is neither shown nor loaded.
+    await expect(page.locator('[data-composer-footer]')).toHaveCount(0);
+    expect(requests).toBe(0);
+    const card = (await page.locator('[data-composer-card]').boundingBox())!;
+    expect(card.height).toBeLessThan(110);
   });
 
   test('a phone types a newline on Enter; mod+Enter sends', async ({

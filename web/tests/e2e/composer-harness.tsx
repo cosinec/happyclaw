@@ -5,6 +5,7 @@
 import { useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { MemoryRouter, useSearchParams } from 'react-router-dom';
+import { wsManager } from '../../src/api/ws';
 import { ChatView } from '../../src/components/chat/ChatView';
 import { useAuthStore, type UserPublic } from '../../src/stores/auth';
 import {
@@ -88,6 +89,7 @@ const harness = {
   sent: [] as SentRecord[],
   uploads: [] as string[][],
   stops: [] as string[],
+  resets: [] as Array<{ jid: string; agentId: string | null }>,
   queueActions: [] as Array<{ id: string; action: string; content?: string }>,
   sendDelayMs: 0,
   switchTo: (_id: string | null) => {},
@@ -133,6 +135,13 @@ const harness = {
     }));
   },
   drafts: () => useChatStore.getState().drafts,
+  /** The server's `context_usage` push after a turn. */
+  pushContextUsage(data: Record<string, unknown>) {
+    (wsManager as unknown as { emit(t: string, d: unknown): void }).emit(
+      'context_usage',
+      { type: 'context_usage', chatJid: groupJid, ...data },
+    );
+  },
   /** Adds a message from this user to the main conversation. */
   pushMessage(content: string) {
     useChatStore.setState((s) => ({
@@ -219,6 +228,10 @@ useChatStore.setState({
     harness.stops.push(jid);
     const agentId = jid.includes('#agent:') ? jid.split('#agent:')[1] : null;
     harness.setRunning(false, agentId);
+    return true;
+  },
+  resetSession: async (jid, agentId) => {
+    harness.resets.push({ jid, agentId: agentId ?? null });
     return true;
   },
   actOnFollowUp: async (_chatJid, id, action, _runId, content) => {
