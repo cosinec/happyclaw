@@ -9,13 +9,13 @@
 
 环境：Node 22.19.0、npm 10.9.3，`npm ci`（根目录 + `web/`）按已提交 lockfile 安装。
 
-| 检查 | 命令 | 结果 |
-| --- | --- | --- |
-| typecheck | `cd web && npx tsc --noEmit` | ✅ 通过 |
-| 单测 | `npx vitest run web/`（web 单测由根目录 vitest 配置运行） | ✅ 64 个文件 / 820 个用例通过 |
-| build | `npm --prefix web run build` | ✅ 通过（仅 chunk 体积提示） |
-| lint | — | ⚪ **不存在**：`web/` 没有 ESLint 配置和 `lint` 脚本（与 F-04 一致） |
-| format | `npx prettier --check "web/src/**/*.{ts,tsx}"` | 🟡 已有 19 个文件不符合 Prettier（存量，非本轮引入） |
+| 检查      | 命令                                                      | 结果                                                                 |
+| --------- | --------------------------------------------------------- | -------------------------------------------------------------------- |
+| typecheck | `cd web && npx tsc --noEmit`                              | ✅ 通过                                                              |
+| 单测      | `npx vitest run web/`（web 单测由根目录 vitest 配置运行） | ✅ 64 个文件 / 820 个用例通过                                        |
+| build     | `npm --prefix web run build`                              | ✅ 通过（仅 chunk 体积提示）                                         |
+| lint      | —                                                         | ⚪ **不存在**：`web/` 没有 ESLint 配置和 `lint` 脚本（与 F-04 一致） |
+| format    | `npx prettier --check "web/src/**/*.{ts,tsx}"`            | 🟡 已有 19 个文件不符合 Prettier（存量，非本轮引入）                 |
 
 结论：没有「本来就红」的门禁；lint 缺失是 F-04 本身。补 ESLint 需要新增依赖，待确认后
 再做（见下方待决问题）。本轮只格式化本轮改动的文件，不批量重排存量文件。
@@ -72,7 +72,41 @@
 8. **工期**：Phase 3 估 2–3 周偏乐观的部分在「原生导航栏」（见 1）和真机登录闭环；
    本轮骨架（壳 + 桥接 v1 + Tab）已打通，Sheet/分享/选图/Passkey 尚未开始。
 
+## 2026-10-28 第二轮：原生导航栏 + 真机
+
+决定：原生导航栏（标题、返回按钮）进入 MVP。
+
+### 交付
+
+- 协议 v1 增量（全部可选，不升版本）：`route.changed.nav` / `modal`、`theme.changed.background`、
+  原生 → Web `nav.action`、能力 `navbar`。
+- Web：`useNativeNavBar()` 页内覆盖；`data-native-title` / `data-native-replaced` 标记；已接入
+  PageHeader、PageTopBar、智能体（新建面板）、记忆（移动端详情）、设置（分区按钮）。
+- iOS：`NativeNavBar`（iOS 26 玻璃按钮），`LayoutCalculator` 增加顶部 inset。
+
+### 验证
+
+- 浏览器：Playwright 在 390×844 视口里注入模拟壳（按 ShellModel 的方式应答握手、画出原生栏
+  位置），28 项检查通过，覆盖标题替换、根布局留白、页内返回、推入页冷启动返回、右侧按钮、
+  弹窗时让位、主题底色、普通浏览器不受影响。
+- 真机（iPhone 17 / iOS 26.5，免费签名）：App 经同一局域网连接本机 dev server，登录后
+  原生 TabBar、任务/智能体/设置的原生标题、新建智能体的原生返回、「更多」Sheet、设置分区
+  按钮都按预期工作。
+- Web 全量单测、build、`swift test` 通过。
+
+### 真机发现并修复
+
+1. 输入框聚焦时键盘把整个文档推上去，内容滚到透明的原生标题栏下面叠在标题上。修复：
+   栏底色取 Web 的 `--background`（Web 用 canvas 把任意 CSS 颜色转成 `#rrggbb`）。
+2. 原生栏会盖住 Web 的 Dialog / Sheet。修复：Web 上报 `modal`，原生暂时隐藏两条栏，inset 不变。
+3. 设置的分区抽屉顶部被状态栏遮住（独立 PWA 同样存在）。修复：抽屉补 safe-area 内边距。
+
+### 仍待处理
+
+- 打开的会话（`/chat/:folder`）保留 Web 页头：页头里有会话切换、上下文面板等业务入口，
+  原生栏只能放一个按钮，硬替换会丢功能；边缘返回可用。
+- 自动化限制：第三方输入法常驻后台时 WDA 认错前台 App，无法直接输入文字；密码框需要人工输入。
+
 ## 待决问题
 
 - 是否为 `web/` 新增 ESLint（及 `lint` 脚本、CI 门禁）？需要新增开发依赖。
-- 原生导航栏（标题/返回按钮）是否进入 MVP？若是，需要逐页隐藏 Web PageHeader。
