@@ -173,6 +173,7 @@ function agentRun(name: string) {
     getFailedChannelOutboxForTurn: store.getFailedChannelOutboxForTurn,
     setSession: vi.fn(),
     setSessionInteractionMode: vi.fn(),
+    broadcastContextUsage: vi.fn(),
     resetIdleTimer: vi.fn(),
     feedStreamEventToCard: vi.fn(),
     reduceStreamEvent: vi.fn(),
