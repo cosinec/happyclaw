@@ -46,15 +46,19 @@ export function formatSessionTime(value: string): string {
   });
 }
 
-export function messagePreview(session: AgentInfo): string {
-  const content = session.latest_message?.content || '';
+/** A message's content as one line of list preview. */
+export function previewText(content: string | null | undefined): string {
   return getPresentedMessageContent({
-    content,
+    content: content || '',
     source_kind: null,
     finalization_reason: null,
   })
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+export function messagePreview(session: AgentInfo): string {
+  return previewText(session.latest_message?.content);
 }
 
 export function isNativeManagedSession(session: AgentInfo): boolean {
