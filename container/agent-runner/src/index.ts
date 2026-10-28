@@ -1889,9 +1889,11 @@ async function runQueryAttempt(
   activateCurrentInputTurn(coldInputTurnId);
   const [memorySnapshot, ownerProfile] = mcpToolsContext
     ? await Promise.all([
-        fetchWorkspaceMemorySnapshot(mcpToolsContext, prompt, {
-          changedSince: turnNotes.memoryChangedSince(),
-        }),
+        fetchWorkspaceMemorySnapshot(
+          mcpToolsContext,
+          prompt,
+          turnNotes.memoryHeld(),
+        ),
         fetchHappyClawOwnerProfileTurn(mcpToolsContext),
       ])
     : [null, null];
@@ -2592,9 +2594,11 @@ async function runQueryAttempt(
       );
       const [memorySnapshot, ownerProfile] = mcpToolsContext
         ? await Promise.all([
-            fetchWorkspaceMemorySnapshot(mcpToolsContext, msg.text, {
-              changedSince: turnNotes.memoryChangedSince(),
-            }),
+            fetchWorkspaceMemorySnapshot(
+              mcpToolsContext,
+              msg.text,
+              turnNotes.memoryHeld(),
+            ),
             fetchHappyClawOwnerProfileTurn(
               mcpToolsContext,
               8_000,

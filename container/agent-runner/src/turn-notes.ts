@@ -145,8 +145,8 @@ function renderChannelContext(
 
 /**
  * The memories the context holds that `changes` says no longer apply as
- * sent: forgotten, superseded, or revised without the new revision coming
- * along in this turn.
+ * sent: forgotten, superseded, expired, or revised without the new revision
+ * coming along in this turn. A replaced store withdraws all of them.
  */
 function memoryWithdrawals(
   held: ReadonlyMap<string, number>,
@@ -189,10 +189,15 @@ function planTurnNotes(
   const ownerProfile = ownerTarget !== state.ownerProfile ? ownerTarget : '';
 
   const snapshot = sources.memory;
+  // After a replaced store (or more changes than one turn reports), nothing
+  // held counts: the snapshot goes out whole.
+  const held = snapshot?.changes?.reset
+    ? new Map<string, number>()
+    : state.memory;
   const narrowed = snapshot?.renderedText.trim()
     ? narrowWorkspaceMemorySnapshot(
         snapshot,
-        (item) => state.memory.get(item.id) !== item.revision,
+        (item) => held.get(item.id) !== item.revision,
       )
     : null;
   const sentMemory = narrowed?.retrievalTrace.itemRevisions ?? [];
@@ -211,7 +216,7 @@ function planTurnNotes(
   );
   let heldMemory = state.memory;
   if (sentMemory.length > 0 || withdrawnMemory.length > 0) {
-    const next = new Map(state.memory);
+    const next = new Map(held);
     for (const { id } of withdrawnMemory) next.delete(id);
     for (const { id, revision } of sentMemory) next.set(id, revision);
     heldMemory = next;
@@ -375,10 +380,19 @@ export class TurnNoteLedger {
     return notes;
   }
 
-  /** The store revision to ask memory changes after, if any memory was sent. */
-  memoryChangedSince(): number | undefined {
+  /**
+   * What a memory snapshot request asks about the memories this context
+   * holds: changes after the store revision they reflect, and which of them
+   * expired since. Nothing when no memory was sent.
+   */
+  memoryHeld(): { changedSince?: number; heldIds?: string[] } {
     const state = this.latest;
-    return state.memory.size > 0 ? state.memoryRevision : undefined;
+    return state.memory.size > 0
+      ? {
+          changedSince: state.memoryRevision,
+          heldIds: [...state.memory.keys()],
+        }
+      : {};
   }
 
   /**

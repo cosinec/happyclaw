@@ -547,6 +547,8 @@ export async function fetchWorkspaceMemorySnapshot(
     timeoutMs?: number;
     /** Store revision the conversation's memory reflects: report changes since. */
     changedSince?: number;
+    /** Items the conversation holds: report the ones expired by now. */
+    heldIds?: readonly string[];
   } = {},
 ): Promise<WorkspaceMemorySnapshot | null> {
   try {
@@ -560,6 +562,7 @@ export async function fetchWorkspaceMemorySnapshot(
         ...(options.changedSince !== undefined
           ? { changedSince: options.changedSince }
           : {}),
+        ...(options.heldIds?.length ? { heldIds: options.heldIds } : {}),
       },
       options.timeoutMs ?? 8_000,
     );
