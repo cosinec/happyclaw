@@ -517,5 +517,8 @@ make build
 git diff --check
 ```
 
+改动 Runner Prompt、`systemPrompt`、工具或 MCP 的 PR 须附改动前后的
+`cache_read_input_tokens` 占比（真实或脚本化运行，见 PR 模板）。
+
 真实 Provider 测试使用 `npm run test:real-model`，会产生真实请求和可能的费用，
 不要把凭据、Endpoint、模型名或未脱敏回复写入日志。
