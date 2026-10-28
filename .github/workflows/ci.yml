@@ -53,6 +53,9 @@ jobs:
       - name: Typecheck
         run: make typecheck
 
+      - name: Lint web
+        run: npm --prefix web run lint
+
       - name: Test
         run: npm test -- --run
 
