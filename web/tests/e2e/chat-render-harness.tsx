@@ -15,7 +15,6 @@
 import { createRoot } from 'react-dom/client';
 import { MemoryRouter } from 'react-router-dom';
 import { ChatView } from '../../src/components/chat/ChatView';
-import { HarnessRunStatusBar } from './run-status-bar-slot';
 import { TooltipProvider } from '../../src/components/ui/tooltip';
 import { ConfirmHost } from '../../src/components/common/ConfirmHost';
 import { Toaster } from 'sonner';
@@ -1344,7 +1343,6 @@ createRoot(document.getElementById('root')!).render(
       <MemoryRouter initialEntries={['/chat/render-harness']}>
         <main className="h-[100dvh] overflow-hidden bg-background">
           <ChatView groupJid={groupJid} />
-          <HarnessRunStatusBar groupJid={groupJid} />
         </main>
       </MemoryRouter>
       <ConfirmHost />
