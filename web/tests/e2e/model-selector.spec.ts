@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 
 // The composer's model picker and the reasoning effort control beside it,
 // in ChatView over the composer harness. The model-selection API is answered by the test itself:
@@ -139,11 +139,24 @@ async function expectRowFits(page: Page) {
   expect(fits.sendInside).toBe(true);
 }
 
+/** Waits for enter animations: a sliding sheet's handle is still moving. */
+const settleAnimations = (scope: Locator) =>
+  scope.evaluate((element) =>
+    Promise.all(
+      element
+        .getAnimations({ subtree: true })
+        .map((animation) => animation.finished.catch(() => undefined)),
+    ),
+  );
+
 const sendButton = (page: Page) =>
   page.locator('[data-composer-toolbar] button[aria-label="发送消息"]');
 
 test.describe('model slot in the composer toolbar', () => {
-  test('sits on the right, just before send', async ({ page }) => {
+  test('sits right before send on a desktop, right after + on a phone', async ({
+    page,
+    isMobile,
+  }) => {
     await openHarness(page, {
       selectedModelConfigId: 'chatgpt',
       selectedModel: 'gpt-6-astra',
@@ -154,10 +167,24 @@ test.describe('model slot in the composer toolbar', () => {
       .boundingBox())!;
     const model = (await modelButton(page).boundingBox())!;
     const send = (await sendButton(page).boundingBox())!;
-    const tools = (await page.locator('[data-composer-tools]').boundingBox())!;
-    // Left: the tools. Right: the model slot, then send.
-    expect(tools.x + tools.width).toBeLessThan(slot.x);
-    expect(send.x - (slot.x + slot.width)).toBeLessThan(8);
+    if (isMobile) {
+      // cindy's order: [+][model · effort] … [stop][send].
+      const plus = (await page
+        .locator('[data-composer-tools] > button')
+        .first()
+        .boundingBox())!;
+      const gap = slot.x - (plus.x + plus.width);
+      expect(gap).toBeGreaterThanOrEqual(0);
+      expect(gap).toBeLessThan(10);
+      expect(send.x - (slot.x + slot.width)).toBeGreaterThan(8);
+    } else {
+      // Left: the tools. Right: the model slot, then send.
+      const tools = (await page
+        .locator('[data-composer-tools]')
+        .boundingBox())!;
+      expect(tools.x + tools.width).toBeLessThan(slot.x);
+      expect(send.x - (slot.x + slot.width)).toBeLessThan(8);
+    }
     expect(model.x + model.width).toBeLessThanOrEqual(send.x + 0.5);
   });
 
@@ -185,14 +212,16 @@ test.describe('model slot in the composer toolbar', () => {
       const slot = (await page
         .locator('[data-composer-model-slot]')
         .boundingBox())!;
-      const tools = page.locator('[data-composer-tools] button');
+      // The tool buttons keep their size and stay clear of the slot (on a
+      // phone it sits among them, right after +).
+      const tools = page.locator('[data-composer-tools] > button');
       for (let i = 0; i < (await tools.count()); i += 1) {
         const tool = (await tools.nth(i).boundingBox())!;
         expect(Math.round(tool.width), `tool ${i} at ${width}px`).toBe(size);
-        expect(
-          tool.x + tool.width,
-          `tool ${i} at ${width}px`,
-        ).toBeLessThanOrEqual(slot.x + 0.5);
+        const clear =
+          tool.x + tool.width <= slot.x + 0.5 ||
+          tool.x >= slot.x + slot.width - 0.5;
+        expect(clear, `tool ${i} at ${width}px`).toBe(true);
       }
     }
   });
@@ -261,6 +290,8 @@ test.describe('phone model sheet', () => {
         (element) => getComputedStyle(element).borderTopLeftRadius,
       ),
     ).toBe('12px');
+    // Measured once it has slid in; mid-slide the press lands on the header.
+    await settleAnimations(sheet);
     const handle = (await sheet.locator('[data-sheet-handle]').boundingBox())!;
     await page.mouse.move(handle.x + handle.width / 2, handle.y + 10);
     await page.mouse.down();

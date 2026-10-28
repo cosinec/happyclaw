@@ -82,9 +82,10 @@ interface PlusAction extends SheetAction {
 
 /**
  * cindy's toolbar: attach, reset and terminal on the left; the model, stop
- * and send on the right. The model trigger gives way first, so a narrow row
- * truncates it and never squeezes the tools or the send button. Below 480px
- * reset and terminal fold into the + menu, leaving the model more room.
+ * and send on the right (a phone: the model right after +). The model
+ * trigger gives way first, so a narrow row truncates it and never squeezes
+ * the tools or the send button. Below 480px reset and terminal fold into
+ * the + menu, leaving the model more room.
  */
 export function ComposerToolbar({
   canAttach,
@@ -143,6 +144,21 @@ export function ComposerToolbar({
     (group) => group.length > 0,
   );
   const [plusSheetOpen, setPlusSheetOpen] = useState(false);
+  // The model (and effort): right before send on a desktop, right after +
+  // on a phone. The padding keeps the triggers' focus rings inside the
+  // clip. Collapsed it stays mounted, only hidden, and keeps its state.
+  const modelSlot = modelSelector && (
+    <div
+      data-composer-model-slot
+      className={cn(
+        '-m-0.5 flex min-w-0 items-center gap-1 overflow-hidden p-0.5',
+        !phone && 'justify-end',
+        collapsed && 'hidden',
+      )}
+    >
+      {modelSelector}
+    </div>
+  );
 
   return (
     <div
@@ -155,11 +171,14 @@ export function ComposerToolbar({
           : 'mt-[2px] flex min-w-0 items-center gap-1 select-none',
       )}
     >
-      {/* Fixed buttons: only the model slot gives way. */}
+      {/* Fixed buttons: only the model slot gives way. On a phone the
+          slot sits in this group right after + (cindy's order), so the
+          group itself gives way through it. */}
       <div
         data-composer-tools
         className={cn(
-          'flex shrink-0 items-center gap-1',
+          'flex items-center gap-1',
+          phone ? 'min-w-0' : 'shrink-0',
           // Collapsed, the tools lead the pill's row: + | text | send.
           collapsed && 'order-first',
         )}
@@ -225,6 +244,7 @@ export function ComposerToolbar({
               </DropdownMenuContent>
             </DropdownMenu>
           ))}
+        {phone && modelSlot}
         {onResetSession && !foldActions && !collapsed && (
           <IconButton
             label="清除当前会话上下文"
@@ -258,19 +278,7 @@ export function ComposerToolbar({
 
       {!collapsed && <div className="flex-1" />}
 
-      {modelSelector && (
-        // The padding keeps the triggers' focus rings inside the clip.
-        // Collapsed it stays mounted, only hidden, and keeps its state.
-        <div
-          data-composer-model-slot
-          className={cn(
-            '-m-0.5 flex min-w-0 items-center justify-end gap-1 overflow-hidden p-0.5',
-            collapsed && 'hidden',
-          )}
-        >
-          {modelSelector}
-        </div>
-      )}
+      {!phone && modelSlot}
 
       {showSideStop && !collapsed && (
         <IconButton
