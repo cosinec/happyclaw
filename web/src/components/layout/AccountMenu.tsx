@@ -175,26 +175,35 @@ export function useNativeAccountMenu({
             : []),
         ],
       },
+      // 主题 / 配色 are submenus so the whole menu fits on screen; each row
+      // shows its current choice.
       {
-        id: 'theme',
-        title: '主题',
+        id: 'appearance',
+        title: '',
         inline: true,
-        children: THEME_OPTIONS.map(({ value, label }) => ({
-          id: `theme:${value}`,
-          title: label,
-          symbol: THEME_SYMBOLS[value],
-          checked: theme === value,
-        })),
-      },
-      {
-        id: 'scheme',
-        title: '配色',
-        inline: true,
-        children: SCHEME_OPTIONS.map(({ value, label }) => ({
-          id: `scheme:${value}`,
-          title: label,
-          checked: colorScheme === value,
-        })),
+        children: [
+          {
+            id: 'theme',
+            title: '主题',
+            symbol: THEME_SYMBOLS[theme],
+            children: THEME_OPTIONS.map(({ value, label }) => ({
+              id: `theme:${value}`,
+              title: label,
+              symbol: THEME_SYMBOLS[value],
+              checked: theme === value,
+            })),
+          },
+          {
+            id: 'scheme',
+            title: '配色',
+            symbol: 'paintpalette',
+            children: SCHEME_OPTIONS.map(({ value, label }) => ({
+              id: `scheme:${value}`,
+              title: label,
+              checked: colorScheme === value,
+            })),
+          },
+        ],
       },
       {
         id: 'support',
