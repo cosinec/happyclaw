@@ -20,7 +20,12 @@ export function PageHeader({
       className={cn('flex items-start justify-between gap-4', className)}
     >
       <div className="min-w-0">
-        <h1 className="truncate text-title-lg text-foreground">{title}</h1>
+        <h1
+          data-native-title
+          className="truncate text-title-lg text-foreground"
+        >
+          {title}
+        </h1>
         {subtitle && (
           <p className="mt-1 text-body text-muted-foreground">{subtitle}</p>
         )}

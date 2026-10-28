@@ -26,7 +26,8 @@ export type WebCapability =
   | 'confirm'
   | 'menu'
   | 'haptic'
-  | 'theme';
+  | 'theme'
+  | 'navbar';
 
 export type NativeCapability = WebCapability | 'share' | 'picker' | 'passkey';
 
@@ -51,6 +52,24 @@ export interface MenuItemDeclaration {
   symbol?: string;
   destructive?: boolean;
   disabled?: boolean;
+}
+
+/** One trailing button in the native navigation bar. */
+export interface NavActionDeclaration {
+  id: string;
+  title: string;
+  symbol: string;
+}
+
+/**
+ * Native navigation bar for the current screen. Pages that keep a rich web
+ * header (chat list, open conversation) declare `visible: false`.
+ */
+export interface NavBarDeclaration {
+  visible: boolean;
+  title: string | null;
+  back: boolean;
+  action: NavActionDeclaration | null;
 }
 
 export type HapticStyle = 'light' | 'medium' | 'success' | 'warning' | 'error';
@@ -80,8 +99,19 @@ export interface WebToNativePayloads {
     tabId: string | null;
     canGoBack: boolean;
     tabBar: boolean;
+    /** Added in v1 as an optional field; shells without `navbar` ignore it. */
+    nav: NavBarDeclaration;
+    /**
+     * A web dialog or sheet is open. The shell hides its bars meanwhile but
+     * keeps reporting the same insets, so the page behind does not shift.
+     */
+    modal: boolean;
   };
-  'theme.changed': { scheme: 'light' | 'dark' };
+  'theme.changed': {
+    scheme: 'light' | 'dark';
+    /** Page background as #rrggbb, for native bars that sit over it. */
+    background?: string;
+  };
   'confirm.request': {
     title: string;
     message: string;
@@ -123,6 +153,7 @@ export interface NativeToWebPayloads {
   };
   'nav.select': { tabId: string };
   'nav.back': Record<string, never>;
+  'nav.action': { id: string };
   'confirm.result': { confirmed: boolean };
   'menu.result': { selected: string | null };
   'app.lifecycle': { state: 'active' | 'inactive' | 'background' };
@@ -188,6 +219,7 @@ const payloadValidators: {
     isFiniteNumber(p.keyboard),
   'nav.select': (p) => typeof p.tabId === 'string',
   'nav.back': () => true,
+  'nav.action': (p) => typeof p.id === 'string',
   'confirm.result': (p) => typeof p.confirmed === 'boolean',
   'menu.result': (p) => p.selected === null || typeof p.selected === 'string',
   'app.lifecycle': (p) =>

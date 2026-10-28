@@ -111,6 +111,7 @@ import {
   skillSelectionError,
   type RuntimePolicyMode,
 } from '../utils/agent-runtime-policy';
+import { useNativeNavBar } from '@/native/nav-bar';
 
 const DEFAULT_RUNTIME_POLICY: AgentProfileRuntimePolicy = {
   reasoning: { effort: 'inherit' },
@@ -345,6 +346,11 @@ export function AgentProfilesPage() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleteTargetId, setDeleteTargetId] = useState('');
   const [createPanelOpen, setCreatePanelOpen] = useState(false);
+  useNativeNavBar(
+    createPanelOpen && !draftMode
+      ? { title: '新建智能体', onBack: () => setCreatePanelOpen(false) }
+      : null,
+  );
   const [draftStep, setDraftStep] = useState(1);
   const [listQuery, setListQuery] = useState('');
   const stepperRef = useRef<HTMLElement>(null);
@@ -1273,7 +1279,10 @@ export function AgentProfilesPage() {
     <div className="min-h-full bg-background lg:flex">
       <aside className="border-b border-surface-border lg:sticky lg:top-0 lg:flex lg:h-(--app-canvas-h) lg:w-64 lg:flex-none lg:flex-col lg:border-r lg:border-b-0">
         <div className="flex h-12 shrink-0 items-center gap-1 pr-2 pl-4 lg:border-b lg:border-surface-border">
-          <h2 className="min-w-0 flex-1 truncate text-title-sm text-foreground">
+          <h2
+            data-native-title="space"
+            className="min-w-0 flex-1 truncate text-title-sm text-foreground"
+          >
             智能体
             <span className="ml-1.5 text-caption font-normal text-muted-foreground tabular-nums">
               {customProfiles.length}
@@ -1412,6 +1421,7 @@ export function AgentProfilesPage() {
                   </p>
                 </div>
                 <Button
+                  data-native-replaced
                   type="button"
                   variant="ghost"
                   size="sm"
