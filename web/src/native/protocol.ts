@@ -33,6 +33,7 @@ export type WebCapability =
 export type NativeCapability =
   | WebCapability
   | 'contextmenu'
+  | 'anchoredmenu'
   | 'share'
   | 'picker'
   | 'passkey';
@@ -58,6 +59,11 @@ export interface MenuItemDeclaration {
   symbol?: string;
   destructive?: boolean;
   disabled?: boolean;
+  /** Radio-style choice (theme, palette). */
+  checked?: boolean;
+  /** A group: a submenu, or with `inline` a titled section. */
+  children?: MenuItemDeclaration[];
+  inline?: boolean;
 }
 
 /** One trailing button in the native navigation bar. */
@@ -131,6 +137,11 @@ export interface WebToNativePayloads {
     title: string | null;
     message: string | null;
     items: MenuItemDeclaration[];
+    /**
+     * The control that opened the menu (viewport CSS pixels). Shells with
+     * `anchoredmenu` show a system menu from it; otherwise an action sheet.
+     */
+    anchor?: { x: number; y: number; width: number; height: number };
   };
   haptic: { style: HapticStyle };
   /**

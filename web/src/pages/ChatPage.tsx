@@ -38,7 +38,10 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { IconButton } from '../components/common/IconButton';
 import { EmptyState } from '../components/common/EmptyState';
-import { AccountMenuItems } from '../components/layout/AccountMenu';
+import {
+  AccountMenuItems,
+  useNativeAccountMenu,
+} from '../components/layout/AccountMenu';
 import { withBasePath } from '../utils/url';
 import { useSwipeBack } from '../hooks/useSwipeBack';
 import { useClearWorkspace } from '../hooks/useClearWorkspace';
@@ -114,6 +117,14 @@ export function ChatPage() {
   const appearance = useAuthStore((s) => s.appearance);
   const appName = appearance?.appName || 'HappyClaw';
   const [showBugReport, setShowBugReport] = useState(false);
+  // In the iOS shell the avatar opens the native (glass) account menu; the
+  // web dropdown stays for browsers and older shells.
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const accountTriggerRef = useRef<HTMLButtonElement>(null);
+  const openNativeAccountMenu = useNativeAccountMenu({
+    onReportBug: () => setShowBugReport(true),
+    showUsage: true,
+  });
   const bugReportMounted = useOpenedOnce(showBugReport);
   const userInitial = (user?.display_name ||
     user?.username ||
@@ -319,9 +330,24 @@ export function ChatPage() {
               onClick={() => setCreateOpen(true)}
               className="text-muted-foreground pointer-coarse:size-10"
             />
-            <DropdownMenu>
+            <DropdownMenu
+              open={accountMenuOpen}
+              onOpenChange={(open) => {
+                if (
+                  open &&
+                  accountTriggerRef.current &&
+                  openNativeAccountMenu(
+                    accountTriggerRef.current,
+                    user?.display_name || user?.username || null,
+                  )
+                )
+                  return;
+                setAccountMenuOpen(open);
+              }}
+            >
               <DropdownMenuTrigger asChild>
                 <button
+                  ref={accountTriggerRef}
                   type="button"
                   aria-label="用户菜单"
                   className="grid size-10 cursor-pointer place-items-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring/40"

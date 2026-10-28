@@ -88,6 +88,9 @@ final class ShellModel {
       self.sharedFile = file
       self.sheet = .share(file)
     }
+    web.anchoredMenu.respond = { [weak self] id, selected in
+      self?.send(.menuResult(id: id, selected: selected))
+    }
     web.contextMenu.onSelect = { [weak self] token, itemId in
       self?.send(.contextMenuResult(token: token, selected: itemId))
     }
@@ -348,7 +351,10 @@ final class ShellModel {
     case let .confirmRequest(id, request):
       confirm.present(id: id, request)
     case let .menuRequest(id, request):
-      menu.present(id: id, request)
+      // From a web control: a system menu at that spot when possible.
+      if !web.anchoredMenu.present(id: id, request) {
+        menu.present(id: id, request)
+      }
     case let .contextMenuOffer(offer):
       web.contextMenu.receive(offer)
     case let .haptic(style):
@@ -389,6 +395,7 @@ final class ShellModel {
     confirm.discard()
     menu.discard()
     web.contextMenu.reset()
+    web.anchoredMenu.discard()
   }
 
   private func resetDeclarations() {

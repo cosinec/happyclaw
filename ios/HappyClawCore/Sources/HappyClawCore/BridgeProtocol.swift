@@ -11,7 +11,7 @@ public enum BridgeProtocol {
   /// `window.webkit.messageHandlers.<name>` registered by the shell.
   public static let handlerName = "happyclaw"
   /// Capabilities the shell offers to the web (subset of web's list).
-  public static let shellCapabilities = ["layout", "tabs", "confirm", "menu", "haptic", "theme", "navbar", "shortcuts", "contextmenu"]
+  public static let shellCapabilities = ["layout", "tabs", "confirm", "menu", "haptic", "theme", "navbar", "shortcuts", "contextmenu", "anchoredmenu"]
 
   /// Highest version both sides speak, or nil when there is none.
   public static func negotiate(_ webVersions: [Int]) -> Int? {
@@ -133,12 +133,27 @@ public struct MenuItemDeclaration: Codable, Equatable, Sendable, Identifiable {
   public var symbol: String?
   public var destructive: Bool?
   public var disabled: Bool?
+  /// Shows a checkmark (radio-style choices such as theme).
+  public var checked: Bool?
+  /// A group: a submenu, or with `inline` a titled section of this menu.
+  public var children: [MenuItemDeclaration]?
+  public var inline: Bool?
+
+  /// Selectable leaves in order, for presentations without nesting.
+  public var leaves: [MenuItemDeclaration] {
+    guard let children else { return [self] }
+    return children.flatMap(\.leaves)
+  }
 }
 
 public struct MenuRequest: Codable, Equatable, Sendable {
   public var title: String?
   public var message: String?
   public var items: [MenuItemDeclaration]
+  /// The control that opened the menu (web view points). With it the shell
+  /// shows a system menu from that spot (`anchoredmenu`); without it, or
+  /// where that is unavailable, an action sheet of the leaves.
+  public var anchor: Rect?
 }
 
 /// A rectangle in web view points (CSS pixels of the visual viewport).

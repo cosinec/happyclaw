@@ -14,6 +14,7 @@ final class WebController: NSObject {
   let channel = BridgeChannel()
   let downloads = DownloadHost()
   let contextMenu = ContextMenuHost()
+  let anchoredMenu = AnchoredMenuPresenter()
 
   var server: ServerAddress? {
     didSet { channel.server = server }
@@ -45,6 +46,7 @@ final class WebController: NSObject {
     webView.navigationDelegate = self
     webView.uiDelegate = self
     contextMenu.webView = webView
+    anchoredMenu.host = webView
     webView.addInteraction(UIContextMenuInteraction(delegate: contextMenu))
     // Edge swipe walks the web history, including react-router pushState entries.
     webView.allowsBackForwardNavigationGestures = true

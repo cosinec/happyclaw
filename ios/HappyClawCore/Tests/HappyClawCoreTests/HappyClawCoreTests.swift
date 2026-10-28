@@ -282,3 +282,22 @@ private let shell = ShellInfo(version: "0.1.0", build: "1", os: "27.1")
     #expect(!BridgeSession().accepts(offer))
   }
 }
+
+@Suite struct AnchoredMenuTests {
+  @Test func decodesNestedAnchoredMenus() throws {
+    let decoded = try BridgeProtocol.decode(Data(#"""
+      {"v":1,"type":"menu.request","id":"w4","payload":{"title":null,"message":null,
+       "anchor":{"x":300,"y":60,"width":44,"height":44},
+       "items":[{"id":"profile","title":"个人设置","symbol":"person.crop.circle"},
+                {"id":"theme","title":"主题","inline":true,"children":[
+                  {"id":"theme:light","title":"浅色","checked":true},{"id":"theme:dark","title":"深色"}]},
+                {"id":"logout","title":"退出登录","destructive":true}]}}
+      """#.utf8))
+    guard case let .menuRequest(id, request) = decoded.message else { Issue.record("wrong case"); return }
+    #expect(id == "w4")
+    #expect(request.anchor == Rect(x: 300, y: 60, width: 44, height: 44))
+    #expect(request.items[1].inline == true)
+    #expect(request.items[1].children?.first?.checked == true)
+    #expect(request.items.flatMap(\.leaves).map(\.id) == ["profile", "theme:light", "theme:dark", "logout"])
+  }
+}
