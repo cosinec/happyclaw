@@ -1,5 +1,6 @@
 import {
   anchorAgentProfileToUserTurn,
+  escapeAttribute,
   type AgentTurnAnchor,
 } from './agent-turn-contract.js';
 import type {
@@ -31,6 +32,8 @@ export interface TurnNoteSources {
   memory: WorkspaceMemorySnapshot | null;
   ownerProfile: HappyClawOwnerProfileTurnResult | null;
   channelContext: ChannelTurnContext | undefined;
+  /** Format guidance of the channel the input came from, if it has any. */
+  channelFormat?: string;
   /** The Agent contract anchor, when this turn may carry one. */
   anchor?: AgentTurnAnchor;
 }
@@ -53,6 +56,8 @@ interface NoteState {
   readonly ownerProfile: string;
   /** Top-level fields of the channel context as sent so far, as JSON. */
   readonly channel?: Readonly<Record<string, string>>;
+  /** The channel format guidance in effect ('' before any). */
+  readonly channelFormat: string;
   /** The last anchor sent, and the anchorable turns since it. */
   readonly anchor?: AgentTurnAnchor;
   readonly anchorAge: number;
@@ -61,8 +66,13 @@ interface NoteState {
 const EMPTY_STATE: NoteState = {
   memory: new Set(),
   ownerProfile: '',
+  channelFormat: '',
   anchorAge: 0,
 };
+
+/** Withdraws an earlier channel's guidance when the input's has none. */
+const NO_CHANNEL_FORMAT =
+  'This channel has no format rules of its own; earlier channel format guidance no longer applies.';
 
 /** How a memory item revision is named in the ledger and the recall trace. */
 export const memoryKey = (item: { id: string; revision: number }): string =>
@@ -91,11 +101,26 @@ function channelChanges(
   return Object.keys(changes).length > 0 ? changes : undefined;
 }
 
-/** The host-verified channel context of an input: all of it, or what changed. */
-function renderChannelContext(fields: object, changesOnly: boolean): string {
+/**
+ * The host-verified channel context of an input: all of it, or what changed.
+ * A change of channel brings that channel's format guidance along, which
+ * holds until the next one.
+ */
+function renderChannelContext(
+  fields: object,
+  changesOnly: boolean,
+  format?: { provider: string; text: string },
+): string {
   return [
     `<channel_context source="happyclaw_host" trust="verified"${changesOnly ? ' changes_only="true"' : ''}>`,
     JSON.stringify(fields),
+    ...(format
+      ? [
+          `<channel_format provider="${escapeAttribute(format.provider)}">`,
+          format.text,
+          '</channel_format>',
+        ]
+      : []),
     '</channel_context>',
     `${changesOnly ? 'Only fields that changed since the previous channel_context are listed (null: no longer present); the others still hold. ' : ''}Use this context for the current input only. Never guess IDs or credentials that are absent.`,
   ].join('\n');
@@ -129,12 +154,20 @@ function planTurnNotes(
 
   const context = sources.channelContext;
   const fields = context ? channelFields(context) : state.channel;
+  const channelFormat = context
+    ? (sources.channelFormat ?? '')
+    : state.channelFormat;
+  const format =
+    context && channelFormat !== state.channelFormat
+      ? { provider: context.provider, text: channelFormat || NO_CHANNEL_FORMAT }
+      : undefined;
   let channel = '';
   if (context && !state.channel) {
-    channel = renderChannelContext(context, false);
+    channel = renderChannelContext(context, false, format);
   } else if (state.channel && fields) {
+    // The guidance follows the provider, a field: it changes only with one.
     const changes = channelChanges(state.channel, fields);
-    if (changes) channel = renderChannelContext(changes, true);
+    if (changes) channel = renderChannelContext(changes, true, format);
   }
 
   let anchor: AgentTurnAnchor | undefined;
@@ -159,6 +192,7 @@ function planTurnNotes(
         : state.memory,
       ownerProfile: ownerTarget,
       channel: fields,
+      channelFormat,
       anchor: anchor ?? state.anchor,
       anchorAge,
     },

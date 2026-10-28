@@ -163,6 +163,61 @@ describe('per-turn notes', () => {
     expect(changed.channel).toContain('{"message":{"id":"om_3"}}');
   });
 
+  test("a channel's format guidance comes with its context, once per channel", () => {
+    const FEISHU = '## 飞书消息格式';
+    const TELEGRAM = '## Telegram 消息格式';
+    const ledger = new TurnNoteLedger();
+    ledger.beginQuery(undefined);
+    const feishu = (id: string) =>
+      sources({ channelContext: channel(id), channelFormat: FEISHU });
+    const first = turn(ledger, 'u1', feishu('om_1')).channel;
+    expect(first).toContain(`<channel_format provider="feishu">\n${FEISHU}`);
+    expect(first.indexOf('<channel_format')).toBeLessThan(
+      first.indexOf('</channel_context>'),
+    );
+    expect(turn(ledger, 'u2', feishu('om_2')).channel).not.toContain(
+      '<channel_format',
+    );
+
+    // Another channel's input, piped into the same warm runner.
+    const telegram = turn(
+      ledger,
+      'u3',
+      sources({
+        channelContext: channel('tg_3', {
+          provider: 'telegram',
+          sourceJid: 'telegram:chat',
+        }),
+        channelFormat: TELEGRAM,
+      }),
+    ).channel;
+    expect(telegram).toContain('changes_only="true"');
+    expect(telegram).toContain(
+      `<channel_format provider="telegram">\n${TELEGRAM}`,
+    );
+
+    // The Web has no rules of its own: the earlier ones are withdrawn.
+    const web = turn(
+      ledger,
+      'u4',
+      sources({
+        channelContext: {
+          schemaVersion: 1,
+          provider: 'web',
+          sourceJid: 'web:ws',
+        },
+      }),
+    ).channel;
+    expect(web).toContain('<channel_format provider="web">');
+    expect(web).toContain('no longer applies');
+    // A Web-only session never gets a format block.
+    const webOnly = new TurnNoteLedger();
+    webOnly.beginQuery(undefined);
+    expect(
+      turn(webOnly, 'v1', sources({ channelContext: channel('om_1') })).channel,
+    ).not.toContain('<channel_format');
+  });
+
   test('a dropped channel field is sent as null', () => {
     const ledger = new TurnNoteLedger();
     ledger.beginQuery(undefined);
@@ -323,7 +378,11 @@ describe('per-turn notes', () => {
     // Turn 2 is in flight, carrying only its new channel message.
     ledger.stage(
       'u2',
-      sources({ channelContext: channel('om_2'), anchor: undefined }),
+      sources({
+        channelContext: channel('om_2'),
+        channelFormat: '## 飞书消息格式',
+        anchor: undefined,
+      }),
     );
     ledger.beginCompaction();
     const restored = ledger.restoreAfterCompaction();
@@ -332,11 +391,15 @@ describe('per-turn notes', () => {
     expect(restored).toContain('小何');
     expect(restored).toContain('content of b');
     expect(restored).toContain('"om_2"');
+    expect(restored).toContain('<channel_format provider="feishu">');
     expect(restored).not.toContain('changes_only');
     // The restored notes are in the context: the next turn adds nothing.
     const next = ledger.stage(
       'u3',
-      sources({ channelContext: channel('om_2') }),
+      sources({
+        channelContext: channel('om_2'),
+        channelFormat: '## 飞书消息格式',
+      }),
     );
     expect([next.memory, next.channel, next.ownerProfile]).toEqual([
       '',

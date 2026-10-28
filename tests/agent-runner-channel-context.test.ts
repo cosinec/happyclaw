@@ -9,6 +9,7 @@ import {
   type ChannelTurnContext,
 } from '../container/agent-runner/src/types.js';
 import { TurnNoteLedger } from '../container/agent-runner/src/turn-notes.js';
+import { createRuntimeSourceHarness } from './helpers/runtime-source.js';
 import {
   createMcpTools,
   untrustedChannelDataNote,
@@ -387,5 +388,50 @@ describe('Agent Runner channel turn context', () => {
       'unavailable for the current web turn',
     );
     expect(fs.existsSync(path.join(root, 'tasks'))).toBe(false);
+  });
+});
+
+describe('channel format guidance', () => {
+  const runner = fs.readFileSync(
+    path.resolve('container/agent-runner/src/index.ts'),
+    'utf8',
+  );
+
+  test("an input's own channel picks its guidance; the Web has none", () => {
+    const harness = createRuntimeSourceHarness(
+      {
+        CHANNEL_GUIDELINES: { feishu: '## 飞书消息格式' },
+        CHANNEL_FORMAT_COMMON: 'Web 端支持完整 Markdown。',
+      },
+      new URL('../container/agent-runner/src/index.ts', import.meta.url),
+    );
+    harness.install('channelFormatFor');
+    const channelFormatFor = harness.globals.channelFormatFor as (
+      context: ChannelTurnContext | undefined,
+    ) => string | undefined;
+    expect(channelFormatFor(feishuContext())).toBe(
+      '## 飞书消息格式\nWeb 端支持完整 Markdown。',
+    );
+    expect(
+      channelFormatFor(normalizeChannelTurnContext(undefined, 'web:main')),
+    ).toBeUndefined();
+    expect(channelFormatFor(undefined)).toBeUndefined();
+  });
+
+  test("rides in each turn with that turn's context, never in the system prompt", () => {
+    // Cold and warm turns pass the guidance of the context they carry.
+    expect(runner).toContain(
+      'channelContext: containerInput.channelContext,\n      channelFormat: channelFormatFor(containerInput.channelContext),',
+    );
+    expect(runner).toContain(
+      'channelContext: queuedChannelContext,\n          channelFormat: channelFormatFor(queuedChannelContext),',
+    );
+    // The system prompt no longer depends on which channel an input came from.
+    const planStart = runner.indexOf(
+      'const promptPlan = buildHappyClawPromptPlan(',
+    );
+    const planEnd = runner.indexOf('const systemPromptAppend', planStart);
+    expect(planStart).toBeGreaterThanOrEqual(0);
+    expect(runner.slice(planStart, planEnd)).not.toMatch(/channel/i);
   });
 });

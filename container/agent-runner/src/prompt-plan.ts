@@ -1,11 +1,7 @@
 import { createHash } from 'node:crypto';
 
 export type PromptBlockScope = 'main' | 'subagent' | 'both';
-export type PromptBlockOwner =
-  | 'platform'
-  | 'agent_profile'
-  | 'workspace'
-  | 'channel';
+export type PromptBlockOwner = 'platform' | 'agent_profile' | 'workspace';
 
 export interface PromptBlockInput {
   id: string;
@@ -48,10 +44,6 @@ export interface HappyClawPromptSources {
   output: string;
   web?: string;
   backgroundTasks?: string;
-  channel?: {
-    id: string;
-    text: string;
-  };
   deliveryContract?: string;
 }
 
@@ -277,18 +269,6 @@ export function buildHappyClawPromptPlan(
       required: false,
       condition: 'Task is available',
       text: wrap('background-tasks', sources.backgroundTasks),
-    });
-  }
-
-  if (sources.channel) {
-    inputs.push({
-      id: `channel.${sources.channel.id}`,
-      version: 1,
-      scope: 'main',
-      owner: 'channel',
-      required: false,
-      condition: `message source resolves to ${sources.channel.id}`,
-      text: wrap('channel-format', sources.channel.text),
     });
   }
 

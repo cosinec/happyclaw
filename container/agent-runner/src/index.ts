@@ -42,7 +42,6 @@ import {
 import { pluginLoadWarnings } from './sdk-init-audit.js';
 import { classifyPreInitErrorResult } from './startup-failure.js';
 import { pruneProcessedHistoryImagesInTranscript as pruneProcessedHistoryImagesInTranscriptFile } from './history-image-prune.js';
-import { getChannelFromJid } from './channel-prefixes.js';
 
 import type {
   ContainerInput,
@@ -605,6 +604,9 @@ function enrichContextAudit(
 
 // 启动期扫描 prompts/channels/*.md，文件名（去 .md 后缀）= channel key（feishu / telegram / qq / dingtalk / ...）
 // 新增渠道时只需在 channels/ 下加一个 .md 文件，无需改代码。
+// The guidance rides in each input's channel_context (turn-notes.ts), not in
+// the system prompt: one warm runner serves inputs from several channels, and
+// the system prompt must stay byte-stable for the prompt cache.
 const CHANNEL_GUIDELINES: Record<string, string> = (() => {
   const channelsDir = path.join(PROMPTS_DIR, 'channels');
   const result: Record<string, string> = {};
@@ -618,6 +620,14 @@ const CHANNEL_GUIDELINES: Record<string, string> = (() => {
   }
   return result;
 })();
+
+/** Format guidance for an input from this channel; none for the Web. */
+function channelFormatFor(
+  context: ChannelTurnContext | undefined,
+): string | undefined {
+  const guidelines = context && CHANNEL_GUIDELINES[context.provider];
+  return guidelines ? `${guidelines}\n${CHANNEL_FORMAT_COMMON}` : undefined;
+}
 
 /**
  * 规范化图片 MIME：
@@ -1980,6 +1990,7 @@ async function runQueryAttempt(
       memory: memorySnapshot,
       ownerProfile,
       channelContext: containerInput.channelContext,
+      channelFormat: channelFormatFor(containerInput.channelContext),
       anchor: shouldAnchorInitialAgentTurn(emitOutput, sourceKindOverride)
         ? agentTurnAnchor
         : undefined,
@@ -2580,6 +2591,7 @@ async function runQueryAttempt(
           memory: memorySnapshot,
           ownerProfile,
           channelContext: queuedChannelContext,
+          channelFormat: channelFormatFor(queuedChannelContext),
           anchor: agentTurnAnchor,
         },
         msg.receipt?.deliveryId ||
@@ -2680,12 +2692,6 @@ async function runQueryAttempt(
     containerInput,
     isHome,
   );
-  const channel =
-    containerInput.channelContext?.provider ||
-    getChannelFromJid(
-      containerInput.currentSourceJid || containerInput.chatJid,
-    );
-  const channelGuidelines = CHANNEL_GUIDELINES[channel] ?? '';
   const memoryPromptName = 'memory-system.workspace' as const;
   const hasMemoryTools = allowedTools.some(
     (tool) =>
@@ -2861,14 +2867,6 @@ async function runQueryAttempt(
     ...(hasWebTools ? { web: WEB_FETCH_GUIDELINES } : {}),
     ...(backgroundTaskToolsAvailable
       ? { backgroundTasks: BACKGROUND_TASK_GUIDELINES }
-      : {}),
-    ...(channelGuidelines
-      ? {
-          channel: {
-            id: channel,
-            text: `${channelGuidelines}\n${CHANNEL_FORMAT_COMMON}`,
-          },
-        }
       : {}),
     ...(!containerInput.isScheduledTask && !containerInput.messageTaskId
       ? {
