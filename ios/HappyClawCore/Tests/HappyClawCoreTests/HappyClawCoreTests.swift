@@ -254,3 +254,31 @@ private let shell = ShellInfo(version: "0.1.0", build: "1", os: "27.1")
     #expect(decoded == registry)
   }
 }
+
+@Suite struct ContextMenuTests {
+  @Test func decodesOfferAndEncodesResult() throws {
+    let decoded = try BridgeProtocol.decode(Data(#"""
+      {"v":1,"type":"contextmenu.offer","payload":{"token":"m3","title":null,
+       "rect":{"x":16,"y":200,"width":300,"height":80},
+       "items":[{"id":"copy","title":"复制文本","symbol":"doc.on.doc"},{"id":"delete","title":"删除","destructive":true}]}}
+      """#.utf8))
+    guard case let .contextMenuOffer(offer) = decoded.message else { Issue.record("wrong case"); return }
+    #expect(offer.token == "m3")
+    #expect(offer.items.map(\.id) == ["copy", "delete"])
+    #expect(offer.items[1].destructive == true)
+    #expect(offer.rect.contains(x: 20, y: 210))
+    #expect(!offer.rect.contains(x: 20, y: 300))
+    #expect(offer.rect.contains(x: 20, y: 285, slop: 8))
+
+    let result = try #require(try JSONSerialization.jsonObject(
+      with: BridgeProtocol.encode(.contextMenuResult(token: "m3", selected: "copy"), version: 1)) as? [String: Any])
+    #expect(result["type"] as? String == "contextmenu.result")
+    #expect((result["payload"] as? [String: String]) == ["token": "m3", "selected": "copy"])
+  }
+
+  @Test func offersAreOnlyAcceptedWithNativeChrome() throws {
+    let offer = WebMessage.contextMenuOffer(
+      ContextMenuOffer(token: "m1", title: nil, rect: Rect(x: 0, y: 0, width: 1, height: 1), items: []))
+    #expect(!BridgeSession().accepts(offer))
+  }
+}

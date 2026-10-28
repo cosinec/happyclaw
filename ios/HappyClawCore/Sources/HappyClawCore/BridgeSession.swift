@@ -139,7 +139,7 @@ public struct BridgeSession: Equatable, Sendable {
       case .prepared, .nativeNavigation: return true
       default: return false
       }
-    case .confirmRequest, .menuRequest, .haptic:
+    case .confirmRequest, .menuRequest, .contextMenuOffer, .haptic:
       return isNativeChromeActive
     }
   }

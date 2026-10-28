@@ -93,6 +93,9 @@ Web 侧对应模块在 `web/src/native/`（`protocol.ts`、`session.ts`、`layou
 - **外链**：本实例同源（含 base path）的导航留在 WebView；其他 http(s) 顶层导航、
   `target=_blank` 和 `mailto:`/`tel:` 交给系统；未知 scheme（如 `javascript:`）丢弃。
   iframe 中的第三方内容保持内嵌。
+- **长按菜单**：`ContextMenuHost` 在 WebView 上挂一个 `UIContextMenuInteraction`。Web 用
+  `useNativeContextMenu()` 给元素登记菜单（目前是消息正文，与「…」菜单共用 `messageMenuActions`），
+  只有原生声明 `contextmenu` 能力时才关闭这些元素的 WebKit 长按选字。
 - **下载**：WKWebView 默认会静默丢弃 `<a download>`（Web 的 `utils/download.ts` 统一走
   blob: URL）和附件响应。壳把它们转成 `WKDownload`，存到临时目录后弹出系统分享面板
   （存到「文件」/「照片」、隔空投送、用其他 App 打开），面板关闭后删除临时文件；Web 不需要改。
@@ -146,33 +149,35 @@ bridge.ready {session} ──────────────▶ nativeNavig
 
 ### 消息（Web → 原生）
 
-| type              | payload                                                                      | 说明                                                                                                                    |
-| ----------------- | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `bridge.hello`    | `versions[]`, `capabilities[]`, `client.build`                               | 任意 `v` 都接受，以便回复 reject                                                                                        |
-| `bridge.ready`    | `session`                                                                    | Web 已提交原生布局                                                                                                      |
-| `chrome.tabs`     | `tabs[]`, `more[]`（`id/title/symbol/path`）                                 | `symbol` 为 SF Symbol；计费等过滤已在 Web 完成                                                                          |
-| `route.changed`   | `path`, `title`, `tabId`, `canGoBack`, `tabBar`, `nav?`, `modal?`            | `tabBar=false`：打开的会话、登录/初始化页；`nav`：`visible/title/back/action{id,title,symbol}`；`modal`：Web 弹窗打开中 |
-| `theme.changed`   | `scheme: light/dark`, `background?`, `accent?`（`#rrggbb`）                  | 原生 chrome 跟随 Web 主题、底色和强调色（底栏选中色）；按服务器缓存，冷启动先用它铺底                                   |
-| `confirm.request` | `title`, `message`, `confirmText`, `cancelText`, `destructive`               | 来自 `confirmDialog()`                                                                                                  |
-| `menu.request`    | `title?`, `message?`, `items[]`（`id/title/symbol?/destructive?/disabled?`） | 原生操作菜单                                                                                                            |
-| `haptic`          | `style: light/medium/success/warning/error`                                  | 来自 `useHaptic`                                                                                                        |
-| `bridge.error`    | `code`, `message`, `ref?`                                                    | Web 无法处理原生消息时回报                                                                                              |
+| type                | payload                                                                      | 说明                                                                                                                    |
+| ------------------- | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `bridge.hello`      | `versions[]`, `capabilities[]`, `client.build`                               | 任意 `v` 都接受，以便回复 reject                                                                                        |
+| `bridge.ready`      | `session`                                                                    | Web 已提交原生布局                                                                                                      |
+| `chrome.tabs`       | `tabs[]`, `more[]`（`id/title/symbol/path`）                                 | `symbol` 为 SF Symbol；计费等过滤已在 Web 完成                                                                          |
+| `route.changed`     | `path`, `title`, `tabId`, `canGoBack`, `tabBar`, `nav?`, `modal?`            | `tabBar=false`：打开的会话、登录/初始化页；`nav`：`visible/title/back/action{id,title,symbol}`；`modal`：Web 弹窗打开中 |
+| `theme.changed`     | `scheme: light/dark`, `background?`, `accent?`（`#rrggbb`）                  | 原生 chrome 跟随 Web 主题、底色和强调色（底栏选中色）；按服务器缓存，冷启动先用它铺底                                   |
+| `confirm.request`   | `title`, `message`, `confirmText`, `cancelText`, `destructive`               | 来自 `confirmDialog()`                                                                                                  |
+| `menu.request`      | `title?`, `message?`, `items[]`（`id/title/symbol?/destructive?/disabled?`） | 原生操作菜单                                                                                                            |
+| `haptic`            | `style: light/medium/success/warning/error`                                  | 来自 `useHaptic`                                                                                                        |
+| `contextmenu.offer` | `token`, `title?`, `rect`, `items[]`                                         | 手指按下带长按菜单的元素时发送；长按落在 `rect` 内且 2 秒内有效才弹系统菜单（元素截图浮起），否则交还 WebKit            |
+| `bridge.error`      | `code`, `message`, `ref?`                                                    | Web 无法处理原生消息时回报                                                                                              |
 
 ### 消息（原生 → Web）
 
-| type             | payload                                         | 说明                                                                                            |
-| ---------------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `bridge.welcome` | `session`, `version`, `capabilities[]`, `shell` |                                                                                                 |
-| `bridge.reject`  | `code`, `message`, `supported[]`                | 原生随即显示恢复页                                                                              |
-| `layout.update`  | `contentInsets`, `safeArea`, `keyboard`         | → `--native-top/right/bottom/left`、`--native-keyboard-occlusion`                               |
-| `nav.select`     | `tabId`                                         | 原生 Tab / 「更多」项被点击                                                                     |
-| `nav.back`       | `{}`                                            | 原生返回按钮：页内覆盖的 `onBack` → 历史后退 → 推入页的父路由                                   |
-| `nav.action`     | `id`                                            | 导航栏右侧按钮被点击                                                                            |
-| `app.shortcut`   | `id`                                            | 桌面图标快捷操作（`new-conversation`）；Web 声明 `shortcuts` 能力才发，冷启动时排队到工作台挂载 |
-| `confirm.result` | `confirmed`                                     | 带请求 `id`                                                                                     |
-| `menu.result`    | `selected: string \| null`                      | `null` 为取消                                                                                   |
-| `app.lifecycle`  | `state: active/inactive/background`             | 预留给 Phase 4 回前台重连                                                                       |
-| `bridge.error`   | `code`, `message`, `ref?`                       | 带 `ref` 时 Web 把对应请求按取消处理                                                            |
+| type                 | payload                                         | 说明                                                                                            |
+| -------------------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `bridge.welcome`     | `session`, `version`, `capabilities[]`, `shell` |                                                                                                 |
+| `bridge.reject`      | `code`, `message`, `supported[]`                | 原生随即显示恢复页                                                                              |
+| `layout.update`      | `contentInsets`, `safeArea`, `keyboard`         | → `--native-top/right/bottom/left`、`--native-keyboard-occlusion`                               |
+| `nav.select`         | `tabId`                                         | 原生 Tab / 「更多」项被点击                                                                     |
+| `nav.back`           | `{}`                                            | 原生返回按钮：页内覆盖的 `onBack` → 历史后退 → 推入页的父路由                                   |
+| `nav.action`         | `id`                                            | 导航栏右侧按钮被点击                                                                            |
+| `app.shortcut`       | `id`                                            | 桌面图标快捷操作（`new-conversation`）；Web 声明 `shortcuts` 能力才发，冷启动时排队到工作台挂载 |
+| `contextmenu.result` | `token`, `selected`                             | 长按菜单项被选中；菜单收起动画结束后才发，处理函数留在 Web                                      |
+| `confirm.result`     | `confirmed`                                     | 带请求 `id`                                                                                     |
+| `menu.result`        | `selected: string \| null`                      | `null` 为取消                                                                                   |
+| `app.lifecycle`      | `state: active/inactive/background`             | 预留给 Phase 4 回前台重连                                                                       |
+| `bridge.error`       | `code`, `message`, `ref?`                       | 带 `ref` 时 Web 把对应请求按取消处理                                                            |
 
 错误码：`invalid_message`、`unsupported_type`、`version_unsupported`、`not_ready`、`busy`、
 `cancelled`。

@@ -30,7 +30,12 @@ export type WebCapability =
   | 'navbar'
   | 'shortcuts';
 
-export type NativeCapability = WebCapability | 'share' | 'picker' | 'passkey';
+export type NativeCapability =
+  | WebCapability
+  | 'contextmenu'
+  | 'share'
+  | 'picker'
+  | 'passkey';
 
 export interface Insets {
   top: number;
@@ -128,6 +133,17 @@ export interface WebToNativePayloads {
     items: MenuItemDeclaration[];
   };
   haptic: { style: HapticStyle };
+  /**
+   * Sent on touch-down over an element with a long-press menu. The shell
+   * shows the menu only if the long press lands inside `rect` (viewport CSS
+   * pixels) while this offer is fresh; otherwise WebKit keeps the gesture.
+   */
+  'contextmenu.offer': {
+    token: string;
+    title: string | null;
+    rect: { x: number; y: number; width: number; height: number };
+    items: MenuItemDeclaration[];
+  };
   'bridge.error': { code: BridgeErrorCode; message: string; ref?: string };
 }
 
@@ -159,6 +175,8 @@ export interface NativeToWebPayloads {
   'nav.action': { id: string };
   /** A home-screen quick action the web handles (e.g. `new-conversation`). */
   'app.shortcut': { id: string };
+  /** A long-press menu item was chosen (after the menu finished closing). */
+  'contextmenu.result': { token: string; selected: string };
   'confirm.result': { confirmed: boolean };
   'menu.result': { selected: string | null };
   'app.lifecycle': { state: 'active' | 'inactive' | 'background' };
@@ -226,6 +244,8 @@ const payloadValidators: {
   'nav.back': () => true,
   'nav.action': (p) => typeof p.id === 'string',
   'app.shortcut': (p) => typeof p.id === 'string',
+  'contextmenu.result': (p) =>
+    typeof p.token === 'string' && typeof p.selected === 'string',
   'confirm.result': (p) => typeof p.confirmed === 'boolean',
   'menu.result': (p) => p.selected === null || typeof p.selected === 'string',
   'app.lifecycle': (p) =>

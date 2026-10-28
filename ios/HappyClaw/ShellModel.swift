@@ -88,6 +88,9 @@ final class ShellModel {
       self.sharedFile = file
       self.sheet = .share(file)
     }
+    web.contextMenu.onSelect = { [weak self] token, itemId in
+      self?.send(.contextMenuResult(token: token, selected: itemId))
+    }
     web.downloads.onFailed = { [weak self] message in
       Haptics.play(.error)
       self?.downloadError = message
@@ -346,6 +349,8 @@ final class ShellModel {
       confirm.present(id: id, request)
     case let .menuRequest(id, request):
       menu.present(id: id, request)
+    case let .contextMenuOffer(offer):
+      web.contextMenu.receive(offer)
     case let .haptic(style):
       Haptics.play(style)
     case let .error(code, text, _):
@@ -383,6 +388,7 @@ final class ShellModel {
   private func discardRequests() {
     confirm.discard()
     menu.discard()
+    web.contextMenu.reset()
   }
 
   private func resetDeclarations() {
