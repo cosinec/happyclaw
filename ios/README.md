@@ -7,7 +7,8 @@ SwiftUI 原生壳 + WKWebView + 版本化 JSON 桥接。原生只接管 chrome�
 方案背景见 `docs/frontend-ios-plan-2026-10/03-ios-native.md`；执行记录与对方案的偏离见
 `docs/frontend-ios-plan-2026-10/07-execution-log.md`。
 
-- 最低 iOS 17；iOS 26+ 的 TabBar 使用 Liquid Glass（`glassEffect`），更早系统用材质背景。
+- 最低 iOS 17。底栏是系统 `UITabBar`：iOS 26+ 由系统绘制浮动的 Liquid Glass 栏（选中透镜、折射、
+  按压反馈），更早系统是标准 Tab 栏；导航栏按钮用 `glassEffect`。
 - 第一版仅 iPhone（`TARGETED_DEVICE_FAMILY = 1`），不做 iPad 布局。
 - 文案只有中文，集中在 `HappyClaw/Support/L10n.swift` + `Localizable.xcstrings`。
 
@@ -25,7 +26,7 @@ ios/
 │   ├── RootShell.swift         NavigationStack + 全屏 WebView + 导航栏 + 浮动 TabBar + 恢复页
 │   ├── NativeNavBar.swift      原生导航栏（标题、返回、一个右侧按钮，由 Web 声明）
 │   ├── ShellModel.swift        WebView、桥接状态机与 SwiftUI chrome 的粘合层
-│   ├── NativeTabBar.swift      原生底部 Tab（由 Web 声明）
+│   ├── NativeTabBar.swift      系统 UITabBar（由 Web 声明 Tab）
 │   ├── WebHostView.swift       WKWebView：持久数据存储、cookie 同步、导航代理、外链、JS 对话框
 │   ├── DownloadHost.swift      网页下载（blob: / 附件）→ 临时文件 → 系统分享面板
 │   ├── ConnectView.swift       服务器地址

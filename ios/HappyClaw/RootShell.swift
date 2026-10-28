@@ -90,9 +90,12 @@ struct RootShell: View {
               tabs: model.tabs,
               showsMore: !model.more.isEmpty,
               selectedSlot: model.selectedTabSlot,
+              sheetOpen: model.isMoreSheetOpen,
               onSelect: { model.selectTab($0) },
               onMore: { model.openMore() }
             )
+            // The system bar lays out its own home-indicator padding.
+            .ignoresSafeArea(edges: .bottom)
             .onGeometryChange(for: CGFloat.self) { bar in bar.frame(in: .global).minY } action: { top in
               model.layout.tabBarOccupancy = max(0, screenBottom - top)
               model.layoutChanged()
