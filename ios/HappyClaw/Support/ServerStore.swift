@@ -37,6 +37,30 @@ enum ServerStore {
   }
 }
 
+/// The last scheme and page color each server reported, so a cold start
+/// paints the right background and status bar before the page has drawn.
+enum AppearanceStore {
+  struct Appearance: Codable, Equatable {
+    var scheme: ColorSchemeName
+    var background: RGBColor?
+  }
+
+  private static func key(_ id: UUID) -> String { "appearance.\(id.uuidString)" }
+
+  static func load(_ id: UUID) -> Appearance? {
+    UserDefaults.standard.data(forKey: key(id)).flatMap { try? JSONDecoder().decode(Appearance.self, from: $0) }
+  }
+
+  static func save(_ appearance: Appearance, for id: UUID) {
+    guard load(id) != appearance, let data = try? JSONEncoder().encode(appearance) else { return }
+    UserDefaults.standard.set(data, forKey: key(id))
+  }
+
+  static func remove(_ id: UUID) {
+    UserDefaults.standard.removeObject(forKey: key(id))
+  }
+}
+
 enum ShellBuild {
   static var info: ShellInfo {
     let bundle = Bundle.main

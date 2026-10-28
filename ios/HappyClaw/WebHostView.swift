@@ -84,6 +84,13 @@ final class WebController: NSObject {
     }
   }
 
+  /// What shows until the page paints: the server's last known background.
+  func setPlaceholder(_ color: RGBColor?) {
+    let background = color.map { UIColor(red: $0.red, green: $0.green, blue: $0.blue, alpha: 1) } ?? .systemBackground
+    webView.backgroundColor = background
+    webView.scrollView.backgroundColor = background
+  }
+
   func load(_ address: ServerAddress) {
     server = address
     webView.load(URLRequest(url: address.url))
