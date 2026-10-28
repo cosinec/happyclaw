@@ -33,6 +33,9 @@ final class ShellModel {
 
   var path: [ShellRoute] = []
   var sheet: ShellSheet?
+  var downloadError: String?
+  /// The file behind an open share sheet; deleted when the sheet closes.
+  @ObservationIgnored private var sharedFile: URL?
 
   let layout = LayoutBridge()
   let confirm = ConfirmBridge()
@@ -51,6 +54,18 @@ final class ShellModel {
       guard let self else { return }
       self.discardRequests()
       self.apply(self.session.contentProcessLost())
+    }
+    DownloadHost.purge()
+    web.downloads.onFinished = { [weak self] file in
+      guard let self else { return }
+      Haptics.play(.success)
+      if let previous = self.sharedFile { DownloadHost.remove(previous) }
+      self.sharedFile = file
+      self.sheet = .share(file)
+    }
+    web.downloads.onFailed = { [weak self] message in
+      Haptics.play(.error)
+      self?.downloadError = message
     }
     confirm.respond = { [weak self] id, confirmed in self?.send(.confirmResult(id: id, confirmed: confirmed)) }
     menu.respond = { [weak self] id, selected in self?.send(.menuResult(id: id, selected: selected)) }
@@ -119,6 +134,14 @@ final class ShellModel {
   func performNavAction(_ action: NavBarState.Action) {
     Haptics.play(.light)
     send(.navAction(id: action.id))
+  }
+
+  func sheetDismissed() {
+    guard let file = sharedFile else { return }
+    // A new share may already be on screen; keep its file.
+    if case .share(file) = sheet { return }
+    DownloadHost.remove(file)
+    sharedFile = nil
   }
 
   func openMore() {

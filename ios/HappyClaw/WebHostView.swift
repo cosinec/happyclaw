@@ -8,6 +8,7 @@ import WebKit
 final class WebController: NSObject {
   let webView: WKWebView
   let channel = BridgeChannel()
+  let downloads = DownloadHost()
 
   var server: ServerAddress? {
     didSet { channel.server = server }
@@ -89,6 +90,14 @@ final class WebController: NSObject {
 extension WebController: WKNavigationDelegate {
   func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction) async -> WKNavigationActionPolicy {
     guard let url = navigationAction.request.url, let server else { return .cancel }
+    // `<a download>`: the web's download helper always produces a blob: URL;
+    // direct links to the instance are accepted too. Anything else follows
+    // the normal link policy.
+    if navigationAction.shouldPerformDownload,
+      url.scheme == "blob" || url.scheme == "data" || server.contains(url)
+    {
+      return .download
+    }
     let decision = WebLinkPolicy.decide(
       url,
       server: server,
@@ -104,6 +113,27 @@ extension WebController: WKNavigationDelegate {
     case .cancel:
       return .cancel
     }
+  }
+
+  /// Attachments and types WebKit cannot display become downloads instead of
+  /// a dead navigation.
+  func webView(
+    _ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse
+  ) async -> WKNavigationResponsePolicy {
+    let disposition = (navigationResponse.response as? HTTPURLResponse)?
+      .value(forHTTPHeaderField: "Content-Disposition")?.lowercased() ?? ""
+    if disposition.hasPrefix("attachment") || !navigationResponse.canShowMIMEType {
+      return .download
+    }
+    return .allow
+  }
+
+  func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
+    download.delegate = downloads
+  }
+
+  func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
+    download.delegate = downloads
   }
 
   func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
