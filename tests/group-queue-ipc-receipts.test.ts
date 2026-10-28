@@ -259,6 +259,8 @@ describe('GroupQueue IPC delivery receipts', () => {
     // The Runner therefore cannot pick one channel's format guidance for its
     // system prompt; each input carries its own (turn-notes.ts).
     await startRunner({ feishuCliAccountId: 'account-a' });
+    // All three inputs land in one millisecond, the case that reorders them.
+    vi.spyOn(Date, 'now').mockReturnValue(Date.UTC(2026, 9, 28));
     const context = (provider: string) => ({
       schemaVersion: 1 as const,
       provider,
@@ -295,13 +297,24 @@ describe('GroupQueue IPC delivery receipts', () => {
     expect(send('from telegram', 'telegram:chat-1', context('telegram'))).toBe(
       'sent',
     );
+    // IPC files are named `${Date.now()}-${random}`, so files written in the
+    // same millisecond list in random order: match each input by its text.
     expect(
-      readPayloads().map(
-        (payload) =>
-          (payload as { channelContext?: { provider: string } }).channelContext
-            ?.provider ?? 'web',
+      Object.fromEntries(
+        readPayloads().map((payload) => {
+          const { text, channelContext } = payload as {
+            text: string;
+            channelContext?: { provider: string };
+          };
+          return [text, channelContext?.provider ?? 'web'];
+        }),
       ),
-    ).toEqual(['feishu', 'web', 'telegram']);
+    ).toEqual({
+      'from feishu': 'feishu',
+      'from the web': 'web',
+      'from telegram': 'telegram',
+    });
+    vi.restoreAllMocks();
     expect(fs.existsSync(path.join(inputDir(), '_drain'))).toBe(false);
   });
 
