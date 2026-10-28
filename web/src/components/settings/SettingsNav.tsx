@@ -335,7 +335,9 @@ export function SettingsNav({
       <Sheet open={open} onOpenChange={onOpenChange}>
         <SheetContent
           side="left"
-          className="flex w-72 flex-col gap-0 p-0"
+          // Full-height drawer: keep its header clear of the status bar and
+          // its last row above the home indicator (standalone PWA, iOS shell).
+          className="flex w-72 flex-col gap-0 p-0 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
           showCloseButton={false}
           onOpenAutoFocus={(event) => {
             // Focusing the search field would raise the on-screen keyboard
