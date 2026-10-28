@@ -2,7 +2,7 @@
 
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { StreamingDisplay } from '../src/components/chat/StreamingDisplay';
 import { useChatStore, type StreamingState } from '../src/stores/chat';
 import type { StreamingStep } from '../src/lib/stream-steps';
@@ -333,5 +333,43 @@ describe('StreamingDisplay, a run whose turn already ended', () => {
   it('shows the next turn of the same run as it streams', async () => {
     await show('input-1', state({ inputTurnId: 'input-2' }));
     expect(card()?.getAttribute('data-mode')).toBe('live');
+  });
+
+  it('keeps a proactive turn quiet after its reply, its spinner back after a while', async () => {
+    vi.useFakeTimers();
+    try {
+      // Before its reply: the spinner, and the panel of the work.
+      await show(undefined, state({ inputTurnId: 'input-1' }), true);
+      expect(text()).toContain('正在处理…');
+      expect(container.querySelector('[data-hc-process-panel]')).not.toBeNull();
+
+      // The reply landed, and the turn only reasons: nothing at all.
+      const reasoning = state({
+        inputTurnId: 'input-1',
+        partialText: '',
+        steps: [steps[0]],
+        activeTools: [],
+        traceEvents: [],
+      });
+      await show('input-1', reasoning, true);
+      expect(container.innerHTML).toBe('');
+      await act(async () => {
+        vi.advanceTimersByTime(2900);
+      });
+      expect(container.innerHTML).toBe('');
+
+      // Still going after a while: the spinner alone, no steps.
+      await act(async () => {
+        vi.advanceTimersByTime(200);
+      });
+      expect(text()).toContain('正在处理…');
+      expect(container.querySelector('[data-hc-process-panel]')).toBeNull();
+
+      // New work brings the panel back at once.
+      await show('input-1', state({ inputTurnId: 'input-1' }), true);
+      expect(container.querySelector('[data-hc-process-panel]')).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -1477,6 +1477,29 @@ export function runTurnAnswered(
   return !!s.activeRuns[runtimeJid]?.answered;
 }
 
+/**
+ * A proactive workspace answers through send_message: an utterance of the turn
+ * the live panel streams is that turn's reply. The panel gives way to it, and
+ * stays away while the turn only reasons (it asks the model once more to decide
+ * it is done); new work brings it back (`hasVisibleWork`). Nothing of the
+ * process moves onto the reply here: the server hangs the turn's process on
+ * its last reply, at the owner's level, as before.
+ */
+function proactiveReplyLanded(
+  s: ChatState,
+  runtimeJid: string,
+  live: StreamingState | undefined,
+  msg: Message,
+): boolean {
+  return (
+    msg.source_kind === 'sdk_send_message' &&
+    isProactiveRuntime(s, runtimeJid) &&
+    !!s.activeRuns[runtimeJid] &&
+    !isFrozenProjection(live) &&
+    answersInput(live, msg.turn_id)
+  );
+}
+
 /** How long a settled card waits for its final message before re-syncing. */
 const SETTLE_FALLBACK_MS = 1500;
 /** Trace rows kept per finished reply (the panel shows 20 per group). */
@@ -5071,21 +5094,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
           !!settledState &&
           (!inPlace || answersInput(settledState, msg.turn_id));
 
-        const nextAgentStreaming = isAgentReply
-          ? exactRunActive && !replacesProjection
-            ? s.agentStreaming
-            : holdsRunningWorkflow
-              ? {
-                  ...s.agentStreaming,
-                  [agentId]:
-                    streamingStateFromWorkflowRuns(runningWorkflowRuns),
-                }
-              : (() => {
-                  const n = { ...s.agentStreaming };
-                  delete n[agentId];
-                  return n;
-                })()
-          : s.agentStreaming;
+        const replyLanded =
+          isProactiveUtterance &&
+          proactiveReplyLanded(s, runtimeJid, agentState, msg);
+        const nextAgentStreaming = replyLanded
+          ? withoutKey(s.agentStreaming, agentId)
+          : isAgentReply
+            ? exactRunActive && !replacesProjection
+              ? s.agentStreaming
+              : holdsRunningWorkflow
+                ? {
+                    ...s.agentStreaming,
+                    [agentId]:
+                      streamingStateFromWorkflowRuns(runningWorkflowRuns),
+                  }
+                : (() => {
+                    const n = { ...s.agentStreaming };
+                    delete n[agentId];
+                    return n;
+                  })()
+            : s.agentStreaming;
 
         // For user messages (non-reply), set agentWaiting=true so subsequent
         // streaming events are accepted.  This handles messages injected from
@@ -5128,7 +5156,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ...(dropsSettled
             ? { settledStreaming: withoutKey(s.settledStreaming, runtimeJid) }
             : {}),
-          ...(inPlace && msg.turn_id
+          ...((inPlace || replyLanded) && msg.turn_id
             ? {
                 activeRuns: withAnsweredTurn(
                   s.activeRuns,
@@ -5334,6 +5362,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         msg.delivery_status !== 'promoting' &&
         msg.delivery_status !== 'cancelled' &&
         msg.delivery_status !== 'subsumed';
+      const replyLanded =
+        isProactiveUtterance &&
+        proactiveReplyLanded(s, chatJid, s.streaming[chatJid], msg);
       const isHidden = typeof document !== 'undefined' && document.hidden;
       const isOtherChat =
         s.currentGroup !== chatJid || !!s.activeAgentTab[chatJid];
@@ -5359,6 +5390,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
               ...(answersInput(settledForTask, msg.turn_id)
                 ? { settledStreaming: withoutKey(s.settledStreaming, chatJid) }
                 : {}),
+            }
+          : {}),
+        ...(replyLanded && msg.turn_id
+          ? {
+              streaming: withoutKey(s.streaming, chatJid),
+              activeRuns: withAnsweredTurn(s.activeRuns, chatJid, msg.turn_id),
             }
           : {}),
         messages: { ...s.messages, [chatJid]: updated },

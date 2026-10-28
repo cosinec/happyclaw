@@ -32,9 +32,12 @@ import {
   type StreamLayout,
 } from '../../hooks/useStreamLayout';
 import { useThrottledValue } from '../../hooks/useThrottledValue';
-import { useTick } from '../../hooks/useTick';
+import { useAfterDelay, useTick } from '../../hooks/useTick';
 import { shouldShowStreamingPartialText } from '../../lib/interaction-mode';
-import { normalizeProcessVisibility } from '../../lib/process-visibility';
+import {
+  hasVisibleWork,
+  normalizeProcessVisibility,
+} from '../../lib/process-visibility';
 import {
   DEEP_THINKING_STATUS,
   describeRunPhase,
@@ -48,6 +51,13 @@ import {
 } from '../../lib/stream-steps';
 import { streamingMarkdownInterval } from '../../lib/streaming-interval';
 import { cn } from '@/lib/utils';
+
+/**
+ * How long a proactive turn may go on quietly after its reply before its
+ * spinner shows again: longer than the request in which the model decides it is
+ * done, so that one never flashes it.
+ */
+const QUIET_SPINNER_DELAY_MS = 3000;
 
 /** Statuses the run status line already shows as its phase. */
 function isPhaseSystemStatus(status: string): boolean {
@@ -520,6 +530,14 @@ export function StreamingDisplay({
   const showPartialText = shouldShowStreamingPartialText(
     effectiveInteractionMode,
   );
+  // A proactive turn that has replied and since only reasons shows nothing
+  // (`proactiveReplyLanded` in the store); still going after a while, only its
+  // spinner.
+  const quiet =
+    effectiveInteractionMode === 'proactive' &&
+    turnAnswered &&
+    !hasVisibleWork(streaming);
+  const stillGoing = useAfterDelay(isWaiting && quiet, QUIET_SPINNER_DELAY_MS);
   // How much of a proactive turn's process its owner chose to show, and
   // whether this reader may change that.
   const processVisibility = useChatStore((s) =>
@@ -677,9 +695,12 @@ export function StreamingDisplay({
   // lifecycle. Keep its activity signal visually separate from message content:
   // it is not an unfinished Assistant reply and must not look like another card.
   if (effectiveInteractionMode === 'proactive') {
-    if (!isWaiting) return null;
+    if (!isWaiting || (quiet && !stillGoing)) return null;
     const showProcess =
-      processVisibility !== 'hidden' && !!streaming && !streaming.interrupted;
+      processVisibility !== 'hidden' &&
+      !quiet &&
+      !!streaming &&
+      !streaming.interrupted;
     return (
       <div
         className={

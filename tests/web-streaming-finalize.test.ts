@@ -1363,3 +1363,245 @@ describe('a final that arrives while its run is still closing', () => {
     expect(state.activeRuns[AGENT_JID]?.answered).toBe('input-sr');
   });
 });
+
+describe("a proactive turn's reply", () => {
+  // A proactive workspace answers through send_message, mid-turn; the turn then
+  // asks the model once more to decide it is done. The utterance of the live
+  // turn is its reply: the panel gives way to it and stays away while the turn
+  // only reasons, and nothing of the process moves onto it.
+  const SPEECH = 'mcp__happyclaw__send_message';
+  type Level = 'hidden' | 'activity' | 'full';
+
+  function proactive(visibility: Level) {
+    useChatStore.setState({
+      groups: {
+        [JID]: {
+          name: 'Proactive',
+          folder: 'proactive',
+          added_at: '2026-10-10T00:00:00.000Z',
+          interaction_mode: 'proactive',
+          process_visibility: visibility,
+        } as never,
+      },
+    });
+  }
+
+  const turn1 = { turnId: 'p-1', inputTurnId: 'input-1' };
+
+  /** Reasoning, then the model's answer text: what the host sends at `full`. */
+  function reason(turn = turn1, agentId?: string) {
+    emit(
+      { eventType: 'status', statusText: 'requesting', ...turn },
+      'run-a',
+      agentId,
+    );
+    emit({ eventType: 'thinking_start', ...turn }, 'run-a', agentId);
+    emit(
+      { eventType: 'thinking_delta', text: '用户问你在做什么', ...turn },
+      'run-a',
+      agentId,
+    );
+    flushRaf();
+    emit({ eventType: 'thinking_end', ...turn }, 'run-a', agentId);
+  }
+
+  function tool(id: string, turn = turn1, agentId?: string) {
+    emit(
+      {
+        eventType: 'tool_use_start',
+        toolName: 'Bash',
+        toolUseId: id,
+        toolInputSummary: 'ls',
+        ...turn,
+      },
+      'run-a',
+      agentId,
+    );
+    emit(
+      { eventType: 'tool_use_end', toolUseId: id, ...turn },
+      'run-a',
+      agentId,
+    );
+  }
+
+  /** The speech tool's call, and the utterance it delivers mid-call. */
+  function speak(id: string, turnId = 'input-1', agentId?: string) {
+    const turn = { turnId: 'p-1', inputTurnId: turnId };
+    emit(
+      { eventType: 'tool_use_start', toolName: SPEECH, toolUseId: id, ...turn },
+      'run-a',
+      agentId,
+    );
+    useChatStore.getState().handleWsNewMessage(
+      JID,
+      finalMessage(id, '刚回完你上一条问题', {
+        source_kind: 'sdk_send_message',
+        turn_id: turnId,
+        ...(agentId ? { chat_jid: AGENT_JID } : {}),
+      }),
+      agentId,
+    );
+    emit(
+      { eventType: 'tool_result', toolUseId: id, ...turn },
+      'run-a',
+      agentId,
+    );
+    emit(
+      { eventType: 'tool_use_end', toolUseId: id, ...turn },
+      'run-a',
+      agentId,
+    );
+  }
+
+  const visibleWork = async () => {
+    const { hasVisibleWork } =
+      await import('../web/src/lib/process-visibility');
+    return hasVisibleWork(useChatStore.getState().streaming[JID]);
+  };
+
+  it('gives the panel way to the reply, quiet while the turn decides it is done', async () => {
+    proactive('activity');
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    reason();
+    tool('tool-1');
+    expect(await visibleWork()).toBe(true);
+
+    const updates: boolean[] = [];
+    const unsubscribe = useChatStore.subscribe((s) =>
+      updates.push(!!s.streaming[JID]),
+    );
+    speak('utterance-1');
+    unsubscribe();
+    // The reply lands and the panel goes in the same update.
+    let state = useChatStore.getState();
+    expect(state.messages[JID].map((m) => m.id)).toEqual(['utterance-1']);
+    expect(state.activeRuns[JID]?.answered).toBe('input-1');
+
+    // The closing request: reasoning only, so nothing is shown.
+    reason();
+    expect(await visibleWork()).toBe(false);
+    state = useChatStore.getState();
+    expect(state.activeRuns[JID]?.answered).toBe('input-1');
+    expect(state.waiting[JID]).toBe(true);
+
+    useChatStore.getState().handleRunFinished(JID, 'run-a');
+    state = useChatStore.getState();
+    expect(state.settledStreaming[JID]).toBeUndefined();
+    expect(state.waiting[JID]).toBe(false);
+  });
+
+  it('brings the panel back when the turn goes on working after its reply', async () => {
+    proactive('activity');
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    reason();
+    tool('tool-1');
+    speak('utterance-1');
+    reason();
+    expect(await visibleWork()).toBe(false);
+    tool('tool-2');
+    expect(await visibleWork()).toBe(true);
+    // Only the work since the reply: the earlier steps went with it.
+    const steps = useChatStore.getState().streaming[JID]?.steps ?? [];
+    expect(steps.filter((step) => step.kind === 'tool')).toHaveLength(1);
+  });
+
+  it("leaves the panel of the next input alone when an older turn's reply lands", () => {
+    proactive('activity');
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    reason({ turnId: 'p-2', inputTurnId: 'input-2' });
+    tool('tool-2', { turnId: 'p-2', inputTurnId: 'input-2' });
+    useChatStore.getState().handleWsNewMessage(
+      JID,
+      finalMessage('utterance-old', '上一轮的话', {
+        source_kind: 'sdk_send_message',
+        turn_id: 'input-1',
+      }),
+    );
+    const state = useChatStore.getState();
+    expect(state.streaming[JID]?.inputTurnId).toBe('input-2');
+    expect(state.activeRuns[JID]?.answered).toBeUndefined();
+  });
+
+  it('shows each level what it showed before, and moves none of it onto the reply', () => {
+    for (const [level, expectSteps, expectThinking] of [
+      ['hidden', false, false],
+      ['activity', true, false],
+      ['full', true, true],
+    ] as const) {
+      reset();
+      proactive(level);
+      useChatStore.getState().handleRunStarted(JID, 'run-a');
+      reason();
+      emit({ eventType: 'text_delta', text: '模型的话', ...turn1 }, 'run-a');
+      flushRaf();
+      tool('tool-1');
+      const live = useChatStore.getState().streaming[JID];
+      expect(!!live?.steps?.length, level).toBe(expectSteps);
+      expect(!!live?.thinkingText, level).toBe(expectThinking);
+      // Never the model's words, at any level.
+      expect(live?.partialText ?? '', level).toBe('');
+
+      speak('utterance-1');
+      const state = useChatStore.getState();
+      expect(state.activeRuns[JID]?.answered, level).toBe('input-1');
+      expect(state.thinkingCache['utterance-1'], level).toBeUndefined();
+      expect(state.stepsCache['utterance-1'], level).toBeUndefined();
+      expect(state.traceCache['utterance-1'], level).toBeUndefined();
+    }
+  });
+
+  it('gives a Runtime Session panel way to its reply too', () => {
+    useChatStore.setState({
+      groups: {
+        [JID]: {
+          name: 'Proactive',
+          folder: 'proactive',
+          added_at: '2026-10-10T00:00:00.000Z',
+          interaction_mode: 'proactive',
+          process_visibility: 'activity',
+        } as never,
+      },
+      agents: {
+        [JID]: [
+          {
+            id: AGENT,
+            name: 'Session',
+            prompt: '',
+            status: 'running',
+            kind: 'conversation',
+            created_at: '2026-10-10T00:00:00.000Z',
+          },
+        ],
+      },
+      agentWaiting: { [AGENT]: true },
+    });
+    useChatStore.getState().handleRunStarted(AGENT_JID, 'run-a');
+    reason(turn1, AGENT);
+    tool('tool-1', turn1, AGENT);
+    expect(useChatStore.getState().agentStreaming[AGENT]).toBeDefined();
+    speak('utterance-s', 'input-1', AGENT);
+    const state = useChatStore.getState();
+    expect(state.agentMessages[AGENT].map((m) => m.id)).toEqual([
+      'utterance-s',
+    ]);
+    expect(state.agentStreaming[AGENT]?.steps ?? []).toEqual([]);
+    expect(state.activeRuns[AGENT_JID]?.answered).toBe('input-1');
+    expect(state.agentWaiting[AGENT]).toBe(true);
+  });
+
+  it('never makes an Assistant workspace send_message the reply', () => {
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    emit({ eventType: 'text_delta', text: '答案', ...turn1 }, 'run-a');
+    flushRaf();
+    useChatStore.getState().handleWsNewMessage(
+      JID,
+      finalMessage('interim', '先说一句', {
+        source_kind: 'sdk_send_message',
+        turn_id: 'input-1',
+      }),
+    );
+    const state = useChatStore.getState();
+    expect(state.streaming[JID]?.partialText).toBe('答案');
+    expect(state.activeRuns[JID]?.answered).toBeUndefined();
+  });
+});
