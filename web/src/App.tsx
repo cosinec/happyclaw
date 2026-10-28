@@ -357,8 +357,15 @@ function getAppRouter() {
 export function App() {
   return (
     <>
-      {/* Top center stays clear of page header actions on both sides. */}
-      <Toaster position="top-center" />
+      {/* Top center stays clear of page header actions on both sides. On
+          phones it also clears the status bar (standalone PWA) and the iOS
+          shell's navigation bar, whichever reaches lower. */}
+      <Toaster
+        position="top-center"
+        mobileOffset={{
+          top: 'calc(max(env(safe-area-inset-top, 0px), var(--native-top, 0px)) + 16px)',
+        }}
+      />
       <ConfirmHost />
       <RouterProvider router={getAppRouter()} />
     </>

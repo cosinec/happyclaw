@@ -1,7 +1,11 @@
-/** Lightweight toast notification — no external dependencies. */
+/**
+ * App-wide toast helpers. They are thin wrappers over sonner (the
+ * <Toaster> mounted in App.tsx) so every notice shares one stack, one
+ * theme-aware style and sonner's polite live region; older call sites keep
+ * the positional showToast(title, body, duration, link) signature.
+ */
+import { toast } from 'sonner';
 
-const MAX_TOASTS = 5;
-let container: HTMLDivElement | null = null;
 const BACKGROUND_TASK_NOTICE_TTL_MS = 15_000;
 const OWNER_KEY = 'happyclaw:bg-task-notice-owner';
 const OWNER_STALE_MS = 120_000;
@@ -9,43 +13,7 @@ const TAB_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2,
 let ownerTrackingBound = false;
 let lastBackgroundTaskNotice: { taskId: string; at: number } | null = null;
 
-function getContainer(): HTMLDivElement {
-  if (container && document.body.contains(container)) return container;
-  container = document.createElement('div');
-  container.style.cssText =
-    'position:fixed;top:16px;right:16px;z-index:99999;display:flex;flex-direction:column;gap:8px;pointer-events:none;';
-  document.body.appendChild(container);
-  return container;
-}
-
-/** Create a toast element with shared styling and animation. Returns { el, dismiss }. */
-function createToastElement(extraCss = ''): { el: HTMLDivElement; dismiss: () => void } {
-  const c = getContainer();
-  while (c.childElementCount >= MAX_TOASTS && c.firstChild) {
-    c.removeChild(c.firstChild);
-  }
-
-  const el = document.createElement('div');
-  el.style.cssText =
-    'pointer-events:auto;max-width:360px;padding:12px 16px;border-radius:8px;' +
-    'background:#1a1a2e;color:#e0e0e0;box-shadow:0 4px 12px rgba(0,0,0,0.3);' +
-    'font-size:14px;line-height:1.4;opacity:0;transform:translateX(40px);' +
-    'transition:opacity 0.3s,transform 0.3s;' + extraCss;
-
-  c.appendChild(el);
-  requestAnimationFrame(() => {
-    el.style.opacity = '1';
-    el.style.transform = 'translateX(0)';
-  });
-
-  const dismiss = () => {
-    el.style.opacity = '0';
-    el.style.transform = 'translateX(40px)';
-    setTimeout(() => el.remove(), 300);
-  };
-
-  return { el, dismiss };
-}
+const MAX_BODY_LENGTH = 120;
 
 export function showToast(
   title: string,
@@ -53,33 +21,19 @@ export function showToast(
   durationMs = 5000,
   link?: { text: string; url: string },
 ): void {
-  const { el, dismiss } = createToastElement();
-
-  const titleEl = document.createElement('div');
-  titleEl.style.fontWeight = '600';
-  titleEl.textContent = title;
-  el.appendChild(titleEl);
-
-  if (body) {
-    const bodyEl = document.createElement('div');
-    bodyEl.style.cssText = 'margin-top:4px;font-size:13px;opacity:0.85;';
-    bodyEl.textContent = body.length > 120 ? body.slice(0, 120) + '…' : body;
-    el.appendChild(bodyEl);
-  }
-
-  if (link) {
-    const linkEl = document.createElement('a');
-    linkEl.href = link.url;
-    linkEl.target = '_blank';
-    linkEl.rel = 'noopener noreferrer';
-    linkEl.textContent = link.text;
-    linkEl.style.cssText =
-      'display:inline-block;margin-top:6px;font-size:13px;color:#5eead4;' +
-      'text-decoration:underline;cursor:pointer;';
-    el.appendChild(linkEl);
-  }
-
-  setTimeout(dismiss, durationMs);
+  toast(title, {
+    description:
+      body && body.length > MAX_BODY_LENGTH
+        ? body.slice(0, MAX_BODY_LENGTH) + '…'
+        : body,
+    duration: durationMs,
+    action: link
+      ? {
+          label: link.text,
+          onClick: () => window.open(link.url, '_blank', 'noopener,noreferrer'),
+        }
+      : undefined,
+  });
 }
 
 /**
@@ -97,11 +51,16 @@ export function notifyIfHidden(title: string, body?: string): void {
 }
 
 function claimOwnershipIfVisible(): boolean {
-  if (typeof window === 'undefined' || typeof document === 'undefined') return true;
+  if (typeof window === 'undefined' || typeof document === 'undefined')
+    return true;
   if (document.visibilityState !== 'visible') return false;
-  if (typeof document.hasFocus === 'function' && !document.hasFocus()) return false;
+  if (typeof document.hasFocus === 'function' && !document.hasFocus())
+    return false;
   try {
-    window.localStorage.setItem(OWNER_KEY, JSON.stringify({ tabId: TAB_ID, at: Date.now() }));
+    window.localStorage.setItem(
+      OWNER_KEY,
+      JSON.stringify({ tabId: TAB_ID, at: Date.now() }),
+    );
   } catch {
     // Fall back to single-tab behavior if storage becomes unavailable mid-session.
   }
@@ -109,7 +68,12 @@ function claimOwnershipIfVisible(): boolean {
 }
 
 function bindOwnerTracking(): void {
-  if (ownerTrackingBound || typeof window === 'undefined' || typeof document === 'undefined') return;
+  if (
+    ownerTrackingBound ||
+    typeof window === 'undefined' ||
+    typeof document === 'undefined'
+  )
+    return;
   ownerTrackingBound = true;
 
   claimOwnershipIfVisible();
@@ -118,7 +82,8 @@ function bindOwnerTracking(): void {
 }
 
 function isNoticeOwner(): boolean {
-  if (typeof window === 'undefined' || typeof document === 'undefined') return true;
+  if (typeof window === 'undefined' || typeof document === 'undefined')
+    return true;
   bindOwnerTracking();
 
   let raw: string | null = null;
@@ -152,33 +117,22 @@ export function showNotificationPromptToast(): void {
   if (Notification.permission !== 'default') return;
   notificationPromptShown = true;
 
-  const { el, dismiss } = createToastElement('display:flex;align-items:center;gap:12px;');
-
-  const textEl = document.createElement('span');
-  textEl.style.flex = '1';
-  textEl.textContent = '开启桌面通知，对话完成时提醒你';
-  el.appendChild(textEl);
-
-  const btn = document.createElement('button');
-  btn.textContent = '开启';
-  btn.style.cssText =
-    'flex-shrink:0;padding:4px 10px;border-radius:5px;border:none;' +
-    'background:#5eead4;color:#0f172a;font-size:13px;font-weight:600;cursor:pointer;';
-  btn.addEventListener('click', () => {
-    Notification.requestPermission();
-    dismiss();
+  toast('开启桌面通知，对话完成时提醒你', {
+    duration: 12000,
+    action: {
+      label: '开启',
+      // A user gesture, so the browser allows the permission prompt.
+      onClick: () => void Notification.requestPermission(),
+    },
   });
-  el.appendChild(btn);
-
-  setTimeout(dismiss, 12000);
 }
 
 export function shouldEmitBackgroundTaskNotice(taskId: string): boolean {
   const now = Date.now();
   if (
-    lastBackgroundTaskNotice
-    && lastBackgroundTaskNotice.taskId === taskId
-    && now - lastBackgroundTaskNotice.at < BACKGROUND_TASK_NOTICE_TTL_MS
+    lastBackgroundTaskNotice &&
+    lastBackgroundTaskNotice.taskId === taskId &&
+    now - lastBackgroundTaskNotice.at < BACKGROUND_TASK_NOTICE_TTL_MS
   ) {
     return false;
   }
