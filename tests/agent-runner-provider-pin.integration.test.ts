@@ -7,16 +7,17 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 
+import { pinBoundProviderSettings } from '../container/agent-runner/src/provider-env-pin.js';
 import {
-  CLAUDE_PROVIDER_ROUTING_ENV_KEYS,
-  pinBoundProviderSettings,
-} from '../container/agent-runner/src/provider-env-pin.js';
+  buildClaudeContextPlan,
+  loadHostClaudeSettings,
+} from '../src/claude-context-resolver.js';
 
 /**
  * The real pinned Claude CLI against two scripted upstreams: A is the bound
- * connection, B is where a settings file tries to send the run. Each layer
- * the Runner loads (the admin's user settings, a workspace's project and
- * local settings) gets its say; the Runner's flag settings must win.
+ * connection, B is where a settings file tries to send the run. The admin's
+ * layer goes through the host's strip, as HappyClaw writes it into the
+ * session settings, and the Runner's flag settings pin what HappyClaw set.
  */
 const runnerRoot = path.resolve('container/agent-runner');
 const runnerRequire = createRequire(path.join(runnerRoot, 'package.json'));
@@ -31,22 +32,37 @@ interface Hit {
   stub: string;
   auth: string | null;
   key: string | null;
+  effort?: string;
 }
 const hits: Hit[] = [];
+/** When set, the first request of a turn runs this Bash command. */
+let bashCommand: string | undefined;
+
 function startStub(name: string) {
   const server = http.createServer((req, res) => {
-    req.resume();
+    let raw = '';
+    req.on('data', (chunk) => (raw += chunk));
     req.on('end', () => {
       if (!req.url?.includes('/messages') || req.url.includes('count')) {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end('{"input_tokens":1}');
         return;
       }
+      const body = JSON.parse(raw || '{}') as {
+        messages?: unknown[];
+        output_config?: { effort?: string };
+      };
       hits.push({
         stub: name,
         auth: req.headers.authorization ?? null,
         key: (req.headers['x-api-key'] as string | undefined) ?? null,
+        ...(body.output_config?.effort
+          ? { effort: body.output_config.effort }
+          : {}),
       });
+      const runBash =
+        bashCommand !== undefined &&
+        !JSON.stringify(body.messages ?? []).includes('tool_result');
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       const send = (type: string, data: object) =>
         res.write(
@@ -63,17 +79,39 @@ function startStub(name: string) {
           usage: { input_tokens: 1, output_tokens: 1 },
         },
       });
-      send('content_block_start', {
-        index: 0,
-        content_block: { type: 'text', text: '' },
-      });
-      send('content_block_delta', {
-        index: 0,
-        delta: { type: 'text_delta', text: `ok-${name}` },
-      });
+      if (runBash) {
+        send('content_block_start', {
+          index: 0,
+          content_block: {
+            type: 'tool_use',
+            id: 'toolu_env',
+            name: 'Bash',
+            input: {},
+          },
+        });
+        send('content_block_delta', {
+          index: 0,
+          delta: {
+            type: 'input_json_delta',
+            partial_json: JSON.stringify({
+              command: bashCommand,
+              description: 'dump env',
+            }),
+          },
+        });
+      } else {
+        send('content_block_start', {
+          index: 0,
+          content_block: { type: 'text', text: '' },
+        });
+        send('content_block_delta', {
+          index: 0,
+          delta: { type: 'text_delta', text: `ok-${name}` },
+        });
+      }
       send('content_block_stop', { index: 0 });
       send('message_delta', {
-        delta: { stop_reason: 'end_turn' },
+        delta: { stop_reason: runBash ? 'tool_use' : 'end_turn' },
         usage: { output_tokens: 1 },
       });
       send('message_stop', {});
@@ -111,14 +149,41 @@ async function* hello() {
   };
 }
 
+/** The admin's ~/.claude/settings.json as HappyClaw projects it. */
+function adminLayer(settings: object): object {
+  const external = fs.mkdtempSync(path.join(scratch, 'admin-'));
+  fs.writeFileSync(
+    path.join(external, 'settings.json'),
+    JSON.stringify(settings),
+  );
+  return loadHostClaudeSettings(
+    buildClaudeContextPlan({
+      executionMode: 'host',
+      group: {
+        name: 'w',
+        folder: 'w',
+        added_at: '2026-10-28T00:00:00.000Z',
+        created_by: 'admin',
+      } as never,
+      externalClaudeDir: external,
+      projectRoot: path.join(scratch, 'project-root'),
+      dataDir: path.join(scratch, 'data'),
+      groupSessionsDir: path.join(external, 'session'),
+      includeHostClaudeContext: true,
+    }),
+  );
+}
+
 /** One turn as the Runner runs it, with `bound` as HappyClaw's env. */
 async function runTurn(options: {
   bound: Record<string, string>;
-  user?: object;
+  admin?: object;
   project?: object;
   local?: object;
   credentials?: object;
   pin?: boolean;
+  model?: string;
+  dumpEnvTo?: string;
 }) {
   const dir = fs.mkdtempSync(path.join(scratch, 'run-'));
   const project = path.join(dir, 'workspace');
@@ -127,7 +192,10 @@ async function runTurn(options: {
   fs.mkdirSync(config, { recursive: true });
   const write = (file: string, value?: object) =>
     value && fs.writeFileSync(file, JSON.stringify(value));
-  write(path.join(config, 'settings.json'), options.user);
+  write(
+    path.join(config, 'settings.json'),
+    options.admin && adminLayer(options.admin),
+  );
   write(path.join(project, '.claude', 'settings.json'), options.project);
   write(path.join(project, '.claude', 'settings.local.json'), options.local);
   write(path.join(config, '.credentials.json'), options.credentials);
@@ -145,57 +213,75 @@ async function runTurn(options: {
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
   });
   const start = hits.length;
-  const stream = sdk.query({
-    prompt: hello(),
-    options: {
-      pathToClaudeCodeExecutable: cli,
-      cwd: project,
-      model: MODEL,
-      env,
-      permissionMode: 'bypassPermissions',
-      allowDangerouslySkipPermissions: true,
-      settingSources: ['project', 'user', 'local'],
-      ...(options.pin === false
-        ? {}
-        : { settings: pinBoundProviderSettings(env) as never }),
-    },
-  });
-  let result = '';
-  for await (const message of stream) {
-    if (message.type === 'result') {
-      result = (message as { result?: string }).result ?? '';
-      break;
+  bashCommand = options.dumpEnvTo
+    ? `env | grep -E '^(ANTHROPIC|CLAUDE_CODE|CLAUDE_AUTOCOMPACT|AWS_BEARER|CLOUD_ML)' | sort > ${options.dumpEnvTo}`
+    : undefined;
+  try {
+    const stream = sdk.query({
+      prompt: hello(),
+      options: {
+        pathToClaudeCodeExecutable: cli,
+        cwd: project,
+        model: options.model ?? MODEL,
+        env,
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+        settingSources: ['project', 'user', 'local'],
+        thinking: { type: 'adaptive' },
+        ...(options.pin === false
+          ? {}
+          : { settings: pinBoundProviderSettings(env) as never }),
+      },
+    });
+    let result = '';
+    for await (const message of stream) {
+      if (message.type === 'result') {
+        result = (message as { result?: string }).result ?? '';
+        break;
+      }
     }
+    return { result, hits: hits.slice(start) };
+  } finally {
+    bashCommand = undefined;
   }
-  return { result, hits: hits.slice(start) };
 }
 
 const boundKey = (url: string) => ({
   ANTHROPIC_BASE_URL: url,
   ANTHROPIC_API_KEY: 'bound-key',
 });
+const atA = [{ stub: 'A', auth: null, key: 'bound-key' }];
 
-describe('the bound connection outranks every settings file', () => {
-  test('pins each routing key to the bound value, or to empty', () => {
+describe('the bound connection and the session choices win', () => {
+  test('pins only what HappyClaw set, and every backend switch off', () => {
     const pinned = pinBoundProviderSettings({
       ANTHROPIC_BASE_URL: 'http://bound',
       ANTHROPIC_DEFAULT_SONNET_MODEL: 'bound-sonnet',
+      CLAUDE_CODE_EFFORT_LEVEL: 'high',
+      ANTHROPIC_AUTH_TOKEN: '',
       API_TIMEOUT_MS: '600000',
       HOME: '/home/node',
     });
-    expect(pinned.apiKeyHelper).toBe('');
-    expect(Object.keys(pinned.env).sort()).toEqual(
-      [...CLAUDE_PROVIDER_ROUTING_ENV_KEYS].sort(),
-    );
-    expect(pinned.env).toMatchObject({
-      ANTHROPIC_BASE_URL: 'http://bound',
-      ANTHROPIC_DEFAULT_SONNET_MODEL: 'bound-sonnet',
-      CLAUDE_CODE_USE_BEDROCK: '',
-      ANTHROPIC_API_KEY: '',
-      ANTHROPIC_UNIX_SOCKET: '',
+    expect(pinned).toEqual({
+      apiKeyHelper: '',
+      env: {
+        CLAUDE_CODE_USE_BEDROCK: '0',
+        CLAUDE_CODE_USE_VERTEX: '0',
+        CLAUDE_CODE_USE_FOUNDRY: '0',
+        CLAUDE_CODE_USE_GATEWAY: '0',
+        CLAUDE_CODE_USE_MANTLE: '0',
+        CLAUDE_CODE_USE_ANTHROPIC_AWS: '0',
+        CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD: '0',
+        ANTHROPIC_BASE_URL: 'http://bound',
+        ANTHROPIC_DEFAULT_SONNET_MODEL: 'bound-sonnet',
+        CLAUDE_CODE_EFFORT_LEVEL: 'high',
+      },
     });
-    // Tuning that neither routes nor authenticates is not pinned.
-    expect(pinned.env).not.toHaveProperty('API_TIMEOUT_MS');
+    // A connection that runs on a backend keeps its switch.
+    expect(
+      pinBoundProviderSettings({ CLAUDE_CODE_USE_VERTEX: '1' }).env
+        .CLAUDE_CODE_USE_VERTEX,
+    ).toBe('1');
   });
 
   test('a project settings file cannot change the endpoint (control: it does without the pin)', async () => {
@@ -207,7 +293,7 @@ describe('the bound connection outranks every settings file', () => {
     });
     expect(unpinned.hits.map((hit) => hit.stub)).toEqual(['B']);
     const pinned = await runTurn({ bound: boundKey(A.url), project });
-    expect(pinned.hits).toEqual([{ stub: 'A', auth: null, key: 'bound-key' }]);
+    expect(pinned.hits).toEqual(atA);
     expect(pinned.result).toBe('ok-A');
   }, 60_000);
 
@@ -223,7 +309,7 @@ describe('the bound connection outranks every settings file', () => {
         },
       },
     });
-    expect(pinned.hits).toEqual([{ stub: 'A', auth: null, key: 'bound-key' }]);
+    expect(pinned.hits).toEqual(atA);
   }, 60_000);
 
   test("a local settings file's apiKeyHelper adds no credential", async () => {
@@ -231,23 +317,29 @@ describe('the bound connection outranks every settings file', () => {
       bound: boundKey(A.url),
       local: { apiKeyHelper: 'echo helper-key' },
     });
-    expect(pinned.hits).toEqual([{ stub: 'A', auth: null, key: 'bound-key' }]);
+    expect(pinned.hits).toEqual(atA);
   }, 60_000);
 
-  test("the admin's user settings cannot change the endpoint or model tier", async () => {
+  test("the admin's settings cannot change the endpoint, credentials or backend", async () => {
     const pinned = await runTurn({
       bound: boundKey(A.url),
-      user: {
-        env: { ANTHROPIC_BASE_URL: B.url, ANTHROPIC_AUTH_TOKEN: 'admin-token' },
+      admin: {
+        env: {
+          ANTHROPIC_BASE_URL: B.url,
+          ANTHROPIC_AUTH_TOKEN: 'admin-token',
+          CLAUDE_CODE_USE_BEDROCK: '1',
+          AWS_BEARER_TOKEN_BEDROCK: 'admin-bedrock',
+        },
+        apiKeyHelper: 'echo admin-helper',
       },
     });
-    expect(pinned.hits).toEqual([{ stub: 'A', auth: null, key: 'bound-key' }]);
+    expect(pinned.hits).toEqual(atA);
   }, 60_000);
 
   test('official OAuth credentials and a setup token still authenticate', async () => {
     const oauth = await runTurn({
       bound: { ANTHROPIC_BASE_URL: A.url },
-      project: { env: { ANTHROPIC_API_KEY: 'project-key' } },
+      admin: { env: { ANTHROPIC_API_KEY: 'admin-key' } },
       credentials: {
         claudeAiOauth: {
           accessToken: 'sk-ant-oat01-from-file',
@@ -271,6 +363,35 @@ describe('the bound connection outranks every settings file', () => {
       { stub: 'A', auth: 'Bearer sk-ant-oat01-setup', key: null },
     ]);
   }, 60_000);
+
+  test("the session's effort and compaction reach the CLI over the admin's and the project's, and tools see no empty provider env", async () => {
+    const dump = path.join(scratch, 'tool-env.txt');
+    const run = await runTurn({
+      model: 'claude-opus-4-7',
+      bound: {
+        ...boundKey(A.url),
+        CLAUDE_CODE_EFFORT_LEVEL: 'high',
+        CLAUDE_CODE_AUTO_COMPACT_WINDOW: '150000',
+      },
+      admin: {
+        env: {
+          CLAUDE_CODE_EFFORT_LEVEL: 'low',
+          CLAUDE_CODE_AUTO_COMPACT_WINDOW: '100000',
+        },
+      },
+      project: { env: { CLAUDE_CODE_EFFORT_LEVEL: 'medium' } },
+      dumpEnvTo: dump,
+    });
+    expect(run.hits.length).toBeGreaterThan(0);
+    expect(run.hits.every((hit) => hit.stub === 'A')).toBe(true);
+    expect(run.hits.map((hit) => hit.effort)).toContain('high');
+    expect(run.hits.map((hit) => hit.effort)).not.toContain('low');
+    const toolEnv = fs.readFileSync(dump, 'utf8').trim().split('\n');
+    expect(toolEnv).toContain('CLAUDE_CODE_EFFORT_LEVEL=high');
+    expect(toolEnv).toContain('CLAUDE_CODE_AUTO_COMPACT_WINDOW=150000');
+    expect(toolEnv).toContain(`ANTHROPIC_BASE_URL=${A.url}`);
+    expect(toolEnv.filter((line) => line.endsWith('='))).toEqual([]);
+  }, 90_000);
 
   test('the Runner passes the pin as its flag settings', () => {
     const runner = fs.readFileSync(

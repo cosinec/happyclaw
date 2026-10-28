@@ -40,6 +40,11 @@ check_sync "$ROOT/shared/channel-prefixes.ts" \
   "$ROOT/src/channel-prefixes.ts" \
   "$ROOT/container/agent-runner/src/channel-prefixes.ts"
 
+# Claude environment HappyClaw owns
+check_sync "$ROOT/shared/claude-provider-env.ts" \
+  "$ROOT/src/claude-provider-env.ts" \
+  "$ROOT/container/agent-runner/src/claude-provider-env.ts"
+
 # Reply step list + reasoning text helpers
 for name in thinking-text stream-steps; do
   check_sync "$ROOT/shared/$name.ts" \

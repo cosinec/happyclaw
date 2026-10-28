@@ -215,9 +215,14 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
   `resolvePinnedModelConfigId`）：会话手选 → 智能体绑定 → 全局默认
   （`defaultModelConfigId`，工作区自带 Provider 环境变量时让位）→ 唯一启用的配置 →
   自动池。绑定即权威，没有跨账号故障转移；Web 的选择器与这一顺序必须一致。
-- 绑定连接的路由、凭据和模型层级环境变量由 Runner 写进 flag settings
-  （`provider-env-pin.ts`，未设置的写空值并关闭 `apiKeyHelper`），它压过管理员、项目和
-  local 的 settings 文件，任何一层都不能改走别的端点或加凭据。
+- HappyClaw 拥有的 Claude 环境（后端开关、端点、凭据、模型层级、会话的 effort/压缩/
+  上下文，清单在 `shared/claude-provider-env.ts`）不取自宿主进程继承的环境，也从管理员
+  的 settings 层剔除（连同 `apiKeyHelper` 等取凭据的命令），不会写进挂载给 Agent 的会话
+  settings。Runner 再把 HappyClaw 设置了的值写进 flag settings，压过管理员、项目和
+  local 的 settings 文件；后端开关一律写 `0`（除非连接打开），并关闭 `apiKeyHelper`。
+  未被 HappyClaw 设置的键（例如官方连接的 `ANTHROPIC_BASE_URL`）仍可由工作区 cwd 下的
+  项目/local settings 文件设置：Host 模式下那是管理员自己的仓库，Container 模式下所有者
+  本就能读到该连接的凭据。
 - 渠道格式说明随每轮的 `<channel_context>` 发送，不进 system prompt；换渠道或每十轮
   重发一次，在被替换或撤回前一直有效。
 - 一个模型配置（连接）是一份凭据、一个地址和一组模型；`anthropicModel` 是连接的默认

@@ -44,6 +44,15 @@ for target in \
   sync_file "$SRC_CP" "$target"
 done
 
+# --- Claude environment HappyClaw owns (backend strip + Runner pin) ---
+SRC_PE="$ROOT/shared/claude-provider-env.ts"
+for target in \
+  "$ROOT/src/claude-provider-env.ts" \
+  "$ROOT/container/agent-runner/src/claude-provider-env.ts" \
+; do
+  sync_file "$SRC_PE" "$target"
+done
+
 # --- Reply step list + reasoning text helpers (2 targets each: backend + web) ---
 # The backend records a settled turn's ordered steps with the very reducer the
 # Web renders live, so the two cannot drift. Not needed by the agent-runner.
