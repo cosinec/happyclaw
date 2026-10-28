@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import {
+  runTurnAnswered,
   shouldRecoverStaleWaiting,
   useChatStore,
   type StreamingState,
@@ -31,9 +32,12 @@ import {
   type StreamLayout,
 } from '../../hooks/useStreamLayout';
 import { useThrottledValue } from '../../hooks/useThrottledValue';
-import { useTick } from '../../hooks/useTick';
+import { useAfterDelay, useTick } from '../../hooks/useTick';
 import { shouldShowStreamingPartialText } from '../../lib/interaction-mode';
-import { normalizeProcessVisibility } from '../../lib/process-visibility';
+import {
+  hasVisibleWork,
+  normalizeProcessVisibility,
+} from '../../lib/process-visibility';
 import {
   DEEP_THINKING_STATUS,
   describeRunPhase,
@@ -47,6 +51,13 @@ import {
 } from '../../lib/stream-steps';
 import { streamingMarkdownInterval } from '../../lib/streaming-interval';
 import { cn } from '@/lib/utils';
+
+/**
+ * How long a proactive turn may go on quietly after its reply before its
+ * spinner shows again: longer than the request in which the model decides it is
+ * done, so that one never flashes it.
+ */
+const QUIET_SPINNER_DELAY_MS = 3000;
 
 /** Statuses the run status line already shows as its phase. */
 function isPhaseSystemStatus(status: string): boolean {
@@ -506,6 +517,12 @@ export function StreamingDisplay({
   const stopping = useChatStore(
     (s) => !settled && !!s.stopRequests[runtimeJid],
   );
+  // The run's turn ended in place (its reply is in the list) and the run is
+  // only closing: there is nothing to show until another input of it streams.
+  const answered = useChatStore((s) =>
+    settled ? undefined : s.activeRuns[runtimeJid]?.answered,
+  );
+  const turnAnswered = runTurnAnswered(answered, streaming);
   // Fire-and-forget spawn Agents retain Assistant streaming semantics even in
   // a proactive Workspace. The Workspace contract applies to main and
   // conversation Agent loops.
@@ -514,6 +531,14 @@ export function StreamingDisplay({
   const showPartialText = shouldShowStreamingPartialText(
     effectiveInteractionMode,
   );
+  // A proactive turn that has replied and since only reasons shows nothing
+  // (`proactiveReplyLanded` in the store); still going after a while, only its
+  // spinner.
+  const quiet =
+    effectiveInteractionMode === 'proactive' &&
+    turnAnswered &&
+    !hasVisibleWork(streaming);
+  const stillGoing = useAfterDelay(isWaiting && quiet, QUIET_SPINNER_DELAY_MS);
   // How much of a proactive turn's process its owner chose to show, and
   // whether this reader may change that.
   const processVisibility = useChatStore((s) =>
@@ -671,9 +696,12 @@ export function StreamingDisplay({
   // lifecycle. Keep its activity signal visually separate from message content:
   // it is not an unfinished Assistant reply and must not look like another card.
   if (effectiveInteractionMode === 'proactive') {
-    if (!isWaiting) return null;
+    if (!isWaiting || (quiet && !stillGoing)) return null;
     const showProcess =
-      processVisibility !== 'hidden' && !!streaming && !streaming.interrupted;
+      processVisibility !== 'hidden' &&
+      !quiet &&
+      !!streaming &&
+      !streaming.interrupted;
     return (
       <div
         className={
@@ -753,6 +781,7 @@ export function StreamingDisplay({
   // Waiting but no stream data: the identity row carries the visible status;
   // keep a one-shot live region for assistive tech (the timer is not live).
   if (isWaiting && !hasStreamData) {
+    if (turnAnswered) return null;
     const status = (
       <span role="status" aria-live="polite" className="sr-only">
         正在准备回复…

@@ -49,6 +49,7 @@ import {
   applyRunFinished,
   applyRunStarted,
   hasExactQueryAttempt,
+  markRunAnswered,
   runsFromAuthoritativeSnapshot,
   shouldApplyRunScopedPayload,
   shouldDiscardStreamForAuthoritativeRun,
@@ -339,6 +340,11 @@ const isClearedResponse = (d: MessageCreateResponse): d is ClearedResponse =>
 
 export interface StreamingState {
   turnId?: string;
+  /**
+   * The input this stream answers: the `turn_id` of its final row. A warm
+   * turn's `turnId` is the Runner's own, so only this pairs the two there.
+   */
+  inputTurnId?: string;
   sessionId?: string;
   partialText: string;
   thinkingText: string;
@@ -1399,7 +1405,127 @@ function settledTurnMatches(
   settled: StreamingState,
   turnId: string | null | undefined,
 ): boolean {
-  return !settled.turnId || !turnId || settled.turnId === turnId;
+  return (
+    !turnId ||
+    (!settled.turnId && !settled.inputTurnId) ||
+    answersInput(settled, turnId)
+  );
+}
+
+/**
+ * The projection streams the answer to input `turnId`: the input it names, or
+ * on a cold start its own turn, which is that input. Never a guess: a stream
+ * that names neither belongs to some other turn as far as this tab can tell.
+ */
+function answersInput(
+  state: StreamingState | undefined,
+  turnId: string | null | undefined,
+): state is StreamingState {
+  return (
+    !!state &&
+    !!turnId &&
+    (state.inputTurnId === turnId || state.turnId === turnId)
+  );
+}
+
+/**
+ * A final that closes its turn. A truncated one is followed by its
+ * continuation and a held one by its running Workflow, in the same turn.
+ */
+function endsTurn(msg: Message): boolean {
+  return (
+    msg.finalization_reason !== 'truncated' &&
+    !msg.workflow_runs?.some((run) => run.status === 'running')
+  );
+}
+
+/** The live card of an active run, not stopped, streams input `turnId`. */
+function streamsInputOf(
+  runs: ClientActiveRuns,
+  runtimeJid: string,
+  live: StreamingState | undefined,
+  turnId: string | null | undefined,
+): live is StreamingState {
+  return (
+    !!runs[runtimeJid] &&
+    !isFrozenProjection(live) &&
+    answersInput(live, turnId)
+  );
+}
+
+interface FinalSettlement {
+  /** The live card of the final's own turn gives way while its run closes. */
+  inPlace: boolean;
+  /** The live card gives way: in place, or its run is over or was stopped. */
+  replacesLive: boolean;
+  /** The card whose thinking, steps and trace the reply takes. */
+  source: StreamingState | undefined;
+  /** The settled card gives way too; one of another turn waits for its own. */
+  dropsSettled: boolean;
+  activeRuns: ClientActiveRuns;
+}
+
+/**
+ * How a final reply settles the cards of its runtime, whichever way it arrives
+ * (its own frame, or a refresh). The live card of exactly its turn settles in
+ * place: the run may still be closing, but the turn is over, so the card gives
+ * way to the reply now rather than at run_finished. Otherwise the reply takes
+ * a settled card's place, or the live one of a run that is over or stopped; a
+ * live card of another turn is left alone.
+ */
+function settlementOf(
+  runs: ClientActiveRuns,
+  runtimeJid: string,
+  live: StreamingState | undefined,
+  settled: StreamingState | undefined,
+  msg: Message,
+  /** A system error ends a turn too, but only a reply takes its card's place. */
+  isReply = true,
+): FinalSettlement {
+  const inPlace =
+    isReply &&
+    endsTurn(msg) &&
+    streamsInputOf(runs, runtimeJid, live, msg.turn_id);
+  const replacesLive = inPlace || !runs[runtimeJid] || isFrozenProjection(live);
+  return {
+    inPlace,
+    replacesLive,
+    source: inPlace ? live : (settled ?? (replacesLive ? live : undefined)),
+    dropsSettled: !!settled && (!inPlace || answersInput(settled, msg.turn_id)),
+    activeRuns: inPlace ? markRunAnswered(runs, runtimeJid, msg.turn_id) : runs,
+  };
+}
+
+/**
+ * Nothing of the run is left to show: the turn of its live slot ended in place
+ * (`ClientActiveRun.answered`) and no other input of the run streams yet. The
+ * composer still has the run to stop until run_finished.
+ */
+export function runTurnAnswered(
+  answered: string | undefined,
+  live: StreamingState | undefined,
+): boolean {
+  return !!answered && (!live || answersInput(live, answered));
+}
+
+/**
+ * A proactive workspace answers through send_message: an utterance (checked by
+ * the caller) of the turn the live panel streams is that turn's reply. The
+ * panel gives way to it, and stays away while the turn only reasons (it asks
+ * the model once more to decide it is done); new work brings it back
+ * (`hasVisibleWork`). Nothing of the process moves onto the reply here: the
+ * server hangs the turn's process on its last reply, at the owner's level.
+ */
+function proactiveReplyLanded(
+  s: ChatState,
+  runtimeJid: string,
+  live: StreamingState | undefined,
+  utterance: Message,
+): boolean {
+  return (
+    isProactiveRuntime(s, runtimeJid) &&
+    streamsInputOf(s.activeRuns, runtimeJid, live, utterance.turn_id)
+  );
 }
 
 /** How long a settled card waits for its final message before re-syncing. */
@@ -1663,6 +1789,7 @@ function resolveStreamingPrev(
     return {
       ...DEFAULT_STREAMING_STATE,
       turnId: event.turnId,
+      inputTurnId: event.inputTurnId,
       sessionId: event.sessionId,
     };
   }
@@ -1767,6 +1894,7 @@ interface PendingDelta {
   runId?: string;
   /** Turn of every chunk; a delta of another turn flushes the batch first. */
   turnId?: string;
+  inputTurnId?: string;
 }
 const pendingDeltas = new Map<string, PendingDelta>();
 
@@ -1863,12 +1991,19 @@ function flushPendingDeltaForRuntime(
  */
 function deltaBase(
   current: StreamingState | undefined,
-  turnId: string | undefined,
+  { turnId, inputTurnId }: Pick<PendingDelta, 'turnId' | 'inputTurnId'>,
 ): StreamingState {
   if (!current || (current.turnId && turnId && current.turnId !== turnId)) {
-    return { ...DEFAULT_STREAMING_STATE, turnId };
+    return { ...DEFAULT_STREAMING_STATE, turnId, inputTurnId };
   }
-  return turnId && !current.turnId ? { ...current, turnId } : current;
+  const next = {
+    turnId: current.turnId ?? turnId,
+    inputTurnId: inputTurnId ?? current.inputTurnId,
+  };
+  return next.turnId === current.turnId &&
+    next.inputTurnId === current.inputTurnId
+    ? current
+    : { ...current, ...next };
 }
 
 function flushPendingDelta(
@@ -1896,7 +2031,7 @@ function flushPendingDelta(
       if (!current && s.agentWaiting[agentId] === false) return s;
       // A stopped card is frozen until its terminal message replaces it.
       if (current?.interrupted) return s;
-      const prev = deltaBase(current, entry.turnId);
+      const prev = deltaBase(current, entry);
       const next = applyDeltaChunks(
         prev,
         entry.chunks,
@@ -1919,7 +2054,7 @@ function flushPendingDelta(
       const current = s.streaming[chatJid];
       if (!current && s.waiting[chatJid] === false) return s;
       if (current?.interrupted) return s;
-      const prev = deltaBase(current, entry.turnId);
+      const prev = deltaBase(current, entry);
       const next = applyDeltaChunks(
         prev,
         entry.chunks,
@@ -2586,6 +2721,7 @@ function applyStreamEvent(
   runStartedAt?: number,
 ): void {
   if (event.turnId) next.turnId = event.turnId;
+  if (event.inputTurnId) next.inputTurnId = event.inputTurnId;
   if (event.sessionId) next.sessionId = event.sessionId;
   next.traceEvents = pushTrace(prev.traceEvents || [], event);
   const at = Date.now();
@@ -3208,12 +3344,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const hasSystemError = data.messages.some((m) =>
             isTerminalSystemMessage(m),
           );
-          // Same rule as a live final message: it replaces a settled or
-          // stopped card, never the projection of a newer active run.
-          const finalizes =
-            (agentReplied || hasSystemError) &&
-            (!exactRunActive || isFrozenProjection(streamState));
-
           // Move the finished reply's thinking and execution details onto it.
           const lastAiMsg = agentReplied
             ? [...data.messages]
@@ -3225,22 +3355,35 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     m.source_kind !== 'sdk_send_message',
                 )
             : undefined;
-          // A settled card always belongs to a finished run: any new reply
-          // replaces it, whatever the live projection of a newer run does.
-          const replacesSettled = !!settledState && agentReplied;
-          const replyCaches = !lastAiMsg
-            ? {}
-            : replacesSettled
-              ? finalizedReplyCaches(s, settledState, lastAiMsg.id)
-              : finalizes
-                ? finalizedReplyCaches(
-                    s,
-                    streamState,
-                    lastAiMsg.id,
-                    s.pendingThinking[jid],
-                    s.pendingThinkingDuration[jid],
-                  )
-                : {};
+          // The same rule as a live final message (`settlementOf`).
+          const settlement = lastAiMsg
+            ? settlementOf(
+                s.activeRuns,
+                jid,
+                streamState,
+                settledState,
+                lastAiMsg,
+              )
+            : null;
+          const finalizes =
+            (agentReplied || hasSystemError) &&
+            (settlement?.replacesLive ??
+              (!exactRunActive || isFrozenProjection(streamState)));
+          // And of a proactive reply: its panel gives way to it.
+          const utterance = [...data.messages]
+            .reverse()
+            .find(
+              (m) =>
+                m.is_from_me &&
+                m.sender !== '__system__' &&
+                m.source_kind === 'sdk_send_message',
+            );
+          const replyLanded =
+            !!utterance && proactiveReplyLanded(s, jid, streamState, utterance);
+          const replyCaches =
+            lastAiMsg && settlement?.source
+              ? finalizedReplyCaches(s, settlement.source, lastAiMsg.id)
+              : {};
           let nextPendingThinking = s.pendingThinking;
           let nextPendingThinkingDuration = s.pendingThinkingDuration;
           if (finalizes && lastAiMsg) {
@@ -3252,22 +3395,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
           return {
             ...replyCaches,
-            ...(replacesSettled || (settledState && hasSystemError)
+            ...(settlement?.dropsSettled || (settledState && hasSystemError)
               ? { settledStreaming: withoutKey(s.settledStreaming, jid) }
               : {}),
+            activeRuns: replyLanded
+              ? markRunAnswered(s.activeRuns, jid, utterance?.turn_id)
+              : (settlement?.activeRuns ?? s.activeRuns),
             pendingMessageUsage: mergedUsage.pending,
             messages: { ...s.messages, [jid]: merged },
             waiting:
               finalizes && !exactRunActive
                 ? { ...s.waiting, [jid]: false }
                 : s.waiting,
-            streaming: finalizes
-              ? (() => {
-                  const next = { ...s.streaming };
-                  delete next[jid];
-                  return next;
-                })()
-              : s.streaming,
+            streaming:
+              finalizes || replyLanded
+                ? withoutKey(s.streaming, jid)
+                : s.streaming,
             pendingThinking: nextPendingThinking,
             pendingThinkingDuration: nextPendingThinkingDuration,
             error: null,
@@ -4463,6 +4606,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         runtimeJid,
         runId,
         turnId: event.turnId,
+        inputTurnId: event.inputTurnId,
       };
       entry.raf = requestAnimationFrame(() => {
         flushPendingDelta(key, chatJid, agentId, set);
@@ -4942,38 +5086,33 @@ export const useChatStore = create<ChatState>((set, get) => ({
           msg.is_from_me &&
           msg.sender !== '__system__' &&
           msg.source_kind !== 'sdk_send_message';
-        const exactRunActive = !!s.activeRuns[`${chatJid}#agent:${agentId}`];
-        // The reply replaces its settled (or stopped) card in this same
-        // update, carrying its thinking and execution details over. A live
-        // projection under an active run belongs to the next attempt.
-        const agentState = s.agentStreaming[agentId];
         const runtimeJid = `${chatJid}#agent:${agentId}`;
-        const settledState = isAgentReply
-          ? s.settledStreaming[runtimeJid]
-          : undefined;
-        const replacesProjection =
-          isAgentReply && (!exactRunActive || isFrozenProjection(agentState));
-        const replyCaches = settledState
-          ? finalizedReplyCaches(s, settledState, msg.id)
-          : replacesProjection && agentState
-            ? finalizedReplyCaches(s, agentState, msg.id)
-            : {};
-
-        const nextAgentStreaming = isAgentReply
-          ? exactRunActive && !replacesProjection
+        const exactRunActive = !!s.activeRuns[runtimeJid];
+        // The reply takes its card's place in this same update, carrying its
+        // thinking and execution details over (`settlementOf`).
+        const agentState = s.agentStreaming[agentId];
+        const settlement = isAgentReply
+          ? settlementOf(
+              s.activeRuns,
+              runtimeJid,
+              agentState,
+              s.settledStreaming[runtimeJid],
+              msg,
+            )
+          : null;
+        const replyLanded =
+          isProactiveUtterance &&
+          proactiveReplyLanded(s, runtimeJid, agentState, msg);
+        const nextAgentStreaming =
+          !replyLanded && !settlement?.replacesLive
             ? s.agentStreaming
-            : holdsRunningWorkflow
+            : settlement && holdsRunningWorkflow
               ? {
                   ...s.agentStreaming,
                   [agentId]:
                     streamingStateFromWorkflowRuns(runningWorkflowRuns),
                 }
-              : (() => {
-                  const n = { ...s.agentStreaming };
-                  delete n[agentId];
-                  return n;
-                })()
-          : s.agentStreaming;
+              : withoutKey(s.agentStreaming, agentId);
 
         // For user messages (non-reply), set agentWaiting=true so subsequent
         // streaming events are accepted.  This handles messages injected from
@@ -5012,10 +5151,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
         );
 
         return {
-          ...replyCaches,
-          ...(settledState
+          ...(settlement?.source
+            ? finalizedReplyCaches(s, settlement.source, msg.id)
+            : {}),
+          ...(settlement?.dropsSettled
             ? { settledStreaming: withoutKey(s.settledStreaming, runtimeJid) }
             : {}),
+          activeRuns: replyLanded
+            ? markRunAnswered(s.activeRuns, runtimeJid, msg.turn_id)
+            : (settlement?.activeRuns ?? s.activeRuns),
           agentMessages: { ...s.agentMessages, [agentId]: updated },
           pendingMessageUsage: mergedUsage.pending,
           agentWaiting: nextAgentWaiting,
@@ -5096,23 +5240,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // 运行的 settled 卡片，或已中断冻结的卡片），并把 thinking 与执行
         // 详情转存到该消息。下一轮的 live 卡片不受影响。
         const exactRunActive = !!s.activeRuns[chatJid];
-        const streamState = s.streaming[chatJid];
-        const settledState = s.settledStreaming[chatJid];
-        const replacesProjection =
-          !exactRunActive || isFrozenProjection(streamState);
-        const replyCaches = isAgentReply
-          ? settledState
-            ? finalizedReplyCaches(s, settledState, msg.id)
-            : replacesProjection
-              ? finalizedReplyCaches(
-                  s,
-                  streamState,
-                  msg.id,
-                  s.pendingThinking[chatJid],
-                  s.pendingThinkingDuration[chatJid],
-                )
-              : {}
-          : {};
+        const settlement = settlementOf(
+          s.activeRuns,
+          chatJid,
+          s.streaming[chatJid],
+          s.settledStreaming[chatJid],
+          msg,
+          isAgentReply,
+        );
+        const replacesProjection = settlement.replacesLive;
+        const replyCaches =
+          isAgentReply && settlement.source
+            ? finalizedReplyCaches(s, settlement.source, msg.id)
+            : {};
         const nextStreaming = { ...s.streaming };
         if (!replacesProjection) {
           // The exact terminal for the previous reply has already started a
@@ -5147,12 +5287,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ...replyCaches,
           messages: { ...s.messages, [chatJid]: updated },
           pendingMessageUsage: mergedUsage.pending,
+          // The run stays: the composer can still stop it until run_finished.
           waiting: {
             ...s.waiting,
             [chatJid]: exactRunActive || holdsRunningWorkflow,
           },
+          activeRuns: settlement.activeRuns,
           streaming: nextStreaming,
-          settledStreaming: withoutKey(s.settledStreaming, chatJid),
+          settledStreaming: settlement.dropsSettled
+            ? withoutKey(s.settledStreaming, chatJid)
+            : s.settledStreaming,
           pendingThinking: nextPending,
           pendingThinkingDuration: nextPendingDur,
           unreadReplies: nextUnread,
@@ -5163,11 +5307,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // result as a scheduled_task message: it is that run's final, and
       // replaces the settled card of the same turn in this same update.
       const settledForTask = s.settledStreaming[chatJid];
-      const replacesSettledTask =
+      const isTaskResult =
         (source === 'scheduled_task' ||
           msg.source_kind === 'scheduled_task_result') &&
         msg.is_from_me &&
-        msg.sender !== '__system__' &&
+        msg.sender !== '__system__';
+      // Its run may still be closing: the live card of exactly its turn
+      // settles in place. An isolated task posts here too, while another turn
+      // streams, so nothing short of the same input does.
+      const liveForTask = s.streaming[chatJid];
+      const taskInPlace =
+        isTaskResult &&
+        endsTurn(msg) &&
+        streamsInputOf(s.activeRuns, chatJid, liveForTask, msg.turn_id);
+      const replacesSettledTask =
+        isTaskResult &&
+        !taskInPlace &&
         !!settledForTask &&
         settledTurnMatches(settledForTask, msg.turn_id);
 
@@ -5181,6 +5336,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         msg.delivery_status !== 'promoting' &&
         msg.delivery_status !== 'cancelled' &&
         msg.delivery_status !== 'subsumed';
+      const replyLanded =
+        isProactiveUtterance &&
+        proactiveReplyLanded(s, chatJid, s.streaming[chatJid], msg);
       const isHidden = typeof document !== 'undefined' && document.hidden;
       const isOtherChat =
         s.currentGroup !== chatJid || !!s.activeAgentTab[chatJid];
@@ -5196,6 +5354,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ? {
               ...finalizedReplyCaches(s, settledForTask, msg.id),
               settledStreaming: withoutKey(s.settledStreaming, chatJid),
+            }
+          : {}),
+        ...(taskInPlace
+          ? {
+              ...finalizedReplyCaches(s, liveForTask, msg.id),
+              activeRuns: markRunAnswered(s.activeRuns, chatJid, msg.turn_id),
+              streaming: withoutKey(s.streaming, chatJid),
+              ...(answersInput(settledForTask, msg.turn_id)
+                ? { settledStreaming: withoutKey(s.settledStreaming, chatJid) }
+                : {}),
+            }
+          : {}),
+        ...(replyLanded
+          ? {
+              streaming: withoutKey(s.streaming, chatJid),
+              activeRuns: markRunAnswered(s.activeRuns, chatJid, msg.turn_id),
             }
           : {}),
         messages: { ...s.messages, [chatJid]: updated },
@@ -5799,38 +5973,51 @@ export const useChatStore = create<ChatState>((set, get) => ({
             );
           const agentState = s.agentStreaming[agentId];
           const runtimeJid = `${jid}#agent:${agentId}`;
-          const settledState = lastAiMsg
-            ? s.settledStreaming[runtimeJid]
-            : undefined;
           const exactRunActive = !!s.activeRuns[runtimeJid];
-          // Same rule as a live final message: it replaces a settled or
-          // stopped card, never the projection of a newer active run.
-          const finalizes =
-            !!lastAiMsg && (!exactRunActive || isFrozenProjection(agentState));
-          const nextAgentStreaming = finalizes
-            ? (() => {
-                const n = { ...s.agentStreaming };
-                delete n[agentId];
-                return n;
-              })()
-            : s.agentStreaming;
+          // The same rule as a live final message (`settlementOf`), and as a
+          // proactive reply.
+          const settlement = lastAiMsg
+            ? settlementOf(
+                s.activeRuns,
+                runtimeJid,
+                agentState,
+                s.settledStreaming[runtimeJid],
+                lastAiMsg,
+              )
+            : null;
+          const finalizes = !!settlement?.replacesLive;
+          const utterance = [...data.messages]
+            .reverse()
+            .find(
+              (m) =>
+                m.is_from_me &&
+                m.sender !== '__system__' &&
+                m.source_kind === 'sdk_send_message',
+            );
+          const replyLanded =
+            !!utterance &&
+            proactiveReplyLanded(s, runtimeJid, agentState, utterance);
 
           return {
-            ...(lastAiMsg && settledState
-              ? {
-                  ...finalizedReplyCaches(s, settledState, lastAiMsg.id),
-                  settledStreaming: withoutKey(s.settledStreaming, runtimeJid),
-                }
-              : finalizes && lastAiMsg && agentState
-                ? finalizedReplyCaches(s, agentState, lastAiMsg.id)
-                : {}),
+            ...(lastAiMsg && settlement?.source
+              ? finalizedReplyCaches(s, settlement.source, lastAiMsg.id)
+              : {}),
+            ...(settlement?.dropsSettled
+              ? { settledStreaming: withoutKey(s.settledStreaming, runtimeJid) }
+              : {}),
+            activeRuns: replyLanded
+              ? markRunAnswered(s.activeRuns, runtimeJid, utterance?.turn_id)
+              : (settlement?.activeRuns ?? s.activeRuns),
             agentMessages: { ...s.agentMessages, [agentId]: merged },
             pendingMessageUsage: mergedUsage.pending,
             agentWaiting:
               finalizes && !exactRunActive
                 ? { ...s.agentWaiting, [agentId]: false }
                 : s.agentWaiting,
-            agentStreaming: nextAgentStreaming,
+            agentStreaming:
+              finalizes || replyLanded
+                ? withoutKey(s.agentStreaming, agentId)
+                : s.agentStreaming,
           };
         });
         if (snapshotMessages) {

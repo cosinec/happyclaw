@@ -34,6 +34,7 @@ import {
 } from '../src/workspace-interaction-runtime.js';
 import { ProactiveCommentaryRelay } from '../src/process-commentary.js';
 import { TurnTraceTracker } from '../src/turn-trace.js';
+import { resolveContainerOutputInputTurnId } from '../src/channel-output-correlation.js';
 import { createRuntimeSourceHarness } from './helpers/runtime-source.js';
 
 const paths = vi.hoisted(() => ({ root: '' }));
@@ -57,8 +58,15 @@ const db = await import('../src/db.js');
 const store = await import('../src/channel-reliability-store.js');
 const { ChannelTurnRuntime } = await import('../src/channel-turn-runtime.js');
 
+// A started Turn heartbeats on a timer. Stop every one before the store closes:
+// a tick after that throws, an unhandled error in a long run of this file.
+const startedRuntimes = vi.spyOn(ChannelTurnRuntime, 'start');
+
 beforeAll(() => db.initDatabase());
 afterAll(() => {
+  for (const started of startedRuntimes.mock.results) {
+    if (started.type === 'return') started.value.dispose();
+  }
   db.closeDatabase();
   fs.rmSync(paths.root, { recursive: true, force: true });
 });
@@ -221,6 +229,7 @@ function agentRun(name: string) {
   });
   return {
     globals,
+    harness,
     runtime,
     inputId,
     virtualChatJid,
@@ -1002,6 +1011,7 @@ function mainRun(name: string, options: { steered?: boolean } = {}) {
   harness.installMainOutput();
   return {
     globals,
+    harness,
     runtime,
     inputId,
     card,
@@ -1139,13 +1149,36 @@ describe('settleInterruptedChannelTurn', () => {
   });
 });
 
+type Level = 'hidden' | 'activity' | 'full';
+
+/** A main Session run with the real Web projection, narration and traces. */
+function mainWith(name: string, mode: 'assistant' | 'proactive', level: Level) {
+  const run = mainRun(name);
+  const traceStore = vi.fn();
+  Object.assign(run.globals, {
+    interactionMode: mode,
+    projectSdkStreamEventForWeb,
+    shouldBroadcastTaskAgentStatus,
+    resolveProcessVisibility: () => (mode === 'proactive' ? level : 'full'),
+    commentaryRelay: new ProactiveCommentaryRelay(),
+    turnTraces: new TurnTraceTracker({
+      mode,
+      getVisibility: () => level,
+      store: traceStore,
+    }),
+  });
+  const broadcasts = () =>
+    (run.globals.broadcastStreamEvent as ReturnType<typeof vi.fn>).mock.calls
+      .map(([, event]) => event)
+      .filter((event) => event.eventType !== 'usage');
+  return { run, traceStore, broadcasts };
+}
+
 /**
  * Process visibility at the host: the real output handlers decide, per event,
  * what the Web is told and what an IM card is fed.
  */
 describe('process visibility in the real output handlers (behavioural)', () => {
-  type Level = 'hidden' | 'activity' | 'full';
-
   async function streamThrough(
     handler: (output: unknown) => Promise<unknown>,
     inputId: string,
@@ -1183,32 +1216,6 @@ describe('process visibility in the real output handlers (behavioural)', () => {
     { eventType: 'memory_recall', summary: '回忆' },
     { eventType: 'context_audit', title: 'Agent Context' },
   ];
-
-  function mainWith(
-    name: string,
-    mode: 'assistant' | 'proactive',
-    level: Level,
-  ) {
-    const run = mainRun(name);
-    const traceStore = vi.fn();
-    Object.assign(run.globals, {
-      interactionMode: mode,
-      projectSdkStreamEventForWeb,
-      shouldBroadcastTaskAgentStatus,
-      resolveProcessVisibility: () => (mode === 'proactive' ? level : 'full'),
-      commentaryRelay: new ProactiveCommentaryRelay(),
-      turnTraces: new TurnTraceTracker({
-        mode,
-        getVisibility: () => level,
-        store: traceStore,
-      }),
-    });
-    const broadcasts = () =>
-      (run.globals.broadcastStreamEvent as ReturnType<typeof vi.fn>).mock.calls
-        .map(([, event]) => event)
-        .filter((event) => event.eventType !== 'usage');
-    return { run, traceStore, broadcasts };
-  }
 
   test('a hidden proactive workspace shows the spinner and nothing of the process', async () => {
     const { run, broadcasts } = mainWith('vis-hidden', 'proactive', 'hidden');
@@ -1596,5 +1603,123 @@ describe('process visibility in the real output handlers (behavioural)', () => {
     // The trace is stored all the same, and the failure is only logged.
     expect(db.getTurnTrace(session, 'turn-s3')).toBeDefined();
     expect(globals.logger.warn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('every Web stream frame names the input it answers (behavioural)', () => {
+  // The final row's `turn_id` is the input a turn answers. A warm turn's
+  // presentation `turnId` is the Runner's own, so the Web pairs its live card
+  // with the final by `inputTurnId`, which must be that same input.
+  type Broadcast = [string, Record<string, any>, string?];
+  const sent = (globals: Record<string, any>) =>
+    (globals.broadcastStreamEvent as ReturnType<typeof vi.fn>).mock
+      .calls as Broadcast[];
+  const frame = (inputTurnId: string | undefined, turnId: string) => ({
+    status: 'stream',
+    result: null,
+    ...(inputTurnId ? { inputTurnId } : {}),
+    streamEvent: { eventType: 'text_delta', text: '答案', turnId },
+  });
+
+  function main(name: string) {
+    const { run } = mainWith(name, 'assistant', 'hidden');
+    Object.assign(run.globals, {
+      resolveContainerOutputInputTurnId,
+      rejectedChannelInputTurns: new Set<string>(),
+    });
+    run.harness.install('channelScopeForOutput', 'processGroupMessages');
+    // Where the final row takes its `turn_id` from.
+    const finalTurnId = (output: Record<string, unknown>) =>
+      run.globals.channelScopeForOutput({ ...output, status: 'success' })
+        .inputId as string;
+    return { run, finalTurnId };
+  }
+
+  // `host` stands for the input the host gave the Runner (`lastProcessed`).
+  test.each([
+    {
+      name: 'cold',
+      label:
+        'a cold start: the host input, which is also the presentation turn',
+      input: 'host',
+      turn: 'host',
+    },
+    {
+      name: 'warm',
+      label: "a warm turn: the delivery it answers, not the Runner's own turn",
+      input: 'delivery-warm',
+      turn: 'presentation-warm',
+    },
+    {
+      name: 'legacy',
+      label: 'an older Runner without an input id: the host input it was given',
+      input: undefined,
+      turn: 'presentation-legacy',
+    },
+  ])('$label', async ({ name, input, turn }) => {
+    const { run, finalTurnId } = main(`input-${name}`);
+    const host = (id: string | undefined) => (id === 'host' ? run.inputId : id);
+    const output = frame(host(input), host(turn)!);
+    await run.output(output);
+    const [[, event]] = sent(run.globals);
+    // The presentation turn is left as it is; the input is added beside it.
+    expect(event.turnId).toBe(host(turn));
+    expect(event.inputTurnId).toBe(host(input) ?? run.inputId);
+    expect(event.inputTurnId).toBe(finalTurnId(output));
+  });
+
+  test("a proactive turn's narration names its input too", async () => {
+    const { run } = mainWith('input-note', 'proactive', 'full');
+    for (const streamEvent of [
+      { eventType: 'status', statusText: 'requesting', turnId: 'p-note' },
+      { eventType: 'text_delta', text: '先看目录', turnId: 'p-note' },
+      {
+        eventType: 'tool_use_start',
+        toolName: 'Bash',
+        toolUseId: 'tool-note',
+        turnId: 'p-note',
+      },
+    ]) {
+      await run.output({
+        status: 'stream',
+        result: null,
+        inputTurnId: 'delivery-note',
+        streamEvent,
+      });
+    }
+    const events = sent(run.globals).map(([, event]) => event);
+    expect(events.map((e) => e.eventType)).toEqual([
+      'status',
+      'commentary',
+      'tool_use_start',
+    ]);
+    for (const event of events) {
+      expect(event.inputTurnId, event.eventType).toBe('delivery-note');
+    }
+  });
+
+  test('a Runtime Session: the delivery it answers, addressed to the session', async () => {
+    for (const [name, inputTurnId, turnId] of [
+      ['session-cold', undefined, undefined],
+      ['session-warm', 'delivery-session', 'presentation-session'],
+    ] as const) {
+      const run = agentRun(`input-${name}`);
+      Object.assign(run.globals, {
+        projectSdkStreamEventForWeb,
+        resolveContainerOutputInputTurnId,
+        rejectedAgentInputTurns: new Set<string>(),
+        broadcastStreamEvent: vi.fn(),
+      });
+      run.harness.install('agentScopeForOutput', 'processAgentConversation');
+      const output = frame(inputTurnId, turnId ?? run.inputId);
+      await run.output(output);
+      const [[, event, agentId]] = sent(run.globals);
+      expect(agentId, name).toBe(run.globals.agentId);
+      expect(event.inputTurnId, name).toBe(inputTurnId ?? run.inputId);
+      expect(event.inputTurnId, name).toBe(
+        run.globals.agentScopeForOutput({ ...output, status: 'success' })
+          .inputId,
+      );
+    }
   });
 });
