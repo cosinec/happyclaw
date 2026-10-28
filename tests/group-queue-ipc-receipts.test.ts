@@ -255,6 +255,56 @@ describe('GroupQueue IPC delivery receipts', () => {
     },
   );
 
+  test('one warm host runner takes Feishu, Web and Telegram inputs in turn', async () => {
+    // The Runner therefore cannot pick one channel's format guidance for its
+    // system prompt; each input carries its own (turn-notes.ts).
+    await startRunner({ feishuCliAccountId: 'account-a' });
+    const context = (provider: string) => ({
+      schemaVersion: 1 as const,
+      provider,
+      channelAccountId: `${provider}-account`,
+      sourceJid: `${provider}:chat-1`,
+      chat: { id: 'chat-1', type: 'group' },
+      message: { id: `${provider}-1` },
+    });
+    const send = (
+      text: string,
+      sourceJid: string,
+      channelContext?: ReturnType<typeof context>,
+      requirements?: { feishuCliAccountId: string | null },
+    ) =>
+      queue.sendMessage(
+        JID,
+        text,
+        undefined,
+        undefined,
+        sourceJid,
+        undefined,
+        undefined,
+        channelContext,
+        undefined,
+        requirements,
+      );
+
+    expect(send('from feishu', 'feishu:chat-1', context('feishu'))).toBe(
+      'sent',
+    );
+    expect(
+      send('from the web', JID, undefined, { feishuCliAccountId: null }),
+    ).toBe('sent');
+    expect(send('from telegram', 'telegram:chat-1', context('telegram'))).toBe(
+      'sent',
+    );
+    expect(
+      readPayloads().map(
+        (payload) =>
+          (payload as { channelContext?: { provider: string } }).channelContext
+            ?.provider ?? 'web',
+      ),
+    ).toEqual(['feishu', 'web', 'telegram']);
+    expect(fs.existsSync(path.join(inputDir(), '_drain'))).toBe(false);
+  });
+
   test('restarts a Bot-bound container for an explicitly unbound request', async () => {
     await startRunner({
       containerName: 'happyclaw-bot-a',

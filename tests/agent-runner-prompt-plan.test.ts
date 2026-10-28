@@ -17,7 +17,6 @@ describe('HappyClaw PromptPlan', () => {
       memory: { id: 'memory-system.workspace', text: 'memory' },
       output: 'output',
       web: 'web',
-      channel: { id: 'telegram', text: 'telegram' },
       deliveryContract: 'delivery',
     });
 
@@ -30,7 +29,6 @@ describe('HappyClaw PromptPlan', () => {
       'memory-system.workspace',
       'output',
       'web-fetch',
-      'channel.telegram',
       'delivery-contract',
     ]);
     expect(plan.blocks.some((block) => block.id === 'skill-routing')).toBe(
