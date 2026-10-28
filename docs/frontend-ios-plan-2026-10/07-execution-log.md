@@ -124,6 +124,15 @@
 （只发生了页面返回、打开了模式面板，没有改动设置）。之后停止了真机自动点击；剩余的真机验证
 （下载 → 分享面板）改为人工完成。以后要在这台手机上自动化，需要每一步截图确认前台，不能批量盲点。
 
+## 2026-10-28 ESLint（F-04）
+
+- `web/` 新增开发依赖：`eslint` 10、`@eslint/js`、`typescript-eslint` 8、`eslint-plugin-react-hooks` 7、
+  `globals`；生产依赖不变（`npm audit --omit=dev` 0 个漏洞）。
+- `npm --prefix web run lint` / `make lint` / CI「Lint web」：只有 error 会失败。基线 0 error、45 warning
+  （27 处 `any`、15 处 Hook 依赖、3 处无用赋值），清零后再把对应规则升为 error。
+- 顺手修掉 lint 发现的小问题：错误包装丢失 `cause`、只会原样抛出的 try/catch、3 条失效的
+  `eslint-disable` 注释。
+
 ## 待决问题
 
-- 是否为 `web/` 新增 ESLint（及 `lint` 脚本、CI 门禁）？需要新增开发依赖。
+- 无。
