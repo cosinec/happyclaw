@@ -1,64 +1,74 @@
 import HappyClawCore
 import SwiftUI
+import UIKit
 
-/// Floating capsule tab bar replacing the web's mobile bottom nav. Items come
-/// from the web's `chrome.tabs` declaration; 「更多」 opens the overflow sheet.
-/// iOS 26+ renders with Liquid Glass, earlier systems with a material.
-struct NativeTabBar: View {
+/// Bottom tab bar replacing the web's mobile bottom nav. It is the system
+/// UITabBar, so iOS 26 draws the floating Liquid Glass bar with its selection
+/// lens, refraction and press feedback, and earlier systems the standard bar;
+/// none of that is redrawn here. Items come from the web's `chrome.tabs`
+/// declaration; 「更多」 opens the overflow sheet instead of selecting a page.
+struct NativeTabBar: UIViewRepresentable {
   let tabs: [TabDeclaration]
   let showsMore: Bool
   let selectedSlot: String?
+  /// Re-evaluates the selection when the overflow sheet closes.
+  let sheetOpen: Bool
   let onSelect: (TabDeclaration) -> Void
   let onMore: () -> Void
 
-  var body: some View {
-    HStack(spacing: 2) {
-      ForEach(tabs) { tab in
-        item(title: tab.title, symbol: tab.symbol, selected: selectedSlot == tab.id) { onSelect(tab) }
+  private static let moreTag = -1
+
+  func makeCoordinator() -> Coordinator { Coordinator() }
+
+  func makeUIView(context: Context) -> UITabBar {
+    let bar = UITabBar()
+    bar.delegate = context.coordinator
+    bar.itemPositioning = .fill
+    return bar
+  }
+
+  func updateUIView(_ bar: UITabBar, context: Context) {
+    let coordinator = context.coordinator
+    coordinator.parent = self
+
+    let signature = tabs.map { "\($0.id)|\($0.title)|\($0.symbol)" } + (showsMore ? ["more"] : [])
+    if signature != coordinator.signature {
+      coordinator.signature = signature
+      var items = tabs.enumerated().map { index, tab in
+        UITabBarItem(title: tab.title, image: UIImage(systemName: tab.symbol), tag: index)
       }
       if showsMore {
-        item(title: L10n.tabMore, symbol: "ellipsis.circle", selected: selectedSlot == ShellModel.moreSlot, action: onMore)
+        items.append(UITabBarItem(title: L10n.tabMore, image: UIImage(systemName: "ellipsis"), tag: Self.moreTag))
       }
+      bar.setItems(items, animated: false)
     }
-    .padding(6)
-    .modifier(TabBarBackground())
-    .padding(.bottom, 4)
+
+    let tag: Int? =
+      if selectedSlot == ShellModel.moreSlot || sheetOpen { Self.moreTag }
+      else { tabs.firstIndex { $0.id == selectedSlot } }
+    let target = tag.flatMap { tag in bar.items?.first { $0.tag == tag } }
+    if bar.selectedItem !== target { bar.selectedItem = target }
   }
 
-  private func item(title: String, symbol: String, selected: Bool, action: @escaping () -> Void) -> some View {
-    Button(action: action) {
-      VStack(spacing: 2) {
-        Image(systemName: symbol)
-          .font(.system(size: 18, weight: selected ? .semibold : .regular))
-          .frame(height: 22)
-        Text(title)
-          .font(.system(size: 10, weight: selected ? .semibold : .regular))
-          .lineLimit(1)
-      }
-      .foregroundStyle(selected ? Color.primary : Color.secondary)
-      .frame(width: 60, height: 46)
-      .background {
-        if selected {
-          Capsule().fill(Color.primary.opacity(0.08))
-        }
-      }
-      .contentShape(Capsule())
-    }
-    .buttonStyle(.plain)
-    .accessibilityLabel(title)
-    .accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)
+  /// UIKit reports the bar's own height for the proposed width, including
+  /// the home indicator area when the bar reaches the screen bottom.
+  func sizeThatFits(_ proposal: ProposedViewSize, uiView bar: UITabBar, context: Context) -> CGSize? {
+    let width = proposal.width ?? bar.window?.bounds.width ?? 390
+    let height = bar.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height
+    return CGSize(width: width, height: height)
   }
-}
 
-private struct TabBarBackground: ViewModifier {
-  func body(content: Content) -> some View {
-    if #available(iOS 26.0, *) {
-      content.glassEffect(.regular.interactive(), in: .capsule)
-    } else {
-      content
-        .background(.regularMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08)))
-        .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+  final class Coordinator: NSObject, UITabBarDelegate {
+    var parent: NativeTabBar?
+    var signature: [String] = []
+
+    func tabBar(_ tabBar: UITabBar, didSelect item: UITabBarItem) {
+      guard let parent else { return }
+      if item.tag == NativeTabBar.moreTag {
+        parent.onMore()
+      } else if parent.tabs.indices.contains(item.tag) {
+        parent.onSelect(parent.tabs[item.tag])
+      }
     }
   }
 }

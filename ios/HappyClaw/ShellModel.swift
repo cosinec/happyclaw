@@ -99,6 +99,11 @@ final class ShellModel {
 
   static let moreSlot = "__more__"
 
+  var isMoreSheetOpen: Bool {
+    if case .more = sheet { return true }
+    return false
+  }
+
   var recoveryReason: BridgeSession.RecoveryReason? {
     if case let .recovery(reason) = session.state { return reason }
     return nil
