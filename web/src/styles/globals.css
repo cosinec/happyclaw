@@ -974,13 +974,31 @@ pre code.language-diff .hljs-deletion {
   }
 }
 
+/* Room a page leaves under its content for the bottom navigation: the
+   floating capsule of narrow windows, or only the home indicator on phones,
+   which navigate from a drawer. `--nav-cover` is how much of it a sticky
+   footer (SettingsStickySaveBar) covers so nothing scrolls through below. */
+:root {
+  --nav-clearance: calc(7rem + env(safe-area-inset-bottom, 0px));
+  --nav-cover: calc(
+    max(24px, env(safe-area-inset-bottom, 0px)) + 58px + 0.5rem
+  );
+}
+@media (max-width: 1023px) and (pointer: coarse) {
+  :root {
+    --nav-clearance: calc(1.5rem + env(safe-area-inset-bottom, 0px));
+    --nav-cover: env(safe-area-inset-bottom, 0px);
+  }
+}
+
 /* Bottom padding for content above floating nav — accounts for safe area */
 /* A utility (not a bare class) so responsive overrides such as lg:pb-0 win. */
 @utility pb-nav-safe {
-  padding-bottom: calc(7rem + env(safe-area-inset-bottom, 0px));
+  padding-bottom: var(--nav-clearance);
 }
 
-/* Floating mobile navigation capsule */
+/* Floating navigation capsule of narrow desktop windows (phones use the
+   drawer instead). */
 .floating-nav-container {
   position: fixed;
   bottom: 24px;

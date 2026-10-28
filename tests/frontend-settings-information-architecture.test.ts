@@ -281,7 +281,7 @@ describe('settings information architecture', () => {
     expect(bindings).toContain('resolveBindingTargetType(rebindGroup)');
     expect(bindings).toContain("resolveBindingTargetType(item) === 'session'");
     expect(bindings).toContain('解除渠道绑定');
-    expect(mobileChat).toMatch(/onRename=|onTogglePin=|onDelete=/);
+    expect(mobileChat).toMatch(/onRename[:=]|onTogglePin[:=]|onDelete[:=]/);
     expect(createWorkspace).toContain('effective_runtime_policy');
     expect(bindingRoute).toContain(
       "threadCapable ? 'thread_map' : 'single_session'",
