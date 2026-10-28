@@ -9,9 +9,15 @@
  */
 import fs from 'node:fs';
 
-import { getJidsByFolder, getSession, getSessionModel } from './db.js';
+import {
+  getJidsByFolder,
+  getSession,
+  getSessionModel,
+  getSessionProviderId,
+} from './db.js';
 import { modelCapabilities, splitOneMillionSuffix } from './model-providers.js';
 import { latestSdkContextWindow } from './run-context-snapshot.js';
+import { getProviderById } from './runtime-config.js';
 import { sessionTranscriptPath } from './session-workflows.js';
 
 export interface SessionContextUsage {
@@ -86,23 +92,24 @@ function readLine(line: string): LastRequest | 'compacted' | null {
 
 /**
  * The last `bytes` of a file as whole lines (a line cut at the start is
- * dropped), and whether that was the whole file.
+ * dropped), and whether that was the whole file. Read off the event loop:
+ * a turn's push and every GET come here.
  */
-function tailLines(
+async function tailLines(
   file: string,
   bytes: number,
-): { lines: string[]; whole: boolean } {
-  const fd = fs.openSync(file, 'r');
+): Promise<{ lines: string[]; whole: boolean }> {
+  const handle = await fs.promises.open(file, 'r');
   try {
-    const size = fs.fstatSync(fd).size;
+    const { size } = await handle.stat();
     const start = Math.max(0, size - bytes);
     const buffer = Buffer.alloc(size - start);
-    fs.readSync(fd, buffer, 0, buffer.length, start);
+    await handle.read(buffer, 0, buffer.length, start);
     const lines = buffer.toString('utf8').split('\n');
     if (start > 0) lines.shift();
     return { lines, whole: start === 0 };
   } finally {
-    fs.closeSync(fd);
+    await handle.close();
   }
 }
 
@@ -111,11 +118,11 @@ function tailLines(
  * recent tail first, a longer one only when long tool results pushed the
  * last answer further back.
  */
-function lastRequest(transcript: string): LastRequest | null {
+async function lastRequest(transcript: string): Promise<LastRequest | null> {
   for (const bytes of [RECENT_TAIL_BYTES, MAX_TAIL_BYTES]) {
-    let tail: ReturnType<typeof tailLines>;
+    let tail: Awaited<ReturnType<typeof tailLines>>;
     try {
-      tail = tailLines(transcript, bytes);
+      tail = await tailLines(transcript, bytes);
     } catch {
       return null;
     }
@@ -130,9 +137,12 @@ function lastRequest(transcript: string): LastRequest | null {
 }
 
 /**
- * The window Claude Code works with: what it reported for this
- * conversation's model when it is known, else 1M for a `[1m]` model, else
- * the model's window capped at Claude Code's default.
+ * The window Claude Code works with, best known first: what it reported for
+ * this conversation's model in this process; the connection's own
+ * CLAUDE_CODE_AUTO_COMPACT_WINDOW; 1M for a `[1m]` model; on an official
+ * connection the model's own window (Claude Code runs 1M-native Claude
+ * models at 1M there); elsewhere the model's window capped at Claude Code's
+ * default, which is what an Anthropic-compatible endpoint is given.
  */
 function contextWindowFor(
   groupFolder: string,
@@ -146,10 +156,19 @@ function contextWindowFor(
     [model, ...(launchModel ? [launchModel] : [])],
   );
   if (reported) return reported;
+  const providerId = getSessionProviderId(groupFolder, agentId);
+  const provider = providerId ? getProviderById(providerId) : null;
+  const configured = Number(
+    provider?.customEnv.CLAUDE_CODE_AUTO_COMPACT_WINDOW?.trim(),
+  );
+  if (Number.isSafeInteger(configured) && configured > 0) return configured;
   if (launchModel && splitOneMillionSuffix(launchModel).oneMillion) {
     return ONE_MILLION_WINDOW;
   }
   const capability = modelCapabilities(launchModel || model)?.contextWindow;
+  if (provider?.type === 'official' && !provider.anthropicBaseUrl) {
+    return capability ?? DEFAULT_CONTEXT_WINDOW;
+  }
   return Math.min(capability ?? DEFAULT_CONTEXT_WINDOW, DEFAULT_CONTEXT_WINDOW);
 }
 
@@ -158,45 +177,43 @@ function contextWindowFor(
  * conversation has no SDK session (nothing ran yet, or it was cleared) or
  * its context was just compacted.
  */
-export function readSessionContextUsage(
+export async function readSessionContextUsage(
   groupFolder: string,
   agentId: string | null,
-): SessionContextUsage {
+): Promise<SessionContextUsage> {
   const sessionId = getSession(groupFolder, agentId);
   if (!sessionId) return NO_CONTEXT_USAGE;
   const transcript = sessionTranscriptPath(groupFolder, agentId, sessionId);
-  const last = transcript ? lastRequest(transcript) : null;
-  if (!last) return NO_CONTEXT_USAGE;
-  const contextWindow = contextWindowFor(
+  const last = transcript ? await lastRequest(transcript) : null;
+  // Cleared or replaced while the transcript was read: it is not this one's.
+  if (!last || getSession(groupFolder, agentId) !== sessionId) {
+    return NO_CONTEXT_USAGE;
+  }
+  const launchModel = getSessionModel(groupFolder, agentId);
+  let contextWindow = contextWindowFor(
     groupFolder,
     agentId,
     last.model,
-    getSessionModel(groupFolder, agentId),
+    launchModel,
   );
+  // A prompt larger than the window proves the window larger: the model's
+  // own is the next best guess.
+  if (last.usedTokens > contextWindow) {
+    contextWindow = Math.max(
+      contextWindow,
+      modelCapabilities(launchModel || last.model)?.contextWindow ?? 0,
+    );
+  }
   return {
     usedTokens: last.usedTokens,
     contextWindow,
-    percentage: Math.round((last.usedTokens / contextWindow) * 1000) / 10,
+    // Still over: the real window is unknown here, so the ring is shown
+    // full rather than past 100%.
+    percentage: Math.min(
+      100,
+      Math.round((last.usedTokens / contextWindow) * 1000) / 10,
+    ),
     model: last.model,
     updatedAt: last.at,
   };
-}
-
-type ClearedListener = (groupFolder: string, agentId: string | null) => void;
-const clearedListeners = new Set<ClearedListener>();
-
-/** Called whenever a conversation's context is cleared (the Web is told). */
-export function onConversationContextCleared(
-  listener: ClearedListener,
-): () => void {
-  clearedListeners.add(listener);
-  return () => clearedListeners.delete(listener);
-}
-
-/** A /clear, /fresh or session reset emptied this conversation's context. */
-export function notifyConversationContextCleared(
-  groupFolder: string,
-  agentId: string | null,
-): void {
-  for (const listener of clearedListeners) listener(groupFolder, agentId);
 }

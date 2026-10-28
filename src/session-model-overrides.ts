@@ -326,7 +326,8 @@ export interface ConnectionModelChoice {
 /**
  * What a model of a configuration offers beyond its id. Its effort without a
  * pick follows the launch: an Agent's own effort, else the model's
- * configured one, else the configuration's environment, else the model's.
+ * configured one, else the configuration's environment. With none of them
+ * Claude Code chooses the level itself, so none is claimed.
  */
 function connectionModelCapabilities(
   provider: ModelConfiguration,
@@ -335,10 +336,7 @@ function connectionModelCapabilities(
 ): Omit<ConnectionModelChoice, 'id' | 'hidden'> {
   const capabilities = modelCapabilities(entry.id);
   const defaultEffort =
-    agentEffort ??
-    entry.effort ??
-    providerEffortLevel(provider) ??
-    capabilities?.defaultEffort;
+    agentEffort ?? entry.effort ?? providerEffortLevel(provider);
   return {
     ...(capabilities?.efforts ? { efforts: capabilities.efforts } : {}),
     ...(defaultEffort ? { defaultEffort } : {}),

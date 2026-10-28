@@ -11654,6 +11654,38 @@ function ensureTerminalContainerStarted(chatJid: string): boolean {
   return true;
 }
 
+/**
+ * What one runner output of the main conversation settles: the SDK session it
+ * ran on, and, once its turn completed, the context ring, whose answer is now
+ * in the transcript. Scheduled group-mode tasks run in this conversation and
+ * count too; isolated tasks have sessions of their own and never come here.
+ */
+function settleMainConversationOutput(
+  group: RegisteredGroup,
+  output: ContainerOutput,
+  agentProfile: AgentProfile | undefined,
+  interactionMode: InteractionMode,
+): void {
+  // 仅从成功的输出中更新 session ID；
+  // error 输出可能携带 stale ID，会覆盖流式传递的有效 session
+  if (
+    output.newSessionId &&
+    output.status !== 'error' &&
+    !output.providerFailure
+  ) {
+    sessions[group.folder] = output.newSessionId;
+    setSession(group.folder, output.newSessionId, undefined, {
+      agentProfileId: agentProfile?.id,
+      agentProfileVersion: agentProfile?.version,
+      identityHash: agentProfile?.identity_hash,
+    });
+    setSessionInteractionMode(group.folder, undefined, interactionMode);
+  }
+  if (output.inputTurnCompleted === true) {
+    void broadcastContextUsage(group.folder, null);
+  }
+}
+
 async function runAgent(
   group: RegisteredGroup,
   prompt: string,
@@ -11757,25 +11789,12 @@ async function runAgent(
         output.sourceKind === 'auto_continue';
       queue.markRunnerQueryIdle(chatJid, { preserveIpcDebt });
     }
-    // 仅从成功的输出中更新 session ID；
-    // error 输出可能携带 stale ID，会覆盖流式传递的有效 session
-    if (
-      output.newSessionId &&
-      output.status !== 'error' &&
-      !output.providerFailure
-    ) {
-      sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId, undefined, {
-        agentProfileId: resolvedAgentProfile?.id,
-        agentProfileVersion: resolvedAgentProfile?.version,
-        identityHash: resolvedAgentProfile?.identity_hash,
-      });
-      setSessionInteractionMode(group.folder, undefined, interactionMode);
-    }
-    // The answer is in the transcript: the context ring can follow it.
-    if (output.inputTurnCompleted === true && !messageTaskId) {
-      broadcastContextUsage(group.folder, null);
-    }
+    settleMainConversationOutput(
+      group,
+      output,
+      resolvedAgentProfile,
+      interactionMode,
+    );
     await onOutput?.(output);
     // A runner receipt proves model consumption, not successful Host
     // persistence/projection. Commit it only after the Host callback resolves;
@@ -18218,7 +18237,7 @@ async function processAgentConversation(
       currentAgentSessionId = output.newSessionId;
     }
     if (output.inputTurnCompleted === true) {
-      broadcastContextUsage(effectiveGroup.folder, agentId);
+      void broadcastContextUsage(effectiveGroup.folder, agentId);
     }
 
     if (

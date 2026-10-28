@@ -120,10 +120,8 @@ import {
   type CodexSelectionView,
 } from '../session-model-overrides.js';
 import { clearTargetAgentBindingsForDeletedAgents } from '../im-context-isolation.js';
-import {
-  notifyConversationContextCleared,
-  readSessionContextUsage,
-} from '../session-context-usage.js';
+import { notifyConversationContextCleared } from '../context-usage-events.js';
+import { readSessionContextUsage } from '../session-context-usage.js';
 import { getChannelType } from '../im-channel.js';
 import { buildUnmountUpdate } from '../channel-mount-service.js';
 import {
@@ -2530,14 +2528,16 @@ groupRoutes.get('/:jid/model-selection', authMiddleware, (c) => {
 });
 
 // GET /api/groups/:jid/context-usage?agentId= - 会话上下文占用（输入框旁的圆环）
-groupRoutes.get('/:jid/context-usage', authMiddleware, (c) => {
+groupRoutes.get('/:jid/context-usage', authMiddleware, async (c) => {
   const scope = resolveSessionModelSelectionScope(
     c,
     c.req.query('agentId'),
     false,
   );
   if ('error' in scope) return scope.error;
-  return c.json(readSessionContextUsage(scope.group.folder, scope.agentId));
+  return c.json(
+    await readSessionContextUsage(scope.group.folder, scope.agentId),
+  );
 });
 
 // PUT /api/groups/:jid/model-selection - 切换会话模型/推理档位（null 恢复默认）

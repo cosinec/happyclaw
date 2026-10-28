@@ -250,14 +250,14 @@ describe('GET /:jid/model-selection', () => {
         enabled: true,
         model: 'opus',
         usable: true,
-        // What the model takes, from its capabilities; with no effort of its
-        // own and no endpoint default, the model's own default effort.
+        // What the model takes, from its capabilities. With no effort of its
+        // own and none from the endpoint, Claude Code picks the level: no
+        // default effort is claimed.
         models: [
           {
             id: 'opus',
             hidden: false,
             efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
-            defaultEffort: 'medium',
             contextWindow: 1_000_000,
           },
         ],
@@ -303,7 +303,6 @@ describe('GET /:jid/model-selection', () => {
             id: 'glm-5.3',
             hidden: false,
             efforts: ['low', 'high', 'max'],
-            defaultEffort: 'high',
             contextWindow: 1_000_000,
           },
         ],
@@ -315,6 +314,18 @@ describe('GET /:jid/model-selection', () => {
         .map((o: any) => o.id),
     ).toEqual(['chatgpt']);
     expect(JSON.stringify(body)).not.toContain('secret');
+  });
+
+  test('claims no default effort where Claude Code picks the level itself', async () => {
+    // An official connection without an effort of its own: opus takes
+    // efforts, but nothing here sets one.
+    mocks.defaultConfigId = 'official';
+    const { body } = await call('GET');
+    expect(body.default).toMatchObject({
+      source: 'default',
+      model: 'opus',
+      effort: null,
+    });
   });
 
   test('reports the global default as what an unselected conversation runs on', async () => {

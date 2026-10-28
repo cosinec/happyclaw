@@ -21,10 +21,10 @@ describe('Agent effort runtime contracts', () => {
     );
   });
 
-  test('host and container starts remove Provider effort only for explicit Agents', () => {
+  test("host and container starts remove Provider effort only for explicit Agents, under a conversation's own", () => {
     const host = read('src/container-runner.ts');
     const calls = host.match(
-      /removeProviderEffortEnv\(envLines, agentEffort\)/g,
+      /applyLaunchEffortEnv\(\s*envLines,\s*resolveAgentSdkEffort\([^)]*\),\s*(?:resolvedProvider|hostPoolResult)\?\.(?:resolved\.)?conversationEffort,\s*\)/g,
     );
     expect(calls).toHaveLength(2);
   });
