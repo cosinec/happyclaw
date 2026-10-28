@@ -160,18 +160,19 @@ bridge.ready {session} ──────────────▶ nativeNavig
 
 ### 消息（原生 → Web）
 
-| type             | payload                                         | 说明                                                              |
-| ---------------- | ----------------------------------------------- | ----------------------------------------------------------------- |
-| `bridge.welcome` | `session`, `version`, `capabilities[]`, `shell` |                                                                   |
-| `bridge.reject`  | `code`, `message`, `supported[]`                | 原生随即显示恢复页                                                |
-| `layout.update`  | `contentInsets`, `safeArea`, `keyboard`         | → `--native-top/right/bottom/left`、`--native-keyboard-occlusion` |
-| `nav.select`     | `tabId`                                         | 原生 Tab / 「更多」项被点击                                       |
-| `nav.back`       | `{}`                                            | 原生返回按钮：页内覆盖的 `onBack` → 历史后退 → 推入页的父路由     |
-| `nav.action`     | `id`                                            | 导航栏右侧按钮被点击                                              |
-| `confirm.result` | `confirmed`                                     | 带请求 `id`                                                       |
-| `menu.result`    | `selected: string \| null`                      | `null` 为取消                                                     |
-| `app.lifecycle`  | `state: active/inactive/background`             | 预留给 Phase 4 回前台重连                                         |
-| `bridge.error`   | `code`, `message`, `ref?`                       | 带 `ref` 时 Web 把对应请求按取消处理                              |
+| type             | payload                                         | 说明                                                                                            |
+| ---------------- | ----------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `bridge.welcome` | `session`, `version`, `capabilities[]`, `shell` |                                                                                                 |
+| `bridge.reject`  | `code`, `message`, `supported[]`                | 原生随即显示恢复页                                                                              |
+| `layout.update`  | `contentInsets`, `safeArea`, `keyboard`         | → `--native-top/right/bottom/left`、`--native-keyboard-occlusion`                               |
+| `nav.select`     | `tabId`                                         | 原生 Tab / 「更多」项被点击                                                                     |
+| `nav.back`       | `{}`                                            | 原生返回按钮：页内覆盖的 `onBack` → 历史后退 → 推入页的父路由                                   |
+| `nav.action`     | `id`                                            | 导航栏右侧按钮被点击                                                                            |
+| `app.shortcut`   | `id`                                            | 桌面图标快捷操作（`new-conversation`）；Web 声明 `shortcuts` 能力才发，冷启动时排队到工作台挂载 |
+| `confirm.result` | `confirmed`                                     | 带请求 `id`                                                                                     |
+| `menu.result`    | `selected: string \| null`                      | `null` 为取消                                                                                   |
+| `app.lifecycle`  | `state: active/inactive/background`             | 预留给 Phase 4 回前台重连                                                                       |
+| `bridge.error`   | `code`, `message`, `ref?`                       | 带 `ref` 时 Web 把对应请求按取消处理                                                            |
 
 错误码：`invalid_message`、`unsupported_type`、`version_unsupported`、`not_ready`、`busy`、
 `cancelled`。
@@ -187,7 +188,7 @@ bridge.ready {session} ──────────────▶ nativeNavig
 ### 版本演进
 
 - 新增可选字段：不升版本，旧端忽略未知字段（Swift `Codable` 默认如此）。`nav`、`modal`、
-  `background` 和 `navbar` 能力都是这样加进 v1 的：旧前端不发 `nav`，原生就不显示导航栏。
+  `background`、`app.shortcut` 和 `navbar` / `shortcuts` 能力都是这样加进 v1 的：旧前端不发 `nav`，原生就不显示导航栏。
 - 新增消息类型：对端回 `unsupported_type`，发送方应按能力（`capabilities`）判断后再发。
 - 破坏性修改：升 `v`。原生的 `supportedVersions` 与 Web 的 `SUPPORTED_PROTOCOL_VERSIONS`
   以区间重叠协商；没有交集时原生显示恢复页，提示更新前端或 App。

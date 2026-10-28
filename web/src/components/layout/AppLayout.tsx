@@ -21,6 +21,7 @@ import { useShellStore } from '../../stores/shell';
 import { useNewConversation } from '../../hooks/useNewConversation';
 import { CommandPaletteHost } from '../command/CommandPaletteHost';
 import { useGlobalStreamSubscriptions } from '../../hooks/useStreamSubscriptions';
+import { subscribeNativeShortcut } from '../../native/shortcuts';
 
 export function AppLayout() {
   const location = useLocation();
@@ -40,6 +41,15 @@ export function AppLayout() {
   useShortcut(SHORTCUTS.toggleSidebar, toggleSidebar, { enabled: isDesktop });
   const { startNewConversation } = useNewConversation();
   useShortcut(SHORTCUTS.newConversation, () => void startNewConversation());
+
+  // iOS home-screen quick action; queued until this layout (logged in) mounts.
+  useEffect(
+    () =>
+      subscribeNativeShortcut((id) => {
+        if (id === 'new-conversation') void startNewConversation();
+      }),
+    [startNewConversation],
+  );
 
   // The sidebar's workspace tree is visible on every route, not just /chat.
   const loadGroups = useChatStore((s) => s.loadGroups);

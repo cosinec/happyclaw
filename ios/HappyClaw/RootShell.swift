@@ -51,6 +51,7 @@ struct RootShell: View {
     } message: { Text($0) }
     .preferredColorScheme(model.webScheme.map { $0 == .dark ? .dark : .light })
     .onChange(of: scenePhase) { _, phase in model.scenePhaseChanged(phase) }
+    .onChange(of: QuickActionInbox.shared.pending) { model.deliverQuickAction() }
     .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
       updateKeyboard(note)
     }

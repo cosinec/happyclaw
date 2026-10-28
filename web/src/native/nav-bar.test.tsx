@@ -132,3 +132,22 @@ describe('native navigation bar declaration', () => {
     expect(html.dataset.nativeNav).toBeUndefined();
   });
 });
+
+describe('native shortcuts', () => {
+  test('an action that arrives before any subscriber is delivered once', async () => {
+    const { emitNativeShortcut, subscribeNativeShortcut } =
+      await import('./shortcuts');
+    emitNativeShortcut('new-conversation');
+    const first = vi.fn();
+    const unsubscribe = subscribeNativeShortcut(first);
+    expect(first).toHaveBeenCalledWith('new-conversation');
+    // Delivered, so a later subscriber does not replay it.
+    const second = vi.fn();
+    const unsubscribeSecond = subscribeNativeShortcut(second);
+    expect(second).not.toHaveBeenCalled();
+    emitNativeShortcut('new-conversation');
+    expect(second).toHaveBeenCalledOnce();
+    unsubscribe();
+    unsubscribeSecond();
+  });
+});
