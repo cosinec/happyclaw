@@ -144,6 +144,34 @@ describe('ProviderList default model', () => {
   });
 });
 
+describe('ProviderList vendor marks', () => {
+  test('each row shows its vendor, or the first letter of an unknown relay', async () => {
+    await render(
+      [
+        provider('claude', {
+          type: 'official',
+          name: 'Claude 订阅',
+          hasAnthropicAuthToken: false,
+          hasClaudeOAuthCredentials: true,
+        }),
+        provider('gpt', { name: 'ChatGPT', hasCodexOAuthCredentials: true }),
+        provider('ds', {
+          presetId: 'deepseek',
+          anthropicBaseUrl: 'https://api.deepseek.com/anthropic',
+        }),
+        provider('relay', { name: 'Relay', anthropicModel: 'house-model' }),
+      ],
+      null,
+    );
+    const tiles = [...document.querySelectorAll('[data-slot="list-row"]')].map(
+      (row) =>
+        row.querySelector('[data-vendor]')?.getAttribute('data-vendor') ??
+        row.querySelector('span[aria-hidden="true"]')?.textContent,
+    );
+    expect(tiles).toEqual(['anthropic', 'openai', 'deepseek', 'R']);
+  });
+});
+
 describe('ProviderList connection status', () => {
   test('shows the last test, not the presence of a key', async () => {
     await render(

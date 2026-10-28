@@ -312,11 +312,16 @@ export function modelInUseAgents(err: unknown): string[] | null {
     .filter((name): name is string => typeof name === 'string');
 }
 
-/** Copy for a pick of a model the connection no longer offers, else null. */
+/** Copy for a model or effort pick the server refused, else null. */
 export function modelBindingErrorMessage(err: unknown): string | null {
-  return errorBody(err)?.code === 'MODEL_NOT_IN_CONNECTION'
-    ? '所选模型已不在该模型配置的模型列表里，请重新选择模型'
-    : null;
+  switch (errorBody(err)?.code) {
+    case 'MODEL_NOT_IN_CONNECTION':
+      return '所选模型已不在该模型配置的模型列表里，请重新选择模型';
+    case 'EFFORT_NOT_SUPPORTED':
+      return '这个模型不支持所选的推理等级，请重新选择';
+    default:
+      return null;
+  }
 }
 
 // ─── Reasoning effort ───

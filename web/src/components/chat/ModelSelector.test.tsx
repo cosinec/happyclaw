@@ -223,14 +223,54 @@ const detail = (title: string) =>
 const checked = () =>
   rows().filter((item) => item.getAttribute('aria-checked') === 'true');
 
-const effortGroup = () =>
-  document.querySelector('[role="radiogroup"][aria-label="推理档位"]');
-const chips = () => [
-  ...(effortGroup()?.querySelectorAll<HTMLButtonElement>('[role="radio"]') ??
-    []),
+/** The reasoning effort control next to the model; null when hidden. */
+const effortTrigger = () =>
+  container.querySelector<HTMLButtonElement>(
+    'button[aria-label="选择推理等级"]',
+  );
+async function openEffort() {
+  await act(async () => {
+    effortTrigger()!.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+    );
+  });
+}
+const effortItems = () => [
+  ...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
 ];
-const chip = (value: string) =>
-  document.querySelector<HTMLButtonElement>(`[data-effort="${value}"]`);
+const effortItem = (text: string) =>
+  effortItems().find((item) => item.textContent === text);
+
+/** A connection whose models take reasoning efforts (a current server). */
+function effortSelection(
+  overrides: Partial<SessionModelSelection> = {},
+): SessionModelSelection {
+  const base = connectionSelection(overrides);
+  return {
+    ...base,
+    options: [
+      {
+        ...base.options[0],
+        models: [
+          {
+            id: 'opus',
+            hidden: false,
+            efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+            defaultEffort: 'xhigh',
+          },
+          {
+            id: 'sonnet',
+            hidden: false,
+            efforts: ['low', 'medium', 'high'],
+            defaultEffort: 'high',
+          },
+          { id: 'haiku', hidden: false },
+        ],
+      },
+      base.options[1],
+    ],
+  };
+}
 
 const railButton = (label: string) =>
   document.querySelector<HTMLButtonElement>(
@@ -343,7 +383,9 @@ describe('describeDefaultModel', () => {
         },
       }),
     );
-    expect(context?.model?.value).toBe('gpt-5.5');
+    expect(context?.model).toBe('gpt-5.5');
+    expect(context?.efforts).toEqual(['low', 'medium', 'high']);
+    expect(context?.picked).toBe(false);
     expect(context?.pinnedModel).toBeNull();
   });
 });
@@ -408,20 +450,24 @@ describe('the trigger', () => {
     expect(trigger().getAttribute('data-state')).toBe('open');
   });
 
-  test('shows a ChatGPT effort in muted text after the model', async () => {
+  test('starts with the vendor mark of the model in use', async () => {
     mocks.get.mockResolvedValue(
-      chatGptSelection({
-        selectedModelConfigId: 'chatgpt',
-        selectedModel: 'gpt-6-astra',
-        selectedEffort: 'high',
-      }),
+      connectionSelection({ selectedModelConfigId: 'official' }),
     );
     await render(null);
-    expect(trigger().textContent).toBe('gpt-6-astra高');
-    const effort = [...trigger().querySelectorAll('span')].find(
-      (span) => span.textContent === '高',
+    expect(
+      trigger().querySelector('[data-vendor]')?.getAttribute('data-vendor'),
+    ).toBe('anthropic');
+
+    mocks.get.mockResolvedValue(
+      chatGptSelection({ selectedModelConfigId: 'chatgpt' }),
     );
-    expect(effort?.className).toContain('text-muted-foreground');
+    await rerender();
+    expect(
+      trigger().querySelector('[data-vendor]')?.getAttribute('data-vendor'),
+    ).toBe('openai');
+    // The effort is a control of its own, not part of the model's label.
+    expect(trigger().textContent).toBe('gpt-6.1-sol');
   });
 
   test('the full label shows in a tooltip', async () => {
@@ -495,6 +541,37 @@ describe('the panel', () => {
       'glm-4.6',
     ]);
     expect(checked()[0].querySelector('svg.lucide-check')).not.toBeNull();
+  });
+
+  test('rows and the rail carry vendor marks, with a monogram for an unknown relay', async () => {
+    const base = connectionSelection();
+    mocks.get.mockResolvedValue({
+      ...base,
+      options: [
+        ...base.options,
+        {
+          id: 'relay',
+          name: 'Relay 中转',
+          kind: 'third_party',
+          enabled: true,
+          model: 'house-model',
+          usable: true,
+          models: [{ id: 'house-model', hidden: false }],
+        },
+      ],
+    });
+    await render(null);
+    await open();
+    const vendor = (element: Element | null | undefined) =>
+      element?.querySelector('[data-vendor]')?.getAttribute('data-vendor') ??
+      null;
+    expect(vendor(row('opus'))).toBe('anthropic');
+    expect(vendor(row('glm-4.6'))).toBe('zhipu');
+    expect(vendor(railButton('Claude 官方'))).toBe('anthropic');
+    expect(vendor(railButton('GLM'))).toBe('zhipu');
+    // Nothing says who makes it: the first letter of the connection.
+    expect(vendor(row('house-model'))).toBeNull();
+    expect(railButton('Relay 中转')?.textContent).toBe('R');
   });
 
   test('the rail filters by connection and 全部 brings everything back', async () => {
@@ -574,7 +651,7 @@ describe('the panel', () => {
       { agentId: 'session-1', modelConfigId: 'glm' },
     );
     expect(mocks.toastSuccess).toHaveBeenCalledWith(
-      '已切换到「GLM」，从下一条消息开始生效',
+      '已切换到「GLM · glm-5.3（1M）」，从下一条消息开始生效',
     );
     expect(trigger().textContent).toBe('glm-5.3');
     // The panel closes once something is picked.
@@ -724,10 +801,18 @@ describe('ChatGPT models', () => {
       /主力编码|旗舰|遗留|配置默认/,
     );
     expect(detail('gpt-6-astra')).toBe('ChatGPT 订阅');
-    // Its mark reads G, not the C a Claude connection has.
-    expect(railButton('ChatGPT 订阅')?.textContent).toBe('G');
-    expect(railButton('Claude 官方')?.textContent).toBe('C');
-    expect(document.body.textContent).toContain('只调整推理档位不会');
+    // ChatGPT shows the OpenAI mark, Claude the Anthropic one.
+    expect(
+      railButton('ChatGPT 订阅')
+        ?.querySelector('[data-vendor]')
+        ?.getAttribute('data-vendor'),
+    ).toBe('openai');
+    expect(
+      railButton('Claude 官方')
+        ?.querySelector('[data-vendor]')
+        ?.getAttribute('data-vendor'),
+    ).toBe('anthropic');
+    expect(document.body.textContent).toContain('推理等级在输入框旁调整');
   });
 
   test('a stored model the account list lacks stays visible and checked', async () => {
@@ -804,7 +889,7 @@ describe('ChatGPT models', () => {
       },
     );
     expect(mocks.toastSuccess).toHaveBeenCalledWith(
-      expect.stringContaining('该模型不支持 最高，档位已恢复为默认（中）'),
+      expect.stringContaining('该模型不支持最高，推理等级已恢复为默认（中）'),
     );
   });
 
@@ -925,66 +1010,202 @@ describe('ChatGPT models', () => {
 });
 
 describe('reasoning effort', () => {
-  test('is not offered without a ChatGPT login, or while the pool picks', async () => {
+  test('appears only when the model in use takes efforts', async () => {
+    // Older servers list no efforts for a connection's models.
     mocks.get.mockResolvedValue(connectionSelection());
     await render(null);
-    await open();
-    expect(effortGroup()).toBeNull();
+    expect(effortTrigger()).toBeNull();
 
-    mocks.get.mockResolvedValue(chatGptSelection());
+    // Following the pool: no model, so no effort.
+    mocks.get.mockResolvedValue(effortSelection());
     await rerender();
-    await open();
-    expect(effortGroup()).toBeNull();
-    expect(trigger().textContent).toBe('自动 · 2 个');
+    expect(effortTrigger()).toBeNull();
+
+    mocks.get.mockResolvedValue(
+      effortSelection({
+        selectedModelConfigId: 'official',
+        selectedModel: 'haiku',
+      }),
+    );
+    await rerender();
+    expect(effortTrigger()).toBeNull();
+
+    mocks.get.mockResolvedValue(
+      effortSelection({ selectedModelConfigId: 'official' }),
+    );
+    await rerender();
+    expect(effortTrigger()).not.toBeNull();
+    // It follows the model control.
+    const buttons = [...container.querySelectorAll('button')];
+    expect(buttons.indexOf(effortTrigger()!)).toBeGreaterThan(
+      buttons.indexOf(trigger()),
+    );
   });
 
-  test('sits under the model in use, lists its levels low to high and saves a pick', async () => {
+  test('shows the level in use, the model default until one is picked', async () => {
     mocks.get.mockResolvedValue(
-      chatGptSelection({
-        selectedModelConfigId: 'chatgpt',
-        selectedModel: 'gpt-5.5',
+      effortSelection({ selectedModelConfigId: 'official' }),
+    );
+    await render(null);
+    expect(effortTrigger()!.textContent).toBe('超高');
+    expect(effortTrigger()!.getAttribute('aria-label')).toBe('选择推理等级');
+    await act(async () => effortTrigger()!.focus());
+    expect(
+      document.querySelector('[data-slot="tooltip-content"]')?.textContent,
+    ).toContain('选择推理等级');
+
+    mocks.get.mockResolvedValue(
+      effortSelection({
+        selectedModelConfigId: 'official',
+        selectedEffort: 'low',
+      }),
+    );
+    await rerender();
+    expect(effortTrigger()!.textContent).toBe('低');
+  });
+
+  test('reads 选择推理等级 when no default level is known', async () => {
+    const base = effortSelection({ selectedModelConfigId: 'official' });
+    base.options[0].models![0] = {
+      id: 'opus',
+      hidden: false,
+      efforts: ['low', 'high'],
+    };
+    mocks.get.mockResolvedValue(base);
+    await render(null);
+    expect(effortTrigger()!.textContent).toBe('选择推理等级');
+  });
+
+  test('lists 默认 and the model levels, and saves a pick for the conversation', async () => {
+    mocks.get.mockResolvedValue(
+      effortSelection({
+        selectedModelConfigId: 'official',
+        selectedModel: 'sonnet',
       }),
     );
     mocks.put.mockResolvedValue(
-      chatGptSelection({
-        selectedModelConfigId: 'chatgpt',
-        selectedModel: 'gpt-5.5',
-        selectedEffort: 'high',
+      effortSelection({
+        selectedModelConfigId: 'official',
+        selectedModel: 'sonnet',
+        selectedEffort: 'medium',
       }),
     );
     await render('session-1');
-    // Following the model's default level.
-    expect(trigger().textContent).toBe('gpt-5.5中');
-    await open();
-    // Right after the checked row.
-    expect(checked()[0].nextElementSibling?.getAttribute('aria-label')).toBe(
-      '推理档位',
-    );
-    expect(chips().map((item) => item.textContent)).toEqual([
-      '默认 · 中',
+    await openEffort();
+    expect(effortItems().map((item) => item.textContent)).toEqual([
+      '默认 · 高',
       '低',
       '中',
       '高',
     ]);
-    expect(chip('default')?.getAttribute('aria-checked')).toBe('true');
-    await click(chip('high'));
+    expect(effortItem('默认 · 高')?.getAttribute('aria-checked')).toBe('true');
+    await click(effortItem('中'));
     expect(mocks.put).toHaveBeenCalledWith(
       '/api/groups/web%3Aws/model-selection',
       {
         agentId: 'session-1',
-        modelConfigId: 'chatgpt',
-        model: 'gpt-5.5',
-        effort: 'high',
+        modelConfigId: 'official',
+        model: 'sonnet',
+        effort: 'medium',
       },
     );
     expect(mocks.toastSuccess).toHaveBeenCalledWith(
-      '推理档位已设为高，从下一个请求开始生效',
+      '推理等级已设为中，从下一条消息开始生效',
     );
-    expect(trigger().textContent).toBe('gpt-5.5高');
-    expect(chip('high')?.getAttribute('aria-checked')).toBe('true');
+    expect(effortTrigger()!.textContent).toBe('中');
   });
 
-  test('only offers the levels the server lists for this user', async () => {
+  test('picking a level while on 默认 names the default connection and model', async () => {
+    const following = effortSelection({
+      default: {
+        source: 'default',
+        modelConfigId: 'official',
+        enabledCount: 2,
+        model: 'opus',
+        effort: 'high',
+      },
+    });
+    mocks.get.mockResolvedValue(following);
+    mocks.put.mockResolvedValue({
+      ...following,
+      selectedModelConfigId: 'official',
+      selectedModel: 'opus',
+      selectedEffort: 'max',
+    });
+    await render(null);
+    // The default's own level (an Agent's, say) wins over the model's.
+    expect(effortTrigger()!.textContent).toBe('高');
+    await openEffort();
+    // Already following the default: choosing it again sends nothing.
+    await click(effortItem('默认 · 高'));
+    expect(mocks.put).not.toHaveBeenCalled();
+    await openEffort();
+    await click(effortItem('最高'));
+    expect(mocks.put).toHaveBeenCalledWith(
+      '/api/groups/web%3Aws/model-selection',
+      {
+        agentId: null,
+        modelConfigId: 'official',
+        model: 'opus',
+        effort: 'max',
+      },
+    );
+  });
+
+  test('默认 clears a picked level', async () => {
+    mocks.get.mockResolvedValue(
+      chatGptSelection({
+        selectedModelConfigId: 'chatgpt',
+        selectedEffort: 'max',
+      }),
+    );
+    mocks.put.mockResolvedValue(
+      chatGptSelection({ selectedModelConfigId: 'chatgpt' }),
+    );
+    await render(null);
+    expect(effortTrigger()!.textContent).toBe('最高');
+    await openEffort();
+    await click(effortItem('默认 · 低'));
+    expect(mocks.put).toHaveBeenCalledWith(
+      '/api/groups/web%3Aws/model-selection',
+      { agentId: null, modelConfigId: 'chatgpt', model: null, effort: null },
+    );
+    expect(mocks.toastSuccess).toHaveBeenCalledWith(
+      '已恢复默认推理等级，从下一条消息开始生效',
+    );
+  });
+
+  test('focus that moved on while the menu closed stays where it went', async () => {
+    const pinned = effortSelection({
+      selectedModelConfigId: 'official',
+      selectedModel: 'sonnet',
+    });
+    mocks.get.mockResolvedValue(pinned);
+    mocks.put.mockResolvedValue({ ...pinned, selectedEffort: 'medium' });
+    await render(null);
+    const elsewhere = document.createElement('input');
+    document.body.append(elsewhere);
+    await openEffort();
+    // The closed menu hands focus back on a timer; hold it.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      await act(async () => effortItem('中')!.click());
+      expect(document.querySelector('[role="menu"]')).toBeNull();
+      elsewhere.focus();
+      await act(async () => vi.runOnlyPendingTimers());
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(document.activeElement).toBe(elsewhere);
+
+    // Otherwise the menu returns focus to its trigger.
+    await openEffort();
+    await click(effortItem('高'));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(document.activeElement).toBe(effortTrigger());
+  });
+
+  test('a ChatGPT model lists the levels the server allows this user', async () => {
     const withUltra = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
     mocks.get.mockResolvedValue(
       chatGptSelection(
@@ -1002,8 +1223,8 @@ describe('reasoning effort', () => {
       ),
     );
     await render(null);
-    await open();
-    expect(chip('ultra')).not.toBeNull();
+    await openEffort();
+    expect(effortItem('极限')).toBeDefined();
 
     mocks.get.mockResolvedValue(
       chatGptSelection({
@@ -1012,76 +1233,80 @@ describe('reasoning effort', () => {
       }),
     );
     await rerender();
-    await open();
-    expect(chip('ultra')).toBeNull();
+    await openEffort();
+    expect(effortItem('极限')).toBeUndefined();
   });
 
-  test('the default chip clears a picked effort', async () => {
+  test('a model switch keeps a level the new model takes, and clears one it does not', async () => {
     mocks.get.mockResolvedValue(
-      chatGptSelection({
-        selectedModelConfigId: 'chatgpt',
-        selectedEffort: 'max',
+      effortSelection({
+        selectedModelConfigId: 'official',
+        selectedEffort: 'xhigh',
       }),
     );
     mocks.put.mockResolvedValue(
-      chatGptSelection({ selectedModelConfigId: 'chatgpt' }),
+      effortSelection({
+        selectedModelConfigId: 'official',
+        selectedModel: 'sonnet',
+      }),
     );
     await render(null);
     await open();
-    await click(chip('default'));
+    await click(row('sonnet'));
     expect(mocks.put).toHaveBeenCalledWith(
       '/api/groups/web%3Aws/model-selection',
-      { agentId: null, modelConfigId: 'chatgpt', model: null, effort: null },
+      {
+        agentId: null,
+        modelConfigId: 'official',
+        model: 'sonnet',
+        effort: null,
+      },
     );
     expect(mocks.toastSuccess).toHaveBeenCalledWith(
-      '已恢复默认推理档位，从下一个请求开始生效',
+      expect.stringContaining('该模型不支持超高，推理等级已恢复为默认（高）'),
     );
-  });
 
-  test('a ChatGPT default sits under the default row and pins the login when set', async () => {
-    const defaulted = chatGptSelection({
-      default: {
-        source: 'default',
-        modelConfigId: 'chatgpt',
-        enabledCount: 2,
-      },
-    });
-    mocks.get.mockResolvedValue(defaulted);
-    mocks.put.mockResolvedValue({
-      ...defaulted,
-      selectedModelConfigId: 'chatgpt',
-      selectedEffort: 'high',
-    });
-    await render(null);
-    expect(trigger().textContent).toBe('gpt-6.1-sol低');
+    // 高 is a level sonnet has too.
+    mocks.get.mockResolvedValue(
+      effortSelection({
+        selectedModelConfigId: 'official',
+        selectedEffort: 'high',
+      }),
+    );
+    await rerender();
     await open();
-    expect(checked().map((item) => item.getAttribute('title'))).toEqual([
-      '默认 · gpt-6.1-sol',
-    ]);
-    expect(document.body.textContent).toContain('使用模型配置里设为默认的模型');
-    expect(checked()[0].nextElementSibling?.getAttribute('aria-label')).toBe(
-      '推理档位',
-    );
-    await click(chip('high'));
-    expect(mocks.put).toHaveBeenCalledWith(
+    await click(row('sonnet'));
+    expect(mocks.put).toHaveBeenLastCalledWith(
       '/api/groups/web%3Aws/model-selection',
-      { agentId: null, modelConfigId: 'chatgpt', model: null, effort: 'high' },
+      {
+        agentId: null,
+        modelConfigId: 'official',
+        model: 'sonnet',
+        effort: 'high',
+      },
     );
   });
 
-  test('cannot be changed when the login must be redone', async () => {
+  test('is read-only without Modify, and while the login must be redone', async () => {
+    mocks.get.mockResolvedValue(
+      chatGptSelection({ selectedModelConfigId: 'chatgpt' }),
+    );
+    await render(null, false);
+    expect(effortTrigger()!.disabled).toBe(true);
+    // The level in use is still readable.
+    expect(effortTrigger()!.textContent).toBe('低');
+
     mocks.get.mockResolvedValue(
       chatGptSelection(
         { selectedModelConfigId: 'chatgpt' },
         { needsReauth: true },
       ),
     );
-    await render(null);
-    await open();
-    expect(chips().every((item) => item.disabled)).toBe(true);
+    await rerender();
+    expect(effortTrigger()!.disabled).toBe(true);
   });
 
-  test('says why when the model in use is not in the account list', async () => {
+  test('is hidden when the model in use is not in the account list', async () => {
     mocks.get.mockResolvedValue(
       chatGptSelection({
         selectedModelConfigId: 'chatgpt',
@@ -1090,28 +1315,26 @@ describe('reasoning effort', () => {
     );
     await render(null);
     expect(trigger().textContent).toBe('gpt-unlisted');
-    await open();
-    expect(effortGroup()).toBeNull();
-    expect(document.body.textContent).toContain(
-      '当前模型不在账号的模型列表里，无法设置推理档位',
-    );
+    expect(effortTrigger()).toBeNull();
   });
 
-  test('a refused pick reloads what the server holds', async () => {
+  test('a refused level reads as such and reloads what the server holds', async () => {
     mocks.get.mockResolvedValue(
-      chatGptSelection({ selectedModelConfigId: 'chatgpt' }),
+      effortSelection({ selectedModelConfigId: 'official' }),
     );
-    mocks.put.mockRejectedValue(
-      new Error('推理档位 ultra 仅限具备系统配置权限的用户选择'),
-    );
+    mocks.put.mockRejectedValue({
+      status: 400,
+      message: 'effort not supported',
+      body: { code: 'EFFORT_NOT_SUPPORTED' },
+    });
     await render(null);
-    await open();
-    await click(chip('max'));
+    await openEffort();
+    await click(effortItem('低'));
     expect(mocks.toastError).toHaveBeenCalledWith(
-      '推理档位 ultra 仅限具备系统配置权限的用户选择',
+      '这个模型不支持所选的推理等级，请重新选择',
     );
     // Picked again from the server's state.
     expect(mocks.get).toHaveBeenCalledTimes(2);
-    expect(trigger().textContent).toBe('gpt-6.1-sol低');
+    expect(effortTrigger()!.textContent).toBe('超高');
   });
 });
