@@ -25,7 +25,10 @@ export function PageTopBar({
       )}
     >
       {title && (
-        <h1 className="shrink-0 truncate text-title-sm text-foreground">
+        <h1
+          data-native-title
+          className="shrink-0 truncate text-title-sm text-foreground"
+        >
           {title}
         </h1>
       )}

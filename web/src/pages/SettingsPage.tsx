@@ -25,6 +25,7 @@ import { UserChannelsSection } from '../components/settings/UserChannelsSection'
 import { UsersPage } from './UsersPage';
 import { MonitorPage, MonitorRefreshButton } from './MonitorPage';
 import type { SettingsTab } from '../components/settings/types';
+import { useNativeNavBar } from '@/native/nav-bar';
 
 const BillingPage = lazy(() => import('./BillingPage'));
 
@@ -82,6 +83,13 @@ export function SettingsPage() {
   );
   const [searchParams, setSearchParams] = useSearchParams();
   const [navOpen, setNavOpen] = useState(false);
+  useNativeNavBar({
+    action: {
+      symbol: 'list.bullet',
+      title: '设置分区',
+      onPress: () => setNavOpen(true),
+    },
+  });
 
   const hasSystemConfigPermission =
     currentUser?.role === 'admin' ||
@@ -209,8 +217,11 @@ export function SettingsPage() {
       data-settings-page="true"
       className="min-h-full lg:flex lg:items-start"
     >
-      {/* Mobile header */}
-      <div className="sticky top-0 z-10 flex h-12 items-center gap-2 border-b border-surface-border bg-background/90 px-2 backdrop-blur lg:hidden">
+      {/* Mobile header; in the iOS shell the native bar replaces it. */}
+      <div
+        data-native-replaced
+        className="sticky top-0 z-10 flex h-12 items-center gap-2 border-b border-surface-border bg-background/90 px-2 backdrop-blur lg:hidden"
+      >
         <IconButton
           label="打开导航"
           hideTooltip

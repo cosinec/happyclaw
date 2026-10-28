@@ -77,6 +77,7 @@ import {
   type WorkspaceMemoryVersionsResult,
   type WorkspaceSummary,
 } from '@/features/workspace-memory/model';
+import { useNativeNavBar } from '@/native/nav-bar';
 
 type KindFilter = 'all' | WorkspaceMemoryKind;
 
@@ -262,6 +263,11 @@ export function MemoryPage() {
   const [saving, setSaving] = useState(false);
   const [conflict, setConflict] = useState<RevisionConflict | null>(null);
   const [showDetail, setShowDetail] = useState(false);
+  useNativeNavBar(
+    isMobile && showDetail
+      ? { title: '记忆详情', onBack: () => setShowDetail(false) }
+      : null,
+  );
 
   const [createOpen, setCreateOpen] = useState(false);
   const [createDraft, setCreateDraft] = useState<Draft>(EMPTY_DRAFT);
@@ -1171,6 +1177,7 @@ export function MemoryPage() {
                   <div className="flex min-h-12 flex-wrap items-center gap-2 border-b border-surface-border px-3 py-2">
                     {isMobile && (
                       <IconButton
+                        data-native-replaced
                         label="返回记忆列表"
                         icon={<ArrowLeft />}
                         onClick={() => setShowDetail(false)}

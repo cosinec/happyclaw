@@ -918,6 +918,26 @@ html[data-native-chrome='active'] .pwa-bottom-guard {
   display: none;
 }
 
+/* The native navigation bar reports the area from the screen top to its
+   bottom edge as --native-top (status bar included). Pages mark the title and
+   back button it replaces; marked elements stay as they are in a browser.
+     data-native-title           hidden
+     data-native-title="space"   invisible but keeps its flex space
+     data-native-replaced        hidden (a web back button or mobile header) */
+html[data-native-nav='visible'] .safe-area-top {
+  padding-top: max(env(safe-area-inset-top), var(--native-top, 0px));
+}
+
+html[data-native-nav='visible']
+  [data-native-title]:not([data-native-title='space']),
+html[data-native-nav='visible'] [data-native-replaced] {
+  display: none;
+}
+
+html[data-native-nav='visible'] [data-native-title='space'] {
+  visibility: hidden;
+}
+
 /* Bottom padding for content above floating nav — accounts for safe area */
 /* A utility (not a bare class) so responsive overrides such as lg:pb-0 win. */
 @utility pb-nav-safe {
