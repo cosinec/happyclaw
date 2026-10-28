@@ -76,7 +76,7 @@ export function ContextUsageRing({
           aria-label={label}
           tabIndex={0}
           className={cn(
-            'inline-flex items-center gap-1 rounded-sm text-caption font-medium tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring/50',
+            'inline-flex items-center gap-1 rounded-sm text-label font-medium tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring/50',
             'animate-in fade-in-0 duration-200 motion-reduce:animate-none',
             tone,
           )}

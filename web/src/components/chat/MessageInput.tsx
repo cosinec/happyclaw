@@ -117,9 +117,9 @@ interface MessageInputProps {
   /** Conversation-scoped model picker shown in the action bar. */
   modelSelector?: ReactNode;
   /**
-   * How full the conversation's context is, under the card on the right
-   * while docked and wider than a phone. Its row is kept even while this
-   * renders nothing, so the ring appearing never moves the composer.
+   * How full the conversation's context is, in the toolbar after the tools
+   * while docked and wider than a phone (a phone's row is full of touch
+   * targets).
    */
   contextUsage?: ReactNode;
   /** Stop the active run when the composer has no follow-up to send. */
@@ -982,6 +982,9 @@ export const MessageInput = memo(function MessageInput({
                 onResetSession={onResetSession}
                 onToggleTerminal={onToggleTerminal}
                 foldActions={foldToolbarActions}
+                contextUsage={
+                  !centered && !isPhoneWidth ? contextUsage : undefined
+                }
                 modelSelector={modelSelector}
                 // A draft turns the primary action into queue/send; keep
                 // stop reachable next to it.
@@ -1019,15 +1022,6 @@ export const MessageInput = memo(function MessageInput({
             </div>
           </div>
         </div>
-        {/* A phone's row is full of touch targets; the ring stays off it. */}
-        {contextUsage && !centered && !isPhoneWidth && (
-          <div
-            data-composer-footer
-            className="mt-1 flex h-5 items-center justify-end px-1"
-          >
-            {contextUsage}
-          </div>
-        )}
       </div>
 
       {attachments.previewIndex !== null &&
