@@ -96,6 +96,40 @@ const harnessBacks = (page: Page) =>
         .composerHarness.backs,
   );
 
+/**
+ * Where a run status could move things: the card's top, the list's bottom
+ * edge and the room it keeps below its last row.
+ */
+const runLayout = async (page: Page) => ({
+  cardTop: (await page.locator('[data-composer-card]').boundingBox())!.y,
+  ...(await page.evaluate(() => {
+    const scroller = [
+      ...document.querySelectorAll<HTMLElement>(
+        '[data-hc-chat-view] .overflow-y-auto',
+      ),
+    ].sort((a, b) => b.scrollHeight - a.scrollHeight)[0];
+    return { listBottom: scroller.getBoundingClientRect().bottom };
+  })),
+  room: await listRoomBelow(page),
+});
+
+/** A run starting and ending leaves the composer and the list where they were. */
+async function expectSteadyAcrossRun(page: Page) {
+  await openHarness(page);
+  const bar = page.locator('[data-composer-status-bar]');
+  // Reserved before any run.
+  await expect(bar).toHaveCount(1);
+  const before = await runLayout(page);
+  await callHarness(page, 'setRunning', true);
+  await expect(
+    page.getByRole('button', { name: '停止当前运行' }),
+  ).toBeVisible();
+  expect(await runLayout(page)).toEqual(before);
+  await callHarness(page, 'setRunning', false);
+  await expect(page.getByRole('button', { name: '发送消息' })).toBeVisible();
+  expect(await runLayout(page)).toEqual(before);
+}
+
 /** A row of the phone's + sheet. */
 const plusAction = (page: Page, name: string) =>
   page
@@ -623,32 +657,40 @@ test.describe('desktop composer', () => {
     await expect(composer(page)).toHaveText('帮我定位和修复一个 Bug');
   });
 
-  test('the run status bar sits right above the card and never moves it', async ({
+  test('the run status row sits right above the card, reserved run or not', async ({
     page,
   }) => {
     await page.goto(`${HARNESS_PATH}?statusbar=1`);
     const card = page.locator('[data-composer-card]');
     const bar = page.locator('[data-composer-status-bar]');
     await expect(card).toBeVisible();
-    // Idle: no row is reserved.
-    await expect(bar).toHaveCount(0);
+    // Idle: the row is there, empty.
+    await expect(bar).toHaveCount(1);
+    await expect(bar.getByTestId('status-bar-probe')).toHaveCount(0);
     const idle = (await card.boundingBox())!;
-
-    await callHarness(page, 'setStatusRunning', true);
-    await expect(bar).toBeVisible();
-    await expect(bar.getByTestId('status-bar-probe')).toBeVisible();
-    // The card stays where it was; the bar grows upward from it.
-    expect(await card.boundingBox()).toEqual(idle);
-    const box = (await bar.boundingBox())!;
-    const gap = idle.y - (box.y + box.height);
+    const row = (await bar.boundingBox())!;
+    const gap = idle.y - (row.y + row.height);
     expect(gap).toBeGreaterThanOrEqual(0);
     expect(gap).toBeLessThan(10);
-    expect(Math.abs(box.x - idle.x)).toBeLessThan(1);
-    expect(Math.abs(box.width - idle.width)).toBeLessThan(1);
+    expect(Math.abs(row.x - idle.x)).toBeLessThan(1);
+    expect(Math.abs(row.width - idle.width)).toBeLessThan(1);
+
+    await callHarness(page, 'setStatusRunning', true);
+    await expect(bar.getByTestId('status-bar-probe')).toBeVisible();
+    // Showing the status moves neither its row nor the card.
+    expect(await bar.boundingBox()).toEqual(row);
+    expect(await card.boundingBox()).toEqual(idle);
 
     await callHarness(page, 'setStatusRunning', false);
-    await expect(bar).toHaveCount(0);
+    await expect(bar.getByTestId('status-bar-probe')).toHaveCount(0);
+    expect(await bar.boundingBox()).toEqual(row);
     expect(await card.boundingBox()).toEqual(idle);
+  });
+
+  test('a run starting and ending moves neither the card nor the list', async ({
+    page,
+  }) => {
+    await expectSteadyAcrossRun(page);
   });
 
   test('back in a narrow desktop window steps to the session list', async ({
@@ -940,13 +982,15 @@ test.describe('touch composer', () => {
           ).getPropertyValue('--composer-dock-height') || '0',
         ),
       );
+    // Reserved before any run, and counted in what the list keeps free.
+    await expect(bar).toHaveCount(1);
     const idleDock = await dockHeight();
-    expect(idleDock).toBeGreaterThan(0);
-    await callHarness(page, 'setStatusRunning', true);
-    await expect(bar).toBeVisible();
-    // The list keeps clear of it: the dock's published height grows by it.
     const barHeight = (await bar.boundingBox())!.height;
-    await expect.poll(dockHeight).toBeGreaterThanOrEqual(idleDock + barHeight);
+    expect(idleDock).toBeGreaterThan(barHeight);
+    await callHarness(page, 'setStatusRunning', true);
+    await expect(bar.getByTestId('status-bar-probe')).toBeVisible();
+    // The same room while a run shows, and after it ends.
+    expect(await dockHeight()).toBe(idleDock);
     const before = [(await bar.boundingBox())!, (await card.boundingBox())!];
     await simulateKeyboard(page, 300);
     await expect
@@ -955,6 +999,12 @@ test.describe('touch composer', () => {
     // Bar and card move together.
     const after = (await bar.boundingBox())!;
     expect(Math.round(before[0].y - after.y)).toBe(300);
+  });
+
+  test('a run starting and ending moves neither the dock nor the list', async ({
+    page,
+  }) => {
+    await expectSteadyAcrossRun(page);
   });
 
   test('back on a phone goes straight to the list, from a session too', async ({

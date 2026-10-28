@@ -437,19 +437,19 @@ describe('status bar', () => {
     />
   );
 
-  test('a docked composer shows it right above the card while a run is active', async () => {
-    await render(view({ isRunning: false }));
-    // Idle: nothing reserved.
-    expect(bar()).toBeNull();
-    await render(view({ isRunning: true }));
-    expect(bar()!.querySelector('[data-testid="status"]')).not.toBeNull();
-    // Directly above the card's anchor, at a fixed height.
-    expect(
-      bar()!.nextElementSibling!.contains(
-        container!.querySelector('[data-composer-card]'),
-      ),
-    ).toBe(true);
-    expect(bar()!.classList).toContain('h-8');
+  test('a docked composer keeps its row right above the card, run or not', async () => {
+    for (const isRunning of [false, true, false]) {
+      await render(view({ isRunning }));
+      // Reserved at a fixed height whatever the run does.
+      expect(bar()!.querySelector('[data-testid="status"]')).not.toBeNull();
+      expect(bar()!.classList).toContain('h-8');
+      // Directly above the card's anchor.
+      expect(
+        bar()!.nextElementSibling!.contains(
+          container!.querySelector('[data-composer-card]'),
+        ),
+      ).toBe(true);
+    }
   });
 
   test('the empty conversation hero has none', async () => {
