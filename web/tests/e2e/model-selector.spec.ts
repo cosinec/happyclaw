@@ -84,8 +84,20 @@ async function openHarness(page: Page, initial: Partial<Selection> = {}) {
     await route.fulfill({ json: payload(state) });
   });
   await page.goto(HARNESS_PATH);
+  await openComposerCard(page);
   await expect(modelButton(page)).toBeVisible();
   return { puts, state };
+}
+
+/**
+ * A phone's composer rests as a one-line pill; the model sits in the card
+ * it opens into when its text gets focus.
+ */
+async function openComposerCard(page: Page) {
+  await expect(page.locator('[data-hc-composer]')).toBeVisible();
+  if ((await page.locator('[data-composer-dock="pill"]').count()) === 0) return;
+  await page.locator('[data-hc-composer] [data-composer-editor]').click();
+  await expect(page.locator('[data-composer-dock="card"]')).toHaveCount(1);
 }
 
 const modelButton = (page: Page) =>
@@ -108,8 +120,15 @@ async function expectRowFits(page: Page) {
     const rowBox = row.getBoundingClientRect();
     const send = row.querySelector('button[aria-label]:last-of-type');
     const sendBox = send?.getBoundingClientRect();
+    // Boxes, not scrollWidth: a phone's padded touch targets reach past
+    // the row without taking any room in it.
+    const right = Math.max(
+      ...[...row.querySelectorAll<HTMLElement>('*')]
+        .filter((element) => element.offsetParent !== null)
+        .map((element) => element.getBoundingClientRect().right),
+    );
     return {
-      overflow: row.scrollWidth - row.clientWidth,
+      overflow: right - rowBox.right,
       sendInside:
         !!sendBox &&
         sendBox.right <= window.innerWidth + 0.5 &&
@@ -151,7 +170,8 @@ test.describe('model slot in the composer toolbar', () => {
       selectedModel: 'gpt-6-astra',
       selectedEffort: 'high',
     });
-    const size = hasTouch ? 40 : 30;
+    // A phone's tools are cindy's 34px.
+    const size = hasTouch ? 34 : 30;
     for (const width of [412, 320]) {
       await page.setViewportSize({ width, height: 700 });
       await expect
@@ -218,6 +238,37 @@ test.describe('model slot in the composer toolbar', () => {
       return shown;
     });
     expect(visible).toBeGreaterThanOrEqual(8);
+  });
+});
+
+test.describe('phone model sheet', () => {
+  test('takes the bottom sheet look and closes when dragged down', async ({
+    page,
+    isMobile,
+  }) => {
+    test.skip(!isMobile, 'a phone opens the picker as a sheet');
+    await openHarness(page, {
+      selectedModelConfigId: 'chatgpt',
+      selectedModel: 'gpt-6-astra',
+      selectedEffort: 'high',
+    });
+    await modelButton(page).click();
+    const sheet = page.getByRole('dialog', { name: '选择模型' });
+    await expect(sheet).toBeVisible();
+    // Rounded top with a handle, without changes to the picker.
+    expect(
+      await sheet.evaluate(
+        (element) => getComputedStyle(element).borderTopLeftRadius,
+      ),
+    ).toBe('12px');
+    const handle = (await sheet.locator('[data-sheet-handle]').boundingBox())!;
+    await page.mouse.move(handle.x + handle.width / 2, handle.y + 10);
+    await page.mouse.down();
+    await page.mouse.move(handle.x + handle.width / 2, handle.y + 400, {
+      steps: 10,
+    });
+    await page.mouse.up();
+    await expect(sheet).toHaveCount(0);
   });
 });
 

@@ -105,3 +105,65 @@ describe('the + menu', () => {
     expect(plus().disabled).toBe(true);
   });
 });
+
+describe('on a phone', () => {
+  const sheetRows = () =>
+    Object.fromEntries(
+      [
+        ...document.querySelectorAll<HTMLButtonElement>(
+          '[data-composer-plus-sheet] button:not([aria-hidden])',
+        ),
+      ].map((row) => [row.textContent, row.disabled]),
+    );
+
+  test('+ opens a bottom sheet with the same actions, folder aside', async () => {
+    const onPickImages = vi.fn();
+    render({ phone: true, foldActions: true, uploading: true, onPickImages });
+    await act(async () => plus().click());
+    const sheet = document.querySelector('[data-composer-plus-sheet]')!;
+    expect(sheet.getAttribute('data-side')).toBe('bottom');
+    expect(sheetRows()).toEqual({
+      添加图片: false,
+      上传文件: true,
+      清除上下文: false,
+      终端: false,
+    });
+    // A row acts, then closes the sheet.
+    await act(async () =>
+      [...sheet.querySelectorAll('button')]
+        .find((row) => row.textContent === '添加图片')!
+        .click(),
+    );
+    expect(onPickImages).toHaveBeenCalledOnce();
+    expect(document.querySelector('[data-composer-plus-sheet]')).toBeNull();
+  });
+
+  test('the resting pill keeps only + and send, around the text', () => {
+    render({
+      phone: true,
+      collapsed: true,
+      modelSelector: <span data-testid="model" />,
+      contextUsage: <span data-testid="ring" />,
+    });
+    const toolbar = container!.querySelector('[data-composer-toolbar]')!;
+    // The toolbar box dissolves into the pill's row around the text.
+    expect(toolbar.classList).toContain('contents');
+    // The tools lead; the text and send follow in DOM order.
+    expect(
+      container!.querySelector('[data-composer-tools]')!.classList,
+    ).toContain('order-first');
+    expect(
+      [...container!.querySelectorAll('[data-composer-tools] button')].map(
+        (button) => button.getAttribute('aria-label'),
+      ),
+    ).toEqual(['添加文件']);
+    // The model and the ring stay mounted, out of sight.
+    expect(
+      container!.querySelector('[data-composer-model-slot]')!.classList,
+    ).toContain('hidden');
+    expect(container!.querySelector('[data-testid="model"]')).not.toBeNull();
+    expect(
+      container!.querySelector('[data-composer-context]')!.classList,
+    ).toContain('hidden');
+  });
+});

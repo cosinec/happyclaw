@@ -415,6 +415,99 @@ describe('conversation isolation', () => {
   });
 });
 
+describe('phone dock', () => {
+  test('rests as a pill and opens into the card with focus or content', async () => {
+    env.touch = true;
+    await render(
+      <MessageInput
+        groupJid="web:g1"
+        onSend={vi.fn()}
+        modelSelector={<span data-testid="model" />}
+      />,
+    );
+    const dock = () =>
+      container!
+        .querySelector('[data-hc-composer]')!
+        .getAttribute('data-composer-dock');
+    expect(dock()).toBe('pill');
+    // The model waits in the card, mounted.
+    expect(container!.querySelector('[data-testid="model"]')).not.toBeNull();
+
+    await act(async () => {
+      editor().commands.focus();
+    });
+    expect(dock()).toBe('card');
+    await act(async () => {
+      editor().commands.blur();
+    });
+    expect(dock()).toBe('pill');
+
+    // Something in it keeps the card open without focus.
+    await typeAtCaret('草稿');
+    await act(async () => {
+      editor().commands.blur();
+    });
+    expect(dock()).toBe('card');
+  });
+
+  test('a sheet the card opened does not fold it; leaving for the page does', async () => {
+    env.touch = true;
+    let expanded = true;
+    const view = () => (
+      <MessageInput
+        groupJid="web:g1"
+        onSend={vi.fn()}
+        // The model picker's trigger, its sheet open or not.
+        modelSelector={<button type="button" aria-expanded={expanded} />}
+      />
+    );
+    await render(view());
+    const dock = () =>
+      container!
+        .querySelector('[data-hc-composer]')!
+        .getAttribute('data-composer-dock');
+    const outside = document.body.appendChild(document.createElement('input'));
+    await act(async () => {
+      editor().commands.focus();
+    });
+    await act(async () => outside.focus());
+    expect(dock()).toBe('card');
+
+    expanded = false;
+    await render(view());
+    await act(async () => {
+      editor().commands.focus();
+    });
+    await act(async () => outside.focus());
+    expect(dock()).toBe('pill');
+    outside.remove();
+  });
+
+  test('publishes its height for the list it floats over', async () => {
+    env.touch = true;
+    container!.setAttribute('data-composer-dock-host', '');
+    await render(<MessageInput groupJid="web:g1" onSend={vi.fn()} />);
+    // The card and its 24px feathered edge; the keyboard lift separately.
+    expect(container!.style.getPropertyValue('--composer-dock-height')).toBe(
+      '24px',
+    );
+    expect(container!.style.getPropertyValue('--composer-dock-lift')).toContain(
+      'var(--keyboard-height',
+    );
+    env.touch = false;
+    await render(<MessageInput groupJid="web:g1" onSend={vi.fn()} />);
+    expect(container!.style.getPropertyValue('--composer-dock-height')).toBe(
+      '',
+    );
+    container!.removeAttribute('data-composer-dock-host');
+    expect(
+      container!
+        .querySelector('[data-hc-composer]')!
+        .hasAttribute('data-composer-dock'),
+    ).toBe(false);
+  });
+});
+
 describe('layout', () => {
   const view = (layout: 'docked' | 'centered', placeholder = 'a') => (
     <MessageInput

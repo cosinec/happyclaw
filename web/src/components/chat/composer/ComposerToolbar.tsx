@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import {
   FileUp,
   FolderUp,
@@ -21,16 +21,20 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
+import { cn } from '@/lib/utils';
 import { IconButton } from '../../common/IconButton';
 import { Shortcut } from '../../common/Shortcut';
 import { SendButton, type SendButtonGlyph } from './cindy/SendButton';
+import { ActionSheet, type SheetAction } from './ActionSheet';
 
 /**
  * Composer toolbar pill (cindy's dropdown tier): bare at rest, an outline and
- * hover fill on hover or while its menu is open.
+ * hover fill on hover or while its menu is open. A phone gets cindy's 34px
+ * tool button with a light fill and a hairline, its touch target padded to
+ * 44px; a touch tablet keeps 40px.
  */
 const COMPOSER_PILL =
-  'size-[30px] shrink-0 rounded-full border border-transparent text-muted-foreground hover:border-surface-border hover:bg-surface-hover hover:text-foreground data-[state=open]:border-surface-border data-[state=open]:bg-surface-hover pointer-coarse:size-10';
+  'relative size-[30px] shrink-0 rounded-full border border-transparent text-muted-foreground hover:border-surface-border hover:bg-surface-hover hover:text-foreground data-[state=open]:border-surface-border data-[state=open]:bg-surface-hover lg:pointer-coarse:size-10 phone:size-[34px] phone:border-surface-border phone:bg-muted phone:before:absolute phone:before:-inset-[5px]';
 
 interface ComposerToolbarProps {
   canAttach: boolean;
@@ -42,6 +46,13 @@ interface ComposerToolbarProps {
   onToggleTerminal?: () => void;
   /** A narrow row: reset and terminal move into the + menu. */
   foldActions?: boolean;
+  /** A phone: + opens a bottom sheet instead of a dropdown. */
+  phone?: boolean;
+  /**
+   * The resting phone pill: only + and the primary action show, laid out
+   * by the card around the editor (the toolbar box itself dissolves).
+   */
+  collapsed?: boolean;
   /**
    * The context ring, after the tools. Its slot keeps its width whether or
    * not the ring has data, so the ring appearing moves nothing.
@@ -64,6 +75,11 @@ interface ComposerToolbarProps {
   };
 }
 
+interface PlusAction extends SheetAction {
+  /** Only in the dropdown (a phone has no folder picker). */
+  desktopOnly?: boolean;
+}
+
 /**
  * cindy's toolbar: attach, reset and terminal on the left; the model, stop
  * and send on the right. The model trigger gives way first, so a narrow row
@@ -79,6 +95,8 @@ export function ComposerToolbar({
   onResetSession,
   onToggleTerminal,
   foldActions = false,
+  phone = false,
+  collapsed = false,
   contextUsage,
   modelSelector,
   showSideStop,
@@ -89,67 +107,125 @@ export function ComposerToolbar({
 }: ComposerToolbarProps) {
   const menuReset = foldActions && !!onResetSession;
   const menuTerminal = foldActions && !!onToggleTerminal;
+  // Named after what the menu offers.
+  const plusLabel = menuReset || menuTerminal ? '更多操作' : '添加文件';
+  const plusDisabled = uploading && !menuReset && !menuTerminal;
+
+  const attachActions: PlusAction[] = canAttach
+    ? [
+        // Images go inline with the message, not through the upload
+        // channel, so an upload in progress allows them.
+        { label: '添加图片', icon: ImageIcon, onSelect: onPickImages },
+        {
+          label: '上传文件',
+          icon: FileUp,
+          onSelect: onPickFiles,
+          disabled: uploading,
+        },
+        {
+          label: '上传文件夹',
+          icon: FolderUp,
+          onSelect: onPickFolder,
+          disabled: uploading,
+          desktopOnly: true,
+        },
+      ]
+    : [];
+  const sessionActions: PlusAction[] = [
+    ...(menuReset
+      ? [{ label: '清除上下文', icon: Paintbrush, onSelect: onResetSession! }]
+      : []),
+    ...(menuTerminal
+      ? [{ label: '终端', icon: TerminalSquare, onSelect: onToggleTerminal! }]
+      : []),
+  ];
+  const plusGroups = [attachActions, sessionActions].filter(
+    (group) => group.length > 0,
+  );
+  const [plusSheetOpen, setPlusSheetOpen] = useState(false);
+
   return (
     <div
       data-composer-toolbar
-      className="mt-[2px] flex min-w-0 items-center gap-1 select-none"
+      className={cn(
+        // Collapsed, the toolbar box dissolves so + and send sit in the
+        // pill's own row around the editor.
+        collapsed
+          ? 'contents'
+          : 'mt-[2px] flex min-w-0 items-center gap-1 select-none',
+      )}
     >
       {/* Fixed buttons: only the model slot gives way. */}
-      <div data-composer-tools className="flex shrink-0 items-center gap-1">
-        {(canAttach || menuReset || menuTerminal) && (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <IconButton
-                // Named after what the menu offers.
-                label={menuReset || menuTerminal ? '更多操作' : '添加文件'}
-                icon={<Plus />}
-                disabled={uploading && !menuReset && !menuTerminal}
-                tooltipSide="top"
-                className={COMPOSER_PILL}
-              />
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" side="top" className="w-44">
-              {canAttach && (
-                <>
-                  {/* Images go inline with the message, not through the
-                      upload channel, so an upload in progress allows them. */}
-                  <DropdownMenuItem onClick={onPickImages}>
-                    <ImageIcon />
-                    添加图片
-                  </DropdownMenuItem>
-                  <DropdownMenuItem disabled={uploading} onClick={onPickFiles}>
-                    <FileUp />
-                    上传文件
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    disabled={uploading}
-                    className="max-lg:hidden"
-                    onClick={onPickFolder}
-                  >
-                    <FolderUp />
-                    上传文件夹
-                  </DropdownMenuItem>
-                </>
-              )}
-              {canAttach && (menuReset || menuTerminal) && (
-                <DropdownMenuSeparator />
-              )}
-              {menuReset && (
-                <DropdownMenuItem onClick={onResetSession}>
-                  <Paintbrush />
-                  清除上下文
-                </DropdownMenuItem>
-              )}
-              {menuTerminal && (
-                <DropdownMenuItem onClick={onToggleTerminal}>
-                  <TerminalSquare />
-                  终端
-                </DropdownMenuItem>
-              )}
-            </DropdownMenuContent>
-          </DropdownMenu>
+      <div
+        data-composer-tools
+        className={cn(
+          'flex shrink-0 items-center gap-1',
+          // Collapsed, the tools lead the pill's row: + | text | send.
+          collapsed && 'order-first',
         )}
-        {onResetSession && !foldActions && (
+      >
+        {plusGroups.length > 0 &&
+          (phone ? (
+            // A phone lists the same actions as rows of a bottom sheet.
+            <ActionSheet
+              open={plusSheetOpen}
+              onOpenChange={setPlusSheetOpen}
+              title={plusLabel}
+              description="添加附件或管理当前会话"
+              groups={plusGroups.map((group) =>
+                group.filter((action) => !action.desktopOnly),
+              )}
+              data-composer-plus-sheet
+              trigger={
+                <IconButton
+                  label={plusLabel}
+                  icon={<Plus />}
+                  disabled={plusDisabled}
+                  hideTooltip
+                  className={COMPOSER_PILL}
+                />
+              }
+            />
+          ) : (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <IconButton
+                  label={plusLabel}
+                  icon={<Plus />}
+                  disabled={plusDisabled}
+                  tooltipSide="top"
+                  className={COMPOSER_PILL}
+                />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" side="top" className="w-44">
+                {plusGroups.map((group, index) => [
+                  index > 0 && (
+                    <DropdownMenuSeparator key={`separator-${index}`} />
+                  ),
+                  ...group.map(
+                    ({
+                      label,
+                      icon: Icon,
+                      onSelect,
+                      disabled,
+                      desktopOnly,
+                    }) => (
+                      <DropdownMenuItem
+                        key={label}
+                        disabled={disabled}
+                        className={desktopOnly ? 'max-lg:hidden' : undefined}
+                        onClick={onSelect}
+                      >
+                        <Icon />
+                        {label}
+                      </DropdownMenuItem>
+                    ),
+                  ),
+                ])}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ))}
+        {onResetSession && !foldActions && !collapsed && (
           <IconButton
             label="清除当前会话上下文"
             icon={<Paintbrush />}
@@ -158,7 +234,7 @@ export function ComposerToolbar({
             className={COMPOSER_PILL}
           />
         )}
-        {onToggleTerminal && !foldActions && (
+        {onToggleTerminal && !foldActions && !collapsed && (
           <IconButton
             label="终端"
             icon={<TerminalSquare />}
@@ -170,26 +246,33 @@ export function ComposerToolbar({
         {contextUsage && (
           <div
             data-composer-context
-            className="ml-1 flex h-[30px] w-[3.25rem] shrink-0 items-center"
+            className={cn(
+              'ml-1 flex h-[30px] w-[3.25rem] shrink-0 items-center',
+              collapsed && 'hidden',
+            )}
           >
             {contextUsage}
           </div>
         )}
       </div>
 
-      <div className="flex-1" />
+      {!collapsed && <div className="flex-1" />}
 
       {modelSelector && (
         // The padding keeps the triggers' focus rings inside the clip.
+        // Collapsed it stays mounted, only hidden, and keeps its state.
         <div
           data-composer-model-slot
-          className="-m-0.5 flex min-w-0 items-center justify-end gap-1 overflow-hidden p-0.5"
+          className={cn(
+            '-m-0.5 flex min-w-0 items-center justify-end gap-1 overflow-hidden p-0.5',
+            collapsed && 'hidden',
+          )}
         >
           {modelSelector}
         </div>
       )}
 
-      {showSideStop && (
+      {showSideStop && !collapsed && (
         <IconButton
           label="停止当前运行"
           icon={

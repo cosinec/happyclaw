@@ -527,9 +527,11 @@ async function recordFrames(page: Page) {
         gap: el.scrollHeight - el.scrollTop - el.clientHeight,
         shift: transform === 'none' ? 0 : new DOMMatrixReadOnly(transform).m42,
         animations: layer.getAnimations().length,
+        // Measured from where it sticks: below a phone's floating header.
         identityTop: identity
           ? identity.getBoundingClientRect().top -
-            el.getBoundingClientRect().top
+            el.getBoundingClientRect().top -
+            (Number.parseFloat(getComputedStyle(identity).top) || 0)
           : null,
       });
       if (probe.__recording) requestAnimationFrame(sample);

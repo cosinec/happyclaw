@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 
 const HARNESS_PATH = '/tests/e2e/composer-harness.html';
 // 2x2 PNG
@@ -57,6 +57,42 @@ const contextUsage = (
   model: usedTokens === null ? null : 'claude-opus-5-5',
   updatedAt: usedTokens === null ? null : new Date().toISOString(),
 });
+
+/**
+ * Room the message list keeps below its last row: its scroller's padding
+ * plus the content's, where a phone's floating dock reserves its height.
+ */
+const listRoomBelow = (page: Page) =>
+  page.evaluate(() => {
+    const scroller = [
+      ...document.querySelectorAll<HTMLElement>(
+        '[data-hc-chat-view] .overflow-y-auto',
+      ),
+    ].sort((a, b) => b.scrollHeight - a.scrollHeight)[0];
+    const content = scroller.querySelector<HTMLElement>(
+      ':scope > .overflow-y-clip > div',
+    )!;
+    return (
+      Number.parseFloat(getComputedStyle(scroller).paddingBottom) +
+      Number.parseFloat(getComputedStyle(content).paddingBottom)
+    );
+  });
+
+/** Waits for enter animations: a sliding sheet's handle is still moving. */
+const settleAnimations = (scope: Locator) =>
+  scope.evaluate((element) =>
+    Promise.all(
+      element
+        .getAnimations({ subtree: true })
+        .map((animation) => animation.finished.catch(() => undefined)),
+    ),
+  );
+
+/** A row of the phone's + sheet. */
+const plusAction = (page: Page, name: string) =>
+  page
+    .locator('[data-composer-plus-sheet]')
+    .getByRole('button', { name, exact: true });
 
 const callHarness = (page: Page, method: string, ...args: unknown[]) =>
   page.evaluate(
@@ -801,7 +837,7 @@ test.describe('touch composer', () => {
 
     // Clearing still asks first.
     await plus.click();
-    await page.getByRole('menuitem', { name: '清除上下文' }).click();
+    await plusAction(page, '清除上下文').click();
     const confirm = page.getByRole('alertdialog');
     await expect(confirm).toBeVisible();
     await confirm.getByRole('button', { name: '清除', exact: true }).click();
@@ -821,7 +857,7 @@ test.describe('touch composer', () => {
     await expect(composer(page)).toHaveText('还能输入');
 
     await plus.click();
-    await page.getByRole('menuitem', { name: '终端' }).click();
+    await plusAction(page, '终端').click();
     await expect(page.getByRole('dialog', { name: '终端' })).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(page.getByRole('dialog', { name: '终端' })).toHaveCount(0);
@@ -829,14 +865,14 @@ test.describe('touch composer', () => {
     // The terminal belongs to the main conversation only.
     await switchTo(page, 'a1');
     await plus.click();
-    await expect(
-      page.getByRole('menuitem', { name: '清除上下文' }),
-    ).toBeVisible();
-    await expect(page.getByRole('menuitem', { name: '终端' })).toHaveCount(0);
+    await expect(plusAction(page, '清除上下文')).toBeVisible();
+    await expect(plusAction(page, '终端')).toHaveCount(0);
     await page.keyboard.press('Escape');
 
-    // Wider than 480px the actions are buttons again.
+    // Wider than 480px the actions are buttons again, in the card the
+    // resting pill opens into.
     await page.setViewportSize({ width: 600, height: 839 });
+    await composer(page).click();
     await expect(
       toolbar.getByRole('button', { name: '清除当前会话上下文' }),
     ).toBeVisible();
@@ -963,20 +999,170 @@ test.describe('touch composer', () => {
     await expect.poll(padding).toBe('0px');
   });
 
-  test('phone header shows the run state and a 40px back button', async ({
+  test('a phone header floats over the conversation, with its actions in a ⋯ sheet', async ({
     page,
   }) => {
     await openHarness(page);
-    await expect(page.getByTestId('chat-run-indicator')).toHaveCount(0);
+    const header = page.locator('[data-hc-chat-view] header');
+    // Transparent and borderless; the conversation scrolls under it.
+    expect(
+      await header.evaluate((element) => [
+        getComputedStyle(element).position,
+        getComputedStyle(element).borderBottomWidth,
+      ]),
+    ).toEqual(['absolute', '0px']);
+    // A round 40px back button; the title centred at 16px, semibold.
+    const back = page.getByRole('button', { name: '返回' });
+    expect(await back.boundingBox()).toMatchObject({ width: 40, height: 40 });
+    expect(
+      await back.evaluate((element) => getComputedStyle(element).borderRadius),
+    ).not.toBe('0px');
+    const title = header.getByRole('heading', { name: '输入框测试工作区' });
+    const titleBox = (await title.boundingBox())!;
+    const viewport = page.viewportSize()!;
+    expect(
+      Math.abs(titleBox.x + titleBox.width / 2 - viewport.width / 2),
+    ).toBeLessThan(2);
+    expect(
+      await title.evaluate((element) => [
+        getComputedStyle(element).fontSize,
+        getComputedStyle(element).fontWeight,
+      ]),
+    ).toEqual(['16px', '600']);
+
+    // The run state shows in the streaming area, not the header; stop is
+    // the dock's 34px solid button.
     await callHarness(page, 'setRunning', true);
-    await expect(page.getByTestId('chat-run-indicator')).toBeVisible();
-    const back = await page.getByRole('button', { name: '返回' }).boundingBox();
-    expect(back!.width).toBeGreaterThanOrEqual(40);
-    expect(back!.height).toBeGreaterThanOrEqual(40);
-    const send = await page
+    await expect(page.getByTestId('chat-run-indicator')).toBeHidden();
+    const stop = (await page
       .getByRole('button', { name: '停止当前运行' })
-      .boundingBox();
-    expect(send!.width).toBeGreaterThanOrEqual(40);
+      .boundingBox())!;
+    expect([Math.round(stop.width), Math.round(stop.height)]).toEqual([34, 34]);
+    await callHarness(page, 'setRunning', false);
+
+    // ⋯ holds the workspace actions, the terminal and clearing the context.
+    await page.getByRole('button', { name: '更多选项' }).click();
+    const sheet = page.locator('[data-chat-options-sheet]');
+    await expect(sheet.getByRole('button')).toHaveText([
+      '工作区设置',
+      '渠道绑定',
+      '终端',
+      '清除上下文',
+    ]);
+    await sheet.getByRole('button', { name: '清除上下文' }).click();
+    const confirm = page.getByRole('alertdialog');
+    await expect(confirm).toBeVisible();
+    await confirm.getByRole('button', { name: '清除', exact: true }).click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { composerHarness: { resets: unknown[] } })
+              .composerHarness.resets,
+        ),
+      )
+      .toEqual([{ jid: 'web:e2e-composer', agentId: null }]);
+
+    // Dragging the sheet's handle down closes it (once it has slid in).
+    await page.getByRole('button', { name: '更多选项' }).click();
+    await expect(sheet).toBeVisible();
+    await settleAnimations(sheet);
+    const handle = (await sheet.locator('[data-sheet-handle]').boundingBox())!;
+    await page.mouse.move(handle.x + handle.width / 2, handle.y + 10);
+    await page.mouse.down();
+    await page.mouse.move(handle.x + handle.width / 2, handle.y + 160, {
+      steps: 8,
+    });
+    await page.mouse.up();
+    await expect(sheet).toHaveCount(0);
+  });
+
+  test('the context sheet opens at half the screen and drags to full', async ({
+    page,
+  }) => {
+    await openHarness(page);
+    await page.getByRole('button', { name: '展开上下文面板' }).click();
+    const sheet = page.getByTestId('mobile-context-sheet');
+    await expect(sheet).toHaveAttribute('data-snap', 'half');
+    const viewport = page.viewportSize()!;
+    const height = async () => Math.round((await sheet.boundingBox())!.height);
+    await expect.poll(height).toBe(Math.round(viewport.height * 0.56));
+
+    const handle = (await sheet.locator('[data-sheet-handle]').boundingBox())!;
+    await page.mouse.move(handle.x + handle.width / 2, handle.y + 10);
+    await page.mouse.down();
+    await page.mouse.move(handle.x + handle.width / 2, handle.y - 300, {
+      steps: 10,
+    });
+    await page.mouse.up();
+    await expect(sheet).toHaveAttribute('data-snap', 'full');
+    await expect.poll(height).toBe(viewport.height - 64);
+  });
+
+  test('a phone composer rests as a pill and opens into the card on tap', async ({
+    page,
+  }) => {
+    await openHarness(page);
+    const dock = page.locator('[data-hc-composer]');
+    const card = page.locator('[data-composer-card]');
+    await expect(dock).toHaveAttribute('data-composer-dock', 'pill');
+    const viewport = page.viewportSize()!;
+    const pill = (await card.boundingBox())!;
+    // 16px from the sides, 8px above the bottom edge, one line tall.
+    expect(Math.round(pill.x)).toBe(16);
+    expect(Math.round(viewport.width - pill.x - pill.width)).toBe(16);
+    expect(Math.round(viewport.height - pill.y - pill.height)).toBe(8);
+    expect(pill.height).toBeLessThan(56);
+    // + and send only: the model waits in the card.
+    await expect(
+      page.locator('[data-composer-tools]').getByRole('button'),
+    ).toHaveCount(1);
+    await expect(page.locator('[data-composer-model-slot]')).toBeHidden();
+    // Tools: 34px with a light fill and a hairline.
+    const plus = page.locator('[data-composer-tools] button').first();
+    expect(
+      await plus.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return [
+          element.getBoundingClientRect().width,
+          style.borderTopWidth,
+          style.backgroundColor === 'rgba(0, 0, 0, 0)',
+        ];
+      }),
+    ).toEqual([34, '1px', false]);
+    // The editor stays at 16px: iOS zooms into smaller text.
+    expect(
+      await composer(page).evaluate(
+        (element) => getComputedStyle(element).fontSize,
+      ),
+    ).toBe('16px');
+    // The message list keeps the dock's height free below its last row.
+    const dockBox = (await dock.boundingBox())!;
+    expect(await listRoomBelow(page)).toBeGreaterThanOrEqual(dockBox.height);
+
+    // A tap focuses the text and opens the card in the same gesture.
+    await composer(page).tap();
+    await expect(composer(page)).toBeFocused();
+    await expect(dock).toHaveAttribute('data-composer-dock', 'card');
+    await expect(page.locator('[data-composer-model-slot]')).toBeVisible();
+    const opened = (await card.boundingBox())!;
+    expect(opened.height).toBeGreaterThan(pill.height + 40);
+    await expect
+      .poll(() =>
+        card.evaluate((element) => getComputedStyle(element).borderRadius),
+      )
+      .toBe('30px');
+    // The list follows the taller dock.
+    await expect
+      .poll(
+        async () =>
+          (await listRoomBelow(page)) - (await dock.boundingBox())!.height,
+      )
+      .toBeGreaterThanOrEqual(0);
+
+    // Leaving the empty composer folds it back into the pill.
+    await page.locator('[data-hc-chat-view] h2').first().click();
+    await expect(dock).toHaveAttribute('data-composer-dock', 'pill');
   });
 });
 
