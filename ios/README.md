@@ -152,7 +152,7 @@ bridge.ready {session} ──────────────▶ nativeNavig
 | `bridge.ready`    | `session`                                                                    | Web 已提交原生布局                                                                                                      |
 | `chrome.tabs`     | `tabs[]`, `more[]`（`id/title/symbol/path`）                                 | `symbol` 为 SF Symbol；计费等过滤已在 Web 完成                                                                          |
 | `route.changed`   | `path`, `title`, `tabId`, `canGoBack`, `tabBar`, `nav?`, `modal?`            | `tabBar=false`：打开的会话、登录/初始化页；`nav`：`visible/title/back/action{id,title,symbol}`；`modal`：Web 弹窗打开中 |
-| `theme.changed`   | `scheme: light/dark`, `background?`（`#rrggbb`）                             | 原生 chrome 跟随 Web 主题和底色                                                                                         |
+| `theme.changed`   | `scheme: light/dark`, `background?`, `accent?`（`#rrggbb`）                  | 原生 chrome 跟随 Web 主题、底色和强调色（底栏选中色）；按服务器缓存，冷启动先用它铺底                                   |
 | `confirm.request` | `title`, `message`, `confirmText`, `cancelText`, `destructive`               | 来自 `confirmDialog()`                                                                                                  |
 | `menu.request`    | `title?`, `message?`, `items[]`（`id/title/symbol?/destructive?/disabled?`） | 原生操作菜单                                                                                                            |
 | `haptic`          | `style: light/medium/success/warning/error`                                  | 来自 `useHaptic`                                                                                                        |

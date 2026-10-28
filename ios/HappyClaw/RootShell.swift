@@ -96,6 +96,7 @@ struct RootShell: View {
               showsMore: !model.more.isEmpty,
               selectedSlot: model.selectedTabSlot,
               sheetOpen: model.isMoreSheetOpen,
+              accent: model.webAccent,
               onSelect: { model.selectTab($0) },
               onMore: { model.openMore() }
             )
@@ -106,6 +107,11 @@ struct RootShell: View {
               model.layoutChanged()
             }
             .transition(.move(edge: .bottom).combined(with: .opacity))
+          }
+
+          if model.isConnecting, model.recoveryReason == nil {
+            ConnectingView(server: model.server)
+              .transition(.opacity)
           }
 
           if let reason = model.recoveryReason {

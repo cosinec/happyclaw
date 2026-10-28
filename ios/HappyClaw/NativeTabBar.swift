@@ -13,6 +13,8 @@ struct NativeTabBar: UIViewRepresentable {
   let selectedSlot: String?
   /// Re-evaluates the selection when the overflow sheet closes.
   let sheetOpen: Bool
+  /// The web palette's accent; nil keeps the app's AccentColor.
+  let accent: RGBColor?
   let onSelect: (TabDeclaration) -> Void
   let onMore: () -> Void
 
@@ -30,6 +32,7 @@ struct NativeTabBar: UIViewRepresentable {
   func updateUIView(_ bar: UITabBar, context: Context) {
     let coordinator = context.coordinator
     coordinator.parent = self
+    bar.tintColor = accent.map { UIColor(red: $0.red, green: $0.green, blue: $0.blue, alpha: 1) }
 
     let signature = tabs.map { "\($0.id)|\($0.title)|\($0.symbol)" } + (showsMore ? ["more"] : [])
     if signature != coordinator.signature {

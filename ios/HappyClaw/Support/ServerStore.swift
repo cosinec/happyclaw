@@ -43,6 +43,7 @@ enum AppearanceStore {
   struct Appearance: Codable, Equatable {
     var scheme: ColorSchemeName
     var background: RGBColor?
+    var accent: RGBColor?
   }
 
   private static func key(_ id: UUID) -> String { "appearance.\(id.uuidString)" }

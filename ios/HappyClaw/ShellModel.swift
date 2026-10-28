@@ -30,6 +30,8 @@ final class ShellModel {
   private(set) var webScheme: ColorSchemeName?
   /// Page background, so the navigation bar matches whatever palette is on.
   private(set) var webBackground: RGBColor?
+  /// Palette accent, tints the system tab bar's selection.
+  private(set) var webAccent: RGBColor?
   private(set) var webBuild: String?
   /// What the web said it handles in bridge.hello.
   private(set) var webCapabilities: Set<String> = []
@@ -47,8 +49,16 @@ final class ShellModel {
   /// Replaced when the active server changes (its data store differs).
   private(set) var web: WebController
   @ObservationIgnored private var handshakeTimer: Task<Void, Never>?
+  @ObservationIgnored private var loadTimer: Task<Void, Never>?
+  /// A top-level load has run long enough to show 「正在连接…」.
+  private(set) var isConnecting = false
 
   private static let handshakeTimeout: Duration = .seconds(10)
+  /// Below this a load finishes without any indicator flashing.
+  private static let connectingDelay: Duration = .milliseconds(600)
+  /// An unreachable LAN address can hang for a minute before the network
+  /// stack gives up; the recovery page is more useful long before that.
+  private static let loadTimeout: Duration = .seconds(15)
   private static let log = Logger(subsystem: Bundle.main.bundleIdentifier ?? "HappyClaw", category: "bridge")
 
   init() {
@@ -159,15 +169,38 @@ final class ShellModel {
     let appearance = AppearanceStore.load(instance.id)
     webScheme = appearance?.scheme
     webBackground = appearance?.background
+    webAccent = appearance?.accent
     web.setPlaceholder(appearance?.background)
     apply(session.retry())
     web.load(instance.address)
+    beginLoad()
+  }
+
+  private func beginLoad() {
+    loadTimer?.cancel()
+    isConnecting = false
+    loadTimer = Task { [weak self] in
+      try? await Task.sleep(for: Self.connectingDelay)
+      guard !Task.isCancelled, let self else { return }
+      self.isConnecting = true
+      try? await Task.sleep(for: Self.loadTimeout - Self.connectingDelay)
+      guard !Task.isCancelled else { return }
+      self.web.stopLoading()
+      self.loadFailed(L10n.connectTimeout)
+    }
+  }
+
+  private func endLoad() {
+    loadTimer?.cancel()
+    loadTimer = nil
+    isConnecting = false
   }
 
   func retry() {
     apply(session.retry())
     lastError = nil
     web.reload()
+    beginLoad()
   }
 
   func selectTab(_ tab: TabDeclaration) {
@@ -243,6 +276,7 @@ final class ShellModel {
   // MARK: Bridge events
 
   private func documentCommitted() {
+    endLoad()
     discardRequests()
     resetDeclarations()
     layout.reset()
@@ -250,6 +284,7 @@ final class ShellModel {
   }
 
   private func loadFailed(_ message: String) {
+    endLoad()
     lastError = message
     Self.log.error("load failed: \(message, privacy: .public)")
     discardRequests()
@@ -300,11 +335,12 @@ final class ShellModel {
     case let .routeChanged(state):
       route = state
       layoutChanged()
-    case let .themeChanged(scheme, background):
+    case let .themeChanged(scheme, background, accent):
       webScheme = scheme
       webBackground = background
+      webAccent = accent
       if let id = registry.activeID {
-        AppearanceStore.save(.init(scheme: scheme, background: background), for: id)
+        AppearanceStore.save(.init(scheme: scheme, background: background, accent: accent), for: id)
       }
     case let .confirmRequest(id, request):
       confirm.present(id: id, request)
