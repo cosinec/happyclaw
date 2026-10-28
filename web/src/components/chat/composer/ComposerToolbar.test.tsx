@@ -138,6 +138,30 @@ describe('on a phone', () => {
     expect(document.querySelector('[data-composer-plus-sheet]')).toBeNull();
   });
 
+  test('the model sits right after + on a phone, before send on a desktop', () => {
+    const slotPlace = () => {
+      const slot = container!.querySelector('[data-composer-model-slot]')!;
+      return [
+        slot.parentElement!.hasAttribute('data-composer-tools'),
+        slot.previousElementSibling?.getAttribute('aria-label') ?? null,
+      ];
+    };
+    render({ phone: true, modelSelector: <span data-testid="model" /> });
+    // In the left group, right after +; that group gives way through it.
+    expect(slotPlace()).toEqual([true, '添加文件']);
+    expect(
+      container!.querySelector('[data-composer-tools]')!.classList,
+    ).toContain('min-w-0');
+
+    act(() => root?.unmount());
+    root = null;
+    render({ modelSelector: <span data-testid="model" /> });
+    expect(slotPlace()).toEqual([false, null]);
+    expect(
+      container!.querySelector('[data-composer-tools]')!.classList,
+    ).toContain('shrink-0');
+  });
+
   test('the resting pill keeps only + and send, around the text', () => {
     render({
       phone: true,

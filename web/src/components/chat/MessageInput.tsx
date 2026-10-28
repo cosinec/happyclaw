@@ -122,6 +122,13 @@ interface MessageInputProps {
    * targets).
    */
   contextUsage?: ReactNode;
+  /**
+   * The run's status (phase, elapsed time), directly above the card while
+   * docked. Its row is reserved only while a run is active and grows
+   * upward from the bottom-anchored card, so it never moves the card; on a
+   * phone it rides with the floating dock and counts in its height.
+   */
+  statusBar?: ReactNode;
   /** Stop the active run when the composer has no follow-up to send. */
   onStop?: () => Promise<boolean> | boolean;
   isRunning?: boolean;
@@ -189,6 +196,7 @@ export const MessageInput = memo(function MessageInput({
   onToggleTerminal,
   modelSelector,
   contextUsage,
+  statusBar,
   onStop,
   isRunning = false,
   queuedFollowUps = [],
@@ -989,6 +997,15 @@ export const MessageInput = memo(function MessageInput({
         }
       >
         <UploadProgress />
+
+        {statusBar && !centered && isRunning && (
+          <div
+            data-composer-status-bar
+            className="mb-1.5 flex h-8 items-center *:min-w-0 *:flex-1"
+          >
+            {statusBar}
+          </div>
+        )}
 
         {/* Palettes anchor on the whole card, queue included. */}
         <div className="relative">

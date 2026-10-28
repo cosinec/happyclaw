@@ -2,11 +2,14 @@
 // a main conversation and two Web sessions in one workspace. Sends, uploads,
 // stops and queue actions are recorded on `window.composerHarness`.
 //   ?empty=1   the main conversation starts with no messages
-import { useEffect } from 'react';
+//   ?statusbar=1  the composer alone over a stub list, with a status bar
+//                 that shows while setStatusRunning(true)
+import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { MemoryRouter, useSearchParams } from 'react-router-dom';
 import { wsManager } from '../../src/api/ws';
 import { ChatView } from '../../src/components/chat/ChatView';
+import { MessageInput } from '../../src/components/chat/MessageInput';
 import { useAuthStore, type UserPublic } from '../../src/stores/auth';
 import {
   useChatStore,
@@ -93,6 +96,8 @@ const harness = {
   queueActions: [] as Array<{ id: string; action: string; content?: string }>,
   sendDelayMs: 0,
   switchTo: (_id: string | null) => {},
+  /** The bare composer's run state (?statusbar=1). */
+  setStatusRunning: (_running: boolean) => {},
   /** Mark the visible conversation as running (or idle). */
   setRunning(running: boolean, agentId: string | null = null) {
     useChatStore.setState((s) =>
@@ -271,12 +276,56 @@ function SessionSwitcher() {
   return null;
 }
 
+/**
+ * The composer over a stub list, as ChatView hosts it, with a status bar
+ * for the run. ChatView does not pass one yet.
+ */
+function BareComposer() {
+  const [running, setRunning] = useState(false);
+  useEffect(() => {
+    harness.setStatusRunning = setRunning;
+  }, []);
+  return (
+    <div
+      data-composer-dock-host
+      className="relative flex h-full min-w-0 flex-col overflow-x-hidden"
+    >
+      <div className="min-h-0 flex-1 overflow-y-auto" />
+      <MessageInput
+        groupJid={groupJid}
+        onSend={(content) => record({ to: 'main', content, images: 0 })}
+        isRunning={running}
+        onStop={() => {
+          setRunning(false);
+          return true;
+        }}
+        statusBar={
+          <div
+            data-testid="status-bar-probe"
+            className="flex h-7 items-center justify-between rounded-full border border-surface-border px-3 text-caption"
+          >
+            <span>思考中</span>
+            <span>12s</span>
+          </div>
+        }
+      />
+    </div>
+  );
+}
+
+const bareComposer =
+  new URLSearchParams(window.location.search).get('statusbar') === '1';
+
 createRoot(document.getElementById('root')!).render(
   <MemoryRouter initialEntries={['/chat/e2e-composer']}>
     <SessionSwitcher />
     <main className="h-[100dvh] overflow-hidden bg-background">
-      {/* onBack renders the phone header's back button. */}
-      <ChatView groupJid={groupJid} onBack={() => undefined} />
+      {bareComposer ? (
+        <BareComposer />
+      ) : (
+        // onBack renders the phone header's back button.
+        <ChatView groupJid={groupJid} onBack={() => undefined} />
+      )}
     </main>
   </MemoryRouter>,
 );

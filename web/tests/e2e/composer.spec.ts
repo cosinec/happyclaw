@@ -615,6 +615,34 @@ test.describe('desktop composer', () => {
     await expect(composer(page)).toHaveText('帮我定位和修复一个 Bug');
   });
 
+  test('the run status bar sits right above the card and never moves it', async ({
+    page,
+  }) => {
+    await page.goto(`${HARNESS_PATH}?statusbar=1`);
+    const card = page.locator('[data-composer-card]');
+    const bar = page.locator('[data-composer-status-bar]');
+    await expect(card).toBeVisible();
+    // Idle: no row is reserved.
+    await expect(bar).toHaveCount(0);
+    const idle = (await card.boundingBox())!;
+
+    await callHarness(page, 'setStatusRunning', true);
+    await expect(bar).toBeVisible();
+    await expect(bar.getByTestId('status-bar-probe')).toBeVisible();
+    // The card stays where it was; the bar grows upward from it.
+    expect(await card.boundingBox()).toEqual(idle);
+    const box = (await bar.boundingBox())!;
+    const gap = idle.y - (box.y + box.height);
+    expect(gap).toBeGreaterThanOrEqual(0);
+    expect(gap).toBeLessThan(10);
+    expect(Math.abs(box.x - idle.x)).toBeLessThan(1);
+    expect(Math.abs(box.width - idle.width)).toBeLessThan(1);
+
+    await callHarness(page, 'setStatusRunning', false);
+    await expect(bar).toHaveCount(0);
+    expect(await card.boundingBox()).toEqual(idle);
+  });
+
   test('a docked composer is about 120px tall, with no conversation title in its row', async ({
     page,
   }) => {
@@ -878,6 +906,38 @@ test.describe('touch composer', () => {
     ).toBeVisible();
   });
 
+  test('on a phone the status bar rides in the dock, over the keyboard too', async ({
+    page,
+  }) => {
+    await page.goto(`${HARNESS_PATH}?statusbar=1`);
+    const card = page.locator('[data-composer-card]');
+    const bar = page.locator('[data-composer-status-bar]');
+    await expect(card).toBeVisible();
+    const dockHeight = () =>
+      page.evaluate(() =>
+        Number.parseFloat(
+          getComputedStyle(
+            document.querySelector('[data-composer-dock-host]')!,
+          ).getPropertyValue('--composer-dock-height') || '0',
+        ),
+      );
+    const idleDock = await dockHeight();
+    expect(idleDock).toBeGreaterThan(0);
+    await callHarness(page, 'setStatusRunning', true);
+    await expect(bar).toBeVisible();
+    // The list keeps clear of it: the dock's published height grows by it.
+    const barHeight = (await bar.boundingBox())!.height;
+    await expect.poll(dockHeight).toBeGreaterThanOrEqual(idleDock + barHeight);
+    const before = [(await bar.boundingBox())!, (await card.boundingBox())!];
+    await simulateKeyboard(page, 300);
+    await expect
+      .poll(async () => Math.round((await card.boundingBox())!.y))
+      .toBe(Math.round(before[1].y - 300));
+    // Bar and card move together.
+    const after = (await bar.boundingBox())!;
+    expect(Math.round(before[0].y - after.y)).toBe(300);
+  });
+
   test('a phone keeps a compact card and leaves the context ring off its row', async ({
     page,
   }) => {
@@ -1088,6 +1148,7 @@ test.describe('touch composer', () => {
     const height = async () => Math.round((await sheet.boundingBox())!.height);
     await expect.poll(height).toBe(Math.round(viewport.height * 0.56));
 
+    await settleAnimations(sheet);
     const handle = (await sheet.locator('[data-sheet-handle]').boundingBox())!;
     await page.mouse.move(handle.x + handle.width / 2, handle.y + 10);
     await page.mouse.down();

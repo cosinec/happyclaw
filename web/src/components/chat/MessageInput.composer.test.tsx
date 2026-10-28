@@ -415,6 +415,42 @@ describe('conversation isolation', () => {
   });
 });
 
+describe('status bar', () => {
+  const bar = () => container!.querySelector('[data-composer-status-bar]');
+  const view = (props: {
+    isRunning: boolean;
+    layout?: 'docked' | 'centered';
+  }) => (
+    <MessageInput
+      groupJid="web:g1"
+      onSend={vi.fn()}
+      onStop={vi.fn()}
+      statusBar={<span data-testid="status" />}
+      {...props}
+    />
+  );
+
+  test('a docked composer shows it right above the card while a run is active', async () => {
+    await render(view({ isRunning: false }));
+    // Idle: nothing reserved.
+    expect(bar()).toBeNull();
+    await render(view({ isRunning: true }));
+    expect(bar()!.querySelector('[data-testid="status"]')).not.toBeNull();
+    // Directly above the card's anchor, at a fixed height.
+    expect(
+      bar()!.nextElementSibling!.contains(
+        container!.querySelector('[data-composer-card]'),
+      ),
+    ).toBe(true);
+    expect(bar()!.classList).toContain('h-8');
+  });
+
+  test('the empty conversation hero has none', async () => {
+    await render(view({ isRunning: true, layout: 'centered' }));
+    expect(bar()).toBeNull();
+  });
+});
+
 describe('phone dock', () => {
   test('rests as a pill and opens into the card with focus or content', async () => {
     env.touch = true;
