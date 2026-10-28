@@ -68,6 +68,9 @@ jobs:
       - name: Process visibility full-stack smoke
         run: node tests/e2e/process-visibility-stack.mjs
 
+      - name: Per-turn context notes full-stack smoke
+        run: node tests/e2e/turn-context-dedup.mjs
+
       - name: Mobile browser interaction tests
         run: npm --prefix web run test:e2e
 

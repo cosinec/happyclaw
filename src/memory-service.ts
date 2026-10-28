@@ -6,6 +6,7 @@ import {
   getMutableWorkspaceMemoryItem,
   getWorkspaceMemoryItem,
   listRecallableWorkspaceMemoryItems,
+  listWorkspaceMemoryChangesSince,
   listWorkspaceMemoryItems,
   listWorkspaceMemoryVersions as listVersionsFromStore,
   searchWorkspaceMemoryItems,
@@ -596,6 +597,11 @@ export function getWorkspaceMemorySnapshot(
     kind?: WorkspaceMemoryKind;
     limit?: number;
     maxChars?: number;
+    /**
+     * Store revision a runtime conversation's memory reflects: also report the
+     * items changed after it, so the conversation can withdraw what it holds.
+     */
+    changedSince?: number | null;
   },
 ) {
   const limit = clampLimit(input.limit, 12);
@@ -667,10 +673,28 @@ export function getWorkspaceMemorySnapshot(
   }
   lines.push('</workspace_memory>');
   const generatedAt = new Date().toISOString();
+  let changes: ReturnType<typeof listWorkspaceMemoryChangesSince> | undefined;
+  if (
+    typeof input.changedSince === 'number' &&
+    Number.isSafeInteger(input.changedSince) &&
+    input.changedSince >= 0
+  ) {
+    try {
+      changes = listWorkspaceMemoryChangesSince({
+        workspaceJid: input.workspaceJid,
+        sinceRevision: input.changedSince,
+      });
+    } catch (error) {
+      translateStoreError(error);
+    }
+  }
   return {
     workspaceJid: input.workspaceJid,
     storeRevision,
     items: included,
+    ...(changes
+      ? { changes: { reset: changes.reset, items: changes.items } }
+      : {}),
     renderedText: included.length > 0 ? lines.join('\n') : '',
     retrievalTrace: {
       query: input.query?.trim() || null,

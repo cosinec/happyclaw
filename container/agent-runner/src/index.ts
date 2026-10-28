@@ -25,6 +25,7 @@ import {
   HookCallback,
   PostCompactHookInput,
   SessionStartHookInput,
+  UserPromptSubmitHookInput,
   PreCompactHookInput,
   createSdkMcpServer,
   type Query,
@@ -120,6 +121,7 @@ import {
   buildClaudeRuntimeEnv,
   type ClaudeRuntimeEnv,
 } from './claude-runtime-env.js';
+import { pinBoundProviderSettings } from './provider-env-pin.js';
 import {
   resolveClaudeProviderRuntime,
   resolveClaudeQueryModelRuntime,
@@ -1092,6 +1094,25 @@ const restoreTurnNotesAfterCompaction: HookCallback = async (input) => {
  * Finally, trim the JSONL file to remove already-compacted history.
  */
 /** Ends the main Agent's compaction phase; subagent compactions never start it. */
+/**
+ * UserPromptSubmit runs for every streamed user message, before system/init,
+ * and its additionalContext rides with that prompt (Claude CLI 2.1.296). A
+ * prompt planned against another session gets its notes in full there.
+ */
+const restoreTurnNotesOnSessionChange: HookCallback = async (input) => {
+  const prompt = input as UserPromptSubmitHookInput;
+  if (prompt.agent_id) return {};
+  const additionalContext = turnNotes.restoreOnSessionChange(prompt.session_id);
+  return additionalContext
+    ? {
+        hookSpecificOutput: {
+          hookEventName: 'UserPromptSubmit' as const,
+          additionalContext,
+        },
+      }
+    : {};
+};
+
 function createPostCompactHook(onCompactionEnd: () => void): HookCallback {
   return async (input) => {
     if (!(input as PostCompactHookInput).agent_id) onCompactionEnd();
@@ -1868,7 +1889,9 @@ async function runQueryAttempt(
   activateCurrentInputTurn(coldInputTurnId);
   const [memorySnapshot, ownerProfile] = mcpToolsContext
     ? await Promise.all([
-        fetchWorkspaceMemorySnapshot(mcpToolsContext, prompt),
+        fetchWorkspaceMemorySnapshot(mcpToolsContext, prompt, {
+          changedSince: turnNotes.memoryChangedSince(),
+        }),
         fetchHappyClawOwnerProfileTurn(mcpToolsContext),
       ])
     : [null, null];
@@ -1883,17 +1906,20 @@ async function runQueryAttempt(
     );
   }
   /**
-   * Trace a turn's memory: what was retrieved for it, and which of those it
-   * carries; the others are already in the conversation.
+   * Trace a turn's memory: what was retrieved for it, which of those it
+   * carries (the others are already in the conversation), and what it
+   * withdraws.
    */
   const emitWorkspaceMemoryRecall = (
     workspaceMemorySnapshot: WorkspaceMemorySnapshot,
-    sent: TurnNotes['sentMemory'],
+    notes: Pick<TurnNotes, 'sentMemory' | 'withdrawnMemory'> | undefined,
     inputTurnId: string,
     queryRunId: string | undefined = containerInput.queryRunId,
   ): void => {
     if (!emitOutput) return;
     const trace = workspaceMemorySnapshot.retrievalTrace;
+    const sent = notes?.sentMemory ?? [];
+    const withdrawn = notes?.withdrawnMemory ?? [];
     const sentKeys = sent.map(memoryKey);
     const inContext = trace.itemRevisions
       .map(memoryKey)
@@ -1908,11 +1934,17 @@ async function runQueryAttempt(
         isSynthetic: true,
         displayLevel: 'detail',
         title: 'Workspace memory snapshot',
-        summary: `revision ${workspaceMemorySnapshot.storeRevision}; ${trace.itemRevisions.length} retrieved, ${sent.length} sent`,
+        summary: `revision ${workspaceMemorySnapshot.storeRevision}; ${trace.itemRevisions.length} retrieved, ${sent.length} sent${withdrawn.length ? `, ${withdrawn.length} withdrawn` : ''}`,
         detail: [
           sentKeys.length ? `sent: ${sentKeys.slice(0, 10).join(', ')}` : '',
           inContext.length
             ? `already in context: ${inContext.slice(0, 10).join(', ')}`
+            : '',
+          withdrawn.length
+            ? `withdrawn: ${withdrawn
+                .slice(0, 10)
+                .map((item) => `${item.id} (${item.status})`)
+                .join(', ')}`
             : '',
         ]
           .filter(Boolean)
@@ -1923,7 +1955,7 @@ async function runQueryAttempt(
       },
     });
     log(
-      `Workspace memory snapshot revision=${workspaceMemorySnapshot.storeRevision} items=${trace.itemRevisions.length} sent=${sent.length} generatedAt=${trace.generatedAt}`,
+      `Workspace memory snapshot revision=${workspaceMemorySnapshot.storeRevision} items=${trace.itemRevisions.length} sent=${sent.length} withdrawn=${withdrawn.length} generatedAt=${trace.generatedAt}`,
     );
   };
   /**
@@ -1951,7 +1983,7 @@ async function runQueryAttempt(
     if (sources.memory) {
       emitWorkspaceMemoryRecall(
         sources.memory,
-        notes?.sentMemory ?? [],
+        notes,
         traceInputTurnId,
         traceQueryRunId,
       );
@@ -2560,7 +2592,9 @@ async function runQueryAttempt(
       );
       const [memorySnapshot, ownerProfile] = mcpToolsContext
         ? await Promise.all([
-            fetchWorkspaceMemorySnapshot(mcpToolsContext, msg.text),
+            fetchWorkspaceMemorySnapshot(mcpToolsContext, msg.text, {
+              changedSince: turnNotes.memoryChangedSince(),
+            }),
             fetchHappyClawOwnerProfileTurn(
               mcpToolsContext,
               8_000,
@@ -2926,7 +2960,13 @@ async function runQueryAttempt(
   // variables: they outrank the `autoCompactWindow` setting and apply to the
   // window Claude Code resolved for the model, 1M-native models included.
   const claudeRuntimeEnv: ClaudeRuntimeEnv = buildClaudeRuntimeEnv(process.env);
-  const flagSettings: Record<string, unknown> = {};
+  // The bound connection outranks every settings file the CLI reads (the
+  // admin's, the workspace's project and local ones), in host and container
+  // mode alike.
+  const flagSettings: Record<string, unknown> = pinBoundProviderSettings({
+    ...process.env,
+    ...claudeRuntimeEnv,
+  });
   const claudeMdExcludes = resolveManagedHostClaudeMdExcludes({
     executionMode: contextAuditBase.executionMode,
     runtimePolicy: containerInput.agentProfile?.runtimePolicy,
@@ -3061,9 +3101,7 @@ async function runQueryAttempt(
       // stream events: the card's sub-agent transcript advances block by block
       // instead of only filling in when the subagent completes.
       forwardSubagentText: true,
-      ...(Object.keys(flagSettings).length > 0
-        ? { settings: flagSettings as any }
-        : {}),
+      settings: flagSettings as any,
       ...(userPlugins && { plugins: userPlugins }),
       ...(activeAgentMcpPolicy.strictMcpConfig
         ? { strictMcpConfig: true }
@@ -3109,6 +3147,7 @@ async function runQueryAttempt(
         SessionStart: [
           { matcher: 'compact', hooks: [restoreTurnNotesAfterCompaction] },
         ],
+        UserPromptSubmit: [{ hooks: [restoreTurnNotesOnSessionChange] }],
       },
     });
     log(

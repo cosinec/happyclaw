@@ -221,6 +221,56 @@ describe('Workspace Memory v2 routes', () => {
     ]);
   });
 
+  test('snapshot reports the items revised or forgotten since a store revision', async () => {
+    const kept = await create(WORKSPACE_A, 'kept as it was');
+    const revised = await create(WORKSPACE_A, 'the release ships Friday');
+    const forgotten = await create(WORKSPACE_A, 'a password that expired');
+    const snapshot = (changedSince?: number) =>
+      memoryService.getWorkspaceMemorySnapshot({
+        actor: { id: 'alice', role: 'member' },
+        workspaceJid: WORKSPACE_A,
+        limit: 10,
+        maxChars: 4000,
+        changedSince,
+      });
+    const seen = snapshot();
+    expect(seen.storeRevision).toBe(3);
+    expect(seen).not.toHaveProperty('changes');
+
+    await request(route(WORKSPACE_A, `/${revised.body.item.id}`), 'PATCH', {
+      expectedRevision: 1,
+      content: 'the release moved to Monday',
+    });
+    await request(route(WORKSPACE_A, `/${forgotten.body.item.id}`), 'DELETE', {
+      expectedRevision: 1,
+      reason: 'expired',
+    });
+    const later = snapshot(seen.storeRevision);
+    expect(later.changes?.reset).toBe(false);
+    expect(
+      [...(later.changes?.items ?? [])].sort((a, b) =>
+        a.id.localeCompare(b.id),
+      ),
+    ).toEqual(
+      [
+        { id: revised.body.item.id, revision: 2, status: 'active' },
+        { id: forgotten.body.item.id, revision: 2, status: 'deleted' },
+      ].sort((a, b) => a.id.localeCompare(b.id)),
+    );
+    expect(later.changes?.items.map((item) => item.id)).not.toContain(
+      kept.body.item.id,
+    );
+    expect(snapshot(later.storeRevision).changes).toEqual({
+      reset: false,
+      items: [],
+    });
+    // A revision the store never reached: it was replaced since.
+    expect(snapshot(later.storeRevision + 10).changes).toEqual({
+      reset: true,
+      items: [],
+    });
+  });
+
   test('workspace deletion and JID reuse cannot inherit the deleted store', async () => {
     await create(WORKSPACE_A, 'belongs only to the deleted workspace');
     db.deleteRegisteredGroup(WORKSPACE_A);

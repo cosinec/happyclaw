@@ -14112,6 +14112,8 @@ async function processTaskIpc(
     query?: string;
     kind?: string;
     maxChars?: number;
+    /** Snapshot: also report items changed after this store revision. */
+    changedSince?: number;
     itemId?: string;
     title?: string;
     content?: string;
@@ -14573,6 +14575,7 @@ async function processTaskIpc(
                 | undefined,
               limit: data.limit,
               maxChars: data.maxChars,
+              changedSince: data.changedSince,
             });
             result = { snapshot };
             logger.info(

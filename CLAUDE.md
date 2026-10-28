@@ -215,6 +215,11 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
   `resolvePinnedModelConfigId`）：会话手选 → 智能体绑定 → 全局默认
   （`defaultModelConfigId`，工作区自带 Provider 环境变量时让位）→ 唯一启用的配置 →
   自动池。绑定即权威，没有跨账号故障转移；Web 的选择器与这一顺序必须一致。
+- 绑定连接的路由、凭据和模型层级环境变量由 Runner 写进 flag settings
+  （`provider-env-pin.ts`，未设置的写空值并关闭 `apiKeyHelper`），它压过管理员、项目和
+  local 的 settings 文件，任何一层都不能改走别的端点或加凭据。
+- 渠道格式说明随每轮的 `<channel_context>` 发送，不进 system prompt；换渠道或每十轮
+  重发一次，在被替换或撤回前一直有效。
 - 一个模型配置（连接）是一份凭据、一个地址和一组模型；`anthropicModel` 是连接的默认
   模型。会话和智能体按「连接 · 模型」选择（`session_model_selections.model`、
   `agent_profiles.model`），换模型时开新的 SDK 会话并注入近期历史；只改 `[1m]` 后缀
@@ -492,7 +497,9 @@ npm run self-test
   测试、模型发现用同一套预设和错误分类。
 - 修改 Prompt 后确保 `scripts/check-agent-runner-prompts.sh` 通过。
 - 修改文档后运行 `npm run docs:check`。
-- SDK/CLI 升级必须显式执行 `make update-sdk`，验证后提交 package.json 与 lockfile。
+- SDK/CLI 升级必须显式执行 `make update-sdk`，验证后提交 package.json 与 lockfile；
+  升级后重跑 `node tests/e2e/turn-context-dedup.mjs`，它固定 SessionStart(compact)
+  补发的位置。
 - 容器以非 root 用户执行 Agent；修改 Dockerfile 或 entrypoint 后需要重建镜像。
 - 停止服务只能杀监听进程：`lsof -ti:PORT -sTCP:LISTEN | xargs kill`。
 - 不要使用会杀死连接方或 Docker 网络代理的宽泛端口 kill 命令。
