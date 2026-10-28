@@ -555,6 +555,61 @@ describe('Workspace Memory runtime boundary', () => {
     await expect(pending).resolves.toBeNull();
   });
 
+  test('a snapshot asks for the changes since the revision the session holds', async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'workspace-memory-snapshot-'),
+    );
+    roots.push(root);
+    const pending = fetchWorkspaceMemorySnapshot(context(root), 'query C', {
+      timeoutMs: 2_000,
+      changedSince: 4,
+    });
+    const request = await readMemoryRequest(root);
+    expect(request).toMatchObject({ operation: 'snapshot', changedSince: 4 });
+    const base = {
+      workspaceJid: 'web:workspace',
+      storeRevision: 6,
+      items: [],
+      renderedText: '',
+      retrievalTrace: {
+        itemRevisions: [],
+        generatedAt: '2026-07-28T00:00:00.000Z',
+      },
+    };
+    acknowledge(root, request.requestId as string, {
+      snapshot: {
+        ...base,
+        changes: {
+          reset: false,
+          items: [{ id: 'gone', revision: 2, status: 'deleted' }],
+        },
+      },
+    });
+    await expect(pending).resolves.toMatchObject({
+      changes: {
+        reset: false,
+        items: [{ id: 'gone', revision: 2, status: 'deleted' }],
+      },
+    });
+
+    // Malformed changes are dropped; the snapshot itself still holds.
+    const other = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'workspace-memory-snapshot-'),
+    );
+    roots.push(other);
+    const next = fetchWorkspaceMemorySnapshot(context(other), 'query D', {
+      timeoutMs: 2_000,
+    });
+    const second = await readMemoryRequest(other);
+    expect(second).not.toHaveProperty('changedSince');
+    acknowledge(other, second.requestId as string, {
+      snapshot: { ...base, changes: { reset: 'no', items: [] } },
+    });
+    const parsed = await next;
+    expect(parsed).not.toBeNull();
+    expect(parsed).not.toHaveProperty('changes');
+  });
+
   test("a warm turn carries B's snapshot and never A's again", () => {
     const snapshot = (...ids: string[]): WorkspaceMemorySnapshot => ({
       workspaceJid: 'web:workspace',

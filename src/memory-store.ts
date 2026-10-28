@@ -1753,6 +1753,48 @@ export function listRecallableWorkspaceMemoryItems(input: {
   return { store, items: rows.map(mapItem) };
 }
 
+/** At most this many changed items are reported to one runtime turn. */
+const MAX_REPORTED_CHANGES = 200;
+
+/**
+ * Items changed after store revision `sinceRevision` (every create, update and
+ * forget bumps the store revision and leaves an audit event at it), with
+ * their current revision and status. A store revision below `sinceRevision`
+ * means the store was replaced since, so nothing from before holds.
+ */
+export function listWorkspaceMemoryChangesSince(input: {
+  workspaceJid: string;
+  sinceRevision: number;
+}): {
+  store: WorkspaceMemoryStore;
+  reset: boolean;
+  items: Array<{ id: string; revision: number; status: WorkspaceMemoryStatus }>;
+} {
+  const store = requireStore(input.workspaceJid);
+  if (store.revision < input.sinceRevision) {
+    return { store, reset: true, items: [] };
+  }
+  const items = requireDatabase()
+    .prepare(
+      `SELECT i.id AS id, i.revision AS revision, i.status AS status
+       FROM workspace_memory_items i
+       WHERE i.store_id = ?
+         AND i.id IN (
+           SELECT item_id FROM workspace_memory_audit_events
+           WHERE store_id = ? AND store_revision > ?
+         )
+       ORDER BY i.updated_at DESC, i.id DESC
+       LIMIT ?`,
+    )
+    .all(
+      store.id,
+      store.id,
+      input.sinceRevision,
+      MAX_REPORTED_CHANGES,
+    ) as Array<{ id: string; revision: number; status: WorkspaceMemoryStatus }>;
+  return { store, reset: false, items };
+}
+
 function ftsPhrase(query: string): string {
   return `"${query.replaceAll('"', '""')}"`;
 }

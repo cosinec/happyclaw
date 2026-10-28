@@ -218,6 +218,8 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
 - 绑定连接的路由、凭据和模型层级环境变量由 Runner 写进 flag settings
   （`provider-env-pin.ts`，未设置的写空值并关闭 `apiKeyHelper`），它压过管理员、项目和
   local 的 settings 文件，任何一层都不能改走别的端点或加凭据。
+- 渠道格式说明随每轮的 `<channel_context>` 发送，不进 system prompt；换渠道或每十轮
+  重发一次，在被替换或撤回前一直有效。
 - 一个模型配置（连接）是一份凭据、一个地址和一组模型；`anthropicModel` 是连接的默认
   模型。会话和智能体按「连接 · 模型」选择（`session_model_selections.model`、
   `agent_profiles.model`），换模型时开新的 SDK 会话并注入近期历史；只改 `[1m]` 后缀

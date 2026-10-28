@@ -12,9 +12,10 @@
 // - custom: a custom Agent on a third-party endpoint (so the Agent contract
 //   anchor applies) with three Workspace memories, one of which is edited
 //   before turn 4. Each memory revision, the anchor and the channel context
-//   appear once; turn 4 carries only the edited memory. Turns 3 and 5 wait
-//   for the Runner to close the CLI, so what was sent carries across queries
-//   as well as within one.
+//   appear once; turn 4 carries only the edited memory, and turn 5 withdraws
+//   another one forgotten before it. Turns 3 and 5 wait for the Runner to
+//   close the CLI, so what was sent carries across queries as well as within
+//   one.
 // - compaction: the stub reports a nearly full window on turn 3, so the CLI
 //   compacts on turn 4; the notes come back once right after the summary.
 // - home: the admin's Home Workspace with the built-in Agent, which adds the
@@ -412,10 +413,24 @@ async function main() {
     memories.push(r.json.item ?? r.json);
   }
   const edited = memories[0];
+  const forgotten = memories[2];
   const custom = await runTurns('custom', cookie, jid, async (turn) => {
     // The Runner closes the CLI 5 s after a result. Turns 3 and 5 start a
     // new query that resumes the session; turns 2 and 4 join the open one.
     if (turn === 3 || turn === 5) await sleep(QUERY_CLOSE_WAIT_MS);
+    if (turn === 5) {
+      // Forgotten while the session holds it: turn 5 withdraws it.
+      const r = await http_(
+        'DELETE',
+        `/api/memory/workspaces/${enc(jid)}/items/${enc(forgotten.id)}`,
+        { cookie, body: { expectedRevision: forgotten.revision } },
+      );
+      if (r.status >= 300)
+        throw new Error(
+          `memory forget: HTTP ${r.status} ${JSON.stringify(r.json)}`,
+        );
+      return;
+    }
     if (turn !== 4) return;
     const r = await http_(
       'PATCH',
@@ -462,6 +477,17 @@ async function main() {
   );
   const channels = count(custom.finalTexts, '<channel_context');
   check('custom', 'the channel context is sent once', channels === 1, channels);
+  const turn5 = custom.finalTexts.find((t) => t.includes('turn 5 '));
+  check(
+    'custom',
+    'turn 5 withdraws the memory forgotten before it',
+    !!turn5 &&
+      turn5.includes(
+        `"withdrawn":[{"id":"${forgotten.id}","status":"deleted"}]`,
+      ) &&
+      /1 withdrawn/.test(custom.recalls[4]?.summary ?? ''),
+    `${turn5?.slice(0, 600)} ${JSON.stringify(custom.recalls[4])}`,
+  );
   const recall4 = custom.recalls[3];
   check(
     'custom',

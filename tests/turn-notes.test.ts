@@ -440,3 +440,232 @@ describe('per-turn notes', () => {
     );
   });
 });
+
+/** A snapshot that also reports items changed since the revision asked. */
+function withChanges(
+  snapshot: WorkspaceMemorySnapshot,
+  items: Array<{ id: string; revision: number; status: string }>,
+  reset = false,
+): WorkspaceMemorySnapshot {
+  return { ...snapshot, storeRevision: 9, changes: { reset, items } };
+}
+
+const memoryJson = (block: string) =>
+  JSON.parse(
+    block
+      .split('\n')[1]
+      .replace(/\\u003c/g, '<')
+      .replace(/\\u003e/g, '>')
+      .replace(/\\u0026/g, '&'),
+  );
+
+describe('withdrawals and restores', () => {
+  test('a forgotten memory is withdrawn, once', () => {
+    const ledger = new TurnNoteLedger();
+    ledger.beginQuery(undefined);
+    expect(ledger.memoryChangedSince()).toBeUndefined();
+    turn(ledger, 'u1', sources({ memory: memory({ id: 'a' }, { id: 'b' }) }));
+    expect(ledger.memoryChangedSince()).toBe(7);
+    const next = turn(
+      ledger,
+      'u2',
+      sources({
+        memory: withChanges(memory({ id: 'b' }), [
+          { id: 'a', revision: 2, status: 'deleted' },
+        ]),
+      }),
+    );
+    expect(next.withdrawnMemory).toEqual([{ id: 'a', status: 'deleted' }]);
+    expect(memoryJson(next.memory)).toMatchObject({
+      items: [],
+      withdrawn: [{ id: 'a', status: 'deleted' }],
+    });
+    expect(next.memory).toContain('withdraws or replaces');
+    expect(ledger.memoryChangedSince()).toBe(9);
+    // Reported again (the host lists changes since the revision asked): no repeat.
+    const again = turn(
+      ledger,
+      'u3',
+      sources({
+        memory: withChanges(memory({ id: 'b' }), [
+          { id: 'a', revision: 2, status: 'deleted' },
+        ]),
+      }),
+    );
+    expect(again.memory).toBe('');
+  });
+
+  test('a revised memory is replaced when recalled, withdrawn when not', () => {
+    const ledger = new TurnNoteLedger();
+    ledger.beginQuery(undefined);
+    turn(ledger, 'u1', sources({ memory: memory({ id: 'a' }, { id: 'b' }) }));
+    const notRecalled = turn(
+      ledger,
+      'u2',
+      sources({
+        memory: withChanges(memory({ id: 'b' }), [
+          { id: 'a', revision: 2, status: 'active' },
+          { id: 'b', revision: 1, status: 'active' },
+        ]),
+      }),
+    );
+    expect(notRecalled.withdrawnMemory).toEqual([
+      { id: 'a', status: 'revised' },
+    ]);
+    // Recalled later, the new revision comes as a new memory.
+    const recalled = turn(
+      ledger,
+      'u3',
+      sources({
+        memory: withChanges(
+          memory({ id: 'a', revision: 2, content: 'new a' }),
+          [{ id: 'a', revision: 2, status: 'active' }],
+        ),
+      }),
+    );
+    expect(recalled.sentMemory).toEqual([{ id: 'a', revision: 2 }]);
+    expect(recalled.withdrawnMemory).toEqual([]);
+
+    const other = new TurnNoteLedger();
+    other.beginQuery(undefined);
+    turn(other, 'v1', sources({ memory: memory({ id: 'a' }) }));
+    const replaced = turn(
+      other,
+      'v2',
+      sources({
+        memory: withChanges(
+          memory({ id: 'a', revision: 2, content: 'new a' }),
+          [{ id: 'a', revision: 2, status: 'active' }],
+        ),
+      }),
+    );
+    expect(replaced.sentMemory).toEqual([{ id: 'a', revision: 2 }]);
+    expect(replaced.withdrawnMemory).toEqual([]);
+  });
+
+  test('a replaced store withdraws every memory held', () => {
+    const ledger = new TurnNoteLedger();
+    ledger.beginQuery(undefined);
+    turn(ledger, 'u1', sources({ memory: memory({ id: 'a' }, { id: 'b' }) }));
+    const next = turn(
+      ledger,
+      'u2',
+      sources({ memory: withChanges(memory({ id: 'c' }), [], true) }),
+    );
+    expect(next.withdrawnMemory).toEqual([
+      { id: 'a', status: 'deleted' },
+      { id: 'b', status: 'deleted' },
+    ]);
+    expect(next.sentMemory).toEqual([{ id: 'c', revision: 1 }]);
+  });
+
+  test("a compaction restores the continued turn's notes, not a queued one's", () => {
+    const stranger = (id: string) =>
+      sources({
+        ownerProfile: null,
+        channelContext: channel(id, { sender: { openId: 'ou_stranger' } }),
+      });
+    const ledger = new TurnNoteLedger();
+    ledger.beginQuery(undefined);
+    ledger.bindSession('s1');
+    turn(ledger, 'u0', sources());
+    ledger.stage('uN', stranger('om_N')); // the non-owner turn in flight
+    ledger.stage(
+      'uN1',
+      sources({
+        channelContext: channel('om_N1', { sender: { openId: 'ou_owner' } }),
+      }),
+    );
+    ledger.beginCompaction();
+    const restored = ledger.restoreAfterCompaction();
+    ledger.endCompaction();
+    expect(restored).toContain('"om_N"');
+    expect(restored).toContain('ou_stranger');
+    expect(restored).not.toContain('ou_owner');
+    expect(restored).not.toContain('小何');
+    // The summary may still name the owner: the restore withdraws the block.
+    expect(restored).toContain(HAPPYCLAW_OWNER_PROFILE_WITHDRAWN_BLOCK);
+    // The owner's next turn brings the block back.
+    expect(ledger.stage('u2', sources()).ownerProfile).toContain('小何');
+  });
+
+  test('a compaction cut short sends everything on the next query', () => {
+    const ledger = new TurnNoteLedger();
+    ledger.beginQuery(undefined);
+    ledger.bindSession('s1');
+    turn(ledger, 'u1', sources());
+    ledger.stage('u2', sources({ channelContext: channel('om_2') }));
+    ledger.beginCompaction(); // the query was interrupted before the hooks after it
+    ledger.beginQuery('s1');
+    const next = ledger.stage(
+      'u3',
+      sources({ channelContext: channel('om_3') }),
+    );
+    expect(next.ownerProfile).toContain('小何');
+    expect(next.channel).not.toContain('changes_only');
+    expect(next.anchor).toBe(anchor);
+  });
+
+  test("a prompt run in another session than planned carries that turn's notes in full", () => {
+    const ledger = new TurnNoteLedger();
+    ledger.beginQuery(undefined);
+    turn(ledger, 'v1', sources());
+    ledger.bindSession('s1');
+    ledger.beginQuery('s1', 'assistant-1');
+    const first = ledger.stage(
+      'v2',
+      sources({ channelContext: channel('om_2') }),
+    );
+    expect(first.ownerProfile).toBe(''); // planned against s1's context
+    expect(ledger.restoreOnSessionChange('s1')).toBe('');
+    const restored = ledger.restoreOnSessionChange('s-new');
+    expect(restored).toContain('<active-agent-turn-contract');
+    expect(restored).toContain('小何');
+    expect(restored).toContain('content of a');
+    expect(restored).toContain('"om_2"');
+    expect(restored).not.toContain('changes_only');
+    ledger.bindSession('s-new'); // system/init then names the same session
+    const next = ledger.stage(
+      'v3',
+      sources({ channelContext: channel('om_2') }),
+    );
+    expect([next.ownerProfile, next.memory, next.channel]).toEqual([
+      '',
+      '',
+      '',
+    ]);
+    // A fresh session's first prompt was planned against nothing: no restore.
+    const fresh = new TurnNoteLedger();
+    fresh.beginQuery(undefined);
+    fresh.stage('w1', sources());
+    expect(fresh.restoreOnSessionChange('s-fresh')).toBe('');
+  });
+
+  test("an IM channel's format rides again every tenth turn, and says it persists", () => {
+    const ledger = new TurnNoteLedger();
+    ledger.beginQuery(undefined);
+    const withFormat = Array.from({ length: 21 }, (_, i) =>
+      turn(
+        ledger,
+        `u${i}`,
+        sources({
+          channelContext: channel(`om_${i}`),
+          channelFormat: '## 飞书消息格式',
+        }),
+      ).channel.includes('<channel_format')
+        ? i + 1
+        : 0,
+    ).filter(Boolean);
+    expect(withFormat).toEqual([1, 11, 21]);
+    const block = turn(
+      new TurnNoteLedger(),
+      'v1',
+      sources({
+        channelContext: channel('om_1'),
+        channelFormat: '## 飞书消息格式',
+      }),
+    ).channel;
+    expect(block).toContain('The channel_format holds for later inputs too');
+    expect(block).toContain('Use the fields for the current input only');
+  });
+});
