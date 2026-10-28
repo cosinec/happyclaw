@@ -139,6 +139,7 @@ final class ShellModel {
   func removeServer(_ id: UUID) {
     guard let removed = registry.remove(id) else { return }
     ServerStore.save(registry)
+    AppearanceStore.remove(removed.id)
     Task { await WebController.deleteData(of: removed) }
   }
 
@@ -153,6 +154,10 @@ final class ShellModel {
     sheet = nil
     resetDeclarations()
     layout.reset()
+    let appearance = AppearanceStore.load(instance.id)
+    webScheme = appearance?.scheme
+    webBackground = appearance?.background
+    web.setPlaceholder(appearance?.background)
     apply(session.retry())
     web.load(instance.address)
   }
@@ -274,6 +279,9 @@ final class ShellModel {
     case let .themeChanged(scheme, background):
       webScheme = scheme
       webBackground = background
+      if let id = registry.activeID {
+        AppearanceStore.save(.init(scheme: scheme, background: background), for: id)
+      }
     case let .confirmRequest(id, request):
       confirm.present(id: id, request)
     case let .menuRequest(id, request):

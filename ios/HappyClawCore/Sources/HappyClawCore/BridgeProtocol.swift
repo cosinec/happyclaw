@@ -53,7 +53,7 @@ public struct TabDeclaration: Codable, Equatable, Sendable, Identifiable, Hashab
 }
 
 /// An sRGB color sent by the web, components 0...1.
-public struct RGBColor: Equatable, Sendable {
+public struct RGBColor: Codable, Equatable, Sendable {
   public var red: Double
   public var green: Double
   public var blue: Double
