@@ -50,6 +50,8 @@ const NARRATION = `Let me run the demo command first (${NONCE}).`;
 const ANSWER = `DEMO_DONE_${NONCE}`;
 const PROACTIVE_TEXT = `DEMO_PROACTIVE_${NONCE}`;
 const SENTINEL = '<!--HAPPYCLAW_PROACTIVE_FINAL_DELIVERED-->';
+const CLOSING_THOUGHT =
+  '**Nothing more**\n\nThe reply is sent; the turn can end.';
 const MODEL = 'stub-model';
 
 const results = [];
@@ -162,6 +164,9 @@ function startStub() {
     // fails, Read), to see what the Runner reads out of their results.
     script: 'demo',
     factsFile: '',
+    // A proactive turn's last request, after it spoke: a real model takes a
+    // moment (and may reason) to decide it is done.
+    closingDelayMs: 0,
     calls: 0,
     agentRequests: 0,
   };
@@ -244,6 +249,12 @@ function startStub() {
             },
           ];
           stop = 'tool_use';
+        } else if (state.closingDelayMs > 0) {
+          await sleep(state.closingDelayMs);
+          blocks = [
+            { type: 'thinking', text: CLOSING_THOUGHT },
+            { type: 'text', text: SENTINEL },
+          ];
         } else {
           blocks = [{ type: 'text', text: SENTINEL }];
         }
@@ -289,6 +300,8 @@ const home = path.join(scratch, 'home');
 fs.mkdirSync(path.join(scratch, 'data'), { recursive: true });
 fs.mkdirSync(home, { recursive: true });
 fs.symlinkSync(path.join(REPO, 'container'), path.join(scratch, 'container'));
+// The server serves ./web/dist: the browser scenario opens the real Web.
+fs.symlinkSync(path.join(REPO, 'web'), path.join(scratch, 'web'));
 
 const stub = await startStub();
 const FACTS_TEXT = `alpha-${NONCE}\nbeta\ngamma\n`;
@@ -721,6 +734,16 @@ async function runScenario(ctx, { label, interaction, visibility, expect }) {
     'the reply was delivered and stored',
     !!finalMsg,
     `agent messages: ${JSON.stringify(agentMessages.map((m) => m.content?.slice(0, 40)))}`,
+  );
+  // Every frame of the turn names the input it answers, the reply's turn_id:
+  // what lets the Web settle the live card in place while the run closes.
+  const frames = live.filter((e) => e.type === 'stream_event');
+  check(
+    label,
+    'every stream frame names the input the reply answers',
+    frames.length > 0 &&
+      frames.every((e) => e.event?.inputTurnId === finalMsg?.turn_id),
+    `${JSON.stringify([...new Set(frames.map((e) => e.event?.inputTurnId))])} reply=${finalMsg?.turn_id}`,
   );
   const flagged = agentMessages.filter((m) => m.has_trace === true);
   // A proactive reply is announced mid-turn, before its trace exists: the
@@ -1486,6 +1509,124 @@ async function main() {
     anonPatch.status === 401,
     `HTTP ${anonPatch.status}`,
   );
+
+  await proactiveReplyInTheBrowser(ctx);
+}
+
+/**
+ * A proactive turn's reply in the real Web: once the utterance is in the list,
+ * its process panel and spinner are gone, while the run (still asking the model
+ * whether it is done) can be stopped. Screenshots go to HC_E2E_SHOTS if set.
+ */
+async function proactiveReplyInTheBrowser(ctx) {
+  const label = 'proactive-reply-browser';
+  console.log(`\n== ${label}`);
+  stub.setMode('proactive');
+  // Shorter than the wait before a quiet turn shows its spinner again (3s).
+  stub.state.closingDelayMs = 1500;
+  const created = await http_('POST', '/api/groups', {
+    cookie: ctx.cookie,
+    body: {
+      name: `${label}-${NONCE}`,
+      execution_mode: 'host',
+      agent_profile_id: ctx.profileId,
+      interaction_mode: 'proactive',
+      process_visibility: 'full',
+    },
+  });
+  if (created.status >= 300)
+    throw new Error(`create workspace: HTTP ${created.status}`);
+  const folder = created.json.group.folder;
+  const { chromium } = createRequire(path.join(REPO, 'web', 'package.json'))(
+    '@playwright/test',
+  );
+  const browser = await chromium.launch();
+  const shots = process.env.HC_E2E_SHOTS;
+  try {
+    const context = await browser.newContext({
+      baseURL: base,
+      viewport: { width: 1280, height: 860 },
+    });
+    await context.addCookies(
+      ctx.cookie.split('; ').map((pair) => {
+        const at = pair.indexOf('=');
+        return {
+          name: pair.slice(0, at),
+          value: pair.slice(at + 1),
+          url: base,
+        };
+      }),
+    );
+    const page = await context.newPage();
+    await page.goto(`/chat/${folder}`);
+    const editor = page.locator('[data-hc-composer] [data-composer-editor]');
+    await editor.waitFor({ timeout: 30_000 });
+    // Every frame from here on: is the reply there, the panel, the spinner,
+    // the stop button.
+    await page.evaluate((reply) => {
+      window.__frames = [];
+      const tick = () => {
+        const text = document.body.innerText;
+        window.__frames.push({
+          at: performance.now(),
+          reply: text.includes(reply),
+          panel: !!document.querySelector('[data-hc-process-panel]'),
+          spinner: text.includes('正在处理…'),
+          stop: !!document.querySelector('[aria-label="停止当前运行"]'),
+        });
+        if (window.__frames.length < 20_000) requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    }, PROACTIVE_TEXT);
+    await editor.click();
+    await page.keyboard.type('what are you doing');
+    await page.keyboard.press('Enter');
+    await page.locator('[data-hc-process-panel]').waitFor({ timeout: 90_000 });
+    if (shots)
+      await page.screenshot({
+        path: path.join(shots, 'proactive-1-working.png'),
+      });
+    await page.getByText(PROACTIVE_TEXT).waitFor({ timeout: 90_000 });
+    if (shots) {
+      await sleep(300);
+      await page.screenshot({
+        path: path.join(shots, 'proactive-2-replied.png'),
+      });
+    }
+    await page
+      .locator('[aria-label="停止当前运行"]')
+      .waitFor({ state: 'detached', timeout: 60_000 });
+    await sleep(500);
+    if (shots)
+      await page.screenshot({ path: path.join(shots, 'proactive-3-done.png') });
+    const frames = await page.evaluate(() => window.__frames);
+    const first = frames.findIndex((f) => f.reply);
+    const after = first >= 0 ? frames.slice(first) : [];
+    check(
+      label,
+      'the panel was there while the turn worked',
+      frames.slice(0, Math.max(first, 0)).some((f) => f.panel && f.spinner),
+    );
+    check(
+      label,
+      'once the reply is in, no frame shows the panel or the spinner',
+      after.length > 0 && after.every((f) => !f.panel && !f.spinner),
+      (() => {
+        const shown = after.find((f) => f.panel || f.spinner);
+        return `${JSON.stringify(shown)} ${shown?.at - after[0]?.at}ms after the reply`;
+      })(),
+    );
+    const closing = after.filter((f) => f.stop);
+    check(
+      label,
+      'the run could still be stopped for a while after the reply',
+      closing.length > 0 && closing.at(-1).at - after[0].at > 1000,
+      `${closing.length} frames, ${closing.at(-1)?.at - after[0]?.at}ms`,
+    );
+  } finally {
+    stub.state.closingDelayMs = 0;
+    await browser.close();
+  }
 }
 
 let failed = false;
