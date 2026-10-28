@@ -8194,7 +8194,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           text,
           { turnId: inputTurnId, sessionId: activeSessionId },
         );
-        if (progressStatus) broadcastStreamEvent(chatJid, progressStatus);
+        if (progressStatus) {
+          broadcastStreamEvent(chatJid, { ...progressStatus, inputTurnId });
+        }
         return true;
       },
       onFinalCandidate: (text) => {
@@ -9145,26 +9147,34 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               streamingAccumulatedText = answerProjection.visibleAnswerText;
             }
 
+            const outputInputTurnId = resolveContainerOutputInputTurnId(
+              result,
+              lastProcessed.id,
+            );
             // The turn's process is kept for turn_traces whatever the Web is
             // shown live; the tracker applies the mode's own limits.
-            turnTraces.observe(
-              resolveContainerOutputInputTurnId(result, lastProcessed.id),
-              result.streamEvent,
-            );
+            turnTraces.observe(outputInputTurnId, result.streamEvent);
             const processVisibility = resolveProcessVisibility();
+            // Every Web frame names the input it answers, the `turn_id` of the
+            // final row: a warm turn's presentation `turnId` is the Runner's
+            // own, so it alone cannot pair the live card with its final.
+            const inputStreamEvent: StreamEvent = {
+              ...result.streamEvent,
+              inputTurnId: outputInputTurnId,
+            };
             // The narration before a tool call goes out ahead of the call.
             for (const note of commentaryRelay.take(
               interactionMode,
               processVisibility,
-              result.streamEvent,
-              resolveContainerOutputInputTurnId(result, lastProcessed.id),
+              inputStreamEvent,
+              outputInputTurnId,
             )) {
               broadcastStreamEvent(chatJid, note);
             }
             const webStreamEvent = projectSdkStreamEventForWeb(
               interactionMode,
               processVisibility,
-              result.streamEvent,
+              inputStreamEvent,
             );
             if (webStreamEvent) {
               if (
@@ -9821,6 +9831,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                   eventType: 'status',
                   statusText: 'idle',
                   turnId: result.inputTurnId ?? lastProcessed.id,
+                  inputTurnId: result.inputTurnId ?? lastProcessed.id,
                   sessionId: activeSessionId,
                 });
               }
@@ -17565,7 +17576,11 @@ async function processAgentConversation(
           { turnId: inputTurnId, sessionId: currentAgentSessionId },
         );
         if (progressStatus) {
-          broadcastStreamEvent(chatJid, progressStatus, agentId);
+          broadcastStreamEvent(
+            chatJid,
+            { ...progressStatus, inputTurnId },
+            agentId,
+          );
         }
         return true;
       },
@@ -18362,24 +18377,30 @@ async function processAgentConversation(
       if (agentAnswerProjection?.visibleAnswerChanged) {
         agentStreamingAccText = agentAnswerProjection.visibleAnswerText;
       }
-      turnTraces.observe(
-        resolveContainerOutputInputTurnId(output, lastProcessed.id),
-        output.streamEvent,
+      const outputInputTurnId = resolveContainerOutputInputTurnId(
+        output,
+        lastProcessed.id,
       );
+      turnTraces.observe(outputInputTurnId, output.streamEvent);
       const processVisibility = resolveProcessVisibility();
+      // Every Web frame names the input it answers (see the main Session).
+      const inputStreamEvent: StreamEvent = {
+        ...output.streamEvent,
+        inputTurnId: outputInputTurnId,
+      };
       // The narration before a tool call goes out ahead of the call.
       for (const note of commentaryRelay.take(
         interactionMode,
         processVisibility,
-        output.streamEvent,
-        resolveContainerOutputInputTurnId(output, lastProcessed.id),
+        inputStreamEvent,
+        outputInputTurnId,
       )) {
         broadcastStreamEvent(chatJid, note, agentId);
       }
       const webStreamEvent = projectSdkStreamEventForWeb(
         interactionMode,
         processVisibility,
-        output.streamEvent,
+        inputStreamEvent,
       );
       if (webStreamEvent) {
         if (webStreamEvent.eventType !== 'usage' || usageProjectionEvent) {
@@ -18652,6 +18673,7 @@ async function processAgentConversation(
               eventType: 'status',
               statusText: 'idle',
               turnId: output.inputTurnId ?? lastProcessed.id,
+              inputTurnId: output.inputTurnId ?? lastProcessed.id,
               sessionId: currentAgentSessionId,
             },
             agentId,
