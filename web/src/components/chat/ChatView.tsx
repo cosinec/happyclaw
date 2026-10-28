@@ -28,6 +28,7 @@ import {
 import { MessageInput, type MessageInputHandle } from './MessageInput';
 import { ModelSelector } from './ModelSelector';
 import { ConversationContextUsage } from './composer/ContextUsageRing';
+import { ActionSheet, type SheetAction } from './composer/ActionSheet';
 import {
   Sheet,
   SheetContent,
@@ -43,12 +44,15 @@ import {
   ChevronRight,
   Folder,
   Link,
+  MoreHorizontal,
+  Paintbrush,
   PanelRightClose,
   PanelRightOpen,
   Server,
   Settings2,
   SlidersHorizontal,
   Terminal,
+  TerminalSquare,
   Upload,
   X,
 } from 'lucide-react';
@@ -240,6 +244,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const [terminalVisible, setTerminalVisible] = useState(false);
   const [terminalMounted, setTerminalMounted] = useState(false);
   const [terminalHeight, setTerminalHeight] = useState(TERMINAL_DEFAULT_HEIGHT);
+  const [headerSheetOpen, setHeaderSheetOpen] = useState(false);
   const [mobileTerminal, setMobileTerminal] = useState(false);
   // null = dialog closed; MAIN_BINDING = main conversation; other = agent id
   const [bindingAgentId, setBindingAgentId] = useState<string | null>(null);
@@ -1179,6 +1184,51 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     );
   }
 
+  const showImBanner =
+    isOwnHome &&
+    !!imStatus &&
+    !Object.values(imStatus).some(Boolean) &&
+    !imBannerDismissed;
+  // This conversation's actions, for the composer and the phone's ⋯ sheet.
+  const resetCurrent = canModifyWorkspaceConfig
+    ? sessionTab
+      ? requestResetActiveAgent
+      : requestResetMain
+    : undefined;
+  const toggleTerminal =
+    canUseTerminal && !sessionTab ? handleTerminalToggle : undefined;
+  // The phone header's ⋯ sheet: workspace settings, then this conversation.
+  const headerActions: SheetAction[][] = [
+    canModifyWorkspaceConfig
+      ? [
+          {
+            label: '工作区设置',
+            icon: Settings2,
+            onSelect: () => setShowInteractionModeDialog(true),
+          },
+          {
+            label: '渠道绑定',
+            icon: Link,
+            onSelect: () => setBindingAgentId(WORKSPACE_BINDING),
+          },
+        ]
+      : [],
+    [
+      ...(toggleTerminal
+        ? [{ label: '终端', icon: TerminalSquare, onSelect: toggleTerminal }]
+        : []),
+      ...(resetCurrent
+        ? [{ label: '清除上下文', icon: Paintbrush, onSelect: resetCurrent }]
+        : []),
+    ],
+  ];
+  const hasHeaderActions = headerActions.some((group) => group.length > 0);
+  // A phone's header controls sit on a translucent round capsule.
+  const phoneCapsule =
+    'phone:rounded-full phone:border phone:border-surface-border phone:bg-surface-raised/85';
+  const phoneHeaderButton =
+    'phone:size-10 phone:rounded-full phone:text-foreground';
+
   return (
     <div
       ref={containerRef}
@@ -1188,26 +1238,34 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     >
       <div
         className={cn(
-          'min-w-0 flex-1 flex-col',
+          'relative min-w-0 flex-1 flex-col phone:[--chat-header-height:3.5rem]',
           mobileSessionsVisible ? 'hidden lg:flex' : 'flex',
+          // A phone's header floats over the conversation; the list keeps
+          // that much room on top (the channel banner takes it instead).
+          !showImBanner && 'phone:[--chat-top-inset:var(--chat-header-height)]',
         )}
       >
-        {/* Header */}
-        <header className="flex h-12 shrink-0 items-center gap-2 border-b border-surface-border px-4 max-lg:h-13 max-lg:bg-background/80 max-lg:backdrop-blur-xl lg:px-5">
+        {/* Header. On a phone it is transparent over the conversation, which
+            scrolls under a blur that fades out toward its bottom edge. */}
+        <header className="flex h-12 shrink-0 items-center gap-2 border-b border-surface-border px-4 max-lg:h-13 max-lg:bg-background/80 max-lg:backdrop-blur-xl lg:px-5 phone:absolute phone:inset-x-0 phone:top-0 phone:z-30 phone:h-(--chat-header-height) phone:border-b-0 phone:bg-transparent phone:px-3 phone:backdrop-blur-none phone:before:pointer-events-none phone:before:absolute phone:before:inset-x-0 phone:before:top-0 phone:before:-bottom-4 phone:before:-z-10 phone:before:bg-background/70 phone:before:backdrop-blur-xl phone:before:[mask-image:linear-gradient(to_bottom,black_55%,transparent)]">
           {onBack && (
             <IconButton
               label="返回"
               icon={<ArrowLeft />}
               onClick={handleBackAction}
               hideTooltip
-              className="-ml-1.5 pointer-coarse:size-10 lg:hidden"
+              className={cn(
+                '-ml-1.5 pointer-coarse:size-10 lg:hidden phone:ml-0',
+                phoneCapsule,
+                phoneHeaderButton,
+              )}
             />
           )}
           {headerLeft}
           <div className="flex min-w-0 flex-1 items-center gap-2">
             <nav
               aria-label="当前对话"
-              className="flex min-w-0 items-center gap-1 text-body"
+              className="flex min-w-0 items-center gap-1 text-body phone:absolute phone:inset-x-[5.75rem] phone:justify-center phone:text-base phone:leading-[22px] phone:font-semibold"
             >
               {activeAgentTab && isConversationTab ? (
                 <button
@@ -1219,7 +1277,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                   {workspaceDisplayName}
                 </button>
               ) : (
-                <h2 className="truncate px-1.5 font-medium text-foreground">
+                <h2 className="truncate px-1.5 font-medium text-foreground phone:font-semibold">
                   {workspaceDisplayName}
                 </h2>
               )}
@@ -1229,7 +1287,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                     className="hidden size-3.5 shrink-0 text-faint-foreground sm:block"
                     aria-hidden="true"
                   />
-                  <h2 className="truncate px-1 font-medium text-foreground">
+                  <h2 className="truncate px-1 font-medium text-foreground phone:font-semibold">
                     {currentContextName}
                   </h2>
                 </>
@@ -1285,20 +1343,27 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
             <span
               data-testid="chat-run-indicator"
               title="运行中"
-              className="inline-flex shrink-0 items-center gap-1.5 px-1 text-caption text-muted-foreground"
+              className="inline-flex shrink-0 items-center gap-1.5 px-1 text-caption text-muted-foreground phone:hidden"
             >
               <Spinner className="size-3.5" aria-hidden="true" />
               {/* Phones keep the spinner only; the header has no room. */}
               <span className="max-sm:sr-only">运行中</span>
             </span>
           )}
-          <div className="flex shrink-0 items-center gap-0.5">
+          {/* A phone keeps files/context and ⋯ in one capsule; the rest of
+              the workspace actions move into the ⋯ sheet. */}
+          <div
+            className={cn(
+              'flex shrink-0 items-center gap-0.5 phone:gap-0',
+              phoneCapsule,
+            )}
+          >
             {canModifyWorkspaceConfig && (
               <IconButton
                 label="工作区设置"
                 icon={<Settings2 />}
                 onClick={() => setShowInteractionModeDialog(true)}
-                className="text-muted-foreground pointer-coarse:size-10"
+                className="text-muted-foreground pointer-coarse:size-10 phone:hidden"
               />
             )}
             {canModifyWorkspaceConfig && (
@@ -1306,7 +1371,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                 variant="ghost"
                 size="sm"
                 onClick={() => setBindingAgentId(WORKSPACE_BINDING)}
-                className="text-muted-foreground pointer-coarse:min-h-10"
+                className="text-muted-foreground pointer-coarse:min-h-10 phone:hidden"
                 title="管理工作区话题群绑定"
                 aria-label="管理工作区话题群绑定"
               >
@@ -1316,48 +1381,72 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
             )}
             <IconButton
               label={panelOpen ? '收起上下文面板' : '展开上下文面板'}
-              icon={panelOpen ? <PanelRightClose /> : <PanelRightOpen />}
+              icon={
+                <>
+                  {panelOpen ? (
+                    <PanelRightClose className="phone:hidden" />
+                  ) : (
+                    <PanelRightOpen className="phone:hidden" />
+                  )}
+                  <Folder className="hidden phone:block" />
+                </>
+              }
               onClick={handleContextPanelToggle}
-              className="text-muted-foreground pointer-coarse:size-10"
+              className={cn(
+                'text-muted-foreground pointer-coarse:size-10',
+                phoneHeaderButton,
+              )}
             />
+            {hasHeaderActions && (
+              <IconButton
+                label="更多选项"
+                icon={<MoreHorizontal />}
+                onClick={() => setHeaderSheetOpen(true)}
+                hideTooltip
+                className={cn('hidden phone:inline-flex', phoneHeaderButton)}
+              />
+            )}
           </div>
         </header>
 
         {/* Message channel setup hint for home container without channel config */}
-        {isOwnHome &&
-          imStatus &&
-          !Object.values(imStatus).some(Boolean) &&
-          !imBannerDismissed && (
-            <div className="flex min-h-9 shrink-0 items-center gap-2 border-b border-surface-border bg-muted/40 px-4 py-1.5 text-caption text-muted-foreground lg:px-5">
-              <Link className="size-3.5 shrink-0 text-primary-text" />
-              <span className="min-w-0 flex-1">
-                未配置消息渠道（飞书 / Telegram / Discord / QQ / 微信 / 钉钉 /
-                WhatsApp），消息无法与 HappyClaw 的直接对话互通
-              </span>
-              <Button
-                variant="outline"
-                size="xs"
-                onClick={() => navigate('/setup/channels')}
-              >
-                去配置
-              </Button>
-              <IconButton
-                label="关闭"
-                icon={<X />}
-                size="icon-xs"
-                hideTooltip
-                onClick={() => {
-                  setImBannerDismissed(true);
-                  localStorage.setItem('im-banner-dismissed', '1');
-                }}
-              />
-            </div>
-          )}
+        {showImBanner && (
+          // Under a phone's floating header, not behind it.
+          <div className="flex min-h-9 shrink-0 items-center gap-2 border-b border-surface-border bg-muted/40 px-4 py-1.5 text-caption text-muted-foreground lg:px-5 phone:mt-(--chat-header-height)">
+            <Link className="size-3.5 shrink-0 text-primary-text" />
+            <span className="min-w-0 flex-1">
+              未配置消息渠道（飞书 / Telegram / Discord / QQ / 微信 / 钉钉 /
+              WhatsApp），消息无法与 HappyClaw 的直接对话互通
+            </span>
+            <Button
+              variant="outline"
+              size="xs"
+              onClick={() => navigate('/setup/channels')}
+            >
+              去配置
+            </Button>
+            <IconButton
+              label="关闭"
+              icon={<X />}
+              size="icon-xs"
+              hideTooltip
+              onClick={() => {
+                setImBannerDismissed(true);
+                localStorage.setItem('im-banner-dismissed', '1');
+              }}
+            />
+          </div>
+        )}
 
         {/* Main conversation canvas */}
         <div className="flex-1 flex overflow-hidden min-h-0">
           {/* Messages Area */}
-          <div className="relative flex min-w-0 flex-1 flex-col overflow-x-hidden">
+          {/* The phone's composer dock floats over this area and publishes
+              its height here (--composer-dock-height). */}
+          <div
+            data-composer-dock-host
+            className="relative flex min-w-0 flex-1 flex-col overflow-x-hidden"
+          >
             {isDragOver && (
               <div
                 data-testid="chat-drop-overlay"
@@ -1378,7 +1467,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                   'flex w-full flex-col px-4',
                   heroCentered
                     ? 'flex-[2] justify-end pt-8 pb-6'
-                    : 'min-h-0 flex-1 overflow-y-auto py-6',
+                    : 'min-h-0 flex-1 overflow-y-auto pt-[calc(1.5rem+var(--chat-top-inset,0px))] pb-[calc(1.5rem+var(--composer-dock-height,0px)+var(--composer-dock-lift,0px))]',
                 )}
               >
                 {/* Centred while it fits; a short screen scrolls it from
@@ -1452,16 +1541,8 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
               }
               queuedFollowUps={queuedFollowUps}
               onFollowUpAction={handleFollowUpAction}
-              onResetSession={
-                canModifyWorkspaceConfig
-                  ? sessionTab
-                    ? requestResetActiveAgent
-                    : requestResetMain
-                  : undefined
-              }
-              onToggleTerminal={
-                !sessionTab && canUseTerminal ? handleTerminalToggle : undefined
-              }
+              onResetSession={resetCurrent}
+              onToggleTerminal={toggleTerminal}
               modelSelector={modelSelector}
               contextUsage={contextUsage}
             />
@@ -1536,12 +1617,14 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       )}
 
       <Sheet open={mobileContextOpen} onOpenChange={setMobileContextOpen}>
-        {/* The height must carry the same `data-[side=bottom]` variant as the
-            default it replaces. An unvariated `h-[80dvh]` survives merging but
-            loses on specificity, leaving the sheet at `h-auto` — it then grows
-            with the file list, covers the viewport and cannot scroll. */}
+        {/* It opens at half the screen and drags to full (cindy's context
+            sheet). Before the detent applies, the height must carry the same
+            `data-[side=bottom]` variant as the default it replaces: an
+            unvariated `h-[80dvh]` loses on specificity, leaving the sheet at
+            `h-auto` — it then grows with the file list and cannot scroll. */}
         <SheetContent
           side="bottom"
+          detents
           data-testid="mobile-context-sheet"
           className="gap-0 p-0 data-[side=bottom]:h-[80dvh]"
         >
@@ -1571,6 +1654,16 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         />
       )}
 
+      {/* Phone: the header's ⋯ sheet */}
+      <ActionSheet
+        open={headerSheetOpen}
+        onOpenChange={setHeaderSheetOpen}
+        title="更多选项"
+        description="工作区设置与当前会话的操作"
+        groups={headerActions}
+        data-chat-options-sheet
+      />
+
       {/* Mobile: Terminal sheet */}
       <Sheet
         open={mobileTerminal}
@@ -1578,7 +1671,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       >
         <SheetContent
           side="bottom"
-          className="p-0 data-[side=bottom]:h-[85dvh]"
+          className="gap-0 p-0 data-[side=bottom]:h-[85dvh]"
         >
           <SheetHeader className="px-4 pt-4 pb-2">
             <SheetTitle>终端</SheetTitle>
@@ -1586,7 +1679,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
               使用当前工作区的终端。
             </SheetDescription>
           </SheetHeader>
-          <div className="flex-1 overflow-hidden h-[calc(85dvh-56px)]">
+          <div className="min-h-0 flex-1 overflow-hidden">
             <Suspense fallback={null}>
               <TerminalPanel
                 groupJid={groupJid}

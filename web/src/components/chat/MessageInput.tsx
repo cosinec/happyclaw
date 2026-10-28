@@ -149,6 +149,11 @@ const FOCUS_HANDOFF_MS = 1000;
 // A visual viewport at least this much shorter than the layout viewport means
 // a software keyboard is up (a hardware keyboard's shortcut bar is smaller).
 const SOFT_KEYBOARD_MIN_PX = 150;
+// The phone dock sits 8px above the safe area, or above the keyboard.
+const DOCK_LIFT =
+  'max(calc(env(safe-area-inset-bottom, 0px) + 8px), calc(var(--keyboard-height, 0px) + 8px))';
+// Its feathered top edge (pt-6), over which the conversation fades out.
+const DOCK_FEATHER_PX = 24;
 // The docking slide covers half the window; a little longer than a fade.
 const DOCK_SLIDE_MS = 280;
 let focusHandoffAt = Number.NEGATIVE_INFINITY;
@@ -302,6 +307,8 @@ export const MessageInput = memo(function MessageInput({
   const isPhoneWidth = useMediaQuery('(max-width: 639px)');
   // Too narrow for every tool beside a readable model name.
   const foldToolbarActions = useMediaQuery('(max-width: 479px)');
+  // A phone: cindy's floating dock, a pill at rest that opens into the card.
+  const phoneDock = useMediaQuery('(max-width: 1023px) and (pointer: coarse)');
   const isWideViewport = useMediaQuery('(min-width: 1024px)');
 
   // iOS keyboard adaptation
@@ -806,6 +813,56 @@ export const MessageInput = memo(function MessageInput({
   // shows the centred layout: the card also moves without committing (the
   // editor grows, the page scrolls), so an earlier reading can be stale.
   const cardRef = useRef<HTMLDivElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const dockColumnRef = useRef<HTMLDivElement>(null);
+
+  // Text entry inside the dock opens the pill; it closes again when focus
+  // leaves for the page. A sheet, menu or popover the dock opened (its
+  // trigger is expanded) is not leaving.
+  const [textFocused, setTextFocused] = useState(false);
+  const noteFocusIn = (event: React.FocusEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement;
+    if (target.isContentEditable || target.matches('input, textarea')) {
+      setTextFocused(true);
+    }
+  };
+  const noteFocusOut = (event: React.FocusEvent<HTMLDivElement>) => {
+    // Focus moving inside a portal the dock opened bubbles here through
+    // React; only the dock's own elements losing focus count.
+    if (!event.currentTarget.contains(event.target as Node)) return;
+    const next = event.relatedTarget as Node | null;
+    if (next && event.currentTarget.contains(next)) return;
+    if (event.currentTarget.querySelector('[aria-expanded="true"]')) return;
+    setTextFocused(false);
+  };
+
+  // The conversation scrolls under the floating dock. The dock publishes
+  // its height on the area it floats over (the card and its feathered
+  // edge; the keyboard lift is --composer-dock-lift, set alongside, so
+  // keyboard frames don't come through here).
+  useLayoutEffect(() => {
+    const column = dockColumnRef.current;
+    const host = rootRef.current?.parentElement?.closest<HTMLElement>(
+      '[data-composer-dock-host]',
+    );
+    if (!column || !host || !phoneDock || layout === 'centered') return;
+    host.style.setProperty('--composer-dock-lift', DOCK_LIFT);
+    let published = '';
+    const update = () => {
+      const height = `${column.offsetHeight + DOCK_FEATHER_PX}px`;
+      if (height === published) return;
+      published = height;
+      host.style.setProperty('--composer-dock-height', height);
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(column);
+    return () => {
+      observer.disconnect();
+      host.style.removeProperty('--composer-dock-height');
+      host.style.removeProperty('--composer-dock-lift');
+    };
+  }, [phoneDock, layout]);
   const committedLayoutRef = useRef(layout);
   const dockFromRef = useRef<number | null>(null);
   if (layout === 'docked' && committedLayoutRef.current === 'centered') {
@@ -874,21 +931,45 @@ export const MessageInput = memo(function MessageInput({
   const queueCollapsible = isTouchInput || isPhoneWidth;
 
   const centered = layout === 'centered';
+  const dock = phoneDock && !centered;
+  // The resting pill opens into the card when the text gets focus (in the
+  // same tap, so iOS raises its keyboard) and stays open while anything is
+  // in it or being worked on.
+  const pill =
+    dock &&
+    !textFocused &&
+    !hasPayload &&
+    queuedFollowUps.length === 0 &&
+    !palette.open &&
+    !editingFollowUpId &&
+    !sendError;
+  const dockCard = dock && !pill;
 
   return (
     <div
+      ref={rootRef}
       data-hc-composer
       data-composer-layout={layout}
+      data-composer-dock={dock ? (pill ? 'pill' : 'card') : undefined}
+      onFocus={dock ? noteFocusIn : undefined}
+      onBlur={dock ? noteFocusOut : undefined}
       className={cn(
         'relative w-full',
-        !centered &&
-          'bg-background pt-1 pb-3 max-lg:border-t max-lg:border-surface-border max-lg:bg-background/80 max-lg:backdrop-blur-xl',
+        dock
+          ? // Floats over the conversation: 16px from the sides, 8px above
+            // the safe area (or the keyboard), its top edge feathered into
+            // the page instead of a border.
+            'absolute inset-x-0 bottom-0 z-20 bg-[linear-gradient(to_bottom,transparent,var(--color-background)_1.5rem)] pt-6'
+          : !centered &&
+              'bg-background pt-1 pb-3 max-lg:border-t max-lg:border-surface-border max-lg:bg-background/80 max-lg:backdrop-blur-xl',
       )}
       style={
         centered
           ? undefined
           : {
-              paddingBottom: `max(0.75rem, env(safe-area-inset-bottom, 0px), var(--keyboard-height, 0px))`,
+              paddingBottom: dock
+                ? DOCK_LIFT
+                : `max(0.75rem, env(safe-area-inset-bottom, 0px), var(--keyboard-height, 0px))`,
             }
       }
     >
@@ -902,6 +983,7 @@ export const MessageInput = memo(function MessageInput({
       {/* Same column as the message list (max-w-3xl + px-6) so the
           composer edges line up with message content. */}
       <div
+        ref={dockColumnRef}
         className={
           isCompact ? 'mx-auto px-4' : 'mx-auto max-w-3xl px-4 lg:px-6'
         }
@@ -922,8 +1004,22 @@ export const MessageInput = memo(function MessageInput({
           <div
             ref={cardRef}
             data-composer-card
-            className="relative overflow-hidden rounded-[12px] border border-surface-border bg-surface-raised transition-colors focus-within:border-foreground/25 motion-reduce:transition-none"
+            className={cn(
+              'relative overflow-hidden border border-surface-border bg-surface-raised transition-[color,background-color,border-color,border-radius] focus-within:border-foreground/25 motion-reduce:transition-none',
+              !dock
+                ? 'rounded-[12px]'
+                : pill
+                  ? 'rounded-[25px]'
+                  : 'rounded-[30px]',
+            )}
           >
+            {dockCard && (
+              // cindy's card handle: a cue that the pill opened into this.
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute top-2 left-1/2 h-1 w-9 -translate-x-1/2 rounded-full bg-muted-foreground/25"
+              />
+            )}
             {queuedFollowUps.length > 0 && (
               <QueuedFollowUpsPanel
                 queuedFollowUps={queuedFollowUps}
@@ -954,12 +1050,19 @@ export const MessageInput = memo(function MessageInput({
                 edge, and blank space between that still focuses the text. */}
             <div
               className={cn(
-                'flex flex-col justify-between px-[11px] pt-[11px] pb-[6px]',
-                centered ? 'min-h-[140px]' : 'min-h-[96px] sm:min-h-[118px]',
+                pill
+                  ? // The pill: + | text | send on one line.
+                    'flex min-h-[50px] items-center gap-1.5 px-2 py-2'
+                  : 'flex flex-col justify-between px-[11px] pt-[11px] pb-[6px]',
+                dockCard && 'min-h-[104px] pt-[22px]',
+                !dock &&
+                  (centered
+                    ? 'min-h-[140px]'
+                    : 'min-h-[96px] sm:min-h-[118px]'),
               )}
               onMouseDown={focusFromBlankArea}
             >
-              <div>
+              <div className={cn(pill && 'min-w-0 flex-1')}>
                 <AttachmentTray
                   images={pendingImages}
                   files={pendingFiles}
@@ -982,6 +1085,8 @@ export const MessageInput = memo(function MessageInput({
                 onResetSession={onResetSession}
                 onToggleTerminal={onToggleTerminal}
                 foldActions={foldToolbarActions}
+                phone={phoneDock}
+                collapsed={pill}
                 contextUsage={
                   !centered && !isPhoneWidth ? contextUsage : undefined
                 }

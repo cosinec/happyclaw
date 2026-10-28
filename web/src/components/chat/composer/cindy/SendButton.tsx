@@ -49,7 +49,8 @@ export const SendButton = forwardRef<HTMLButtonElement, SendButtonProps>(
           'relative flex size-[30px] shrink-0 cursor-pointer items-center justify-center rounded-full',
           'transition-[color,background-color,transform] duration-150 motion-reduce:transition-none',
           'focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-surface-raised focus-visible:outline-none',
-          'pointer-coarse:size-10',
+          // A phone: cindy's 34px send, its touch target padded to 44px.
+          'lg:pointer-coarse:size-10 phone:size-[34px] phone:before:absolute phone:before:-inset-[5px]',
           idle
             ? 'cursor-not-allowed bg-muted text-faint-foreground'
             : 'bg-foreground text-background hover:bg-foreground/85 active:scale-95',

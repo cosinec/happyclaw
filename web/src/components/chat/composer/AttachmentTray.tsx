@@ -34,16 +34,18 @@ export function AttachmentTray({
             <img
               src={img.preview}
               alt={img.name}
-              className="size-14 rounded-lg border border-surface-border object-cover"
+              // A phone: 72px squares, as in cindy's tray.
+              className="size-14 rounded-lg border border-surface-border object-cover phone:size-[72px] phone:rounded-[12px]"
             />
           </button>
           <button
             type="button"
             onClick={() => onRemoveImage(i)}
-            className="absolute -top-2 -right-2 flex size-6 cursor-pointer items-center justify-center rounded-full bg-foreground text-background shadow-menu transition-opacity pointer-fine:opacity-0 pointer-fine:group-hover/attachment:opacity-100 pointer-fine:group-focus-within/attachment:opacity-100 focus-visible:opacity-100 motion-reduce:transition-none pointer-coarse:before:absolute pointer-coarse:before:-inset-2"
+            // A phone: a 22px X inside the thumbnail's corner.
+            className="absolute -top-2 -right-2 flex size-6 cursor-pointer items-center justify-center rounded-full bg-foreground text-background shadow-menu transition-opacity pointer-fine:opacity-0 pointer-fine:group-hover/attachment:opacity-100 pointer-fine:group-focus-within/attachment:opacity-100 focus-visible:opacity-100 motion-reduce:transition-none pointer-coarse:before:absolute pointer-coarse:before:-inset-2 phone:top-1 phone:right-1 phone:size-[22px] phone:bg-foreground/75 phone:shadow-none"
             aria-label="移除图片"
           >
-            <X className="size-3.5" />
+            <X className="size-3.5 phone:size-3" />
           </button>
         </div>
       ))}

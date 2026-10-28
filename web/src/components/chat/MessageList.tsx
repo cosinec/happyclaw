@@ -34,6 +34,7 @@ import {
 } from '../../lib/message-timeline';
 import { resolveAgentDisplayIdentity } from '../../utils/agent-identity';
 import { copyToClipboard } from '../../utils/clipboard';
+import { cn } from '@/lib/utils';
 import {
   formatChatDateLabel,
   localDayKey,
@@ -1183,11 +1184,16 @@ export const MessageList = memo(function MessageList({
               the padding on the scroller 24px of text scrolled by above it. */}
           <div
             ref={contentRef}
-            className={
-              displayMode === 'compact'
-                ? 'mx-auto px-4 pt-6 min-w-0'
-                : 'mx-auto min-w-0 max-w-3xl px-4 pt-6 lg:px-6'
-            }
+            className={cn(
+              // A phone's header and composer dock float over the list;
+              // ChatView and the dock publish how much of it they cover.
+              // The bottom room is on the content, not the scroller, so a
+              // taller dock re-pins a reader at the bottom like a taller row.
+              'mx-auto min-w-0 px-4 pt-[calc(1.5rem+var(--chat-top-inset,0px))] pb-[calc(var(--composer-dock-height,0px)+var(--composer-dock-lift,0px))]',
+              // Sticky rows (StreamingDisplay) stick below the header.
+              '[&_[data-follow-sticky]]:top-[var(--chat-top-inset,0px)]',
+              displayMode !== 'compact' && 'max-w-3xl lg:px-6',
+            )}
           >
             {loading && hasMore && (
               <div ref={measureLoadingRow} className="flex justify-center py-4">
@@ -1435,7 +1441,7 @@ export const MessageList = memo(function MessageList({
 
       {/* Floating scroll buttons */}
       {showScrollButtons && (
-        <div className="absolute right-4 bottom-4 flex flex-col gap-1.5">
+        <div className="absolute right-4 bottom-[calc(1rem+var(--composer-dock-height,0px)+var(--composer-dock-lift,0px))] flex flex-col gap-1.5">
           {!atTop && (
             <button
               type="button"

@@ -3,6 +3,9 @@
 @plugin "tailwindcss-animate";
 
 @custom-variant dark (&:is(.dark *));
+/* A phone: below the desktop layout and driven by touch. The composer's
+   phone dock (MessageInput) tests the same query in JS. */
+@custom-variant phone (@media (max-width: 1023px) and (pointer: coarse));
 
 /* Inter (UI) and Geist Mono (code) are self-hosted via @fontsource-variable,
    imported in main.tsx so Vite fingerprints the files under the app base path. */
