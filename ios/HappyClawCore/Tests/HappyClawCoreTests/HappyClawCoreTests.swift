@@ -23,7 +23,27 @@ private let shell = ShellInfo(version: "0.1.0", build: "1", os: "27.1")
     let nullTitle = try BridgeProtocol.decode(json(#"""
       {"v":1,"type":"route.changed","payload":{"path":"/login","title":null,"tabId":null,"canGoBack":false,"tabBar":false}}
       """#))
-    if case let .routeChanged(state) = nullTitle.message { #expect(state.tabId == nil) } else { Issue.record("wrong case") }
+    if case let .routeChanged(state) = nullTitle.message {
+      #expect(state.tabId == nil)
+      #expect(state.nav == nil)  // older web builds omit it
+    } else { Issue.record("wrong case") }
+
+    let withNav = try BridgeProtocol.decode(json(#"""
+      {"v":1,"type":"route.changed","payload":{"path":"/memory","title":"记忆","tabId":"memory","canGoBack":false,"tabBar":true,
+       "nav":{"visible":true,"title":"记忆详情","back":true,"action":{"id":"page","title":"分区","symbol":"list.bullet"}}}}
+      """#))
+    if case let .routeChanged(state) = withNav.message {
+      #expect(state.nav == NavBarState(
+        visible: true, title: "记忆详情", back: true,
+        action: .init(id: "page", title: "分区", symbol: "list.bullet")))
+    } else { Issue.record("wrong case") }
+
+    let theme = try BridgeProtocol.decode(json(#"""
+      {"v":1,"type":"theme.changed","payload":{"scheme":"light","background":"#faf9f5"}}
+      """#))
+    #expect(theme.message == .themeChanged(.light, background: RGBColor(hex: "#faf9f5")))
+    #expect(RGBColor(hex: "#ff0000")?.red == 1)
+    #expect(RGBColor(hex: "oklch(0.1 0 0)") == nil)
 
     let confirm = try BridgeProtocol.decode(json(#"""
       {"v":1,"type":"confirm.request","id":"w1","payload":{"title":"删除？","message":"不可恢复","confirmText":"删除","cancelText":"取消","destructive":true}}
@@ -172,5 +192,22 @@ private let shell = ShellInfo(version: "0.1.0", build: "1", os: "27.1")
     let typing = LayoutCalculator.compute(LayoutInput(safeArea: safe, tabBarOccupancy: 96, tabBarVisible: true, keyboardHeight: 336))
     #expect(typing.contentInsets.bottom == 0)
     #expect(typing.keyboard == 336)
+  }
+
+  @Test func navBarCoversTopIncludingStatusBar() {
+    let shown = LayoutCalculator.compute(LayoutInput(
+      safeArea: safe, tabBarOccupancy: 0, tabBarVisible: false, keyboardHeight: 336,
+      navBarOccupancy: 103, navBarVisible: true))
+    // Stays while typing, unlike the tab bar.
+    #expect(shown.contentInsets.top == 103)
+    let hidden = LayoutCalculator.compute(LayoutInput(
+      safeArea: safe, tabBarOccupancy: 0, tabBarVisible: false, keyboardHeight: 0,
+      navBarOccupancy: 103, navBarVisible: false))
+    #expect(hidden.contentInsets.top == 0)
+    // Before the bar is measured it still reports more than the status bar.
+    let unmeasured = LayoutCalculator.compute(LayoutInput(
+      safeArea: safe, tabBarOccupancy: 0, tabBarVisible: false, keyboardHeight: 0,
+      navBarOccupancy: 0, navBarVisible: true))
+    #expect(unmeasured.contentInsets.top > safe.top)
   }
 }

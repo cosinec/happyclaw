@@ -11,7 +11,7 @@ public enum BridgeProtocol {
   /// `window.webkit.messageHandlers.<name>` registered by the shell.
   public static let handlerName = "happyclaw"
   /// Capabilities the shell offers to the web (subset of web's list).
-  public static let shellCapabilities = ["layout", "tabs", "confirm", "menu", "haptic", "theme"]
+  public static let shellCapabilities = ["layout", "tabs", "confirm", "menu", "haptic", "theme", "navbar"]
 
   /// Highest version both sides speak, or nil when there is none.
   public static func negotiate(_ webVersions: [Int]) -> Int? {
@@ -52,19 +52,70 @@ public struct TabDeclaration: Codable, Equatable, Sendable, Identifiable, Hashab
   }
 }
 
+/// An sRGB color sent by the web, components 0...1.
+public struct RGBColor: Equatable, Sendable {
+  public var red: Double
+  public var green: Double
+  public var blue: Double
+
+  /// Accepts `#rrggbb` only, which is what the web normalizes to.
+  public init?(hex: String) {
+    guard hex.count == 7, hex.first == "#", let value = UInt32(hex.dropFirst(), radix: 16) else { return nil }
+    red = Double((value >> 16) & 0xFF) / 255
+    green = Double((value >> 8) & 0xFF) / 255
+    blue = Double(value & 0xFF) / 255
+  }
+}
+
 public struct RouteState: Codable, Equatable, Sendable {
   public var path: String
   public var title: String?
   public var tabId: String?
   public var canGoBack: Bool
   public var tabBar: Bool
+  /// Optional within v1: an older web build omits it and gets no native bar.
+  public var nav: NavBarState?
+  /// A web dialog or sheet is open; bars hide but insets stay as they were.
+  public var modal: Bool?
 
-  public init(path: String, title: String?, tabId: String?, canGoBack: Bool, tabBar: Bool) {
+  public init(
+    path: String, title: String?, tabId: String?, canGoBack: Bool, tabBar: Bool,
+    nav: NavBarState? = nil, modal: Bool? = nil
+  ) {
     self.path = path
     self.title = title
     self.tabId = tabId
     self.canGoBack = canGoBack
     self.tabBar = tabBar
+    self.nav = nav
+    self.modal = modal
+  }
+}
+
+/// The native navigation bar the web declares for the current screen.
+public struct NavBarState: Codable, Equatable, Sendable {
+  public struct Action: Codable, Equatable, Sendable {
+    public var id: String
+    public var title: String
+    public var symbol: String
+
+    public init(id: String, title: String, symbol: String) {
+      self.id = id
+      self.title = title
+      self.symbol = symbol
+    }
+  }
+
+  public var visible: Bool
+  public var title: String?
+  public var back: Bool
+  public var action: Action?
+
+  public init(visible: Bool, title: String?, back: Bool, action: Action?) {
+    self.visible = visible
+    self.title = title
+    self.back = back
+    self.action = action
   }
 }
 
@@ -114,7 +165,8 @@ public enum WebMessage: Equatable, Sendable {
   case ready(session: String)
   case tabs(tabs: [TabDeclaration], more: [TabDeclaration])
   case routeChanged(RouteState)
-  case themeChanged(ColorSchemeName)
+  /// `background` is the page color as #rrggbb (optional within v1).
+  case themeChanged(ColorSchemeName, background: RGBColor?)
   case confirmRequest(id: String, ConfirmRequest)
   case menuRequest(id: String, MenuRequest)
   case haptic(HapticStyle)
@@ -170,7 +222,7 @@ private struct TabsPayload: Decodable {
   var tabs: [TabDeclaration]
   var more: [TabDeclaration]
 }
-private struct ThemePayload: Decodable { var scheme: ColorSchemeName }
+private struct ThemePayload: Decodable { var scheme: ColorSchemeName; var background: String? }
 private struct HapticPayload: Decodable { var style: HapticStyle }
 private struct ErrorPayload: Decodable {
   var code: String
@@ -217,7 +269,9 @@ extension BridgeProtocol {
     case "route.changed":
       message = .routeChanged(try payload(RouteState.self))
     case "theme.changed":
-      message = .themeChanged(try payload(ThemePayload.self).scheme)
+      let theme = try payload(ThemePayload.self)
+      // An unparseable color is dropped rather than failing the message.
+      message = .themeChanged(theme.scheme, background: theme.background.flatMap(RGBColor.init(hex:)))
     case "confirm.request":
       message = .confirmRequest(id: try requestId(), try payload(ConfirmRequest.self))
     case "menu.request":
@@ -259,6 +313,7 @@ public enum NativeMessage: Equatable, Sendable {
   case layout(contentInsets: Insets, safeArea: Insets, keyboard: Double)
   case navSelect(tabId: String)
   case navBack
+  case navAction(id: String)
   case confirmResult(id: String, confirmed: Bool)
   case menuResult(id: String, selected: String?)
   case lifecycle(LifecycleState)
@@ -271,6 +326,7 @@ public enum NativeMessage: Equatable, Sendable {
     case .layout: "layout.update"
     case .navSelect: "nav.select"
     case .navBack: "nav.back"
+    case .navAction: "nav.action"
     case .confirmResult: "confirm.result"
     case .menuResult: "menu.result"
     case .lifecycle: "app.lifecycle"
@@ -313,6 +369,9 @@ extension BridgeProtocol {
       return envelope(P(tabId: tabId))
     case .navBack:
       return envelope(Empty())
+    case let .navAction(id):
+      struct P: Encodable { var id: String }
+      return envelope(P(id: id))
     case let .confirmResult(id, confirmed):
       struct P: Encodable { var confirmed: Bool }
       return envelope(P(confirmed: confirmed), id: id)
