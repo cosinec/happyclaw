@@ -29,7 +29,8 @@ ios/
 │   ├── NativeTabBar.swift      系统 UITabBar（由 Web 声明 Tab）
 │   ├── WebHostView.swift       WKWebView：持久数据存储、cookie 同步、导航代理、外链、JS 对话框
 │   ├── DownloadHost.swift      网页下载（blob: / 附件）→ 临时文件 → 系统分享面板
-│   ├── ConnectView.swift       服务器地址
+│   ├── ConnectView.swift       添加服务器（首次启动也用它）
+│   ├── ServerListView.swift    多服务器列表：切换 / 添加 / 删除
 │   ├── Bridge/
 │   │   ├── BridgeChannel.swift 注入脚本 + 收发（只接受本实例顶层 frame）
 │   │   ├── LayoutBridge.swift  安全区/TabBar/键盘 → layout.update（去重）
@@ -39,7 +40,7 @@ ios/
 │   ├── Recovery/               恢复页、诊断页
 │   ├── Support/                文案、触感、地址存储
 │   └── Resources/              Assets（图标取自 web/public/icons/logo-1024.png）
-├── HappyClawCore/              纯 Swift 包：协议编解码、握手状态机、地址/外链策略、布局计算
+├── HappyClawCore/              纯 Swift 包：协议编解码、握手状态机、地址/外链策略、多服务器注册表、布局计算
 │   └── Tests/                  `swift test`，无需模拟器
 └── scripts/install-device.sh   构建并装到已连接的 iPhone（也用于 7 天续签）
 ```
@@ -97,7 +98,10 @@ Web 侧对应模块在 `web/src/native/`（`protocol.ts`、`session.ts`、`layou
   （存到「文件」/「照片」、隔空投送、用其他 App 打开），面板关闭后删除临时文件；Web 不需要改。
 - **JS 对话框**：实现了 `alert/confirm/prompt` 的 WKUIDelegate。否则 WKWebView 里
   `confirm()` 会静默返回 false，Web 的「未保存离开」守卫会失效。
-- **登录**：`WKWebsiteDataStore.default()` 持久化 cookie；401 由 Web 跳登录页，原生不拦截。
+- **多服务器**：「更多 → 服务器」保存多个实例，每个有独立的 WebKit 数据存储
+  （`WKWebsiteDataStore(forIdentifier:)`），登录、缓存互不影响；切换时整个 WebView 重建并重新握手。
+  旧版本保存的单个地址迁移为第一个实例，继续使用默认存储，登录不丢。删除实例会同时清掉它在本机的数据。
+- **登录**：各实例的数据存储持久化 cookie；401 由 Web 跳登录页，原生不拦截。
   页面加载完成后把本实例 cookie 同步进 `HTTPCookieStorage.shared`，供以后原生请求
   （Widget 快照、推送注册）复用。
 
@@ -272,7 +276,7 @@ ios/scripts/install-device.sh <UDID>     # 指定设备
 
 - 填 `http://<Mac 局域网 IP>:5173`（`ipconfig getifaddr en0`），手机和 Mac 在同一局域网；
 - 首次访问局域网时 iOS 会请求「本地网络」权限，必须允许；
-- 正式使用请填部署好的 HTTPS 域名。之后可在「更多 → 服务器地址」修改。
+- 正式使用请填部署好的 HTTPS 域名。之后可在「更多 → 服务器」添加或切换服务器。
 
 ## 签名有效期与续签
 

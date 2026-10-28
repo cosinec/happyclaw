@@ -1,26 +1,39 @@
 import Foundation
 import HappyClawCore
 
-/// Persists the instance address. `HAPPYCLAW_SERVER_URL` in the launch
-/// environment overrides it, so simulator runs and UI tests can point at a
-/// dev server. It never replaces a saved address, but seeds an empty one, so
-/// a later cold start from the home screen reaches the same server.
+/// Persists the saved servers (ServerRegistry) in UserDefaults.
+///
+/// The single `serverURL` saved before instances existed migrates onto
+/// WebKit's shared store, so its login survives. `HAPPYCLAW_SERVER_URL` in the
+/// launch environment (install-device.sh, simulator runs) is added if new and
+/// made active, so a later cold start from the home screen reaches it too.
 enum ServerStore {
-  private static let key = "serverURL"
+  private static let key = "servers.v1"
+  private static let legacyKey = "serverURL"
 
-  static func load() -> ServerAddress? {
+  static func load() -> ServerRegistry {
+    var registry: ServerRegistry
+    if let data = UserDefaults.standard.data(forKey: key),
+      let decoded = try? JSONDecoder().decode(ServerRegistry.self, from: data)
+    {
+      registry = decoded
+    } else {
+      let legacy = UserDefaults.standard.string(forKey: legacyKey).flatMap { try? ServerAddress(parsing: $0) }
+      registry = ServerRegistry(legacyAddress: legacy)
+    }
     if let override = ProcessInfo.processInfo.environment["HAPPYCLAW_SERVER_URL"],
       let address = try? ServerAddress(parsing: override)
     {
-      if UserDefaults.standard.string(forKey: key) == nil { save(address) }
-      return address
+      registry.activate(address)
     }
-    guard let saved = UserDefaults.standard.string(forKey: key) else { return nil }
-    return try? ServerAddress(parsing: saved)
+    save(registry)
+    return registry
   }
 
-  static func save(_ address: ServerAddress) {
-    UserDefaults.standard.set(address.url.absoluteString, forKey: key)
+  static func save(_ registry: ServerRegistry) {
+    guard let data = try? JSONEncoder().encode(registry) else { return }
+    UserDefaults.standard.set(data, forKey: key)
+    UserDefaults.standard.removeObject(forKey: legacyKey)
   }
 }
 

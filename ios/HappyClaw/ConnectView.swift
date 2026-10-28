@@ -1,13 +1,13 @@
 import HappyClawCore
 import SwiftUI
 
-/// First-launch address entry, also pushed from 「更多 → 服务器地址」.
+/// First-launch address entry, also pushed from 「更多 → 服务器 → 添加服务器」.
+/// Connecting returns to the web root, so it never dismisses itself.
 struct ConnectView: View {
   let isSettings: Bool
   let onConnect: (ServerAddress) -> Void
   @State private var input: String
   @State private var error: String?
-  @Environment(\.dismiss) private var dismiss
 
   init(initial: ServerAddress?, isSettings: Bool, onConnect: @escaping (ServerAddress) -> Void) {
     self.isSettings = isSettings
@@ -65,7 +65,6 @@ struct ConnectView: View {
       let address = try ServerAddress(parsing: input)
       error = nil
       onConnect(address)
-      if isSettings { dismiss() }
     } catch .empty {
       error = L10n.connectErrorEmpty
     } catch .unsupportedScheme {

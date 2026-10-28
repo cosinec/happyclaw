@@ -211,3 +211,46 @@ private let shell = ShellInfo(version: "0.1.0", build: "1", os: "27.1")
     #expect(unmeasured.contentInsets.top > safe.top)
   }
 }
+
+@Suite struct ServerRegistryTests {
+  private func address(_ text: String) throws -> ServerAddress { try ServerAddress(parsing: text) }
+
+  @Test func migratesLegacyAddressOntoSharedStore() throws {
+    let registry = ServerRegistry(legacyAddress: try address("http://192.168.1.10:5173"))
+    #expect(registry.instances.count == 1)
+    #expect(registry.active?.dataStore == .shared)
+    #expect(ServerRegistry(legacyAddress: nil).active == nil)
+  }
+
+  @Test func activateDeduplicatesByAddressAndIsolatesNewOnes() throws {
+    var registry = ServerRegistry(legacyAddress: try address("http://192.168.1.10:5173"))
+    let legacy = try #require(registry.active)
+    let home = registry.activate(try address("https://claw.example.com:8443/"))
+    #expect(home.dataStore == .isolated(home.id))
+    #expect(registry.activeID == home.id)
+    // Same server typed differently is the same instance.
+    let again = registry.activate(try address("HTTPS://CLAW.example.com:8443"))
+    #expect(again.id == home.id)
+    #expect(registry.instances.count == 2)
+    registry.select(legacy.id)
+    #expect(registry.active == legacy)
+  }
+
+  @Test func onlyInactiveInstancesCanBeRemoved() throws {
+    var registry = ServerRegistry()
+    let a = registry.activate(try address("http://a.local"))
+    let b = registry.activate(try address("http://b.local"))
+    #expect(registry.remove(b.id) == nil)  // active
+    #expect(registry.remove(a.id) == a)
+    #expect(registry.instances == [b])
+    registry.select(UUID())  // unknown id is ignored
+    #expect(registry.activeID == b.id)
+  }
+
+  @Test func roundTripsThroughJSON() throws {
+    var registry = ServerRegistry(legacyAddress: try address("http://a.local"))
+    registry.activate(try address("http://b.local"))
+    let decoded = try JSONDecoder().decode(ServerRegistry.self, from: JSONEncoder().encode(registry))
+    #expect(decoded == registry)
+  }
+}
