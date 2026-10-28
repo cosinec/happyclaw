@@ -337,7 +337,9 @@ export function SettingsNav({
           side="left"
           // Full-height drawer: keep its header clear of the status bar and
           // its last row above the home indicator (standalone PWA, iOS shell).
-          className="flex w-72 flex-col gap-0 p-0 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
+          // On touch devices the sheet itself takes focus (below), which must
+          // not draw a focus ring along its edge.
+          className="flex w-72 flex-col gap-0 p-0 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] outline-none"
           showCloseButton={false}
           onOpenAutoFocus={(event) => {
             // Focusing the search field would raise the on-screen keyboard
