@@ -1,7 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 
-// The composer's model picker (with the ChatGPT reasoning effort in its
-// panel), in ChatView over the composer harness. The model-selection API is answered by the test itself:
+// The composer's model picker and the reasoning effort control beside it,
+// in ChatView over the composer harness. The model-selection API is answered by the test itself:
 // GET returns the current selection, PUT records the body and applies it.
 
 const HARNESS_PATH = '/tests/e2e/composer-harness.html';
@@ -93,9 +93,11 @@ const modelButton = (page: Page) =>
 /** A model row of the open panel, by the model it names. */
 const modelRow = (page: Page, model: string) =>
   page.locator(`[data-model-row][title="${model}"]`);
-/** A reasoning effort chip of the open panel. */
-const effortChip = (page: Page, effort: string) =>
-  page.locator(`[data-effort="${effort}"]`);
+/** The reasoning effort control next to the model. */
+const effortButton = (page: Page) =>
+  page.locator('[data-hc-composer] button[aria-label="选择推理等级"]');
+const effortItem = (page: Page, label: string) =>
+  page.getByRole('menuitemradio', { name: label, exact: true });
 
 /** The row of composer actions the model button sits in. */
 const actionRow = (page: Page) =>
@@ -172,9 +174,14 @@ test.describe('model picker', () => {
       selectedModel: 'gpt-6-astra',
       selectedEffort: 'high',
     });
-    // The model, then its effort in plain text.
+    // The model, then its own effort control.
     await expect(modelButton(page)).toContainText('gpt-6-astra');
-    await expect(modelButton(page)).toContainText('高');
+    await expect(effortButton(page)).toContainText('高');
+    const boxes = await Promise.all([
+      modelButton(page).boundingBox(),
+      effortButton(page).boundingBox(),
+    ]);
+    expect(boxes[0]!.x).toBeLessThan(boxes[1]!.x);
     await expectRowFits(page);
 
     for (const width of [412, 360, 320]) {
@@ -197,9 +204,7 @@ test.describe('model picker', () => {
     // Models are listed by name; whatever commentary the catalog carries stays out.
     await expect(panel).not.toContainText(/主力编码|旗舰|遗留|配置默认/);
     // Nothing to set an effort on while the pool chooses the configuration.
-    await expect(
-      panel.getByRole('radiogroup', { name: '推理档位' }),
-    ).toHaveCount(0);
+    await expect(effortButton(page)).toHaveCount(0);
     await modelRow(page, 'gpt-6-astra').click();
     await expect.poll(() => puts.length).toBe(1);
     expect(puts[0]).toMatchObject({
@@ -209,25 +214,27 @@ test.describe('model picker', () => {
     });
     await expect(modelButton(page)).toContainText('gpt-6-astra');
 
-    await modelButton(page).click();
-    const efforts = page.getByRole('radiogroup', { name: '推理档位' });
-    await expect(efforts).toBeVisible();
-    // gpt-6-astra offers everything up to max here, after the default chip.
-    await expect(efforts.getByRole('radio')).toHaveCount(1 + EFFORTS.length);
-    await effortChip(page, 'xhigh').click();
+    await effortButton(page).click();
+    // gpt-6-astra offers everything up to max here, after 默认.
+    await expect(page.getByRole('menuitemradio')).toHaveCount(
+      1 + EFFORTS.length,
+    );
+    await effortItem(page, '超高').click();
     await expect.poll(() => puts.length).toBe(2);
     expect(puts[1]).toMatchObject({
       modelConfigId: 'chatgpt',
       model: 'gpt-6-astra',
       effort: 'xhigh',
     });
-    await expect(modelButton(page)).toContainText('超高');
+    await expect(effortButton(page)).toContainText('超高');
 
     // A model without that level puts the effort back to its default.
+    await modelButton(page).click();
     await modelRow(page, 'gpt-5.5').click();
     await expect.poll(() => puts.length).toBe(3);
     expect(puts[2]).toMatchObject({ model: 'gpt-5.5', effort: null });
-    await expect(modelButton(page)).toContainText('gpt-5.5中');
+    await expect(modelButton(page)).toContainText('gpt-5.5');
+    await expect(effortButton(page)).toContainText('中');
   });
 
   test('the panel stays inside a small screen', async ({ page }) => {

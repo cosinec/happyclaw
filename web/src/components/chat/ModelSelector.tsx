@@ -8,6 +8,7 @@ import {
 } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
+  Brain,
   Check,
   ChevronDown,
   LayoutGrid,
@@ -20,6 +21,15 @@ import { toast } from 'sonner';
 
 import { cn } from '@/lib/utils';
 import { splitOneMillionSuffix } from '@/lib/model-providers';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import {
   Popover,
   PopoverContent,
@@ -39,6 +49,8 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { IconButton } from '@/components/common/IconButton';
+import { vendorOfConnection, vendorOfModel } from '../brand/vendor';
+import { VendorTile } from '../brand/VendorTile';
 import { api } from '../../api/client';
 import { useMediaQuery } from '../../hooks/useMediaQuery';
 import { useAuthStore } from '../../stores/auth';
@@ -74,6 +86,11 @@ export interface ConnectionModelChoice {
   id: string;
   /** Left out of the menu unless the conversation already runs on it. */
   hidden: boolean;
+  /** Reasoning efforts the model takes, low to high; absent when none. */
+  efforts?: string[];
+  /** The level it runs at when none is picked. */
+  defaultEffort?: string;
+  contextWindow?: number;
 }
 
 export interface SessionModelOption {
@@ -112,6 +129,8 @@ export interface SessionModelSelection {
      * servers do not send it.
      */
     model?: string | null;
+    /** The effort a launch with no pick runs at, when its model takes one. */
+    effort?: string | null;
   };
   options: SessionModelOption[];
 }
@@ -176,6 +195,14 @@ function ownModel(option: SessionModelOption): string {
   return option.codex ? option.codex.defaultModel : option.model;
 }
 
+/** The vendor a row's model comes from, else the connection's. */
+function vendorOf(option: SessionModelOption, model: string) {
+  return (
+    vendorOfModel(model) ??
+    vendorOfConnection({ kind: option.kind, model: ownModel(option) })
+  );
+}
+
 /**
  * The connection and model the conversation runs on: the pick, or what the
  * default resolves to (the server sends a connection only for an Agent, the
@@ -206,7 +233,25 @@ function modelInUse(selection: SessionModelSelection): {
   };
 }
 
+/** The efforts a connection's model takes, and its own default level. */
+function modelEfforts(
+  option: SessionModelOption,
+  model: string,
+): { efforts: string[]; defaultEffort: string | null } | null {
+  if (option.codex) {
+    const choice = option.codex.models.find((item) => item.value === model);
+    return choice?.efforts.length
+      ? { efforts: choice.efforts, defaultEffort: choice.defaultEffort || null }
+      : null;
+  }
+  const entry = option.models?.find((item) => item.id === model);
+  return entry?.efforts?.length
+    ? { efforts: entry.efforts, defaultEffort: entry.defaultEffort ?? null }
+    : null;
+}
+
 const DEFAULT_ROW_KEY = '__default__';
+const DEFAULT_EFFORT = '__default__';
 
 /** One row of the panel: what picking it saves and how it reads. */
 interface ModelRow {
@@ -264,36 +309,90 @@ function optionRows(
   return rows;
 }
 
-/**
- * The configuration, model and effort the conversation actually runs on, when
- * that is a ChatGPT login the effort control can act on. An automatic pool, a
- * workspace override or another kind of configuration has none.
- */
-export function resolveEffortContext(selection: SessionModelSelection): {
+export interface EffortContext {
+  /** The connection the conversation runs on. */
   option: SessionModelOption;
-  model: CodexModelChoice | null;
-  /** Null when the conversation follows the default effort. */
+  /** The model it runs there. */
+  model: string;
+  /** The levels that model takes, low to high. */
+  efforts: string[];
+  /** The level when none is picked: the default's, else the model's own. */
+  defaultEffort: string | null;
+  /** The picked level; null follows the default. */
   effort: string | null;
-  /** The model to send back with an effort: only an explicit pick. */
+  /** The conversation picked its connection (else it follows the default). */
+  picked: boolean;
+  /** The model a picked connection was pinned to; null follows its own. */
   pinnedModel: string | null;
-} | null {
+}
+
+/**
+ * The reasoning effort of the model the conversation runs on — the pick, or
+ * the default's model — when that model takes efforts; null hides the effort
+ * control.
+ */
+export function resolveEffortContext(
+  selection: SessionModelSelection,
+): EffortContext | null {
   const { option, model } = modelInUse(selection);
-  if (!option?.codex) return null;
+  const levels = option && model ? modelEfforts(option, model) : null;
+  if (!option || !levels) return null;
   const picked = !!selection.selectedModelConfigId;
   return {
     option,
-    model: option.codex.models.find((item) => item.value === model) ?? null,
+    model,
+    efforts: levels.efforts,
+    defaultEffort:
+      (picked ? null : selection.default.effort) ?? levels.defaultEffort,
     effort: picked ? (selection.selectedEffort ?? null) : null,
+    picked,
     pinnedModel: picked ? (selection.selectedModel ?? null) : null,
   };
 }
 
 /**
- * The composer's model control: plain text at rest, a filled pill on hover
- * or while open. The label truncates; the tooltip carries the full name.
+ * The composer's model and effort controls: plain text at rest, a filled
+ * pill on hover or while open. Labels truncate; tooltips carry the full name.
  */
 const TRIGGER_CLASS =
-  'inline-flex h-[30px] max-w-[240px] min-w-0 cursor-pointer items-center gap-1 rounded-full px-2.5 text-label font-medium text-foreground transition-colors duration-100 hover:bg-surface-hover focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none data-[state=open]:bg-surface-hover disabled:cursor-default disabled:hover:bg-transparent pointer-coarse:h-10';
+  'inline-flex h-[30px] min-w-0 cursor-pointer items-center gap-1.5 rounded-full px-2 text-label font-medium text-foreground transition-colors duration-100 hover:bg-surface-hover focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none data-[state=open]:bg-surface-hover disabled:cursor-default disabled:hover:bg-transparent pointer-coarse:h-10';
+
+/**
+ * A tooltip on a menu trigger. Focus comes back to the trigger when the menu
+ * closes; that alone must not pop the tooltip up over what was just picked.
+ * Leaving the trigger lets it show again.
+ */
+function useQuietTooltip() {
+  const [open, setOpen] = useState(false);
+  const muted = useRef(false);
+  return {
+    open,
+    onOpenChange: (next: boolean) => setOpen(next && !muted.current),
+    /** The menu opened or closed. */
+    onMenuOpenChange: (menuOpen: boolean) => {
+      if (!menuOpen) muted.current = true;
+      setOpen(false);
+    },
+    triggerProps: {
+      onPointerLeave: () => {
+        muted.current = false;
+      },
+      onBlur: () => {
+        muted.current = false;
+      },
+    },
+  };
+}
+
+/**
+ * A closed menu hands focus back to its trigger once its exit animation ends.
+ * If the model panel was opened in the meantime, focus already sits there;
+ * pulling it back would close the panel again.
+ */
+function keepFocusThatMovedOn(event: Event) {
+  const active = document.activeElement;
+  if (active && active !== document.body) event.preventDefault();
+}
 
 interface ModelSelectorProps {
   groupJid: string;
@@ -318,10 +417,7 @@ export function ModelSelector({
   );
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [tooltipOpen, setTooltipOpen] = useState(false);
-  // Focus returns to the button when the panel closes; that alone must not
-  // pop the tooltip up over what was just picked. Leaving the button resets it.
-  const tooltipMuted = useRef(false);
+  const modelTooltip = useQuietTooltip();
   const lastRefreshAt = useRef(0);
   // Bumped by every save: a look-up that started before one must not put an
   // older selection back over the saved one.
@@ -366,8 +462,7 @@ export function ModelSelector({
   };
 
   const handleOpenChange = (next: boolean) => {
-    if (!next) tooltipMuted.current = true;
-    setTooltipOpen(false);
+    modelTooltip.onMenuOpenChange(next);
     setOpen(next);
     if (next) refreshCatalog();
   };
@@ -416,18 +511,10 @@ export function ModelSelector({
   const triggerName = inUse.model
     ? splitOneMillionSuffix(inUse.model).model
     : (inUse.option?.name ?? describeDefaultModel(selection));
-  const shownEffort = effortContext?.model
-    ? (effortContext.effort ?? effortContext.model.defaultEffort)
-    : null;
   const fullLabel = inUse.model
     ? [inUse.option?.name, modelLabel(inUse.model)].filter(Boolean).join(' · ')
     : triggerName;
-  const tooltip = [
-    picked ? fullLabel : `默认 · ${fullLabel}`,
-    shownEffort ? `推理档位 ${effortLabel(shownEffort)}` : null,
-  ]
-    .filter(Boolean)
-    .join(' · ');
+  const tooltip = picked ? fullLabel : `默认 · ${fullLabel}`;
 
   const pickRow = (row: ModelRow | null) => {
     const modelConfigId = row ? row.option.id : null;
@@ -439,56 +526,63 @@ export function ModelSelector({
       return;
     }
     const option = row?.option;
-    if (!option?.codex) {
-      if (option && model) {
-        void save(
-          { modelConfigId, model },
-          () =>
-            `已切换到「${option.name} · ${modelLabel(model)}」，从下一条消息开始生效`,
-        );
-        return;
-      }
+    if (!option) {
       // Exactly the request older servers understand.
-      void save({ modelConfigId }, (next) => {
-        const chosen = next.options.find((item) => item.id === modelConfigId);
-        return chosen
-          ? `已切换到「${chosen.name}」，从下一条消息开始生效`
-          : '已恢复默认模型，从下一条消息开始生效';
-      });
+      void save(
+        { modelConfigId: null },
+        () => '已恢复默认模型，从下一条消息开始生效',
+      );
       return;
     }
     // A model keeps the effort picked before only if it has that level;
     // otherwise the conversation returns to the model's default.
-    const modelToRun = model ?? option.codex.defaultModel;
-    const choice = option.codex.models.find(
-      (item) => item.value === modelToRun,
-    );
+    const modelToRun = model ?? ownModel(option);
+    const levels = modelEfforts(option, modelToRun);
     const keptEffort =
       modelConfigId === selection.selectedModelConfigId
         ? (selection.selectedEffort ?? null)
         : null;
     const effort =
-      keptEffort && choice?.efforts.includes(keptEffort) ? keptEffort : null;
-    void save({ modelConfigId, model, effort }, () => {
-      const base = `已切换到「${option.name} · ${modelToRun}」，从下一条消息开始生效`;
-      return keptEffort && !effort && choice
-        ? `${base}；该模型不支持 ${effortLabel(keptEffort)}，档位已恢复为默认（${effortLabel(choice.defaultEffort)}）`
-        : base;
-    });
+      keptEffort && levels?.efforts.includes(keptEffort) ? keptEffort : null;
+    const name = modelToRun
+      ? `${option.name} · ${modelLabel(modelToRun)}`
+      : option.name;
+    const dropped =
+      keptEffort && !effort
+        ? `；该模型不支持${effortLabel(keptEffort)}，推理等级已恢复为默认${
+            levels?.defaultEffort
+              ? `（${effortLabel(levels.defaultEffort)}）`
+              : ''
+          }`
+        : '';
+    // Older servers know `{ modelConfigId }` alone: send a model or an
+    // effort only when there is one to send, or one to clear.
+    void save(
+      {
+        modelConfigId,
+        ...(model || option.codex ? { model } : {}),
+        ...(keptEffort || option.codex ? { effort } : {}),
+      },
+      () => `已切换到「${name}」，从下一条消息开始生效${dropped}`,
+    );
   };
 
-  const pickEffort = (effort: string | null) => {
-    if (!effortContext || effort === effortContext.effort) return;
+  const pickEffort = (value: string | null) => {
+    if (!effortContext || value === effortContext.effort) return;
     void save(
       {
         modelConfigId: effortContext.option.id,
-        model: effortContext.pinnedModel,
-        effort,
+        // On 「默认」 the effort needs the default's connection and model
+        // named explicitly; a pick keeps what it pinned.
+        model: effortContext.picked
+          ? effortContext.pinnedModel
+          : effortContext.model || null,
+        effort: value,
       },
       () =>
-        effort
-          ? `推理档位已设为${effortLabel(effort)}，从下一个请求开始生效`
-          : '已恢复默认推理档位，从下一个请求开始生效',
+        value
+          ? `推理等级已设为${effortLabel(value)}，从下一条消息开始生效`
+          : '已恢复默认推理等级，从下一条消息开始生效',
     );
   };
 
@@ -498,13 +592,11 @@ export function ModelSelector({
       selection={selection}
       pinnedModel={pinnedModel}
       selectedKey={selectedKey}
-      effortContext={effortContext}
       disabled={disabled}
       onPick={(row) => {
         handleOpenChange(false);
         pickRow(row);
       }}
-      onPickEffort={pickEffort}
       onManage={
         canManageModels
           ? () => {
@@ -521,35 +613,121 @@ export function ModelSelector({
   const Root = phone ? Sheet : Popover;
   const Trigger = phone ? SheetTrigger : PopoverTrigger;
   return (
-    <Root open={open} onOpenChange={handleOpenChange}>
-      <Tooltip
-        open={tooltipOpen}
-        onOpenChange={(next) => setTooltipOpen(next && !tooltipMuted.current)}
-      >
-        <Trigger asChild>
+    <>
+      <Root open={open} onOpenChange={handleOpenChange}>
+        <Tooltip
+          open={modelTooltip.open}
+          onOpenChange={modelTooltip.onOpenChange}
+        >
+          <Trigger asChild>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                disabled={disabled}
+                aria-label={`模型：${fullLabel}`}
+                // A disabled button gets no tooltip; the title still reads.
+                title={disabled ? tooltip : undefined}
+                {...modelTooltip.triggerProps}
+                className={cn(TRIGGER_CLASS, 'max-w-[240px]')}
+              >
+                {saving ? (
+                  <Loader2 className="size-5 shrink-0 animate-spin p-0.5" />
+                ) : inUse.option ? (
+                  <VendorTile
+                    size="sm"
+                    vendor={vendorOf(inUse.option, inUse.model)}
+                    name={inUse.option.name}
+                  />
+                ) : (
+                  <span className="flex size-5 shrink-0 items-center justify-center rounded-md bg-surface-selected text-muted-foreground">
+                    <Sparkles className="size-3" aria-hidden="true" />
+                  </span>
+                )}
+                <span className="min-w-0 truncate">{triggerName}</span>
+                {canChange && (
+                  <ChevronDown
+                    className="size-3.5 shrink-0 text-muted-foreground"
+                    aria-hidden="true"
+                  />
+                )}
+              </button>
+            </TooltipTrigger>
+          </Trigger>
+          <TooltipContent side="top">{tooltip}</TooltipContent>
+        </Tooltip>
+        {phone ? (
+          <SheetContent
+            side="bottom"
+            className="gap-0 p-0 data-[side=bottom]:h-[80dvh]"
+            // Focus the sheet, not the search field: a phone keyboard would
+            // cover the list.
+            onOpenAutoFocus={(event) => {
+              event.preventDefault();
+              (event.currentTarget as HTMLElement | null)?.focus();
+            }}
+          >
+            <SheetHeader className="shrink-0 border-b border-surface-border px-4 py-3 pr-12">
+              <SheetTitle className="text-title-sm">选择模型</SheetTitle>
+              <SheetDescription className="sr-only">
+                本会话使用的模型
+              </SheetDescription>
+            </SheetHeader>
+            {panel}
+          </SheetContent>
+        ) : (
+          <PopoverContent
+            side="top"
+            align="start"
+            collisionPadding={8}
+            aria-label="选择模型"
+            className="flex max-h-[var(--radix-popover-content-available-height)] w-[min(460px,calc(100vw-2rem))] flex-col gap-0 overflow-hidden rounded-xl p-0"
+          >
+            {panel}
+          </PopoverContent>
+        )}
+      </Root>
+      {effortContext && (
+        <EffortMenu
+          context={effortContext}
+          disabled={disabled || !!optionStatus(effortContext.option)}
+          onPick={pickEffort}
+        />
+      )}
+    </>
+  );
+}
+
+interface EffortMenuProps {
+  context: EffortContext;
+  disabled: boolean;
+  onPick: (effort: string | null) => void;
+}
+
+/** The reasoning effort of the model in use, next to the model control. */
+function EffortMenu({ context, disabled, onPick }: EffortMenuProps) {
+  const tooltip = useQuietTooltip();
+  const level = context.effort ?? context.defaultEffort;
+  return (
+    <DropdownMenu onOpenChange={tooltip.onMenuOpenChange}>
+      <Tooltip open={tooltip.open} onOpenChange={tooltip.onOpenChange}>
+        <DropdownMenuTrigger asChild>
           <TooltipTrigger asChild>
             <button
               type="button"
               disabled={disabled}
-              aria-label={`模型：${fullLabel}`}
-              // A disabled button gets no tooltip; the title still reads.
-              title={disabled ? tooltip : undefined}
-              onPointerLeave={() => {
-                tooltipMuted.current = false;
-              }}
-              onBlur={() => {
-                tooltipMuted.current = false;
-              }}
-              className={TRIGGER_CLASS}
+              aria-label="选择推理等级"
+              title={disabled ? '选择推理等级' : undefined}
+              {...tooltip.triggerProps}
+              className={cn(TRIGGER_CLASS, 'shrink-0')}
             >
-              {saving && <Loader2 className="size-3.5 shrink-0 animate-spin" />}
-              <span className="min-w-0 truncate">{triggerName}</span>
-              {shownEffort && (
-                <span className="shrink-0 font-normal text-muted-foreground">
-                  {effortLabel(shownEffort)}
-                </span>
-              )}
-              {canChange && (
+              <Brain
+                className="size-4 shrink-0 text-muted-foreground"
+                aria-hidden="true"
+              />
+              <span className="whitespace-nowrap">
+                {level ? effortLabel(level) : '选择推理等级'}
+              </span>
+              {!disabled && (
                 <ChevronDown
                   className="size-3.5 shrink-0 text-muted-foreground"
                   aria-hidden="true"
@@ -557,40 +735,45 @@ export function ModelSelector({
               )}
             </button>
           </TooltipTrigger>
-        </Trigger>
-        <TooltipContent side="top">{tooltip}</TooltipContent>
+        </DropdownMenuTrigger>
+        <TooltipContent side="top">选择推理等级</TooltipContent>
       </Tooltip>
-      {phone ? (
-        <SheetContent
-          side="bottom"
-          className="gap-0 p-0 data-[side=bottom]:h-[80dvh]"
-          // Focus the sheet, not the search field: a phone keyboard would
-          // cover the list.
-          onOpenAutoFocus={(event) => {
-            event.preventDefault();
-            (event.currentTarget as HTMLElement | null)?.focus();
-          }}
+      <DropdownMenuContent
+        side="top"
+        align="start"
+        collisionPadding={8}
+        onCloseAutoFocus={keepFocusThatMovedOn}
+        className="w-56 max-w-[calc(100vw-2rem)]"
+      >
+        <DropdownMenuLabel>推理等级</DropdownMenuLabel>
+        <DropdownMenuRadioGroup
+          value={context.effort ?? DEFAULT_EFFORT}
+          onValueChange={(value) =>
+            onPick(value === DEFAULT_EFFORT ? null : value)
+          }
         >
-          <SheetHeader className="shrink-0 border-b border-surface-border px-4 py-3 pr-12">
-            <SheetTitle className="text-title-sm">选择模型</SheetTitle>
-            <SheetDescription className="sr-only">
-              本会话使用的模型
-            </SheetDescription>
-          </SheetHeader>
-          {panel}
-        </SheetContent>
-      ) : (
-        <PopoverContent
-          side="top"
-          align="start"
-          collisionPadding={8}
-          aria-label="选择模型"
-          className="flex max-h-[var(--radix-popover-content-available-height)] w-[min(460px,calc(100vw-2rem))] flex-col gap-0 overflow-hidden rounded-xl p-0"
-        >
-          {panel}
-        </PopoverContent>
-      )}
-    </Root>
+          <DropdownMenuRadioItem value={DEFAULT_EFFORT}>
+            默认
+            {context.defaultEffort && (
+              <span className="text-muted-foreground">
+                {' · '}
+                {effortLabel(context.defaultEffort)}
+              </span>
+            )}
+          </DropdownMenuRadioItem>
+          <DropdownMenuSeparator />
+          {context.efforts.map((effort) => (
+            <DropdownMenuRadioItem key={effort} value={effort}>
+              {effortLabel(effort)}
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+        <DropdownMenuSeparator />
+        <p className="px-2 py-1 text-micro leading-4 text-muted-foreground">
+          只影响推理深度，从下一条消息开始生效，不会重置会话。
+        </p>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -599,27 +782,23 @@ interface ModelPanelProps {
   /** The model picked within the selected configuration, if any. */
   pinnedModel: string | null;
   selectedKey: string;
-  effortContext: ReturnType<typeof resolveEffortContext>;
   disabled: boolean;
   /** Null picks the default. */
   onPick: (row: ModelRow | null) => void;
-  onPickEffort: (effort: string | null) => void;
   onManage: (() => void) | null;
 }
 
 /**
  * The model panel after cindy's unified selector: a search field, a rail of
  * connections that filters the list, two-line rows with a check on the one
- * in use, the ChatGPT effort under its row, and the way to Settings.
+ * in use, and the way to Settings.
  */
 function ModelPanel({
   selection,
   pinnedModel,
   selectedKey,
-  effortContext,
   disabled,
   onPick,
-  onPickEffort,
   onManage,
 }: ModelPanelProps) {
   const [query, setQuery] = useState('');
@@ -627,7 +806,6 @@ function ModelPanel({
   const listRef = useRef<HTMLDivElement>(null);
 
   const needle = query.trim().toLowerCase();
-  const hasCodex = selection.options.some((option) => option.codex);
   // A search looks through every connection, whatever the rail shows.
   const rows = selection.options
     .filter((option) => needle || rail === 'all' || option.id === rail)
@@ -670,16 +848,6 @@ function ModelPanel({
     items[next].focus();
   };
 
-  // The effort belongs to whichever row the conversation runs on.
-  const effortStrip = (key: string) =>
-    effortContext && key === selectedKey ? (
-      <EffortStrip
-        context={effortContext}
-        disabled={disabled || !!optionStatus(effortContext.option)}
-        onPick={onPickEffort}
-      />
-    ) : null;
-
   return (
     <div className="flex min-h-0 flex-1 flex-col" onKeyDown={moveFocus}>
       <div className="relative shrink-0 border-b border-surface-border">
@@ -717,7 +885,13 @@ function ModelPanel({
               active={rail === option.id && !needle}
               onClick={() => showRail(option.id)}
             >
-              <Monogram option={option} />
+              <VendorTile
+                vendor={vendorOfConnection({
+                  kind: option.kind,
+                  model: ownModel(option),
+                })}
+                name={option.name}
+              />
             </RailButton>
           ))}
         </div>
@@ -729,44 +903,44 @@ function ModelPanel({
           className="min-w-0 flex-1 space-y-0.5 overflow-y-auto overscroll-contain p-1.5"
         >
           {showDefault && (
-            <>
-              <RowButton
-                checked={selectedKey === DEFAULT_ROW_KEY}
-                disabled={disabled}
-                onClick={() => onPick(null)}
-                mark={
-                  <MarkTile>
-                    <Sparkles className="size-3.5" aria-hidden="true" />
-                  </MarkTile>
-                }
-                title={`默认 · ${describeDefaultModel(selection)}`}
-                detail={defaultHint(selection)}
-              />
-              {effortStrip(DEFAULT_ROW_KEY)}
-            </>
+            <RowButton
+              checked={selectedKey === DEFAULT_ROW_KEY}
+              disabled={disabled}
+              onClick={() => onPick(null)}
+              mark={
+                <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-surface-selected text-muted-foreground">
+                  <Sparkles className="size-3.5" aria-hidden="true" />
+                </span>
+              }
+              title={`默认 · ${describeDefaultModel(selection)}`}
+              detail={defaultHint(selection)}
+            />
           )}
           {rows.map((row) => {
             const { model, oneMillion } = splitOneMillionSuffix(row.id);
             const status = optionStatus(row.option);
             return (
-              <div key={row.key}>
-                <RowButton
-                  checked={row.key === selectedKey}
-                  disabled={disabled || !!status}
-                  onClick={() => onPick(row)}
-                  mark={<Monogram option={row.option} />}
-                  title={model || '由中转站决定'}
-                  detail={[
-                    row.option.name,
-                    oneMillion ? '1M 上下文' : null,
-                    row.note,
-                    status,
-                  ]
-                    .filter(Boolean)
-                    .join(' · ')}
-                />
-                {effortStrip(row.key)}
-              </div>
+              <RowButton
+                key={row.key}
+                checked={row.key === selectedKey}
+                disabled={disabled || !!status}
+                onClick={() => onPick(row)}
+                mark={
+                  <VendorTile
+                    vendor={vendorOf(row.option, row.id)}
+                    name={row.option.name}
+                  />
+                }
+                title={model || '由中转站决定'}
+                detail={[
+                  row.option.name,
+                  oneMillion ? '1M 上下文' : null,
+                  row.note,
+                  status,
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
+              />
             );
           })}
           {rows.length === 0 && !showDefault && (
@@ -779,9 +953,7 @@ function ModelPanel({
 
       <div className="shrink-0 space-y-1 border-t border-surface-border px-3 py-2">
         <p className="text-micro leading-4 text-muted-foreground">
-          {hasCodex
-            ? '切换模型会开启新的底层会话，并自动带上最近的对话记录；只调整推理档位不会。'
-            : '切换模型会开启新的底层会话，并自动带上最近的对话记录。'}
+          切换模型会开启新的底层会话，并自动带上最近的对话记录；推理等级在输入框旁调整。
         </p>
         {onManage && (
           <button
@@ -820,37 +992,10 @@ function RailButton({
       className={cn(
         'size-9 rounded-lg',
         active
-          ? 'bg-surface-selected text-foreground hover:bg-surface-selected'
+          ? 'bg-surface-selected text-foreground ring-1 ring-surface-border hover:bg-surface-selected'
           : 'text-muted-foreground',
       )}
     />
-  );
-}
-
-/** The rounded tile a row's or rail item's mark sits in. */
-function MarkTile({ children }: { children: ReactNode }) {
-  return (
-    <span
-      aria-hidden="true"
-      className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-surface-selected text-caption font-semibold text-muted-foreground"
-    >
-      {children}
-    </span>
-  );
-}
-
-/**
- * A connection's mark: a letter in a tile. A ChatGPT login reads as G so it
- * does not look like a Claude one; the others take the first letter of their
- * name.
- */
-function Monogram({ option }: { option: SessionModelOption }) {
-  return (
-    <MarkTile>
-      {option.kind === 'codex'
-        ? 'G'
-        : (Array.from(option.name.trim())[0]?.toUpperCase() ?? '?')}
-    </MarkTile>
   );
 }
 
@@ -899,63 +1044,5 @@ function RowButton({
         />
       )}
     </button>
-  );
-}
-
-/** The reasoning efforts of the ChatGPT model in use, under its row. */
-function EffortStrip({
-  context,
-  disabled,
-  onPick,
-}: {
-  context: NonNullable<ReturnType<typeof resolveEffortContext>>;
-  disabled: boolean;
-  onPick: (effort: string | null) => void;
-}) {
-  const choice = context.model;
-  if (!choice) {
-    return (
-      <p className="pr-2 pb-1.5 pl-12 text-micro text-muted-foreground">
-        当前模型不在账号的模型列表里，无法设置推理档位
-      </p>
-    );
-  }
-  const chips: Array<{ value: string | null; label: string }> = [
-    { value: null, label: `默认 · ${effortLabel(choice.defaultEffort)}` },
-    ...choice.efforts.map((effort) => ({
-      value: effort,
-      label: effortLabel(effort),
-    })),
-  ];
-  return (
-    <div
-      role="radiogroup"
-      aria-label="推理档位"
-      className="flex flex-wrap gap-1 pr-2 pb-1.5 pl-12"
-    >
-      {chips.map((chip) => {
-        const checked = context.effort === chip.value;
-        return (
-          <button
-            key={chip.value ?? 'default'}
-            type="button"
-            role="radio"
-            aria-checked={checked}
-            data-effort={chip.value ?? 'default'}
-            disabled={disabled}
-            onClick={() => onPick(chip.value)}
-            title={chip.value ?? `跟随默认（${choice.defaultEffort}）`}
-            className={cn(
-              'inline-flex h-6 cursor-pointer items-center rounded-full px-2 text-caption ring-1 transition-colors duration-100 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:h-8',
-              checked
-                ? 'bg-surface-selected font-medium text-foreground ring-surface-selected'
-                : 'text-muted-foreground ring-surface-border hover:bg-surface-hover hover:text-foreground',
-            )}
-          >
-            {chip.label}
-          </button>
-        );
-      })}
-    </div>
   );
 }
