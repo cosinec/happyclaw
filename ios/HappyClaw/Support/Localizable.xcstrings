@@ -393,7 +393,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "修改服务器地址"
+            "value": "切换服务器"
           }
         }
       }

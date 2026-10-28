@@ -133,6 +133,17 @@
 - 顺手修掉 lint 发现的小问题：错误包装丢失 `cause`、只会原样抛出的 try/catch、3 条失效的
   `eslint-disable` 注释。
 
+## 2026-10-28 第四轮：系统底栏、多服务器、配色与快捷操作
+
+- 底栏改为系统 `UITabBar`（之前是手绘胶囊 + `glassEffect`，没有系统的选中透镜和折射）。真机确认
+  iOS 26 Liquid Glass 生效，选中色跟随 Web 强调色（`theme.changed.accent`）。
+- 多服务器：「更多 → 服务器」切换 / 添加 / 删除，每个服务器独立的 `WKWebsiteDataStore`。真机确认
+  旧地址迁移后登录保留，新地址独立登录，切换往返登录不丢。
+- 冷启动按服务器缓存的明暗、底色和强调色先铺底。
+- 加载 0.6 秒后显示「正在连接…」，15 秒超时进恢复页（真机确认）。之前连不上的局域网地址会黑屏约一分钟。
+- 桌面快捷操作「新建对话」「任务」（`app.shortcut`）。自动化无法长按主屏图标，真机待人工验证。
+- 代码推送到 fork `cosinec/happyclaw` 的 `feat/ios-native-shell`（对 `flipped0119/happyclaw` 没有推送权限）。
+
 ## 待决问题
 
 - 无。
