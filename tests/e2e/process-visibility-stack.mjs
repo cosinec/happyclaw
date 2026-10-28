@@ -504,6 +504,33 @@ async function runScenario(ctx, { label, interaction, visibility, expect }) {
   const counts = typeCounts(live);
   console.log(`   web-visible stream events: ${JSON.stringify(counts)}`);
 
+  // 0. The context ring follows the turn, and GET reads the same numbers.
+  const usageNotices = live.filter((e) => e.type === 'context_usage');
+  const lastUsage = usageNotices.at(-1);
+  check(
+    label,
+    'the context ring is told how full the context is after the turn',
+    !!lastUsage &&
+      lastUsage.usedTokens > 0 &&
+      lastUsage.contextWindow > 0 &&
+      typeof lastUsage.percentage === 'number' &&
+      typeof lastUsage.model === 'string',
+    JSON.stringify(usageNotices),
+  );
+  const usageRead = await http_(
+    'GET',
+    `/api/groups/${enc(jid)}/context-usage`,
+    { cookie: ctx.cookie },
+  );
+  check(
+    label,
+    'GET context-usage reads what the ring was told',
+    usageRead.status === 200 &&
+      usageRead.json?.usedTokens === lastUsage?.usedTokens &&
+      usageRead.json?.contextWindow === lastUsage?.contextWindow,
+    `HTTP ${usageRead.status} ${JSON.stringify(usageRead.json)}`,
+  );
+
   // 1. What the Web may see live.
   const streamEvents = live
     .filter((e) => e.type === 'stream_event')

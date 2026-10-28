@@ -645,6 +645,7 @@ import {
   startWebServer,
   broadcastToWebClients,
   broadcastNewMessage,
+  broadcastContextUsage,
   broadcastTyping,
   broadcastStreamEvent,
   broadcastAgentStatus,
@@ -11771,6 +11772,10 @@ async function runAgent(
       });
       setSessionInteractionMode(group.folder, undefined, interactionMode);
     }
+    // The answer is in the transcript: the context ring can follow it.
+    if (output.inputTurnCompleted === true && !messageTaskId) {
+      broadcastContextUsage(group.folder, null);
+    }
     await onOutput?.(output);
     // A runner receipt proves model consumption, not successful Host
     // persistence/projection. Commit it only after the Host callback resolves;
@@ -18211,6 +18216,9 @@ async function processAgentConversation(
         interactionMode,
       );
       currentAgentSessionId = output.newSessionId;
+    }
+    if (output.inputTurnCompleted === true) {
+      broadcastContextUsage(effectiveGroup.folder, agentId);
     }
 
     if (

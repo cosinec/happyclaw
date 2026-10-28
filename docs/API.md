@@ -86,6 +86,7 @@ Public：
 - `POST /api/groups/:jid/interrupt`
 - `POST /api/groups/:jid/reset-session`
 - `GET|PUT /api/groups/:jid/model-selection`，聊天输入框的会话级模型与推理档位选择
+- `GET /api/groups/:jid/context-usage`，会话当前的上下文占用（输入框旁的圆环）
 - `POST /api/groups/:jid/clear-history`，重建工作区内容：永久清除聊天、
   Runtime Session、子对话、工作目录及 Workspace Memory（含版本历史和
   Home Owner Profile），关联定时任务停止并移入回收站；保留工作区外壳、
@@ -148,6 +149,17 @@ Runner（下一条消息重启），但保留 SDK 会话。高于 `max` 的档�
 `EFFORT_RESTRICTED`，Runner 启动时若选择者已失去该权限则回到默认档；放宽只需改
 `CODEX_SESSION_EFFORT_CEILING`。响应附带 `drained`（被退出的暖 Runner 数）与
 `liveUpdated`（被就地改档的存活网关授权数）。
+
+`context-usage` 以 `agentId` 查询参数区分 Runtime Session，访问检查同
+`model-selection` 的 GET，返回
+`{ usedTokens, contextWindow, percentage, model, updatedAt }`，没运行过、刚清除
+（`/clear`、`/fresh`、重置会话）或刚压缩上下文时全部为 `null`。数据在宿主侧从会话
+当前 SDK 会话的 transcript 读取：`usedTokens` 是最后一次主线程请求的 input + cache
+read + cache creation（不含子代理请求），`model` 是该请求的上游模型，`updatedAt` 是
+那次回复写入的时间；`contextWindow` 优先用 Claude Code 本进程上报的窗口（同一模型），
+否则 `[1m]` 模型为 1M，否则为模型窗口与 200K 中的较小者；`percentage` 保留一位小数。
+每个回合完成后，以及会话被清除时，工作区的 Web 会话收到 WebSocket 消息
+`{ type: 'context_usage', chatJid, agentId?, usedTokens, contextWindow, percentage, model, updatedAt }`。
 
 Runner 启动时，选中的模型取代配置的默认模型成为 `ANTHROPIC_MODEL`，第三方端点的
 各档模型映射和 `[1m]` 模型的压缩窗口随之变化。模型条目带 `effort` 时以该档位运行

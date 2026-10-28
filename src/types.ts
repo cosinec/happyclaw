@@ -937,6 +937,21 @@ export type RunFinishReason =
 // WebSocket message types
 export type WsMessageOut =
   | {
+      /**
+       * How full a conversation's context is: after each completed turn, and
+       * all null when the conversation is cleared (see session-context-usage).
+       */
+      type: 'context_usage';
+      /** A Web chat of the conversation's workspace. */
+      chatJid: string;
+      agentId?: string;
+      usedTokens: number | null;
+      contextWindow: number | null;
+      percentage: number | null;
+      model: string | null;
+      updatedAt: string | null;
+    }
+  | {
       type: 'new_message';
       chatJid: string;
       message: NewMessage & { is_from_me: boolean };
