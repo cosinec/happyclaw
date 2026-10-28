@@ -996,6 +996,15 @@ html[data-native-nav='visible'] [data-native-title='space'] {
   visibility: hidden;
 }
 
+/* Elements with a native long-press menu (useNativeContextMenu): the press
+   belongs to the shell's menu, so WebKit must not start a text selection or
+   its own callout. The menu offers 「复制文本」 instead. */
+html[data-native-contextmenu] [data-native-menu] {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 /* Bottom padding for content above floating nav — accounts for safe area */
 /* A utility (not a bare class) so responsive overrides such as lg:pb-0 win. */
 @utility pb-nav-safe {

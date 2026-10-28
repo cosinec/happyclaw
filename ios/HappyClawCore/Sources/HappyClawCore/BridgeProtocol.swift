@@ -11,7 +11,7 @@ public enum BridgeProtocol {
   /// `window.webkit.messageHandlers.<name>` registered by the shell.
   public static let handlerName = "happyclaw"
   /// Capabilities the shell offers to the web (subset of web's list).
-  public static let shellCapabilities = ["layout", "tabs", "confirm", "menu", "haptic", "theme", "navbar", "shortcuts"]
+  public static let shellCapabilities = ["layout", "tabs", "confirm", "menu", "haptic", "theme", "navbar", "shortcuts", "contextmenu"]
 
   /// Highest version both sides speak, or nil when there is none.
   public static func negotiate(_ webVersions: [Int]) -> Int? {
@@ -141,6 +141,42 @@ public struct MenuRequest: Codable, Equatable, Sendable {
   public var items: [MenuItemDeclaration]
 }
 
+/// A rectangle in web view points (CSS pixels of the visual viewport).
+public struct Rect: Codable, Equatable, Sendable {
+  public var x: Double
+  public var y: Double
+  public var width: Double
+  public var height: Double
+
+  public init(x: Double, y: Double, width: Double, height: Double) {
+    self.x = x
+    self.y = y
+    self.width = width
+    self.height = height
+  }
+
+  public func contains(x px: Double, y py: Double, slop: Double = 0) -> Bool {
+    px >= x - slop && px <= x + width + slop && py >= y - slop && py <= y + height + slop
+  }
+}
+
+/// Sent by the web when a finger lands on an element that has a long-press
+/// menu. The shell only shows it if the long press that follows lands inside
+/// `rect` while the offer is fresh; otherwise WebKit keeps the gesture.
+public struct ContextMenuOffer: Codable, Equatable, Sendable {
+  public var token: String
+  public var title: String?
+  public var rect: Rect
+  public var items: [MenuItemDeclaration]
+
+  public init(token: String, title: String?, rect: Rect, items: [MenuItemDeclaration]) {
+    self.token = token
+    self.title = title
+    self.rect = rect
+    self.items = items
+  }
+}
+
 public enum HapticStyle: String, Codable, Sendable {
   case light, medium, success, warning, error
 }
@@ -170,6 +206,7 @@ public enum WebMessage: Equatable, Sendable {
   case themeChanged(ColorSchemeName, background: RGBColor?, accent: RGBColor?)
   case confirmRequest(id: String, ConfirmRequest)
   case menuRequest(id: String, MenuRequest)
+  case contextMenuOffer(ContextMenuOffer)
   case haptic(HapticStyle)
   case error(code: String, message: String, ref: String?)
 }
@@ -280,6 +317,8 @@ extension BridgeProtocol {
       message = .confirmRequest(id: try requestId(), try payload(ConfirmRequest.self))
     case "menu.request":
       message = .menuRequest(id: try requestId(), try payload(MenuRequest.self))
+    case "contextmenu.offer":
+      message = .contextMenuOffer(try payload(ContextMenuOffer.self))
     case "haptic":
       message = .haptic(try payload(HapticPayload.self).style)
     case "bridge.error":
@@ -319,6 +358,7 @@ public enum NativeMessage: Equatable, Sendable {
   case navBack
   case navAction(id: String)
   case appShortcut(id: String)
+  case contextMenuResult(token: String, selected: String)
   case confirmResult(id: String, confirmed: Bool)
   case menuResult(id: String, selected: String?)
   case lifecycle(LifecycleState)
@@ -333,6 +373,7 @@ public enum NativeMessage: Equatable, Sendable {
     case .navBack: "nav.back"
     case .navAction: "nav.action"
     case .appShortcut: "app.shortcut"
+    case .contextMenuResult: "contextmenu.result"
     case .confirmResult: "confirm.result"
     case .menuResult: "menu.result"
     case .lifecycle: "app.lifecycle"
@@ -378,6 +419,9 @@ extension BridgeProtocol {
     case let .navAction(id), let .appShortcut(id):
       struct P: Encodable { var id: String }
       return envelope(P(id: id))
+    case let .contextMenuResult(token, selected):
+      struct P: Encodable { var token: String; var selected: String }
+      return envelope(P(token: token, selected: selected))
     case let .confirmResult(id, confirmed):
       struct P: Encodable { var confirmed: Bool }
       return envelope(P(confirmed: confirmed), id: id)

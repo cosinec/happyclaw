@@ -13,6 +13,7 @@ final class WebController: NSObject {
   let dataStore: ServerInstance.DataStore
   let channel = BridgeChannel()
   let downloads = DownloadHost()
+  let contextMenu = ContextMenuHost()
 
   var server: ServerAddress? {
     didSet { channel.server = server }
@@ -43,6 +44,8 @@ final class WebController: NSObject {
     channel.webView = webView
     webView.navigationDelegate = self
     webView.uiDelegate = self
+    contextMenu.webView = webView
+    webView.addInteraction(UIContextMenuInteraction(delegate: contextMenu))
     // Edge swipe walks the web history, including react-router pushState entries.
     webView.allowsBackForwardNavigationGestures = true
     // The web lays out against env(safe-area-inset-*) and --native-*; the

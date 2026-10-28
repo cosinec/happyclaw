@@ -36,7 +36,8 @@ import { PermissionAlert, TracePanel } from './ExecutionTrace';
 import { ThinkingBlock } from './ThinkingBlock';
 import { ProcessCard, hasProcess } from './ProcessCard';
 import { LazyTurnTrace } from './LazyTurnTrace';
-import { MessageContextMenu } from './MessageContextMenu';
+import { MessageContextMenu, messageMenuActions } from './MessageContextMenu';
+import { useNativeContextMenu } from '../../native/context-menu';
 import { ImageLightbox } from './ImageLightbox';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
 import { useStreamLayout } from '../../hooks/useStreamLayout';
@@ -379,6 +380,16 @@ export const MessageBubble = memo(
       !(traceEvents && traceEvents.length > 0);
     const isUser = !message.is_from_me;
     const presentedContent = getPresentedMessageContent(message);
+    // iOS shell: long-pressing the message body opens the same actions as
+    // the 「…」 menu, as a native menu with the message lifted.
+    const nativeMenuRef = useNativeContextMenu<HTMLDivElement>(() => ({
+      actions: messageMenuActions({
+        content: presentedContent,
+        chatJid: message.chat_jid,
+        messageId: message.id,
+        onShareImage: isUser ? undefined : () => setShowShareDialog(true),
+      }),
+    }));
     const completedWorkflowRuns = useMemo(
       () => message.workflow_runs?.filter((run) => run.status !== 'running'),
       [message.workflow_runs],
@@ -741,7 +752,10 @@ export const MessageBubble = memo(
 
           {/* Content — strip first-child top margin for consistent spacing */}
           {!hasOnlyImages && (
-            <div className="min-w-0 overflow-hidden [&>div>*:first-child]:!mt-0">
+            <div
+              ref={nativeMenuRef}
+              className="min-w-0 overflow-hidden [&>div>*:first-child]:!mt-0"
+            >
               {isAI ? (
                 <FinalMarkdown
                   content={presentedContent}
@@ -787,7 +801,10 @@ export const MessageBubble = memo(
             <div className="relative flex flex-col items-end">
               {renderImages(cn('justify-end', hasOnlyImages && 'mb-0'))}
               {!hasOnlyImages && (
-                <div className="rounded-[1.25rem] bg-muted px-4 py-2.5 text-foreground phone:rounded-xl phone:border phone:border-surface-border phone:bg-surface-raised phone:p-3">
+                <div
+                  ref={nativeMenuRef}
+                  className="rounded-[1.25rem] bg-muted px-4 py-2.5 text-foreground phone:rounded-xl phone:border phone:border-surface-border phone:bg-surface-raised phone:p-3"
+                >
                   <p className="text-body-lg break-words whitespace-pre-wrap">
                     {presentedContent}
                   </p>
@@ -877,7 +894,7 @@ export const MessageBubble = memo(
           {renderImages('mb-3')}
 
           {!hasOnlyImages && (
-            <div className={REPLY_BODY_CLASS}>
+            <div ref={nativeMenuRef} className={REPLY_BODY_CLASS}>
               <FinalMarkdown
                 content={presentedContent}
                 groupJid={markdownJid}

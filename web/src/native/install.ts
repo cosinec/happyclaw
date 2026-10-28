@@ -8,6 +8,7 @@ import {
 } from './layout';
 import { currentNativeNavBar, subscribeNativeNavBar } from './nav-bar';
 import { emitNativeShortcut } from './shortcuts';
+import { handleNativeContextMenuResult } from './context-menu';
 import {
   buildTabDeclarations,
   describeRoute,
@@ -107,6 +108,14 @@ export function installNativeBridge(router: AppRouter) {
     build: import.meta.env.VITE_BUILD_ID || import.meta.env.MODE,
     onCommit: () => {
       activateNativeChrome();
+      // Long-press menus replace WebKit's text selection on marked elements
+      // only when this shell can actually show them.
+      if (session.supports('contextmenu')) {
+        document.documentElement.dataset.nativeContextmenu = '';
+        teardown.push(
+          () => delete document.documentElement.dataset.nativeContextmenu,
+        );
+      }
       session.send('chrome.tabs', declarations);
       sendRoute();
       let theme = currentTheme();
@@ -188,6 +197,9 @@ export function installNativeBridge(router: AppRouter) {
     if (parent) void router.navigate(parent, { replace: true });
   });
   session.on('app.shortcut', ({ id }) => emitNativeShortcut(id));
+  session.on('contextmenu.result', ({ token, selected }) =>
+    handleNativeContextMenuResult(token, selected),
+  );
   session.on('nav.action', ({ id }) => {
     if (id === 'page') currentNativeNavBar()?.action?.onPress();
   });
