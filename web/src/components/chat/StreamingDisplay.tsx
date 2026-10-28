@@ -1,6 +1,8 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import {
+  proactiveTurnQuiet,
+  runTurnAnswered,
   shouldRecoverStaleWaiting,
   useChatStore,
   type StreamingState,
@@ -10,6 +12,7 @@ import { resolveAgentDisplayIdentity } from '../../utils/agent-identity';
 import type { InteractionMode } from '../../types';
 import { EmojiAvatar } from '../common/EmojiAvatar';
 import { StreamingMarkdown } from './StreamingMarkdown';
+import { REPLY_BODY_CLASS } from './MessageBubble';
 import { TodoProgressPanel } from './TodoProgressPanel';
 import { ToolActivityCard, ToolRow } from './ToolActivityCard';
 import { AskUserQuestionCard } from './AskUserQuestionCard';
@@ -21,25 +24,16 @@ import { WorkflowRunCard } from './WorkflowRunCard';
 import { isWorkflowTask, workflowRunOf } from './workflow-run';
 import { PermissionAlert, TracePanel } from './ExecutionTrace';
 import { ProcessPanel } from './ProcessPanel';
-import { useShellStore } from '../../stores/shell';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
-import { useConnectionStatus } from '../../hooks/useConnectionStatus';
-import { useRunElapsed } from '../../hooks/useRunElapsed';
-import { useReplyRate } from '../../hooks/useReplyRate';
 import {
   useStreamLayout,
   type StreamLayout,
 } from '../../hooks/useStreamLayout';
 import { useThrottledValue } from '../../hooks/useThrottledValue';
-import { useTick } from '../../hooks/useTick';
+import { useAfterDelay, useTick } from '../../hooks/useTick';
 import { shouldShowStreamingPartialText } from '../../lib/interaction-mode';
 import { normalizeProcessVisibility } from '../../lib/process-visibility';
-import {
-  DEEP_THINKING_STATUS,
-  describeRunPhase,
-  formatRunElapsed,
-  isCompactingStatus,
-} from '../../lib/run-phase';
+import { DEEP_THINKING_STATUS, isCompactingStatus } from '../../lib/run-phase';
 import {
   answerStart,
   readStepQuestions,
@@ -48,7 +42,14 @@ import {
 import { streamingMarkdownInterval } from '../../lib/streaming-interval';
 import { cn } from '@/lib/utils';
 
-/** Statuses the run status line already shows as its phase. */
+/**
+ * The narration before a tool call streams like an answer: the process folds
+ * only once the answer has gone on this long, so a card does not fold and open
+ * again around each such line.
+ */
+const ANSWER_FOLD_DELAY_MS = 800;
+
+/** Statuses the run status bar already shows as its phase. */
 function isPhaseSystemStatus(status: string): boolean {
   return (
     status === 'requesting' ||
@@ -84,97 +85,6 @@ function classicToolSteps(
   return tools.filter((step) => !hidden.has(step));
 }
 
-/** How long this run has gone on, ticking by itself so its parent need not. */
-function RunElapsed({ runtimeJid }: { runtimeJid: string }) {
-  const elapsed = useRunElapsed(runtimeJid);
-  if (elapsed == null) return null;
-  return (
-    <span className="text-caption text-faint-foreground tabular-nums">
-      {formatRunElapsed(elapsed)}
-    </span>
-  );
-}
-
-/**
- * Estimated output speed while the reply's text streams. Not announced: it
- * is a reading, not news; on a narrow screen the phase needs the room.
- */
-function ReplyRate({
-  groupJid,
-  agentId,
-}: {
-  groupJid: string;
-  agentId?: string;
-}) {
-  const rate = useReplyRate(groupJid, agentId);
-  if (rate == null) return null;
-  return (
-    <span
-      aria-hidden="true"
-      className="shrink-0 text-faint-foreground tabular-nums max-sm:hidden"
-    >
-      · 约 {rate} tok/s
-    </span>
-  );
-}
-
-/** Codex-style run status: current phase plus time since the run started. */
-const RunStatus = memo(function RunStatus({
-  groupJid,
-  agentId,
-  phase,
-  stopHint = false,
-}: {
-  groupJid: string;
-  agentId?: string;
-  phase: string;
-  /** This view's composer stops the run on Esc. */
-  stopHint?: boolean;
-}) {
-  const runtimeJid = agentId ? `${groupJid}#agent:${agentId}` : groupJid;
-  // A requested stop freezes the timer at the click: the run is ending.
-  const stopped = useChatStore((s) => !!s.stopRequests[runtimeJid]);
-  const elapsed = useRunElapsed(runtimeJid);
-  // Offline, the run may have moved on; don't pretend the phase is live. A
-  // dropped WebSocket alone isn't enough: HTTP polling keeps state fresh.
-  const offline = useConnectionStatus() === 'offline';
-  const shownPhase = offline ? '网络已断开，恢复后同步' : phase;
-  const announced = useThrottledValue(shownPhase, 3000);
-  return (
-    <span className="flex min-w-0 items-center gap-1.5 text-caption text-muted-foreground">
-      <span
-        className={cn(
-          'truncate',
-          offline ? 'text-warning' : !stopped && 'shimmer',
-        )}
-      >
-        {shownPhase}
-      </span>
-      <span role="status" aria-live="polite" className="sr-only">
-        {announced}
-      </span>
-      {elapsed != null && !offline && (
-        <span className="shrink-0 text-faint-foreground tabular-nums">
-          {formatRunElapsed(elapsed)}
-        </span>
-      )}
-      {!stopped && !offline && (
-        <>
-          <ReplyRate groupJid={groupJid} agentId={agentId} />
-          {stopHint && (
-            <span
-              aria-hidden="true"
-              className="shrink-0 text-faint-foreground max-sm:hidden pointer-coarse:hidden"
-            >
-              · Esc 停止
-            </span>
-          )}
-        </>
-      )}
-    </span>
-  );
-});
-
 /** Shared streaming content — used by both compact and chat modes to eliminate duplication. */
 function StreamingContent({
   streaming,
@@ -208,13 +118,14 @@ function StreamingContent({
     answerText,
     streamingMarkdownInterval(answerText),
   );
-  // Text is arriving: a quiet trailing dot marks where it continues.
-  const writing =
+  // The answer is being written: the process folds to its summary above it.
+  const answering =
     live &&
     !streaming.isThinking &&
     !streaming.awaitingModel &&
     streaming.activeTools.length === 0 &&
     !!answerText;
+  const answerFolds = useAfterDelay(answering, ANSWER_FOLD_DELAY_MS);
   // The model's request is out and nothing is running meanwhile.
   const waitingForModel =
     live &&
@@ -267,12 +178,11 @@ function StreamingContent({
     <TodoProgressPanel todos={streaming.todos} />
   );
   const answer = showPartialText && streaming.partialText && answerText && (
-    <div className="max-w-none overflow-hidden">
+    <div className={REPLY_BODY_CLASS}>
       <StreamingMarkdown
         content={partialMarkdown}
         groupJid={groupJid}
         variant="chat"
-        caret={writing}
       />
     </div>
   );
@@ -406,6 +316,8 @@ function StreamingContent({
             waitingSince={streaming.phaseStartedAt}
             hasContent={hasContent}
             groupJid={groupJid}
+            answering={answerFolds}
+            memoryKey={streaming.inputTurnId ?? streaming.turnId}
           />
         </>
       ) : (
@@ -458,8 +370,6 @@ interface StreamingDisplayProps {
   agentAvatarEmoji?: string | null;
   agentAvatarColor?: string | null;
   interactionMode?: InteractionMode;
-  /** The status line mentions Esc: this view's composer stops the run. */
-  stopHint?: boolean;
   /**
    * Show the finished run's settled card (frozen until its final message
    * replaces it) instead of the live projection.
@@ -476,7 +386,6 @@ export function StreamingDisplay({
   agentAvatarEmoji,
   agentAvatarColor,
   interactionMode = 'assistant',
-  stopHint = false,
   settled = false,
 }: StreamingDisplayProps) {
   // A settled card belongs to a finished run: nothing about it is waiting.
@@ -506,6 +415,12 @@ export function StreamingDisplay({
   const stopping = useChatStore(
     (s) => !settled && !!s.stopRequests[runtimeJid],
   );
+  // The run's turn ended in place (its reply is in the list) and the run is
+  // only closing: there is nothing to show until another input of it streams.
+  const answered = useChatStore((s) =>
+    settled ? undefined : s.activeRuns[runtimeJid]?.answered,
+  );
+  const turnAnswered = runTurnAnswered(answered, streaming);
   // Fire-and-forget spawn Agents retain Assistant streaming semantics even in
   // a proactive Workspace. The Workspace contract applies to main and
   // conversation Agent loops.
@@ -514,13 +429,14 @@ export function StreamingDisplay({
   const showPartialText = shouldShowStreamingPartialText(
     effectiveInteractionMode,
   );
-  // How much of a proactive turn's process its owner chose to show, and
-  // whether this reader may change that.
+  // A proactive turn that has replied and since only reasons shows no panel;
+  // the run status bar says it is busy.
+  const quiet = useChatStore(
+    (s) => !settled && proactiveTurnQuiet(s, runtimeJid),
+  );
+  // How much of a proactive turn's process its owner chose to show.
   const processVisibility = useChatStore((s) =>
     normalizeProcessVisibility(s.groups[groupJid]?.process_visibility),
-  );
-  const canChangeVisibility = useChatStore(
-    (s) => !!s.groups[groupJid]?.can_modify,
   );
   const { layout } = useStreamLayout();
   const appearance = useAuthStore((state) => state.appearance);
@@ -628,29 +544,27 @@ export function StreamingDisplay({
     else if (hasThinking) setThinkingExpanded(false);
   }, [isThinking, hasThinking]);
 
-  const runStatus =
-    isWaiting && !streaming?.interrupted ? (
-      <RunStatus
-        groupJid={groupJid}
-        agentId={agentId}
-        phase={describeRunPhase(streaming, stopping)}
-        stopHint={stopHint}
-      />
-    ) : null;
-  // Only a card the run is still writing gets live affordances (the caret).
+  // Only a card the run is still writing gets live affordances.
   const live =
     isWaiting &&
     !stopping &&
     !!streaming &&
     !streaming.interrupted &&
     !streaming.settling;
-  // Sticky: a long run pushes the row above the viewport, and it carries the
-  // phase and elapsed time. Same height as MessageBubble's row so the
-  // streaming → final swap doesn't move content.
+  // Same height as MessageBubble's row so the streaming → final swap doesn't
+  // move content. The run's state is the status bar's (RunStatusBar). On a
+  // phone the conversation's own Assistant reply has no row (its header names
+  // the agent); a spawned agent working beside it keeps its name. Sticky, as
+  // the follow glide expects of this row.
   const identityRow = (
     <div
       data-follow-sticky
-      className="sticky top-0 z-10 mb-1.5 flex h-6 items-center gap-2 bg-background"
+      className={cn(
+        'sticky top-0 z-10 mb-1.5 flex h-6 items-center gap-2 bg-background',
+        effectiveInteractionMode === 'assistant' &&
+          runtimeAgentKind !== 'spawn' &&
+          'phone:hidden',
+      )}
     >
       <EmojiAvatar
         imageUrl={agentIdentity.imageUrl}
@@ -663,68 +577,35 @@ export function StreamingDisplay({
       <span className="text-label font-medium text-foreground">
         {senderName}
       </span>
-      {runStatus}
     </div>
   );
 
   // Proactive mode exposes only committed native messages plus an explicit run
-  // lifecycle. Keep its activity signal visually separate from message content:
-  // it is not an unfinished Assistant reply and must not look like another card.
+  // lifecycle, which the run status bar shows. The list keeps the process at
+  // the level its owner chose, and none once the turn has replied and only
+  // reasons.
   if (effectiveInteractionMode === 'proactive') {
-    if (!isWaiting) return null;
-    const showProcess =
-      processVisibility !== 'hidden' && !!streaming && !streaming.interrupted;
+    if (
+      !isWaiting ||
+      processVisibility === 'hidden' ||
+      quiet ||
+      !streaming ||
+      streaming.interrupted
+    ) {
+      return null;
+    }
     return (
       <div
         className={
-          isCompact ? 'mb-2 border-b border-surface-border pb-2' : 'w-full'
+          isCompact ? 'mb-2 border-b border-surface-border pb-2' : 'w-full pb-2'
         }
       >
-        <div
-          className={
-            isCompact
-              ? 'flex min-h-10 items-center gap-2 text-body text-muted-foreground'
-              : 'flex min-h-10 w-full items-center gap-2 py-2 text-body text-muted-foreground'
-          }
-        >
-          <div
-            role="status"
-            aria-live="polite"
-            aria-atomic="true"
-            aria-label={`${senderName}正在处理`}
-            className="flex items-center gap-2"
-          >
-            <Loader2
-              aria-hidden="true"
-              className="h-4 w-4 shrink-0 animate-spin text-muted-foreground motion-reduce:animate-none"
-            />
-            <span>正在处理…</span>
-          </div>
-          {processVisibility === 'hidden' && (
-            <>
-              <RunElapsed runtimeJid={runtimeJid} />
-              {canChangeVisibility && (
-                <button
-                  type="button"
-                  onClick={() =>
-                    useShellStore.getState().requestWorkspaceSettings(groupJid)
-                  }
-                  className="ml-auto inline-flex h-7 shrink-0 cursor-pointer items-center rounded-md px-2 text-caption text-faint-foreground transition-colors hover:bg-surface-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none pointer-coarse:h-10"
-                >
-                  显示过程
-                </button>
-              )}
-            </>
-          )}
-        </div>
-        {showProcess && streaming && (
-          <ProcessPanel
-            streaming={streaming}
-            groupJid={groupJid}
-            runtimeJid={runtimeJid}
-            visibility={processVisibility}
-          />
-        )}
+        <ProcessPanel
+          streaming={streaming}
+          groupJid={groupJid}
+          runtimeJid={runtimeJid}
+          visibility={processVisibility}
+        />
       </div>
     );
   }
@@ -750,14 +631,10 @@ export function StreamingDisplay({
   // 仅在既不等待也无冻结数据时才隐藏
   if (!isWaiting && !hasStreamData) return null;
 
-  // Waiting but no stream data: the identity row carries the visible status;
-  // keep a one-shot live region for assistive tech (the timer is not live).
+  // Waiting but no stream data: the row marks where the reply will appear,
+  // and the run status bar says what the run is doing.
   if (isWaiting && !hasStreamData) {
-    const status = (
-      <span role="status" aria-live="polite" className="sr-only">
-        正在准备回复…
-      </span>
-    );
+    if (turnAnswered) return null;
     if (isCompact) {
       return (
         <div className="mb-2 border-b border-surface-border pb-2">
@@ -765,18 +642,11 @@ export function StreamingDisplay({
             <span className="text-caption font-medium text-foreground">
               {senderName}
             </span>
-            {runStatus}
           </div>
-          {status}
         </div>
       );
     }
-    return (
-      <div className="w-full pb-6">
-        {identityRow}
-        {status}
-      </div>
-    );
+    return <div className="w-full pb-6">{identityRow}</div>;
   }
 
   if (!streaming) return null;
@@ -808,7 +678,6 @@ export function StreamingDisplay({
           <span className="text-caption font-medium text-foreground">
             {senderName}
           </span>
-          {runStatus}
         </div>
 
         {/* Content — flat, no card wrapper */}
@@ -840,7 +709,10 @@ export function StreamingDisplay({
       </div>
       {/* Holds the place of the final reply's action row (MessageBubble), so
           the card and the reply that replaces it are the same height. */}
-      <div aria-hidden="true" className="mt-1.5 h-7 pointer-coarse:h-10" />
+      <div
+        aria-hidden="true"
+        className="mt-1.5 h-7 pointer-coarse:h-10 phone:h-11"
+      />
     </div>
   );
 }

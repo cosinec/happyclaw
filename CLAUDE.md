@@ -14,6 +14,8 @@
 - 系统设置及默认值：`src/runtime-config.ts`
 - 渠道能力与会话路由：`src/im-channel-capabilities.ts`、`src/channel-mount-service.ts`
 - StreamEvent：`shared/stream-event.ts`
+- 模型连接预设、模型列表解析与上游错误分类：`shared/model-providers.ts`
+- 第三方代码与许可：`THIRD_PARTY_NOTICES.md`
 
 `docs/agent-first-architecture-plan.md` 和
 `docs/claude-code-plugin-automation-design.md` 是历史设计记录，不作为当前接口或数据结构的真相源。
@@ -98,7 +100,10 @@ Radix UI。路由以 `web/src/App.tsx` 为准：
 `/groups`、`/skills`、`/mcp-servers` 和 `/plugins` 是兼容重定向，不应新增独立页面。
 
 桌面端外壳是一条可拖宽、可折叠（⌘B）的侧栏加嵌入式页面画布；侧栏包含导航和
-工作区 → 会话树，⌘K 打开命令面板。移动端使用底部导航和独立的工作区/会话列表。
+工作区 → 会话树，⌘K 打开命令面板。手机（`phone:`，触屏且窄于 1024px）由左上角
+汉堡菜单打开左侧抽屉导航；首页是一级列表（工作区标题下直接列出会话，可折叠），右下角
+按钮在默认工作区新建对话，`?sessions=1` 重定向到该列表并展开对应工作区。窄桌面窗口
+仍使用底部导航和独立的工作区/会话列表。
 
 Web UI 约定：
 
@@ -116,6 +121,13 @@ Web UI 约定：
   经 `MotionProvider` 懒加载并遵循减少动态效果设置。流式回复的贴底跟随（每批一次的
   WAAPI 位移补偿）和逐词淡入（CSS keyframes）是逐帧、逐词的热路径，不走 `m.*`，
   同样在减少动态效果时关闭。
+- 聊天输入框是 Tiptap 编辑器（`@tiptap/*` 全部精确锁同一版本）。编辑器内核（结构化列表、
+  中文标点与选区修补、长粘贴折叠块、序列化）取自 cindy，位于
+  `components/chat/composer/cindy/`，按 Apache-2.0 保留来源与修改声明；外层
+  `MessageInput` 和 `components/chat/composer/` 是 HappyClaw 自己的，回车、排队、插话
+  语义见 §4。`/` 面板插入 `/技能名`：HappyClaw 的消息信封让 CLI 不会直接展开斜杠命令，
+  由模型调用 Skill 工具；`@` 选中的文件序列化为 `@"工作区相对路径"`，由 CLI 自动附带。
+  为此消息正文在 `<message>` 内另起一行、不转义引号（属性值照常转义）。
 
 ### 3.3 Agent Runner
 
@@ -196,10 +208,29 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
   确认的调用（如 Hook 返回 `ask`）与没有它时一样被拒绝。Runner 没有交互作答通道：
   AskUserQuestion 立即以「已向用户展示、下一条消息作答」的结果返回，模型在回复里复述
   问题和选项后结束本轮；Web 卡片和飞书按钮只是作答捷径，用户的回答作为下一条消息到达。
+  只有主 Agent 能提问：子代理（`agentID` 非空）的 AskUserQuestion 被拒绝，要求它把
+  问题交回主 Agent，Runner 也不把它的问题推给 Web 或飞书卡片；当前 CLI 本身就不给
+  子代理这个工具。
 - 一次运行绑定的模型配置按固定顺序解析（`container-runner.ts` 的
   `resolvePinnedModelConfigId`）：会话手选 → 智能体绑定 → 全局默认
   （`defaultModelConfigId`，工作区自带 Provider 环境变量时让位）→ 唯一启用的配置 →
   自动池。绑定即权威，没有跨账号故障转移；Web 的选择器与这一顺序必须一致。
+- HappyClaw 拥有的 Claude 环境（后端开关、端点、凭据、模型层级、会话的 effort/压缩/
+  上下文，清单在 `shared/claude-provider-env.ts`）不取自宿主进程继承的环境，也从管理员
+  的 settings 层剔除（连同 `apiKeyHelper` 等取凭据的命令），不会写进挂载给 Agent 的会话
+  settings。Runner 再把 HappyClaw 设置了的值写进 flag settings，压过管理员、项目和
+  local 的 settings 文件；后端开关一律写 `0`（除非连接打开），并关闭 `apiKeyHelper`。
+  未被 HappyClaw 设置的键（例如官方连接的 `ANTHROPIC_BASE_URL`）仍可由工作区 cwd 下的
+  项目/local settings 文件设置：Host 模式下那是管理员自己的仓库，Container 模式下所有者
+  本就能读到该连接的凭据。
+- 渠道格式说明随每轮的 `<channel_context>` 发送，不进 system prompt；换渠道或每十轮
+  重发一次，在被替换或撤回前一直有效。
+- 一个模型配置（连接）是一份凭据、一个地址和一组模型；`anthropicModel` 是连接的默认
+  模型。会话和智能体按「连接 · 模型」选择（`session_model_selections.model`、
+  `agent_profiles.model`），换模型时开新的 SDK 会话并注入近期历史；只改 `[1m]` 后缀
+  不算换模型。连接的模型列表、预设和最近一次测试存在 V5 配置文件的可选字段里，不升
+  文件版本，旧版本读到会忽略、凭据不受影响。新建连接只有在没有其他启用的连接时才默认
+  加入自动池。测试连接和获取模型列表只有在上游确实接受了凭据时才记录认证头方式。
 - 宿主机 Skills 由 `runtime_policy.skills.host` 独立选择，不能通过
   `host_claude` 开关隐式获得。
 - 工作区 `CLAUDE.md`、项目 `.claude/skills` 和项目 MCP 属于项目上下文层。
@@ -388,7 +419,8 @@ data/
 ```
 
 主要数据库当前 Schema 版本以 `src/db.ts` 的 `CURRENT_SCHEMA_VERSION` 为准。
-不要在文档中复制版本号；迁移必须同时具备备份、前向升级和拒绝降级保护。
+不要在文档中复制版本号；迁移必须同时具备备份、前向升级和拒绝降级保护。只新增索引
+不需要升级版本：在每次启动都会执行的建表函数里用 `CREATE INDEX IF NOT EXISTS`。
 
 核心表族：
 
@@ -467,9 +499,13 @@ npm run self-test
 - 修改共享类型后运行 `make sync-types`；`make typecheck` 会检查副本一致性。回复步骤归并器
   （`shared/stream-steps.ts`、`shared/thinking-text.ts`）同步到后端和 Web：后端用同一套
   纯函数记录已结算回合的有序步骤，与 Web 流式时渲染的步骤不会漂移。
+  `shared/model-providers.ts` 同样同步到后端和 Web：添加向导的引导与服务端的校验、
+  测试、模型发现用同一套预设和错误分类。
 - 修改 Prompt 后确保 `scripts/check-agent-runner-prompts.sh` 通过。
 - 修改文档后运行 `npm run docs:check`。
-- SDK/CLI 升级必须显式执行 `make update-sdk`，验证后提交 package.json 与 lockfile。
+- SDK/CLI 升级必须显式执行 `make update-sdk`，验证后提交 package.json 与 lockfile；
+  升级后重跑 `node tests/e2e/turn-context-dedup.mjs`，它固定 SessionStart(compact)
+  补发的位置。
 - 容器以非 root 用户执行 Agent；修改 Dockerfile 或 entrypoint 后需要重建镜像。
 - 停止服务只能杀监听进程：`lsof -ti:PORT -sTCP:LISTEN | xargs kill`。
 - 不要使用会杀死连接方或 Docker 网络代理的宽泛端口 kill 命令。
@@ -496,6 +532,9 @@ make test
 make build
 git diff --check
 ```
+
+改动 Runner Prompt、`systemPrompt`、工具或 MCP 的 PR 须附改动前后的
+`cache_read_input_tokens` 占比（真实或脚本化运行，见 PR 模板）。
 
 真实 Provider 测试使用 `npm run test:real-model`，会产生真实请求和可能的费用，
 不要把凭据、Endpoint、模型名或未脱敏回复写入日志。

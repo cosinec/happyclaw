@@ -111,11 +111,17 @@ import { hasPermission } from '../permissions.js';
 import {
   buildCodexSelectionView,
   chatGptDefaultModel,
+  listSessionPickerModels,
   readStoredChoice,
+  readStoredConnectionChoice,
+  unpickedLaunchEffort,
+  unpickedLaunchModel,
   validateSessionChoice,
   type CodexSelectionView,
 } from '../session-model-overrides.js';
 import { clearTargetAgentBindingsForDeletedAgents } from '../im-context-isolation.js';
+import { notifyConversationContextCleared } from '../context-usage-events.js';
+import { readSessionContextUsage } from '../session-context-usage.js';
 import { getChannelType } from '../im-channel.js';
 import { buildUnmountUpdate } from '../channel-mount-service.js';
 import {
@@ -2176,6 +2182,7 @@ groupRoutes.post('/:jid/reset-session', authMiddleware, async (c) => {
     if (!agentId) {
       delete deps.getSessions()[group.folder];
     }
+    notifyConversationContextCleared(group.folder, agentId ?? null);
   } catch (err) {
     logger.error(
       { jid, folder: group.folder, agentId, err },
@@ -2244,8 +2251,9 @@ groupRoutes.post('/:jid/reset-session', authMiddleware, async (c) => {
 });
 
 // ─── 会话模型选择（聊天输入框的模型选择器） ──────────────────────────
-// Session-level pick of a saved model configuration. No selection means the
-// conversation follows the default: the Agent's model configuration, else the
+// Session-level pick of a saved model configuration and, optionally, one of
+// its models. No selection means the conversation follows the default: the
+// Agent's model configuration (and model), else the global default, else the
 // automatic pool of enabled configurations.
 
 type SessionModelSelectionScope =
@@ -2350,7 +2358,14 @@ function buildSessionModelSelectionPayload(
       // key) would fail every turn; the picker shows it but cannot pick it.
       usable: providerHasCredentials(provider),
     };
-    if (!provider.codexOAuthCredentials) return option;
+    if (!provider.codexOAuthCredentials) {
+      // The picker lists the visible ones; a hidden model stays pickable by
+      // a choice that already names it.
+      return {
+        ...option,
+        models: listSessionPickerModels(provider, agentEffort),
+      };
+    }
     // The list is the account's own once its catalog has been fetched; ask for
     // a fresher one without making the picker wait for it.
     maybeRefreshCodexProviderCatalog(provider.id, {
@@ -2364,18 +2379,36 @@ function buildSessionModelSelectionPayload(
     return { ...option, codex };
   });
 
+  const defaultProvider = providers.find(
+    (provider) => provider.id === defaultModelConfigId,
+  );
   const selectedModelConfigId = exists(stored?.modelConfigId)
     ? stored.modelConfigId
     : null;
   const view = selectedModelConfigId
     ? codexViews.get(selectedModelConfigId)
     : undefined;
-  // A stored model or effort the catalog or the chooser's permission no longer
-  // backs reads as unset, exactly as a runner launch would treat it.
+  const selectedProvider = providers.find(
+    (provider) => provider.id === selectedModelConfigId,
+  );
+  // A stored model or effort the list, the catalog or the chooser's permission
+  // no longer backs reads as unset, exactly as a runner launch would treat it.
   const selected =
     stored && view
       ? readStoredChoice(view, stored, canExceedCeiling)
-      : { model: null, effort: null };
+      : stored && selectedProvider
+        ? readStoredConnectionChoice(selectedProvider, stored)
+        : { model: null, effort: null };
+  const defaultModel = defaultProvider
+    ? unpickedLaunchModel(
+        defaultProvider,
+        defaultSource === 'agent' ? profile?.model : null,
+        group.folder,
+      )
+    : null;
+  const defaultView = defaultProvider
+    ? codexViews.get(defaultProvider.id)
+    : undefined;
 
   return {
     selectedModelConfigId,
@@ -2384,6 +2417,14 @@ function buildSessionModelSelectionPayload(
     default: {
       source: defaultSource,
       modelConfigId: defaultModelConfigId,
+      // What "default" runs, resolved as a launch without a pick resolves it.
+      model: defaultModel,
+      effort: defaultView
+        ? (defaultView.models.find((entry) => entry.value === defaultModel)
+            ?.defaultEffort ?? defaultView.defaultEffort)
+        : defaultProvider
+          ? unpickedLaunchEffort(defaultProvider, defaultModel, agentEffort)
+          : null,
       enabledCount: enabled.length,
     },
     options,
@@ -2395,10 +2436,13 @@ function buildSessionModelSelectionPayload(
  *
  * A different configuration or model starts a new SDK session on the next
  * message, so the warm runner is retired (one already on the chosen
- * configuration is spared only when no model is involved). A different effort
- * needs no restart at all: the gateway reads it per request, so the live
- * runners of the chosen configuration are pointed at it and keep running.
- * Choosing nothing new does nothing.
+ * configuration is spared only when no model is involved: neither choice
+ * names one, and a conversation that had picked nothing did not run the
+ * Agent's). A different effort on a ChatGPT subscription needs no restart at
+ * all: the gateway reads it per request, so the live runners of the chosen
+ * configuration are pointed at it and keep running. Elsewhere Claude Code
+ * takes its effort at start, so the runner is retired but the SDK session
+ * kept. Choosing nothing new does nothing.
  */
 function applySessionChoiceChange(
   deps: NonNullable<ReturnType<typeof getWebDeps>>,
@@ -2419,21 +2463,41 @@ function applySessionChoiceChange(
   ): string => {
     if (!choice?.modelConfigId) return '';
     const provider = providers.find((item) => item.id === choice.modelConfigId);
-    const model = provider?.codexOAuthCredentials
-      ? (choice.model ?? chatGptDefaultModel(provider))
-      : '';
+    const model = !provider
+      ? ''
+      : provider.codexOAuthCredentials
+        ? (choice.model ?? chatGptDefaultModel(provider))
+        : (choice.model ?? provider.anthropicModel);
     return `${choice.modelConfigId}\u0000${model}`;
   };
+  const jids = agentId
+    ? [`${jid}#agent:${agentId}`]
+    : getJidsByFolder(group.folder);
+  const effortChanged = (previous?.effort ?? null) !== next.effort;
   let drained = 0;
   if (launchKey(previous) !== launchKey(next)) {
-    const target = previous?.model || next.model ? null : next.modelConfigId;
-    drained = deps.queue.drainRunnersForModelSelection(
-      agentId ? [`${jid}#agent:${agentId}`] : getJidsByFolder(group.folder),
-      target,
+    const profile = peekAgentProfileForWorkspace(
+      group.folder,
+      group.created_by,
     );
+    const ranAgentModel =
+      !previous && !!profile?.model_config_id && !!profile.model;
+    const target =
+      previous?.model || next.model || ranAgentModel
+        ? null
+        : next.modelConfigId;
+    drained = deps.queue.drainRunnersForModelSelection(jids, target);
+  } else if (
+    effortChanged &&
+    !providers.find((item) => item.id === next.modelConfigId)
+      ?.codexOAuthCredentials
+  ) {
+    // Claude Code reads its effort when the runner starts: a new one takes
+    // a new runner, on the same SDK session (the model did not change).
+    drained = deps.queue.drainRunnersForModelSelection(jids, null);
   }
   let liveUpdated = 0;
-  if ((previous?.effort ?? null) !== next.effort) {
+  if (effortChanged) {
     liveUpdated = updateLiveSessionEffort(
       {
         groupFolder: group.folder,
@@ -2460,6 +2524,19 @@ groupRoutes.get('/:jid/model-selection', authMiddleware, (c) => {
       scope.agentId,
       c.get('user') as AuthUser,
     ),
+  );
+});
+
+// GET /api/groups/:jid/context-usage?agentId= - 会话上下文占用（输入框旁的圆环）
+groupRoutes.get('/:jid/context-usage', authMiddleware, async (c) => {
+  const scope = resolveSessionModelSelectionScope(
+    c,
+    c.req.query('agentId'),
+    false,
+  );
+  if ('error' in scope) return scope.error;
+  return c.json(
+    await readSessionContextUsage(scope.group.folder, scope.agentId),
   );
 });
 

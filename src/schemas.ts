@@ -5,6 +5,13 @@ import { AGENT_EFFORT_LEVELS } from './agent-effort.js';
 import { ALL_PERMISSIONS } from './permissions.js';
 import type { Permission } from './types.js';
 import { MAX_GROUP_NAME_LEN } from './group-constants.js';
+import {
+  getModelPreset,
+  isValidModelId,
+  MAX_PROVIDER_MODEL_ID_LENGTH,
+  MAX_PROVIDER_MODELS,
+  MODEL_EFFORTS,
+} from './model-providers.js';
 
 export const ChannelProviderSchema = z.enum([
   'feishu',
@@ -289,16 +296,35 @@ export const GroupAgentProfilePatchSchema = z.object({
 
 /**
  * Chat composer model picker: null returns the conversation to the default.
- * `model` and `effort` pick inside a ChatGPT configuration; the request replaces
- * the whole choice, so leaving them out follows the configuration's defaults.
- * The catalog decides which values are valid, so they are plain strings here.
+ * `model` picks inside any configuration, `effort` only inside a ChatGPT one;
+ * the request replaces the whole choice, so leaving them out follows the
+ * configuration's defaults. The configuration's model list (a ChatGPT
+ * catalog) decides which values are valid, so they are plain strings here.
  */
 export const SessionModelSelectionSchema = z.object({
   agentId: z.string().trim().min(1).max(128).nullable().optional(),
   modelConfigId: z.string().trim().min(1).max(128).nullable(),
-  model: z.string().trim().min(1).max(128).nullable().optional(),
+  model: z
+    .string()
+    .trim()
+    .min(1)
+    .max(MAX_PROVIDER_MODEL_ID_LENGTH)
+    .nullable()
+    .optional(),
   effort: z.string().trim().min(1).max(32).nullable().optional(),
 });
+
+/**
+ * An Agent's model within its configuration; null runs the configuration's
+ * default. Whether the configuration offers it is checked by the route.
+ */
+const AgentProfileModelSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(MAX_PROVIDER_MODEL_ID_LENGTH)
+  .nullable()
+  .optional();
 
 const AgentProfileRuntimePolicyModeSchema = z.enum([
   'inherit',
@@ -402,6 +428,7 @@ export const AgentProfileCreateSchema = z
       .nullable()
       .optional(),
     model_config_id: z.string().trim().min(1).max(128).nullable().optional(),
+    model: AgentProfileModelSchema,
     runtime_policy: AgentProfileRuntimePolicySchema.optional(),
   })
   .superRefine(validatePromptModeCompatibility);
@@ -424,6 +451,7 @@ export const AgentProfilePatchSchema = z
       .nullable()
       .optional(),
     model_config_id: z.string().trim().min(1).max(128).nullable().optional(),
+    model: AgentProfileModelSchema,
     runtime_policy: AgentProfileRuntimePolicySchema.optional(),
   })
   .superRefine(validatePromptModeCompatibility);
@@ -1105,6 +1133,35 @@ const ProviderBaseUrlSchema = z
 
 const ProviderAuthModeSchema = z.enum(['bearer', 'x-api-key']);
 
+const ProviderModelIdSchema = z
+  .string()
+  .trim()
+  .refine(isValidModelId, { message: '模型名无效' });
+
+/** '' is a pass-through relay: Claude Code picks the model itself. */
+const ProviderDefaultModelSchema = z
+  .string()
+  .max(MAX_PROVIDER_MODEL_ID_LENGTH)
+  .refine((value) => !value.trim() || isValidModelId(value.trim()), {
+    message: '模型名无效',
+  });
+
+/** The whole list a connection offers; the default model need not be in it. */
+const ProviderModelListSchema = z
+  .array(
+    z.object({
+      id: ProviderModelIdSchema,
+      hidden: z.boolean().optional(),
+      effort: z.enum(MODEL_EFFORTS).optional(),
+    }),
+  )
+  .max(MAX_PROVIDER_MODELS);
+
+const ProviderPresetIdSchema = z
+  .string()
+  .trim()
+  .refine((value) => !!getModelPreset(value), { message: '未知的厂商预设' });
+
 export const UnifiedProviderCreateSchema = z
   .object({
     name: z.string().min(1).max(64),
@@ -1112,7 +1169,9 @@ export const UnifiedProviderCreateSchema = z
     anthropicBaseUrl: ProviderBaseUrlSchema.optional(),
     anthropicAuthToken: z.string().max(2000).optional(),
     anthropicAuthMode: ProviderAuthModeSchema.optional(),
-    anthropicModel: z.string().max(128).optional(),
+    anthropicModel: ProviderDefaultModelSchema.optional(),
+    models: ProviderModelListSchema.optional(),
+    presetId: ProviderPresetIdSchema.optional(),
     anthropicApiKey: z.string().max(2000).optional(),
     claudeCodeOauthToken: z.string().max(2000).optional(),
     claudeOAuthCredentials: ClaudeOAuthCredentialsSchema.optional(),
@@ -1139,8 +1198,12 @@ export const UnifiedProviderPatchSchema = z
   .object({
     name: z.string().min(1).max(64).optional(),
     anthropicBaseUrl: ProviderBaseUrlSchema.optional(),
-    anthropicAuthMode: ProviderAuthModeSchema.optional(),
-    anthropicModel: z.string().max(128).optional(),
+    /** Null goes back to inferring the header style from the token. */
+    anthropicAuthMode: ProviderAuthModeSchema.nullable().optional(),
+    anthropicModel: ProviderDefaultModelSchema.optional(),
+    /** The whole new list; models left out are removed. */
+    models: ProviderModelListSchema.optional(),
+    presetId: ProviderPresetIdSchema.nullable().optional(),
     customEnv: z.record(z.string().max(256), z.string().max(4096)).optional(),
     weight: z.number().int().min(1).max(100).optional(),
     // Third-party edits save the token with the other fields in one request,
@@ -1154,6 +1217,8 @@ export const UnifiedProviderPatchSchema = z
       data.anthropicBaseUrl !== undefined ||
       data.anthropicAuthMode !== undefined ||
       data.anthropicModel !== undefined ||
+      data.models !== undefined ||
+      data.presetId !== undefined ||
       data.customEnv !== undefined ||
       data.weight !== undefined ||
       data.anthropicAuthToken !== undefined ||
@@ -1162,18 +1227,33 @@ export const UnifiedProviderPatchSchema = z
   );
 
 /**
- * Draft of a third-party endpoint to probe before (or without) saving. With a
- * providerId, blank fields fall back to the stored provider — including its
- * token, which is never sent back to the client.
+ * A connection to list models from: a saved one by providerId, or a draft
+ * that is not saved yet. With a providerId, blank fields fall back to the
+ * stored connection — including its credential, which is never sent back to
+ * the client. A draft without a type is a third-party endpoint.
  */
-export const ProviderConnectivityTestSchema = z.object({
+export const ProviderDiscoverModelsSchema = z.object({
   providerId: z.string().trim().min(1).max(64).optional(),
+  type: z.enum(['official', 'third_party']).optional(),
+  presetId: ProviderPresetIdSchema.optional(),
   anthropicBaseUrl: ProviderBaseUrlSchema.optional(),
   anthropicAuthToken: z.string().max(2000).optional(),
   anthropicAuthMode: ProviderAuthModeSchema.optional(),
-  anthropicModel: z.string().max(128).optional(),
+  anthropicApiKey: z.string().max(2000).optional(),
+  /** A pasted setup-token or .credentials.json; checked, never saved. */
+  claudeCredentialInput: ClaudeCredentialInputSchema.optional(),
+  /** A draft's env; its ANTHROPIC_CUSTOM_HEADERS go with every request. */
   customEnv: z.record(z.string().max(256), z.string().max(4096)).optional(),
 });
+
+/** A connection to test: as for listing models, plus the model it runs. */
+export const ProviderConnectivityTestSchema =
+  ProviderDiscoverModelsSchema.extend({
+    anthropicModel: ProviderDefaultModelSchema.optional(),
+  });
+export type ProviderConnectivityTestInput = z.infer<
+  typeof ProviderConnectivityTestSchema
+>;
 
 export const UnifiedProviderSecretsSchema = z
   .object({

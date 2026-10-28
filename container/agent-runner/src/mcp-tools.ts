@@ -239,6 +239,15 @@ export interface WorkspaceMemorySnapshot {
     query?: string | null;
     generatedAt: string;
   };
+  /**
+   * Items changed after the store revision the request named: their current
+   * revision and status. `reset` means the store was replaced, so nothing
+   * from before holds.
+   */
+  changes?: {
+    reset: boolean;
+    items: Array<{ id: string; revision: number; status: string }>;
+  };
 }
 
 export interface HappyClawOwnerProfileProjection {
@@ -302,6 +311,7 @@ export function parseWorkspaceMemorySnapshot(
   ) {
     return null;
   }
+  const changes = parseWorkspaceMemoryChanges(value.changes);
   return {
     workspaceJid: value.workspaceJid,
     storeRevision: value.storeRevision as number,
@@ -315,6 +325,34 @@ export function parseWorkspaceMemorySnapshot(
       query: trace.query as string | null | undefined,
       generatedAt: trace.generatedAt,
     },
+    ...(changes ? { changes } : {}),
+  };
+}
+
+function parseWorkspaceMemoryChanges(
+  value: unknown,
+): WorkspaceMemorySnapshot['changes'] {
+  if (
+    !isRecord(value) ||
+    typeof value.reset !== 'boolean' ||
+    !Array.isArray(value.items) ||
+    !value.items.every(
+      (item) =>
+        isRecord(item) &&
+        typeof item.id === 'string' &&
+        Number.isInteger(item.revision) &&
+        typeof item.status === 'string',
+    )
+  ) {
+    return undefined;
+  }
+  return {
+    reset: value.reset,
+    items: value.items as Array<{
+      id: string;
+      revision: number;
+      status: string;
+    }>,
   };
 }
 
@@ -503,7 +541,15 @@ export async function fetchHappyClawOwnerProfileTurn(
 export async function fetchWorkspaceMemorySnapshot(
   ctx: McpContext,
   query: string,
-  options: { limit?: number; maxChars?: number; timeoutMs?: number } = {},
+  options: {
+    limit?: number;
+    maxChars?: number;
+    timeoutMs?: number;
+    /** Store revision the conversation's memory reflects: report changes since. */
+    changedSince?: number;
+    /** Items the conversation holds: report the ones expired by now. */
+    heldIds?: readonly string[];
+  } = {},
 ): Promise<WorkspaceMemorySnapshot | null> {
   try {
     const result = await callWorkspaceMemory(
@@ -513,6 +559,10 @@ export async function fetchWorkspaceMemorySnapshot(
         query: query.slice(0, 500),
         limit: Math.min(Math.max(options.limit ?? 8, 1), 20),
         maxChars: Math.min(Math.max(options.maxChars ?? 6000, 500), 12_000),
+        ...(options.changedSince !== undefined
+          ? { changedSince: options.changedSince }
+          : {}),
+        ...(options.heldIds?.length ? { heldIds: options.heldIds } : {}),
       },
       options.timeoutMs ?? 8_000,
     );

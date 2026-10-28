@@ -2,8 +2,10 @@ import { describe, expect, test, vi } from 'vitest';
 
 import {
   buildMessagesUrl,
+  connectionTestResult,
   parseCustomHeaders,
   probeProviderModel,
+  redact,
   testProviderConnectivity,
 } from '../src/provider-connectivity.js';
 
@@ -127,6 +129,69 @@ describe('provider connectivity probe', () => {
       'deepseek-v4-pro',
       'deepseek-v4-flash',
     ]);
+  });
+
+  test('redacts a key echoed JSON-escaped and the custom header values', async () => {
+    const key = 'bce-v3/ALTAK-abcdefgh/0123456789abcdef';
+    const escaped = JSON.stringify({ detail: { key } }).replace(/\//g, '\\/');
+    expect(redact(escaped, [key])).not.toContain('0123456789abcdef');
+
+    const probe = await probeProviderModel(
+      {
+        baseUrl: 'https://relay.test',
+        token: 'tok-abcdef-123',
+        authMode: 'bearer',
+        model: 'm',
+        customHeaders: 'X-Tenant-Secret: tenant-secret-42',
+      },
+      {
+        fetchImpl: (async () =>
+          new Response('rejected tenant tenant-secret-42', {
+            status: 403,
+          })) as unknown as typeof fetch,
+      },
+    );
+    expect(probe.message).toBe('rejected tenant ***');
+  });
+
+  test('strips the 1M suffix the way model lists read it', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(200, {}));
+    const probe = await probeProviderModel(
+      {
+        baseUrl: 'https://relay.test',
+        token: 'tok-abcdef',
+        authMode: 'bearer',
+        model: ' glm-5[1M] ',
+      },
+      { fetchImpl: fetchImpl as unknown as typeof fetch },
+    );
+    expect(probe.model).toBe('glm-5');
+  });
+
+  test('a test whose failing probe got no answer records no status', () => {
+    const result = connectionTestResult(
+      {
+        ok: false,
+        probes: [
+          { model: 'glm-5', ok: true, status: 200, latencyMs: 80 },
+          {
+            model: 'glm-5-flash',
+            ok: false,
+            status: null,
+            latencyMs: 20_000,
+            message: 'timeout',
+            code: 'TIMEOUT',
+          },
+        ],
+      },
+      { model: 'glm-5' },
+    );
+    expect(result.record).toMatchObject({
+      ok: false,
+      code: 'TIMEOUT',
+      status: null,
+      latencyMs: 80,
+    });
   });
 
   test('helpers', () => {

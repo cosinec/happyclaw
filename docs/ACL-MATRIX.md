@@ -92,7 +92,7 @@ token（Runner/查询退出即吊销），并拒绝带 `Forwarded`、`X-Forwarde
 - 列表中的工作区投影
 - 读取消息与文件，以及回合的思考摘要与执行轨迹
   （`GET /api/groups/:jid/turn-traces/:turnId`，主动模式工作区另按下述过程可见性过滤）
-- 查看会话当前使用的模型配置
+- 查看会话当前使用的模型配置与上下文占用（`GET /api/groups/:jid/context-usage`）
 - 发送普通消息
 - 查看 Runtime Session、绑定和项目能力
 - 打开 Web 终端前的资源检查
@@ -258,6 +258,12 @@ read-only 投影按 host-issued turn ID 精确匹配当前或已接纳的 queued
 
 系统 MCP 默认仅 admin 可用；只有显式设置为 shared 后，普通成员的 Agent 才能进入
 有效能力清单。API 不回传 Secret 明文。
+
+模型连接只由 `manage_system_config` 管理，没有个人连接：增改删、凭据、启用、全局默认、
+`POST /api/config/claude/providers/test`、`POST /api/config/claude/providers/discover-models`
+和 `GET /api/config/claude/providers/:id/impact` 都在该权限下。测试与获取模型列表共用每个
+用户每分钟 10 次的上游请求限额；草稿里的凭据只用于这一次请求，不落盘，上游错误摘录脱敏后
+返回，日志只记上游 origin。普通成员通过会话模型选择和智能体绑定使用已有连接，看不到凭据。
 
 ## 7. WebSocket
 

@@ -977,8 +977,10 @@ export class StreamEventProcessor {
       }
     }
 
-    // Track AskUserQuestion tool
-    if (block.name === 'AskUserQuestion' && block.id) {
+    // Track AskUserQuestion tool. A sub-agent's question is refused, never
+    // put to the user (runnerCanUseTool), so its input is not streamed as
+    // questions a Web or Feishu card would show.
+    if (block.name === 'AskUserQuestion' && block.id && !isNested) {
       if (typeof blockIndex === 'number') {
         this.pendingAskUserInput.set(blockIndex, {
           toolUseId: block.id,

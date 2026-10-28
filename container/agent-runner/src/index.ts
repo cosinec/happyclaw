@@ -24,6 +24,8 @@ import {
   query,
   HookCallback,
   PostCompactHookInput,
+  SessionStartHookInput,
+  UserPromptSubmitHookInput,
   PreCompactHookInput,
   createSdkMcpServer,
   type Query,
@@ -41,7 +43,6 @@ import {
 import { pluginLoadWarnings } from './sdk-init-audit.js';
 import { classifyPreInitErrorResult } from './startup-failure.js';
 import { pruneProcessedHistoryImagesInTranscript as pruneProcessedHistoryImagesInTranscriptFile } from './history-image-prune.js';
-import { getChannelFromJid } from './channel-prefixes.js';
 
 import type {
   ContainerInput,
@@ -53,10 +54,7 @@ import type {
   StreamEvent,
   ChannelTurnContext,
 } from './types.js';
-import {
-  formatChannelTurnContextForPrompt,
-  normalizeChannelTurnContext,
-} from './types.js';
+import { normalizeChannelTurnContext } from './types.js';
 import type { ClaudeContextAudit } from './stream-event.types.js';
 export type { StreamEventType, StreamEvent } from './types.js';
 
@@ -84,11 +82,14 @@ import {
   type WorkspaceMemorySnapshot,
 } from './mcp-tools.js';
 import { HappyClawFirstWakeAcknowledger } from './owner-profile-first-wake.js';
+import { createSerializedAsyncTrigger } from './workspace-memory-context.js';
 import {
-  createSerializedAsyncTrigger,
-  loadWorkspaceMemoryTurnContext,
-} from './workspace-memory-context.js';
-import { loadHappyClawOwnerProfileTurnContext } from './owner-profile-context.js';
+  decorateUserTurn,
+  memoryKey,
+  TurnNoteLedger,
+  type TurnNoteSources,
+  type TurnNotes,
+} from './turn-notes.js';
 import {
   createWorkspaceMemoryWriteGuard,
   WORKSPACE_MEMORY_WRITE_GUARD_MATCHER,
@@ -120,6 +121,7 @@ import {
   buildClaudeRuntimeEnv,
   type ClaudeRuntimeEnv,
 } from './claude-runtime-env.js';
+import { pinBoundProviderSettings } from './provider-env-pin.js';
 import {
   resolveClaudeProviderRuntime,
   resolveClaudeQueryModelRuntime,
@@ -178,7 +180,6 @@ import {
   resolveManagedHostClaudeMdExcludes,
 } from './claude-memory-policy.js';
 import {
-  anchorAgentProfileToUserTurn,
   escapeAttribute,
   resolveAgentTurnAnchor,
   shouldAnchorInitialAgentTurn,
@@ -240,6 +241,9 @@ let compactionAwaitingCompletion = false;
 // Module-level session ID so SIGTERM handler can emit it before exit.
 // Updated in main() whenever a query returns a new session.
 let latestSessionId: string | undefined;
+// Per-turn notes (memory, Owner Profile, channel, Agent anchor) already in
+// the current Claude session.
+const turnNotes = new TurnNoteLedger();
 // Durable identity of the SDK input turn that currently owns runner output.
 // writeOutput snapshots it into every frame so direct status/error/session
 // frames cannot silently lose correlation just because they bypass emit().
@@ -602,6 +606,9 @@ function enrichContextAudit(
 
 // 启动期扫描 prompts/channels/*.md，文件名（去 .md 后缀）= channel key（feishu / telegram / qq / dingtalk / ...）
 // 新增渠道时只需在 channels/ 下加一个 .md 文件，无需改代码。
+// The guidance rides in each input's channel_context (turn-notes.ts), not in
+// the system prompt: one warm runner serves inputs from several channels, and
+// the system prompt must stay byte-stable for the prompt cache.
 const CHANNEL_GUIDELINES: Record<string, string> = (() => {
   const channelsDir = path.join(PROMPTS_DIR, 'channels');
   const result: Record<string, string> = {};
@@ -615,6 +622,14 @@ const CHANNEL_GUIDELINES: Record<string, string> = (() => {
   }
   return result;
 })();
+
+/** Format guidance for an input from this channel; none for the Web. */
+function channelFormatFor(
+  context: ChannelTurnContext | undefined,
+): string | undefined {
+  const guidelines = context && CHANNEL_GUIDELINES[context.provider];
+  return guidelines ? `${guidelines}\n${CHANNEL_FORMAT_COMMON}` : undefined;
+}
 
 /**
  * 规范化图片 MIME：
@@ -1054,11 +1069,43 @@ function getSessionSummary(
 }
 
 /**
- * Archive the full transcript to conversations/ before compaction.
- * Also flush any accumulated streaming text as a compact_partial message
- * so users don't lose the response that was being generated.
- * Finally, trim the JSONL file to remove already-compacted history.
+ * Claude Code runs SessionStart (source compact) after a compaction and
+ * before PostCompact; its additionalContext lands after the summary, where
+ * the interrupted turn continues, and survives a resume (Claude CLI 2.1.296).
  */
+const restoreTurnNotesAfterCompaction: HookCallback = async (input) => {
+  const start = input as SessionStartHookInput;
+  if (start.source !== 'compact' || start.agent_id) return {};
+  const additionalContext = turnNotes.restoreAfterCompaction();
+  return additionalContext
+    ? {
+        hookSpecificOutput: {
+          hookEventName: 'SessionStart' as const,
+          additionalContext,
+        },
+      }
+    : {};
+};
+
+/**
+ * UserPromptSubmit runs for every streamed user message, before system/init,
+ * and its additionalContext rides with that prompt (Claude CLI 2.1.296). A
+ * prompt planned against another session gets its notes in full there.
+ */
+const restoreTurnNotesOnSessionChange: HookCallback = async (input) => {
+  const prompt = input as UserPromptSubmitHookInput;
+  if (prompt.agent_id) return {};
+  const additionalContext = turnNotes.restoreOnSessionChange(prompt.session_id);
+  return additionalContext
+    ? {
+        hookSpecificOutput: {
+          hookEventName: 'UserPromptSubmit' as const,
+          additionalContext,
+        },
+      }
+    : {};
+};
+
 /** Ends the main Agent's compaction phase; subagent compactions never start it. */
 function createPostCompactHook(onCompactionEnd: () => void): HookCallback {
   return async (input) => {
@@ -1067,6 +1114,12 @@ function createPostCompactHook(onCompactionEnd: () => void): HookCallback {
   };
 }
 
+/**
+ * Archive the full transcript to conversations/ before compaction.
+ * Also flush any accumulated streaming text as a compact_partial message
+ * so users don't lose the response that was being generated.
+ * Finally, trim the JSONL file to remove already-compacted history.
+ */
 function createPreCompactHook(deps: {
   emit: (output: ContainerOutput) => void;
   getFullText: () => string;
@@ -1724,14 +1777,6 @@ function nonNegativeNumber(value: unknown): number {
   return Number.isFinite(number) ? Math.max(0, number) : 0;
 }
 
-function decorateChannelUserTurn(
-  message: string,
-  context: ChannelTurnContext | undefined,
-): string {
-  const channelBlock = formatChannelTurnContextForPrompt(context);
-  return channelBlock ? `${channelBlock}\n\n${message}` : message;
-}
-
 /**
  * Run a single query and stream results via writeOutput.
  * Uses MessageStream (AsyncIterable) to keep isSingleUserTurn=false,
@@ -1781,6 +1826,7 @@ async function runQueryAttempt(
     CLAUDE_PROVIDER_RUNTIME,
     PROVIDER_FALLBACK_MODELS.activeModelOverride,
   );
+  turnNotes.beginQuery(sessionId, resumeAt);
   const stream = new MessageStream();
   // Track messages piped into this query.  When the query is interrupted,
   // these messages would otherwise be lost (consumed by the aborted query).
@@ -1841,36 +1887,45 @@ async function runQueryAttempt(
     }
   };
   activateCurrentInputTurn(coldInputTurnId);
-  const [workspaceMemoryTurn, ownerProfileTurn] = mcpToolsContext
+  const [memorySnapshot, ownerProfile] = mcpToolsContext
     ? await Promise.all([
-        loadWorkspaceMemoryTurnContext(prompt, (query) =>
-          fetchWorkspaceMemorySnapshot(mcpToolsContext, query),
+        fetchWorkspaceMemorySnapshot(
+          mcpToolsContext,
+          prompt,
+          turnNotes.memoryHeld(),
         ),
-        loadHappyClawOwnerProfileTurnContext(() =>
-          fetchHappyClawOwnerProfileTurn(mcpToolsContext),
-        ),
+        fetchHappyClawOwnerProfileTurn(mcpToolsContext),
       ])
-    : [
-        { snapshot: null, block: '' },
-        { result: null, block: '' },
-      ];
+    : [null, null];
   const firstWakeAcknowledger = new HappyClawFirstWakeAcknowledger();
   firstWakeAcknowledger.register(
     activeOutputInputTurnId || coldInputTurnId,
-    ownerProfileTurn.result,
+    ownerProfile,
   );
-  if (mcpToolsContext && !workspaceMemoryTurn.snapshot) {
+  if (mcpToolsContext && !memorySnapshot) {
     logWarn(
       'Workspace memory snapshot unavailable; continuing this turn without durable memory context',
     );
   }
+  /**
+   * Trace a turn's memory: what was retrieved for it, which of those it
+   * carries (the others are already in the conversation), and what it
+   * withdraws.
+   */
   const emitWorkspaceMemoryRecall = (
     workspaceMemorySnapshot: WorkspaceMemorySnapshot,
+    notes: Pick<TurnNotes, 'sentMemory' | 'withdrawnMemory'> | undefined,
     inputTurnId: string,
     queryRunId: string | undefined = containerInput.queryRunId,
   ): void => {
     if (!emitOutput) return;
     const trace = workspaceMemorySnapshot.retrievalTrace;
+    const sent = notes?.sentMemory ?? [];
+    const withdrawn = notes?.withdrawnMemory ?? [];
+    const sentKeys = sent.map(memoryKey);
+    const inContext = trace.itemRevisions
+      .map(memoryKey)
+      .filter((key) => !sentKeys.includes(key));
     writeOutput({
       status: 'stream',
       result: null,
@@ -1881,26 +1936,62 @@ async function runQueryAttempt(
         isSynthetic: true,
         displayLevel: 'detail',
         title: 'Workspace memory snapshot',
-        summary: `revision ${workspaceMemorySnapshot.storeRevision}; ${trace.itemRevisions.length} item(s)`,
-        detail: trace.itemRevisions
-          .map((item) => `${item.id}@${item.revision}`)
-          .slice(0, 10)
-          .join(', '),
+        summary: `revision ${workspaceMemorySnapshot.storeRevision}; ${trace.itemRevisions.length} retrieved, ${sent.length} sent${withdrawn.length ? `, ${withdrawn.length} withdrawn` : ''}`,
+        detail: [
+          sentKeys.length ? `sent: ${sentKeys.slice(0, 10).join(', ')}` : '',
+          inContext.length
+            ? `already in context: ${inContext.slice(0, 10).join(', ')}`
+            : '',
+          withdrawn.length
+            ? `withdrawn: ${withdrawn
+                .slice(0, 10)
+                .map((item) => `${item.id} (${item.status})`)
+                .join(', ')}`
+            : '',
+        ]
+          .filter(Boolean)
+          .join('; '),
         queryRunId,
         turnId: containerInput.turnId,
         sessionId,
       },
     });
     log(
-      `Workspace memory snapshot revision=${workspaceMemorySnapshot.storeRevision} items=${trace.itemRevisions.length} generatedAt=${trace.generatedAt}`,
+      `Workspace memory snapshot revision=${workspaceMemorySnapshot.storeRevision} items=${trace.itemRevisions.length} sent=${sent.length} withdrawn=${withdrawn.length} generatedAt=${trace.generatedAt}`,
     );
   };
-  if (workspaceMemoryTurn.snapshot) {
-    emitWorkspaceMemoryRecall(
-      workspaceMemoryTurn.snapshot,
-      activeOutputInputTurnId || coldInputTurnId,
+  /**
+   * Push one user turn with the notes its context still lacks, and trace its
+   * memory. Notes are staged only for a message the stream accepts.
+   */
+  const pushUserTurn = (
+    text: string,
+    turnImages: Array<{ data: string; mimeType?: string }> | undefined,
+    uuid: UUID,
+    sources: TurnNoteSources,
+    traceInputTurnId: string,
+    traceQueryRunId?: string,
+  ): string[] => {
+    let notes: TurnNotes | undefined;
+    const rejected = stream.push(
+      text,
+      turnImages,
+      (message) => {
+        notes = turnNotes.stage(uuid, sources);
+        return decorateUserTurn(message, notes);
+      },
+      uuid,
     );
-  }
+    if (sources.memory) {
+      emitWorkspaceMemoryRecall(
+        sources.memory,
+        notes,
+        traceInputTurnId,
+        traceQueryRunId,
+      );
+    }
+    return rejected;
+  };
   const pipedMessagesDuringQuery = ipcDeliveryTracker.unacknowledgedMessages;
   const providerFallbackTurns = new ProviderFallbackTurnLedger({
     prompt,
@@ -1920,33 +2011,25 @@ async function runQueryAttempt(
     containerInput.agentProfile,
     CLAUDE_PROVIDER_RUNTIME.endpointKind,
   );
-  const anchorUserTurn = (message: string): string =>
-    anchorAgentProfileToUserTurn(agentTurnAnchor, message);
-  const decorateInitialUserTurn = (message: string): string => {
-    const withChannelContext = decorateChannelUserTurn(
-      message,
-      containerInput.channelContext,
-    );
-    const withWorkspaceMemory = workspaceMemoryTurn.block
-      ? `${workspaceMemoryTurn.block}\n\n${withChannelContext}`
-      : withChannelContext;
-    const withOwnerProfile = ownerProfileTurn.block
-      ? `${ownerProfileTurn.block}\n\n${withWorkspaceMemory}`
-      : withWorkspaceMemory;
-    return shouldAnchorInitialAgentTurn(emitOutput, sourceKindOverride)
-      ? anchorUserTurn(withOwnerProfile)
-      : withOwnerProfile;
-  };
   const initialSdkUuid = randomUUID();
   ipcDeliveryTracker.bindSdkMessageUuid(
     ipcDeliveryTracker.currentTurnMessages,
     initialSdkUuid,
   );
-  const initialRejected = stream.push(
+  const initialRejected = pushUserTurn(
     prompt,
     images,
-    decorateInitialUserTurn,
     initialSdkUuid,
+    {
+      memory: memorySnapshot,
+      ownerProfile,
+      channelContext: containerInput.channelContext,
+      channelFormat: channelFormatFor(containerInput.channelContext),
+      anchor: shouldAnchorInitialAgentTurn(emitOutput, sourceKindOverride)
+        ? agentTurnAnchor
+        : undefined,
+    },
+    activeOutputInputTurnId || coldInputTurnId,
   );
   const decorateStreamEvent = (event: StreamEvent): StreamEvent => ({
     ...event,
@@ -2509,30 +2592,24 @@ async function runQueryAttempt(
           containerInput.currentSourceJid ||
           containerInput.chatJid,
       );
-      const [workspaceMemoryTurn, ownerProfileTurn] = mcpToolsContext
+      const [memorySnapshot, ownerProfile] = mcpToolsContext
         ? await Promise.all([
-            loadWorkspaceMemoryTurnContext(msg.text, (query) =>
-              fetchWorkspaceMemorySnapshot(mcpToolsContext, query),
+            fetchWorkspaceMemorySnapshot(
+              mcpToolsContext,
+              msg.text,
+              turnNotes.memoryHeld(),
             ),
-            loadHappyClawOwnerProfileTurnContext(() =>
-              fetchHappyClawOwnerProfileTurn(
-                mcpToolsContext,
-                8_000,
-                msg.receipt?.deliveryId,
-              ),
+            fetchHappyClawOwnerProfileTurn(
+              mcpToolsContext,
+              8_000,
+              msg.receipt?.deliveryId,
             ),
           ])
-        : [
-            { snapshot: null, block: '' },
-            { result: null, block: '' },
-          ];
+        : [null, null];
       if (msg.receipt?.deliveryId) {
-        firstWakeAcknowledger.register(
-          msg.receipt.deliveryId,
-          ownerProfileTurn.result,
-        );
+        firstWakeAcknowledger.register(msg.receipt.deliveryId, ownerProfile);
       }
-      if (mcpToolsContext && !workspaceMemoryTurn.snapshot) {
+      if (mcpToolsContext && !memorySnapshot) {
         logWarn(
           'Workspace memory snapshot unavailable for warm turn; continuing without durable memory context',
         );
@@ -2542,35 +2619,24 @@ async function runQueryAttempt(
       // requeued by the caller; never emit a recall trace or push it into an
       // ended SDK stream.
       if (!ipcPolling || stream.ended) return;
-      if (workspaceMemoryTurn.snapshot) {
-        emitWorkspaceMemoryRecall(
-          workspaceMemoryTurn.snapshot,
-          msg.receipt?.deliveryId ||
-            outputCorrelation.currentInputTurnId ||
-            containerInput.turnId ||
-            generateTurnId(),
-          msg.queryRunId || containerInput.queryRunId,
-        );
-      }
       const sdkUuid = randomUUID();
       ipcDeliveryTracker.bindSdkMessageUuid([msg], sdkUuid);
-      const rejected = stream.push(
+      const rejected = pushUserTurn(
         msg.text,
         msg.images,
-        (message) => {
-          const withChannelContext = decorateChannelUserTurn(
-            message,
-            queuedChannelContext,
-          );
-          const withWorkspaceMemory = workspaceMemoryTurn.block
-            ? `${workspaceMemoryTurn.block}\n\n${withChannelContext}`
-            : withChannelContext;
-          const withOwnerProfile = ownerProfileTurn.block
-            ? `${ownerProfileTurn.block}\n\n${withWorkspaceMemory}`
-            : withWorkspaceMemory;
-          return anchorUserTurn(withOwnerProfile);
-        },
         sdkUuid,
+        {
+          memory: memorySnapshot,
+          ownerProfile,
+          channelContext: queuedChannelContext,
+          channelFormat: channelFormatFor(queuedChannelContext),
+          anchor: agentTurnAnchor,
+        },
+        msg.receipt?.deliveryId ||
+          outputCorrelation.currentInputTurnId ||
+          containerInput.turnId ||
+          generateTurnId(),
+        msg.queryRunId || containerInput.queryRunId,
       );
       for (const reason of rejected) {
         emit({
@@ -2664,12 +2730,6 @@ async function runQueryAttempt(
     containerInput,
     isHome,
   );
-  const channel =
-    containerInput.channelContext?.provider ||
-    getChannelFromJid(
-      containerInput.currentSourceJid || containerInput.chatJid,
-    );
-  const channelGuidelines = CHANNEL_GUIDELINES[channel] ?? '';
   const memoryPromptName = 'memory-system.workspace' as const;
   const hasMemoryTools = allowedTools.some(
     (tool) =>
@@ -2753,6 +2813,7 @@ async function runQueryAttempt(
 
     containerInput.turnId = generateTurnId();
     if (inputTurnCompleted) {
+      turnNotes.commitAnswered(candidate.completedAssistantUuid);
       providerFallbackTurns.completeHealthyTurn({
         sessionId: newSessionId || sessionId,
         resumeAt: candidate.completedAssistantUuid,
@@ -2845,14 +2906,6 @@ async function runQueryAttempt(
     ...(backgroundTaskToolsAvailable
       ? { backgroundTasks: BACKGROUND_TASK_GUIDELINES }
       : {}),
-    ...(channelGuidelines
-      ? {
-          channel: {
-            id: channel,
-            text: `${channelGuidelines}\n${CHANNEL_FORMAT_COMMON}`,
-          },
-        }
-      : {}),
     ...(!containerInput.isScheduledTask && !containerInput.messageTaskId
       ? {
           deliveryContract: proactiveInteractiveContract
@@ -2911,7 +2964,13 @@ async function runQueryAttempt(
   // variables: they outrank the `autoCompactWindow` setting and apply to the
   // window Claude Code resolved for the model, 1M-native models included.
   const claudeRuntimeEnv: ClaudeRuntimeEnv = buildClaudeRuntimeEnv(process.env);
-  const flagSettings: Record<string, unknown> = {};
+  // The bound connection outranks every settings file the CLI reads (the
+  // admin's, the workspace's project and local ones), in host and container
+  // mode alike.
+  const flagSettings: Record<string, unknown> = pinBoundProviderSettings({
+    ...process.env,
+    ...claudeRuntimeEnv,
+  });
   const claudeMdExcludes = resolveManagedHostClaudeMdExcludes({
     executionMode: contextAuditBase.executionMode,
     runtimePolicy: containerInput.agentProfile?.runtimePolicy,
@@ -3046,9 +3105,7 @@ async function runQueryAttempt(
       // stream events: the card's sub-agent transcript advances block by block
       // instead of only filling in when the subagent completes.
       forwardSubagentText: true,
-      ...(Object.keys(flagSettings).length > 0
-        ? { settings: flagSettings as any }
-        : {}),
+      settings: flagSettings as any,
       ...(userPlugins && { plugins: userPlugins }),
       ...(activeAgentMcpPolicy.strictMcpConfig
         ? { strictMcpConfig: true }
@@ -3067,9 +3124,10 @@ async function runQueryAttempt(
         PostCompact: [
           {
             hooks: [
-              createPostCompactHook(() =>
-                firstResponseWatchdog?.endCompaction(),
-              ),
+              createPostCompactHook(() => {
+                firstResponseWatchdog?.endCompaction();
+                turnNotes.endCompaction();
+              }),
             ],
           },
         ],
@@ -3080,14 +3138,20 @@ async function runQueryAttempt(
                 emit,
                 getFullText: () => processor.getFullText(),
                 resetFullText: () => processor.resetFullTextAccumulator(),
-                onCompactionStart: () =>
+                onCompactionStart: () => {
                   firstResponseWatchdog?.beginCompaction(
                     SDK_COMPACTION_RESPONSE_TIMEOUT_MS,
-                  ),
+                  );
+                  turnNotes.beginCompaction();
+                },
               }),
             ],
           },
         ],
+        SessionStart: [
+          { matcher: 'compact', hooks: [restoreTurnNotesAfterCompaction] },
+        ],
+        UserPromptSubmit: [{ hooks: [restoreTurnNotesOnSessionChange] }],
       },
     });
     log(
@@ -3808,6 +3872,7 @@ async function runQueryAttempt(
 
       if (message.type === 'system' && message.subtype === 'init') {
         newSessionId = message.session_id;
+        turnNotes.bindSession(newSessionId);
         log(`Session initialized: ${newSessionId}`);
         // Mark transport ready and drain any IPC messages that arrived before init.
         sdkTransportReady = true;
@@ -3837,9 +3902,9 @@ async function runQueryAttempt(
           `Result #${resultCount}: subtype=${resultSubtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`,
         );
         const resultMsg = message as unknown as Record<string, unknown>;
-        ipcDeliveryTracker.observeAnsweredSdkUuids(
-          sdkResultAnsweredUserMessageUuids(resultMsg),
-        );
+        const answeredSdkUuids = sdkResultAnsweredUserMessageUuids(resultMsg);
+        ipcDeliveryTracker.observeAnsweredSdkUuids(answeredSdkUuids);
+        turnNotes.observeAnswered(answeredSdkUuids);
         const limitDecision = decideProviderLimitAction({
           result: textResult ?? null,
           canFallback: PROVIDER_FALLBACK_MODELS.canActivateFallback,

@@ -30,7 +30,8 @@ export function escapeAttribute(value: string): string {
 }
 
 /**
- * Repeat the selected AgentProfile beside each user turn.
+ * Repeat the selected AgentProfile beside a user turn (turn-notes.ts decides
+ * which turns carry it).
  *
  * Some Claude-compatible providers preserve Claude Code memory and user
  * messages but do not reliably honor a custom SDK systemPrompt. Keeping the

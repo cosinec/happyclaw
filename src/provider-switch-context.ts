@@ -20,7 +20,7 @@ export interface ProviderSwitchSelection {
   profileId: string;
   previousProviderId?: string;
   resetSession?: boolean;
-  /** The upstream model the fresh session starts on (ChatGPT-gateway runs). */
+  /** The upstream model the fresh session starts on; none for a pass-through relay. */
   sessionModel?: string | null;
 }
 

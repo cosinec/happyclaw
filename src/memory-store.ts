@@ -638,6 +638,10 @@ export function createWorkspaceMemorySchema(db: SqliteDatabase): void {
     );
     CREATE INDEX IF NOT EXISTS idx_workspace_memory_audit_workspace_created
       ON workspace_memory_audit_events(workspace_jid, created_at DESC);
+    -- An index alone needs no schema version bump: this function runs on
+    -- every boot and IF NOT EXISTS adds it to an existing database.
+    CREATE INDEX IF NOT EXISTS idx_workspace_memory_audit_store_revision
+      ON workspace_memory_audit_events(store_id, store_revision);
 
     CREATE VIRTUAL TABLE IF NOT EXISTS workspace_memory_fts USING fts5(
       item_id UNINDEXED,
@@ -1751,6 +1755,86 @@ export function listRecallableWorkspaceMemoryItems(input: {
     )
     .all(...params) as MemoryItemRow[];
   return { store, items: rows.map(mapItem) };
+}
+
+/** At most this many changed items are reported to one runtime turn. */
+const MAX_REPORTED_CHANGES = 200;
+
+/**
+ * What changed for a runtime conversation since store revision
+ * `sinceRevision`: the items with an audit event after it (every create,
+ * update and forget bumps the store revision and leaves one at it), with
+ * their current revision and status, and the `heldIds` that expired or are
+ * not yet valid at `now`, as `expired`. A store revision below
+ * `sinceRevision` means the store was replaced since; more changes than one
+ * turn reports are treated the same way, so nothing is dropped silently.
+ */
+export function listWorkspaceMemoryChangesSince(input: {
+  workspaceJid: string;
+  sinceRevision: number;
+  heldIds?: readonly string[];
+  now?: string;
+}): {
+  store: WorkspaceMemoryStore;
+  reset: boolean;
+  items: Array<{ id: string; revision: number; status: string }>;
+} {
+  const store = requireStore(input.workspaceJid);
+  if (store.revision < input.sinceRevision) {
+    return { store, reset: true, items: [] };
+  }
+  const db = requireDatabase();
+  const changed = db
+    .prepare(
+      `SELECT i.id AS id, i.revision AS revision, i.status AS status
+       FROM workspace_memory_items i
+       WHERE i.store_id = ?
+         AND i.id IN (
+           SELECT item_id FROM workspace_memory_audit_events
+           WHERE store_id = ? AND store_revision > ?
+         )
+       ORDER BY i.updated_at DESC, i.id DESC
+       LIMIT ?`,
+    )
+    .all(
+      store.id,
+      store.id,
+      input.sinceRevision,
+      MAX_REPORTED_CHANGES + 1,
+    ) as Array<{ id: string; revision: number; status: string }>;
+  const reported = new Set(changed.map((item) => item.id));
+  const held = [...new Set(input.heldIds ?? [])].filter(
+    (id) => !reported.has(id),
+  );
+  const now = input.now ?? nowIso();
+  const expired: Array<{ id: string; revision: number; status: string }> = [];
+  for (let start = 0; start < held.length; start += 500) {
+    const ids = held.slice(start, start + 500);
+    expired.push(
+      ...(db
+        .prepare(
+          `SELECT id, revision, 'expired' AS status
+           FROM workspace_memory_items
+           WHERE store_id = ?
+             AND status = 'active'
+             AND id IN (${ids.map(() => '?').join(', ')})
+             AND (
+               (valid_from IS NOT NULL AND julianday(valid_from) > julianday(?))
+               OR (valid_until IS NOT NULL AND julianday(valid_until) <= julianday(?))
+               OR (expires_at IS NOT NULL AND julianday(expires_at) <= julianday(?))
+             )`,
+        )
+        .all(store.id, ...ids, now, now, now) as Array<{
+        id: string;
+        revision: number;
+        status: string;
+      }>),
+    );
+  }
+  if (changed.length + expired.length > MAX_REPORTED_CHANGES) {
+    return { store, reset: true, items: [] };
+  }
+  return { store, reset: false, items: [...changed, ...expired] };
 }
 
 function ftsPhrase(query: string): string {

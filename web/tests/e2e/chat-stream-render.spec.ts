@@ -81,11 +81,11 @@ test.describe('the step timeline', () => {
 
     // The oldest steps fold into one line that says what they were.
     await expect(
-      timeline.getByRole('button', { name: /较早 4 步 · 3 个工具/ }),
+      timeline.getByRole('button', { name: /较早 5 步 · 3 个工具/ }),
     ).toBeVisible();
-    // The latest ones are rows: finished reasoning, commentary, running tool,
-    // the sub-agent, and the reasoning being written.
-    await expect(timeline.getByText('比较方案')).toBeVisible();
+    // The latest five are rows: commentary, running tool, the sub-agent and the
+    // reasoning being written; the finished reasoning before them is folded.
+    await expect(timeline.getByText('比较方案')).toHaveCount(0);
     await expect(
       timeline.getByText('我先把渲染循环换成虚拟列表，再跑测试。'),
     ).toBeVisible();
@@ -118,7 +118,7 @@ test.describe('the step timeline', () => {
   test('opens a folded line to the steps it holds', async ({ page }) => {
     await open(page, 'scenario=streaming');
     const timeline = block(page).getByRole('list', { name: '处理步骤' });
-    const folded = timeline.getByRole('button', { name: /较早 4 步/ });
+    const folded = timeline.getByRole('button', { name: /较早 5 步/ });
     await expect(folded).toHaveAttribute('aria-expanded', 'false');
     await expect(timeline.getByText('已浏览 1 个文件 · 搜索 1 次')).toHaveCount(
       0,
@@ -143,6 +143,7 @@ test.describe('the step timeline', () => {
 
   test('has touch-sized buttons and nothing that sticks out sideways', async ({
     page,
+    hasTouch,
   }) => {
     await open(page, 'scenario=streaming');
     const card = block(page).locator('[data-hc-process-card]');
@@ -152,7 +153,7 @@ test.describe('the step timeline', () => {
     for (let i = 0; i < count; i += 1) {
       const box = await buttons.nth(i).boundingBox();
       // 40px is the touch target the coarse-pointer variants ask for.
-      expect(box!.height).toBeGreaterThanOrEqual(39);
+      if (hasTouch) expect(box!.height).toBeGreaterThanOrEqual(39);
     }
     await expectNoSidewaysOverflow(page);
   });
@@ -177,9 +178,7 @@ test.describe('the step timeline', () => {
     const card = page.locator('[data-hc-stream-card="settled"]');
     await expect(card).toBeVisible();
     // The process folds to one summary row; nothing spins.
-    const summary = card.getByRole('button', {
-      name: /已处理 .* · 6 个工具 · 3 段思考 · 1 个失败/,
-    });
+    const summary = card.getByRole('button', { name: /^已工作 \d+s$/ });
     await expect(summary).toBeVisible();
     await expect(summary).toHaveAttribute('aria-expanded', 'false');
     await expect(page.locator('[data-hc-step-timeline]')).toHaveCount(0);
@@ -314,10 +313,10 @@ test.describe('a proactive workspace', () => {
     page,
   }) => {
     await open(page, 'scenario=proactive&visibility=hidden');
-    await expect(block(page).getByText('正在处理…')).toBeVisible();
-    await expect(
-      block(page).getByRole('button', { name: '显示过程' }),
-    ).toBeVisible();
+    const bar = page.locator('[data-hc-run-status-bar]');
+    await expect(bar.locator('[data-hc-run-phase]')).toHaveText('处理中');
+    await expect(bar.getByRole('button', { name: '显示过程' })).toBeVisible();
+    await expect(bar).not.toContainText(/运行命令|搜索|Bash/);
     await expect(page.locator('[data-hc-process-panel]')).toHaveCount(0);
     const text = await block(page).innerText();
     for (const word of ['Bash', 'Grep', 'vitest', '检查移动端滚动性能']) {
@@ -395,7 +394,10 @@ test.describe('a proactive workspace', () => {
     page,
   }) => {
     await open(page, 'scenario=proactive&visibility=hidden');
-    await block(page).getByRole('button', { name: '显示过程' }).click();
+    await page
+      .locator('[data-hc-run-status-bar]')
+      .getByRole('button', { name: '显示过程' })
+      .click();
     const dialog = page.getByRole('dialog', { name: '工作区回复模式' });
     await expect(dialog).toBeVisible();
     const levels = dialog.getByRole('group', { name: '过程可见性' });
@@ -421,9 +423,7 @@ test.describe('a finished reply that has its steps', () => {
     await reply.scrollIntoViewIfNeeded();
     const card = reply.locator('[data-hc-process-card]');
     await expect(card).toHaveAttribute('data-mode', 'settled');
-    const summary = card.getByRole('button', {
-      name: /已处理 .* · 6 个工具 · 3 段思考 · 1 个失败/,
-    });
+    const summary = card.getByRole('button', { name: /^已工作 \d+s$/ });
     await expect(summary).toBeVisible();
     await expect(summary).toHaveAttribute('aria-expanded', 'false');
     // The two rows the card replaces are not there; the steps stay folded.
@@ -456,6 +456,7 @@ test.describe('a finished reply that has its steps', () => {
 
   test('has a summary row the touch target asks for, as high as the streaming card keeps', async ({
     page,
+    hasTouch,
   }) => {
     await open(page, 'scenario=history&steps=1');
     const summary = page
@@ -463,7 +464,8 @@ test.describe('a finished reply that has its steps', () => {
       .first();
     await summary.scrollIntoViewIfNeeded();
     const final = (await summary.boundingBox())!;
-    expect(final.height).toBeGreaterThanOrEqual(39);
+    // The touch target applies to coarse pointers only.
+    if (hasTouch) expect(final.height).toBeGreaterThanOrEqual(39);
 
     await open(page, 'scenario=settled');
     const frozen = (await page
@@ -595,6 +597,7 @@ test.describe('the reasoning and trace the server kept', () => {
 
   test('is one collapsed row that loads the settled card, open on the steps', async ({
     page,
+    hasTouch,
   }) => {
     const requests: string[] = [];
     await route(page, (r) => {
@@ -609,7 +612,7 @@ test.describe('the reasoning and trace the server kept', () => {
     // Nothing is asked for until the row is opened.
     expect(requests).toEqual([]);
     const rowBox = (await row.boundingBox())!;
-    expect(rowBox.height).toBeGreaterThanOrEqual(39);
+    if (hasTouch) expect(rowBox.height).toBeGreaterThanOrEqual(39);
 
     await row.click();
     const card = page.locator('[data-hc-process-card]');
@@ -621,7 +624,7 @@ test.describe('the reasoning and trace the server kept', () => {
     expect(summaryBox.width).toBeCloseTo(rowBox.width, 0);
     expect(summaryBox.x).toBeCloseTo(rowBox.x, 0);
     await expect(
-      card.getByRole('button', { name: /已处理 .* · 1 个工具 · 1 段思考/ }),
+      card.getByRole('button', { name: /^已工作 \d+s$/ }),
     ).toHaveAttribute('aria-expanded', 'true');
     const steps = card.getByRole('list', { name: '处理步骤' });
     await expect(steps.getByText('useChatStore in web/src')).toBeVisible();
@@ -763,8 +766,12 @@ test.describe('the reasoning and trace the server kept', () => {
     await page.getByRole('button', { name: '处理过程' }).click();
     const card = page.locator('[data-hc-process-card]');
     await expect(
-      card.getByRole('button', { name: /已处理 .* · 1 个工具/ }),
+      card.getByRole('button', { name: /^已工作 \d+s$/ }),
     ).toHaveAttribute('aria-expanded', 'true');
+    // The speech tool is not among the tools it says it used.
+    await expect(card.locator('[data-hc-work-counts]')).toHaveText(
+      '1 个工具 · 1 段思考',
+    );
     await expect(page.getByText('useChatStore in web/src')).toBeVisible();
     await expect(page.getByText(SAY)).toHaveCount(0);
     await expect(page.getByText('说点什么')).toHaveCount(0);
@@ -847,7 +854,7 @@ test.describe('on a wide screen', () => {
       card!.x + card!.width + 1,
     );
     // Rows are 28px tall with a mouse; the touch-sized variant does not apply.
-    const folded = timeline.getByRole('button', { name: /较早 4 步/ });
+    const folded = timeline.getByRole('button', { name: /较早 5 步/ });
     expect((await folded.boundingBox())!.height).toBeLessThan(32);
   });
 
@@ -1241,21 +1248,19 @@ test.describe('the streamed answer', () => {
     /** Median milliseconds between renders of the answer as text streams. */
     const cadence = async (typing: boolean) => {
       const [from, to] = await page.evaluate(async (typing) => {
-        const textarea = document.querySelector('textarea')!;
-        const setValue = Object.getOwnPropertyDescriptor(
-          HTMLTextAreaElement.prototype,
-          'value',
-        )!.set!;
+        // The composer's Tiptap editor, as typing reaches it.
+        const composer = (
+          document.querySelector('[data-composer-editor]') as HTMLElement & {
+            editor: { commands: { insertContent: (text: string) => void } };
+          }
+        ).editor;
         const from = performance.now();
         for (let i = 0; i < 60; i += 1) {
           window.renderHarness.emit({
             eventType: 'text_delta',
             text: `word${i} `,
           });
-          if (typing) {
-            setValue.call(textarea, `${textarea.value}a`);
-            textarea.dispatchEvent(new Event('input', { bubbles: true }));
-          }
+          if (typing) composer.commands.insertContent('a');
           await new Promise((resolve) => setTimeout(resolve, 20));
         }
         return [from, performance.now()];

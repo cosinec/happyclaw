@@ -16,6 +16,9 @@ interface BalancingSettingsProps {
   /** A default model is set: unselected conversations bypass the pool. */
   hasDefault: boolean;
   onChange: (updates: Partial<BalancingConfig>) => void;
+  /** Connections in the pool, for the weighted strategy's weights. */
+  pool: ReadonlyArray<{ id: string; name: string; weight: number }>;
+  onWeightChange: (providerId: string, weight: number) => void;
   disabled: boolean;
   saving: boolean;
 }
@@ -37,6 +40,8 @@ export function BalancingSettings({
   balancing,
   hasDefault,
   onChange,
+  pool,
+  onWeightChange,
   disabled,
   saving,
 }: BalancingSettingsProps) {
@@ -162,13 +167,31 @@ export function BalancingSettings({
               </NativeSelect>
             }
           >
-            {balancing.strategy === 'weighted-round-robin' && (
-              <div className="rounded-lg bg-muted/60 px-3 py-2 text-caption leading-5 text-muted-foreground">
-                💡
-                上方提供商列表已显示每家的「权重」徽标。点击对应提供商的「编辑」按钮可调整。
-                所有提供商默认权重为 1（均匀分配），调整权重后流量按比例分配。
-              </div>
-            )}
+            {balancing.strategy === 'weighted-round-robin' &&
+              (pool.length === 0 ? (
+                <p className="text-caption text-muted-foreground">
+                  启用模型连接后可以在这里调整各自的权重。
+                </p>
+              ) : (
+                <div
+                  role="group"
+                  aria-label="连接权重"
+                  className="divide-y divide-surface-border overflow-hidden rounded-lg ring-1 ring-surface-border"
+                >
+                  {pool.map((provider) => (
+                    <WeightRow
+                      key={provider.id}
+                      name={provider.name}
+                      weight={provider.weight}
+                      disabled={disabled}
+                      onCommit={(weight) => onWeightChange(provider.id, weight)}
+                    />
+                  ))}
+                  <p className="px-3 py-2 text-caption leading-5 text-muted-foreground">
+                    权重 1–100，流量按权重比例分配；全部为 1 时均匀分配。
+                  </p>
+                </div>
+              ))}
           </SettingsRow>
 
           <SettingsRow
@@ -226,5 +249,48 @@ export function BalancingSettings({
         </div>
       )}
     </SettingsGroup>
+  );
+}
+
+function WeightRow({
+  name,
+  weight,
+  disabled,
+  onCommit,
+}: {
+  name: string;
+  weight: number;
+  disabled: boolean;
+  onCommit: (weight: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(weight));
+  useEffect(() => {
+    setDraft(String(weight));
+  }, [weight]);
+  const commit = () => {
+    const next = clampInteger(draft, weight, 1, 100);
+    setDraft(String(next));
+    if (next !== weight) onCommit(next);
+  };
+  return (
+    <label className="flex items-center justify-between gap-3 px-3 py-2">
+      <span className="min-w-0 truncate text-label text-foreground">
+        {name}
+      </span>
+      <Input
+        type="number"
+        min={1}
+        max={100}
+        value={draft}
+        disabled={disabled}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') event.currentTarget.blur();
+        }}
+        aria-label={`「${name}」的权重`}
+        className="w-20 shrink-0 tabular-nums"
+      />
+    </label>
   );
 }

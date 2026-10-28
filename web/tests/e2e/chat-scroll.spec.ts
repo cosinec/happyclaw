@@ -527,9 +527,11 @@ async function recordFrames(page: Page) {
         gap: el.scrollHeight - el.scrollTop - el.clientHeight,
         shift: transform === 'none' ? 0 : new DOMMatrixReadOnly(transform).m42,
         animations: layer.getAnimations().length,
+        // Measured from where it sticks: below a phone's floating header.
         identityTop: identity
           ? identity.getBoundingClientRect().top -
-            el.getBoundingClientRect().top
+            el.getBoundingClientRect().top -
+            (Number.parseFloat(getComputedStyle(identity).top) || 0)
           : null,
       });
       if (probe.__recording) requestAnimationFrame(sample);
@@ -580,6 +582,7 @@ async function glideState(page: Page) {
 
 test('a reader pinned to a streamed reply glides with it instead of jumping each batch', async ({
   page,
+  hasTouch,
 }) => {
   await openHarness(page, { n: '60' });
   await settledAtBottom(page);
@@ -603,17 +606,24 @@ test('a reader pinned to a streamed reply glides with it instead of jumping each
     scrollStep / 2,
   );
 
-  // The identity row slides up to the top once and stays there while the
-  // content glides under it.
-  const stuck = frames.findIndex(
-    (f) => f.identityTop !== null && f.identityTop < 1,
-  );
-  expect(stuck).toBeGreaterThan(0);
-  expect(largestStep(frames, (f) => f.identityTop ?? 0)).toBeLessThan(
-    scrollStep / 2,
-  );
-  for (const frame of frames.slice(stuck)) {
-    expect(Math.abs(frame.identityTop ?? 0)).toBeLessThan(1);
+  if (hasTouch) {
+    // A phone's reply has no identity row: nothing sticks over the text.
+    await expect(
+      page.locator('[data-hc-streaming-block] [data-follow-sticky]'),
+    ).toBeHidden();
+  } else {
+    // The identity row slides up to the top once and stays there while the
+    // content glides under it.
+    const stuck = frames.findIndex(
+      (f) => f.identityTop !== null && f.identityTop < 1,
+    );
+    expect(stuck).toBeGreaterThan(0);
+    expect(largestStep(frames, (f) => f.identityTop ?? 0)).toBeLessThan(
+      scrollStep / 2,
+    );
+    for (const frame of frames.slice(stuck)) {
+      expect(Math.abs(frame.identityTop ?? 0)).toBeLessThan(1);
+    }
   }
 
   // Once the batches stop it rests at the bottom with nothing left over.
@@ -818,6 +828,7 @@ test('the scroll buttons stay hidden when the transcript fits', async ({
 
 test('the jump-to-bottom button counts replies that arrived while reading history', async ({
   page,
+  hasTouch,
 }) => {
   await openHarness(page, { n: '60' });
   await settledAtBottom(page);
@@ -825,13 +836,26 @@ test('the jump-to-bottom button counts replies that arrived while reading histor
   await scrollTranscriptTo(page, top - 3000);
   await page.waitForTimeout(300);
   await expect(bottomButton(page)).toHaveAccessibleName('回到底部');
-  await expect(page.getByRole('button', { name: '回到顶部' })).toBeVisible();
+  // One 36px round button; a phone has no jump to the top.
+  const box = (await bottomButton(page).boundingBox())!;
+  expect(box.width).toBeCloseTo(36, 0);
+  expect(box.height).toBeCloseTo(36, 0);
+  await expect(page.getByRole('button', { name: '回到顶部' })).toHaveCount(
+    hasTouch ? 0 : 1,
+  );
+  await expect(bottomButton(page).locator('[data-hc-unseen-dot]')).toHaveCount(
+    0,
+  );
 
   await harness(page, 'pushMessage', '第一条新回复');
   await harness(page, 'pushMessage', '第二条新回复');
+  // A dot says replies arrived; how many is in its name.
   await expect(bottomButton(page)).toHaveAccessibleName(
     '回到底部，有 2 条新消息',
   );
+  await expect(
+    bottomButton(page).locator('[data-hc-unseen-dot]'),
+  ).toBeVisible();
 
   await bottomButton(page).click();
   await expect.poll(async () => (await metrics(page)).gap).toBeLessThan(24);
@@ -878,9 +902,9 @@ test('the empty state scrolls to every starter on a short viewport', async ({
   expect(reach!.lastBottom).toBeLessThanOrEqual(reach!.scrollerBottom);
 
   await starters.last().click();
-  await expect(page.locator('[data-hc-chat-view] textarea')).toHaveValue(
-    '帮我定位和修复一个 Bug',
-  );
+  await expect(
+    page.locator('[data-hc-chat-view] [data-composer-editor]'),
+  ).toHaveText('帮我定位和修复一个 Bug');
 });
 
 test('an error callout copies its message', async ({ page, context }) => {

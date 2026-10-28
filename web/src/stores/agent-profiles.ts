@@ -76,6 +76,8 @@ interface AgentProfilesState {
     avatar_emoji?: string | null;
     avatar_color?: string | null;
     model_config_id?: string | null;
+    /** Needs `model_config_id`; must be one of that configuration's models. */
+    model?: string | null;
     runtime_policy?: AgentProfileRuntimePolicy;
   }) => Promise<AgentProfile>;
   updateProfile: (
@@ -92,6 +94,8 @@ interface AgentProfilesState {
       avatar_emoji?: string | null;
       avatar_color?: string | null;
       model_config_id?: string | null;
+      /** Null clears it; changing `model_config_id` clears it as well. */
+      model?: string | null;
       runtime_policy?: AgentProfileRuntimePolicyPatch;
     },
   ) => Promise<AgentProfile>;

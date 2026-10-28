@@ -59,6 +59,7 @@ import {
   getUsableDefaultProvider,
   getBalancingConfig,
   getProviders,
+  findProviderModel,
   providerHasCredentials,
   getSystemSettings,
   getEffectiveExternalDir,
@@ -97,8 +98,10 @@ import {
 import {
   chatGptDefaultModel,
   chatGptLaunchModel,
+  resolveAgentLaunchModel,
   resolveSessionLaunchOverrides,
   sessionModelHasChanged,
+  type SessionLaunchOverrides,
 } from './session-model-overrides.js';
 import { isApiError } from './agent-output-parser.js';
 import {
@@ -112,6 +115,7 @@ import {
 import type {
   ClaudeOAuthCredentials,
   ClaudeProviderConfig,
+  UnifiedProvider,
 } from './runtime-config.js';
 import {
   loadManagedMcpLayers,
@@ -187,10 +191,7 @@ import {
 } from './feishu-cli-runtime.js';
 import { assertValidWorkspaceFolderName } from './workspace-folder.js';
 import { resolveRunnerLivenessTimeouts } from './runner-liveness.js';
-import {
-  removeProviderEffortEnv,
-  resolveAgentSdkEffort,
-} from './agent-effort.js';
+import { applyLaunchEffortEnv, resolveAgentSdkEffort } from './agent-effort.js';
 
 /**
  * 宿主机的 ~/.claude.json 路径。
@@ -683,6 +684,11 @@ export interface ContainerInput {
     includeClaudePreset: boolean;
     /** Null means inherit the system default model configuration. */
     modelConfigId?: string | null;
+    /**
+     * A model of `modelConfigId`'s list; null runs that configuration's
+     * default. Applies only when this binding is what pins the launch.
+     */
+    model?: string | null;
     runtimePolicy?: AgentProfileRuntimePolicy;
   };
   /**
@@ -980,6 +986,13 @@ export function replaceHostMcpServersEnv(
 interface ResolvedProvider {
   config: ClaudeProviderConfig;
   customEnv: Record<string, string>;
+  /**
+   * The effort this conversation picked. It is set as CLAUDE_CODE_EFFORT_LEVEL
+   * even over an Agent's own effort: Claude Code ranks that variable above
+   * the SDK `effort` option the runner passes for the Agent, so the Agent
+   * profile the runner sees (and hashes) stays as stored.
+   */
+  conversationEffort?: string;
 }
 
 type RunnerAgentProfile = NonNullable<ContainerInput['agentProfile']>;
@@ -1395,6 +1408,7 @@ export function willClearSessionOnProviderSwitch(
   groupFolder: string,
   agentId?: string | null,
   modelConfigId?: string | null,
+  agentModel?: string | null,
 ): boolean {
   const selectedModelConfigId = resolvePinnedModelConfigId(modelConfigId, {
     groupFolder,
@@ -1407,6 +1421,7 @@ export function willClearSessionOnProviderSwitch(
       groupFolder,
       agentId,
       selectedModelConfigId,
+      { modelConfigId, model: agentModel },
     );
   }
 
@@ -1461,28 +1476,76 @@ export function willClearSessionOnProviderSwitch(
 }
 
 /**
- * Whether launching on `providerId` would change the model of a ChatGPT
- * session that is still resumable. Mirrors withSessionModel, read-only.
+ * Whether launching on `providerId` would change the model of a session that
+ * is still resumable. Mirrors withSessionModel, read-only.
  */
 function boundSessionModelWillChange(
   groupFolder: string,
   agentId: string | null | undefined,
   providerId: string,
+  agentBinding: AgentModelBinding = {},
 ): boolean {
   const provider = getProviders().find((item) => item.id === providerId);
-  if (!provider?.codexOAuthCredentials) return false;
-  const overrides = resolveSessionLaunchOverrides(
+  if (!provider) return false;
+  const overrides = pinnedLaunchOverrides(
+    provider,
     groupFolder,
     agentId,
-    provider,
+    agentBinding,
     { warn: false },
   );
+  if (!provider.codexOAuthCredentials) {
+    return sessionModelHasChanged(
+      groupFolder,
+      agentId,
+      overrides.model ?? provider.anthropicModel,
+      provider.anthropicModel,
+    );
+  }
   return sessionModelHasChanged(
     groupFolder,
     agentId,
     chatGptLaunchModel(overrides.model, provider),
     chatGptDefaultModel(provider),
   );
+}
+
+/** The model configuration and model a top-level Agent is bound to. */
+interface AgentModelBinding {
+  modelConfigId?: string | null;
+  model?: string | null;
+}
+
+/**
+ * The model (and, on ChatGPT, the effort) a pinned launch runs on within
+ * `provider`: the conversation's own pick when that pick is what pinned the
+ * launch, else the Agent's model when its binding did, else nothing, which
+ * runs the configuration's default. A conversation that picks a
+ * configuration but no model therefore runs that configuration's default,
+ * even when the Agent names a model of the same configuration.
+ */
+function pinnedLaunchOverrides(
+  provider: UnifiedProvider,
+  groupFolder: string,
+  agentId: string | null | undefined,
+  agentBinding: AgentModelBinding,
+  options: { warn?: boolean } = {},
+): SessionLaunchOverrides {
+  if (resolveSessionModelSelection(groupFolder, agentId)) {
+    return resolveSessionLaunchOverrides(
+      groupFolder,
+      agentId,
+      provider,
+      options,
+    );
+  }
+  if (agentBinding.modelConfigId !== provider.id) return {};
+  const model = resolveAgentLaunchModel(provider, agentBinding.model, {
+    groupFolder,
+    agentId,
+    warn: options.warn,
+  });
+  return model ? { model } : {};
 }
 
 /**
@@ -1604,14 +1667,18 @@ export function trySelectPoolProvider(
   agentId?: string | null,
   modelConfigId?: string | null,
   transientRetryProfileId?: string | null,
+  agentModel?: string | null,
 ): PoolProviderSelection | null {
   const selection = selectPoolProvider(
     groupFolder,
     agentId,
     modelConfigId,
     transientRetryProfileId,
+    agentModel,
   );
-  return selection ? withSessionModel(selection, groupFolder, agentId) : null;
+  return selection
+    ? withModelEffort(withSessionModel(selection, groupFolder, agentId))
+    : null;
 }
 
 export interface PoolProviderSelection {
@@ -1625,13 +1692,20 @@ export interface PoolProviderSelection {
    */
   modelOverride?: string;
   /**
-   * ChatGPT launches: the upstream model the Session's SDK session runs on,
-   * recorded so that a later launch can tell the model changed.
+   * Pinned launches: the model the conversation's pick or the Agent's binding
+   * chose within the configuration, run instead of the configuration's own.
+   */
+  chosenModel?: string;
+  /**
+   * The model the Session's SDK session runs on, recorded so that a later
+   * launch can tell the model changed. Empty for a pass-through relay that
+   * names no model.
    */
   sessionModel?: string;
   /**
-   * ChatGPT launches: the reasoning effort this conversation picked. It is
-   * minted into the gateway grant, never into the runner's environment.
+   * The reasoning effort this conversation picked. A ChatGPT launch mints it
+   * into the gateway grant, never into the runner's environment; any other
+   * launch runs Claude Code at it (resolved.conversationEffort).
    */
   sessionEffort?: string;
 }
@@ -1639,8 +1713,9 @@ export interface PoolProviderSelection {
 /**
  * A ChatGPT session's encrypted reasoning only verifies for the model that
  * issued it, so a conversation that changes model has to start a new SDK
- * session, the same way one that changes provider does. Record the model this
- * launch runs on and flag the reset when it differs from the recorded one.
+ * session, the same way one that changes provider does; every other
+ * configuration follows the same rule. Record the model this launch runs on
+ * and flag the reset when it differs from the recorded one.
  */
 function withSessionModel(
   selection: PoolProviderSelection,
@@ -1648,22 +1723,28 @@ function withSessionModel(
   agentId: string | null | undefined,
 ): PoolProviderSelection {
   const { config } = selection.resolved;
-  if (!isCodexGatewayBaseUrl(config.anthropicBaseUrl)) return selection;
   const provider = getProviders().find(
     (item) => item.id === selection.profileId,
   );
   if (!provider) return selection;
-  const sessionModel = chatGptLaunchModel(
-    selection.modelOverride || config.anthropicModel,
-    provider,
-  );
+  const chatGpt = isCodexGatewayBaseUrl(config.anthropicBaseUrl);
+  // The gateway serves a pool's fallback tier on the account's own model, so
+  // a ChatGPT session records what that resolves to. Elsewhere the fallback
+  // tier is a detour the session has always survived: it is neither recorded
+  // nor compared, only the chosen model or the configuration's own is.
+  const sessionModel = chatGpt
+    ? chatGptLaunchModel(
+        selection.modelOverride || config.anthropicModel,
+        provider,
+      )
+    : (selection.chosenModel ?? provider.anthropicModel);
   const modelChanged =
     !selection.resetSession &&
     sessionModelHasChanged(
       groupFolder,
       agentId,
       sessionModel,
-      chatGptDefaultModel(provider),
+      chatGpt ? chatGptDefaultModel(provider) : provider.anthropicModel,
     );
   if (modelChanged) {
     logger.info(
@@ -1679,11 +1760,48 @@ function withSessionModel(
   };
 }
 
+/**
+ * The effort a launch runs Claude Code at, highest first: the conversation's
+ * pick, the Agent's own effort, the effort configured for the model the
+ * launch really runs on (a pool's fallback tier is judged as itself), the
+ * configuration's CLAUDE_CODE_EFFORT_LEVEL. The first and third go into the
+ * environment here; when it is built (applyLaunchEffortEnv) the Agent's
+ * replaces the model's, and the conversation's stays over the Agent's.
+ * ChatGPT subscriptions take their effort from the gateway and keep no list.
+ */
+function withModelEffort(
+  selection: PoolProviderSelection,
+): PoolProviderSelection {
+  const { config, customEnv } = selection.resolved;
+  if (isCodexGatewayBaseUrl(config.anthropicBaseUrl)) return selection;
+  const provider = getProviders().find(
+    (item) => item.id === selection.profileId,
+  );
+  const model = selection.modelOverride || config.anthropicModel;
+  const effort =
+    selection.sessionEffort ??
+    (provider && model
+      ? findProviderModel(provider, model)?.effort
+      : undefined);
+  if (!effort) return selection;
+  return {
+    ...selection,
+    resolved: {
+      config,
+      customEnv: { ...customEnv, CLAUDE_CODE_EFFORT_LEVEL: effort },
+      ...(selection.sessionEffort
+        ? { conversationEffort: selection.sessionEffort }
+        : {}),
+    },
+  };
+}
+
 function selectPoolProvider(
   groupFolder: string,
   agentId?: string | null,
   modelConfigId?: string | null,
   transientRetryProfileId?: string | null,
+  agentModel?: string | null,
 ): PoolProviderSelection | null {
   const selectedModelConfigId = resolvePinnedModelConfigId(modelConfigId, {
     groupFolder,
@@ -1708,15 +1826,15 @@ function selectPoolProvider(
     const resolved = resolveProviderById(selected.id);
     providerPool.acquireSession(selected.id);
     setSessionProviderId(groupFolder, agentId, selected.id);
-    // A ChatGPT conversation may run another of the account's models and at
-    // another effort. Only the main model is replaced: the OPUS / SONNET /
-    // SUBAGENT tiers follow it when the environment is built, and the haiku
-    // tier (background work) deliberately stays on the configuration's model.
-    const overrides = resolveSessionLaunchOverrides(
-      groupFolder,
-      agentId,
-      selected,
-    );
+    // The conversation or the Agent may run another of the configuration's
+    // models (a ChatGPT conversation also another effort). Only the main
+    // model is replaced: the tier models and a [1m] model's compaction
+    // window follow it when the environment is built, except that a ChatGPT
+    // haiku tier (background work) deliberately stays on the gateway's own.
+    const overrides = pinnedLaunchOverrides(selected, groupFolder, agentId, {
+      modelConfigId,
+      model: agentModel,
+    });
     return {
       profileId: selected.id,
       resolved: {
@@ -1727,6 +1845,7 @@ function selectPoolProvider(
       },
       previousProviderId: existingBoundId,
       resetSession: !!existingBoundId && existingBoundId !== selected.id,
+      ...(overrides.model ? { chosenModel: overrides.model } : {}),
       ...(overrides.effort ? { sessionEffort: overrides.effort } : {}),
     };
   }
@@ -2444,8 +2563,11 @@ function prepareVolumeMounts(
     effectiveContainerOverride,
     resolvedProvider?.customEnv,
   );
-  const agentEffort = resolveAgentSdkEffort(agentProfile?.runtimePolicy);
-  removeProviderEffortEnv(envLines, agentEffort);
+  applyLaunchEffortEnv(
+    envLines,
+    resolveAgentSdkEffort(agentProfile?.runtimePolicy),
+    resolvedProvider?.conversationEffort,
+  );
   // Agent policy is authoritative; do not inherit global/custom runtime env.
   for (let index = envLines.length - 1; index >= 0; index -= 1) {
     if (
@@ -3109,6 +3231,7 @@ export async function runContainerAgent(
     sessionAgentId,
     input.agentProfile?.modelConfigId,
     transientRetryProfileForInput(input.turnId),
+    input.agentProfile?.model,
   );
   const selectedProfileId = poolResult?.profileId ?? null;
   const selectedProviderQuotaEpoch = selectedProfileId
@@ -4245,6 +4368,7 @@ export async function runHostAgent(
     sessionAgentId,
     input.agentProfile?.modelConfigId,
     transientRetryProfileForInput(input.turnId),
+    input.agentProfile?.model,
   );
   const hostSelectedProfileId = hostPoolResult?.profileId ?? null;
   const hostProviderQuotaEpoch = hostSelectedProfileId
@@ -4299,10 +4423,11 @@ export async function runHostAgent(
         : containerOverride,
       hostPoolResult?.resolved.customEnv,
     );
-    const agentEffort = resolveAgentSdkEffort(
-      input.agentProfile?.runtimePolicy,
+    applyLaunchEffortEnv(
+      envLines,
+      resolveAgentSdkEffort(input.agentProfile?.runtimePolicy),
+      hostPoolResult?.resolved.conversationEffort,
     );
-    removeProviderEffortEnv(envLines, agentEffort);
     const injectsAnthropicAuthToken = envLines.some((line) =>
       line.startsWith('ANTHROPIC_AUTH_TOKEN='),
     );

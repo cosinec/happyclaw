@@ -71,6 +71,8 @@ interface ShellState {
    */
   expandedWorkspaces: Record<string, boolean>;
   paletteOpen: boolean;
+  /** The phone navigation drawer (phones have no sidebar or tab bar). */
+  navDrawerOpen: boolean;
   createWorkspaceOpen: boolean;
   /** Agent preselected in the create-workspace dialog (null = default). */
   createWorkspaceAgentId: string | null;
@@ -88,6 +90,7 @@ interface ShellState {
   /** Opening a workspace drops an explicit collapse so it shows its sessions. */
   revealWorkspace: (jid: string) => void;
   setPaletteOpen: (open: boolean) => void;
+  setNavDrawerOpen: (open: boolean) => void;
   setCreateWorkspaceOpen: (
     open: boolean,
     agentProfileId?: string | null,
@@ -107,6 +110,7 @@ export const useShellStore = create<ShellState>((set, get) => ({
   sidebarCollapsed: read(COLLAPSED_KEY) === '1',
   expandedWorkspaces: readExpanded(),
   paletteOpen: false,
+  navDrawerOpen: false,
   createWorkspaceOpen: false,
   createWorkspaceAgentId: null,
   bindingRequest: null,
@@ -138,6 +142,7 @@ export const useShellStore = create<ShellState>((set, get) => ({
     set({ expandedWorkspaces: next });
   },
   setPaletteOpen: (open) => set({ paletteOpen: open }),
+  setNavDrawerOpen: (open) => set({ navDrawerOpen: open }),
   setCreateWorkspaceOpen: (open, agentProfileId = null) =>
     set({
       createWorkspaceOpen: open,

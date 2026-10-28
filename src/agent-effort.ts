@@ -42,6 +42,30 @@ export function resolveAgentSdkEffort(
     : undefined;
 }
 
+/**
+ * The effort lines of a launch's environment: an Agent's explicit effort
+ * replaces the Provider's (the runner passes it as the SDK `effort` option),
+ * and a conversation's own pick replaces both. Claude Code ranks
+ * CLAUDE_CODE_EFFORT_LEVEL above that option, so the conversation's goes in
+ * the environment and the Agent profile is never rewritten for it.
+ */
+export function applyLaunchEffortEnv(
+  lines: string[],
+  agentEffort: SdkAgentEffort | undefined,
+  conversationEffort: string | undefined,
+): void {
+  if (!conversationEffort) {
+    removeProviderEffortEnv(lines, agentEffort);
+    return;
+  }
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (lines[index]?.startsWith('CLAUDE_CODE_EFFORT_LEVEL=')) {
+      lines.splice(index, 1);
+    }
+  }
+  lines.push(`CLAUDE_CODE_EFFORT_LEVEL=${conversationEffort}`);
+}
+
 /** Remove the Provider-level effort only when an Agent has an explicit value. */
 export function removeProviderEffortEnv(
   lines: string[],

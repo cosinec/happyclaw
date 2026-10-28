@@ -1,5 +1,5 @@
 import type { StreamEvent, WorkflowRunSnapshot } from '../stream-event.types';
-import type { StreamingTaskRuntimeState } from '../stores/chat';
+import type { StreamingState, StreamingTaskRuntimeState } from '../stores/chat';
 import type { ProcessVisibility } from '../types';
 
 /** Anything but a known level reads as hidden: older servers send nothing. */
@@ -62,6 +62,24 @@ const ACTIVITY_EVENTS = new Set<string>([
  * "latest tool", and it does not count among the tools used.
  */
 export const SPEECH_TOOL_NAME = 'mcp__happyclaw__send_message';
+
+/**
+ * Work a proactive turn does that its owner watches: a tool (the speech tool
+ * never reaches the process), a sub-agent or a plan. Reasoning and the model's
+ * requests are not: after it speaks, a turn asks the model once more to decide
+ * it is done, and that is not news.
+ */
+export function hasVisibleWork(streaming: StreamingState | undefined): boolean {
+  if (!streaming) return false;
+  return (
+    streaming.activeTools.length > 0 ||
+    Object.keys(streaming.taskStates).length > 0 ||
+    !!streaming.todos?.length ||
+    !!streaming.steps?.some(
+      (step) => step.kind === 'tool' || step.kind === 'task',
+    )
+  );
+}
 
 /** The part of a trace row the speech tool is told apart by. */
 interface TraceRowLike {

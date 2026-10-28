@@ -207,20 +207,6 @@ export function normalizeChannelTurnContext(
   };
 }
 
-/** Compact per-turn prompt material. It is a user-turn prefix, not a frozen
- * system prompt, so warm SDK sessions always observe the latest channel. */
-export function formatChannelTurnContextForPrompt(
-  context: ChannelTurnContext | undefined,
-): string {
-  if (!context) return '';
-  return [
-    '<channel_context source="happyclaw_host" trust="verified">',
-    JSON.stringify(context),
-    '</channel_context>',
-    'Use this context for the current input only. Never guess IDs or credentials that are absent.',
-  ].join('\n');
-}
-
 export interface ContainerInput {
   prompt: string;
   sessionId?: string;

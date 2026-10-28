@@ -2,38 +2,40 @@ import { describe, expect, test } from 'vitest';
 
 import { isOneMillionContextModel as backendIsOneMillion } from '../src/runtime-config.js';
 import {
+  splitOneMillionSuffix,
+  withOneMillionSuffix,
+} from '../web/src/lib/model-providers.js';
+import {
   buildDefaultProviderEnv,
-  buildProviderModel,
   isOneMillionContextModel,
-  parseProviderModel,
 } from '../web/src/utils/provider-model.js';
 
 describe('third-party provider model settings', () => {
   test('parses the one-million context suffix from an existing model', () => {
-    expect(parseProviderModel('  glm-5.2[1m]  ')).toEqual({
+    expect(splitOneMillionSuffix('  glm-5.2[1m]  ')).toEqual({
       model: 'glm-5.2',
-      oneMillionContext: true,
+      oneMillion: true,
     });
   });
 
   test('normalizes duplicate or mixed-case suffixes', () => {
-    expect(buildProviderModel('qwen3.7-max[1M][1m]', true)).toBe(
+    expect(withOneMillionSuffix('qwen3.7-max[1M][1m]', true)).toBe(
       'qwen3.7-max[1m]',
     );
   });
 
   test('removes the suffix when one-million context is disabled', () => {
-    expect(buildProviderModel('MiniMax-M3[1m]', false)).toBe('MiniMax-M3');
+    expect(withOneMillionSuffix('MiniMax-M3[1m]', false)).toBe('MiniMax-M3');
   });
 
   test('does not create a suffix without a model name', () => {
-    expect(buildProviderModel(' ', true)).toBe('');
+    expect(withOneMillionSuffix(' ', true)).toBe('');
   });
 
   test('shows all managed values for a one-million context provider', () => {
     expect(
       Object.fromEntries(
-        buildDefaultProviderEnv('glm-5.2', true).map(({ key, value }) => [
+        buildDefaultProviderEnv('glm-5.2[1m]').map(({ key, value }) => [
           key,
           value,
         ]),
@@ -52,7 +54,7 @@ describe('third-party provider model settings', () => {
   });
 
   test('keeps model-derived rows pending until a model is entered', () => {
-    const rows = buildDefaultProviderEnv('', false);
+    const rows = buildDefaultProviderEnv('');
 
     expect(rows.filter((row) => row.source === 'model')).toHaveLength(4);
     expect(rows.filter((row) => row.source === 'model')).toSatisfy((items) =>
@@ -65,9 +67,9 @@ describe('third-party provider model settings', () => {
 
   test('prefills the 1M compact window only for an explicit [1m] model, like the backend', () => {
     const window = (model: string, oneMillionContext = false) =>
-      buildDefaultProviderEnv(model, oneMillionContext).find(
-        (row) => row.key === 'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
-      )?.value;
+      buildDefaultProviderEnv(
+        withOneMillionSuffix(model, oneMillionContext),
+      ).find((row) => row.key === 'CLAUDE_CODE_AUTO_COMPACT_WINDOW')?.value;
     // A gateway capped at 200K cannot be detected, so 1M-native Claude IDs
     // keep the conservative default unless the provider opts into [1m].
     expect(window('claude-sonnet-5-5')).toBe('200000');

@@ -78,7 +78,7 @@ function persistAgentState(agentId: string, collapsed: boolean) {
  * assistant avatar exactly like chat messages do; a custom agent without its
  * own avatar shows its initial so agents stay distinguishable in the tree.
  */
-function sectionIdentity(
+export function sectionIdentity(
   section: AgentWorkspaceSection,
   appearance: AppearanceConfig | null,
   primary: boolean,
@@ -104,7 +104,9 @@ function sectionIdentity(
 }
 
 /** Workspaces without an agent profile are grouped under a synthetic id. */
-function profileIdOf(section: AgentWorkspaceSection): string | undefined {
+export function profileIdOf(
+  section: AgentWorkspaceSection,
+): string | undefined {
   return section.id === '__default__' ? undefined : section.id;
 }
 
@@ -123,6 +125,9 @@ export interface WorkspaceActions {
   /** Open the agent's settings. */
   onOpenAgent?: (agentProfileId: string) => void;
 }
+
+/** What a workspace row's ⋯ menu acts on. */
+export type WorkspaceMenuActions = Omit<WorkspaceActions, 'onSelect'>;
 
 interface WorkspaceTreeProps extends WorkspaceActions {
   variant: WorkspaceTreeVariant;
@@ -304,7 +309,7 @@ export const WorkspaceTree = memo(function WorkspaceTree({
   );
 });
 
-function AgentAvatar({
+export function AgentAvatar({
   identity,
   touch,
 }: {
@@ -588,27 +593,9 @@ const WorkspaceRow = memo(function WorkspaceRow({
   const touch = variant === 'mobile';
   const nested = !!renderSessions && !touch;
 
-  // Use the real name once renamed, otherwise the friendly home default.
-  const isDefaultName =
-    !group.name ||
-    group.name === 'Main' ||
-    group.name === `${currentUser?.username} Home`;
   const displayName =
-    label ?? (isHome && isDefaultName ? '我的工作区' : group.name);
+    label ?? workspaceDisplayName(group, isHome, currentUser?.username);
   const canModify = !!group.can_modify;
-  const canPin = !isHome && !!actions.onTogglePin;
-  const hasWorkspaceItems = canPin || canModify;
-  const hasAgentItems =
-    !!agentId && (!!actions.onCreateWorkspace || !!actions.onOpenAgent);
-  // Topic workspaces get their sessions from the channel; a session created
-  // here is an extra Web-only one, and the label says so.
-  const isTopicWorkspace =
-    group.conversation_nav_mode === 'vertical_threads' ||
-    group.conversation_source === 'native_thread' ||
-    group.conversation_source === 'feishu_thread';
-  const createLabel = isTopicWorkspace ? '新建 Web 会话' : '新建会话';
-  // The row stands for its agent, so name the workspace in its actions.
-  const noun = agentId ? '工作区' : '';
   const icon = identity ? (
     <AgentAvatar identity={identity} touch={touch} />
   ) : expanded ? (
@@ -668,69 +655,18 @@ const WorkspaceRow = memo(function WorkspaceRow({
         ) : null}
         {nested && canModify && actions.onCreateSession && (
           <CreateSessionButton
-            label={`${createLabel}（${displayName}）`}
+            label={`${createSessionLabel(group)}（${displayName}）`}
             onCreate={() => actions.onCreateSession!(group)}
           />
         )}
-        {(hasWorkspaceItems || hasAgentItems) && (
-          <RowMenu label={`${displayName}的更多操作`} touch={touch}>
-            {canPin && (
-              <DropdownMenuItem onClick={() => actions.onTogglePin!(group.jid)}>
-                <Pin />
-                {group.pinned_at ? '取消固定' : '固定'}
-              </DropdownMenuItem>
-            )}
-            {canModify && actions.onRename && (
-              <DropdownMenuItem
-                onClick={() => actions.onRename!(group.jid, group.name)}
-              >
-                <Pencil />
-                重命名{noun}
-              </DropdownMenuItem>
-            )}
-            {canModify && (
-              <>
-                {(canPin || actions.onRename) && <DropdownMenuSeparator />}
-                <DropdownMenuItem
-                  onClick={() => actions.onClearHistory(group.jid, displayName)}
-                >
-                  <RotateCcw />
-                  重建工作区
-                </DropdownMenuItem>
-              </>
-            )}
-            {!isHome && canModify && actions.onDelete && (
-              <DropdownMenuItem
-                variant="destructive"
-                onClick={() => actions.onDelete!(group.jid, group.name)}
-              >
-                <Trash2 />
-                删除{noun}
-              </DropdownMenuItem>
-            )}
-            {hasAgentItems && (
-              <>
-                {hasWorkspaceItems && <DropdownMenuSeparator />}
-                {actions.onCreateWorkspace && (
-                  <DropdownMenuItem
-                    onClick={() => actions.onCreateWorkspace!(agentId!)}
-                  >
-                    <FolderPlus />
-                    新建工作区
-                  </DropdownMenuItem>
-                )}
-                {actions.onOpenAgent && (
-                  <DropdownMenuItem
-                    onClick={() => actions.onOpenAgent!(agentId!)}
-                  >
-                    <Bot />
-                    智能体设置
-                  </DropdownMenuItem>
-                )}
-              </>
-            )}
-          </RowMenu>
-        )}
+        <WorkspaceRowMenu
+          group={group}
+          isHome={isHome}
+          displayName={displayName}
+          agentId={agentId}
+          actions={actions}
+          touch={touch}
+        />
       </div>
       {nested && (
         <AnimatePresence initial={false}>
@@ -750,6 +686,129 @@ const WorkspaceRow = memo(function WorkspaceRow({
     </li>
   );
 });
+
+/** The home workspace shows a friendly default until the user renames it. */
+export function workspaceDisplayName(
+  group: GroupEntry,
+  isHome: boolean,
+  username: string | undefined,
+): string {
+  const isDefaultName =
+    !group.name || group.name === 'Main' || group.name === `${username} Home`;
+  return isHome && isDefaultName ? '我的工作区' : group.name;
+}
+
+/** Topic workspaces get their sessions from the channel; a session created
+ *  here is an extra Web-only one, and the label says so. */
+export function createSessionLabel(group: GroupEntry): string {
+  const isTopicWorkspace =
+    group.conversation_nav_mode === 'vertical_threads' ||
+    group.conversation_source === 'native_thread' ||
+    group.conversation_source === 'feishu_thread';
+  return isTopicWorkspace ? '新建 Web 会话' : '新建会话';
+}
+
+/**
+ * The ⋯ menu of a workspace row, or nothing when it would be empty. With
+ * `withCreateSession` it starts with 新建会话 (phones have no hover "+").
+ */
+export function WorkspaceRowMenu({
+  group,
+  isHome,
+  displayName,
+  agentId,
+  actions,
+  touch = false,
+  withCreateSession = false,
+}: {
+  group: GroupEntry;
+  isHome: boolean;
+  displayName: string;
+  /** Set when the row stands for a whole agent or one of its workspaces. */
+  agentId?: string;
+  actions: WorkspaceMenuActions;
+  touch?: boolean;
+  withCreateSession?: boolean;
+}) {
+  const canModify = !!group.can_modify;
+  const canPin = !isHome && !!actions.onTogglePin;
+  const hasWorkspaceItems = canPin || canModify;
+  const hasAgentItems =
+    !!agentId && (!!actions.onCreateWorkspace || !!actions.onOpenAgent);
+  const canCreateSession =
+    withCreateSession && canModify && !!actions.onCreateSession;
+  // The row stands for its agent, so name the workspace in its actions.
+  const noun = agentId ? '工作区' : '';
+  if (!hasWorkspaceItems && !hasAgentItems) return null;
+  return (
+    <RowMenu label={`${displayName}的更多操作`} touch={touch}>
+      {canCreateSession && (
+        <>
+          <DropdownMenuItem
+            onClick={() => void actions.onCreateSession!(group)}
+          >
+            <Plus />
+            {createSessionLabel(group)}
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+        </>
+      )}
+      {canPin && (
+        <DropdownMenuItem onClick={() => actions.onTogglePin!(group.jid)}>
+          <Pin />
+          {group.pinned_at ? '取消固定' : '固定'}
+        </DropdownMenuItem>
+      )}
+      {canModify && actions.onRename && (
+        <DropdownMenuItem
+          onClick={() => actions.onRename!(group.jid, group.name)}
+        >
+          <Pencil />
+          重命名{noun}
+        </DropdownMenuItem>
+      )}
+      {canModify && (
+        <>
+          {(canPin || actions.onRename) && <DropdownMenuSeparator />}
+          <DropdownMenuItem
+            onClick={() => actions.onClearHistory(group.jid, displayName)}
+          >
+            <RotateCcw />
+            重建工作区
+          </DropdownMenuItem>
+        </>
+      )}
+      {!isHome && canModify && actions.onDelete && (
+        <DropdownMenuItem
+          variant="destructive"
+          onClick={() => actions.onDelete!(group.jid, group.name)}
+        >
+          <Trash2 />
+          删除{noun}
+        </DropdownMenuItem>
+      )}
+      {hasAgentItems && (
+        <>
+          {hasWorkspaceItems && <DropdownMenuSeparator />}
+          {actions.onCreateWorkspace && (
+            <DropdownMenuItem
+              onClick={() => actions.onCreateWorkspace!(agentId!)}
+            >
+              <FolderPlus />
+              新建工作区
+            </DropdownMenuItem>
+          )}
+          {actions.onOpenAgent && (
+            <DropdownMenuItem onClick={() => actions.onOpenAgent!(agentId!)}>
+              <Bot />
+              智能体设置
+            </DropdownMenuItem>
+          )}
+        </>
+      )}
+    </RowMenu>
+  );
+}
 
 /** Hover-revealed icon buttons at the end of a row (+, delete and ⋯). */
 export const rowIconButtonClass =

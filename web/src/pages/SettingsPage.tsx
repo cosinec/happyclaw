@@ -1,12 +1,14 @@
 import { lazy, Suspense, useCallback, useMemo, useState } from 'react';
 import { Navigate, useSearchParams } from 'react-router-dom';
-import { Menu } from 'lucide-react';
+import { ListTree, Menu } from 'lucide-react';
 import { toast } from 'sonner';
 
 import { Badge } from '@/components/ui/badge';
 import { IconButton } from '@/components/common/IconButton';
 import { PageContainer } from '@/components/common/PageContainer';
 import { useAuthStore } from '../stores/auth';
+import { NavDrawerButton } from '../components/layout/NavDrawer';
+import { useIsPhone } from '../components/layout/phone';
 import { SettingsNav } from '../components/settings/SettingsNav';
 import { ClaudeProviderSection } from '../components/settings/ClaudeProviderSection';
 import { RegistrationSection } from '../components/settings/RegistrationSection';
@@ -82,6 +84,7 @@ export function SettingsPage() {
   );
   const [searchParams, setSearchParams] = useSearchParams();
   const [navOpen, setNavOpen] = useState(false);
+  const isPhone = useIsPhone();
 
   const hasSystemConfigPermission =
     currentUser?.role === 'admin' ||
@@ -209,18 +212,35 @@ export function SettingsPage() {
       data-settings-page="true"
       className="min-h-full lg:flex lg:items-start"
     >
-      {/* Mobile header */}
-      <div className="sticky top-0 z-10 flex h-12 items-center gap-2 border-b border-surface-border bg-background/90 px-2 backdrop-blur lg:hidden">
-        <IconButton
-          label="打开导航"
-          hideTooltip
-          size="icon"
-          icon={<Menu className="size-4 text-muted-foreground" />}
-          onClick={() => setNavOpen(true)}
-          className="pointer-coarse:size-11"
-        />
+      {/* Mobile header. On a phone the hamburger opens the app drawer and
+          the section list moves to the right. */}
+      <div className="sticky top-0 z-10 flex h-12 items-center gap-2 border-b border-surface-border bg-background/90 px-2 backdrop-blur lg:hidden phone:h-13 phone:gap-1">
+        {isPhone ? (
+          <NavDrawerButton />
+        ) : (
+          <IconButton
+            label="打开导航"
+            hideTooltip
+            size="icon"
+            icon={<Menu className="size-4 text-muted-foreground" />}
+            onClick={() => setNavOpen(true)}
+            className="pointer-coarse:size-11"
+          />
+        )}
         {/* The section title is the h1 below; the bar only names the page. */}
-        <span className="truncate text-title-sm text-foreground">设置</span>
+        <span className="truncate text-title-sm text-foreground phone:text-title">
+          设置
+        </span>
+        {isPhone && (
+          <IconButton
+            label="设置分区"
+            hideTooltip
+            size="icon"
+            icon={<ListTree className="size-5" />}
+            onClick={() => setNavOpen(true)}
+            className="ml-auto size-11 rounded-full text-muted-foreground"
+          />
+        )}
       </div>
 
       <SettingsNav

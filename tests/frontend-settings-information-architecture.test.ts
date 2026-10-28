@@ -125,22 +125,31 @@ describe('settings information architecture', () => {
   test('uses accurate channel and provider safety semantics', () => {
     const bindings = read('web/src/components/settings/BindingsSection.tsx');
     const bindingRow = read('web/src/components/settings/ImBindingRow.tsx');
-    const provider = read('web/src/components/settings/ProviderEditor.tsx');
+    const providerEnv = read(
+      'web/src/components/settings/ProviderEnvEditor.tsx',
+    );
     const providerList = read('web/src/components/settings/ProviderList.tsx');
     const providerModel = read('web/src/utils/provider-model.ts');
+    const wizardModels = read('web/src/components/settings/ModelPicker.tsx');
+    const connectionModels = read(
+      'web/src/components/settings/ConnectionModelList.tsx',
+    );
+    const wizard = read('web/src/components/settings/AddModelWizard.tsx');
     const settings = read('web/src/pages/SettingsPage.tsx');
 
     expect(bindings).toMatch(/解除发言者限制|不可恢复|解除绑定/);
     expect(bindingRow).toMatch(
       /消息响应方式|supports_owner_mention|require_mention/,
     );
-    expect(provider).toContain('高级设置 · 环境变量');
-    expect(provider).toContain('系统预填环境变量');
-    expect(provider).toContain('已自定义');
-    expect(provider).toContain('恢复默认值');
+    expect(providerEnv).toContain('高级设置 · 环境变量');
+    expect(providerEnv).toContain('系统预填环境变量');
+    expect(providerEnv).toContain('已自定义');
+    expect(providerEnv).toContain('恢复默认值');
     expect(providerModel).toContain('CLAUDE_CODE_AUTO_COMPACT_WINDOW');
-    expect(provider).toContain('1M 上下文');
-    expect(provider).toContain('系统预填 Claude Code 运行环境');
+    // 1M is a per-model switch, both when adding and when managing models.
+    expect(wizardModels).toContain('1M 上下文');
+    expect(connectionModels).toContain('<OneMillionToggle');
+    expect(wizard).toContain('系统预填 Claude Code 运行环境');
     // The default is a deliberate, clearable choice (按钮「默认」), not the
     // old always-present "系统默认" pointer.
     expect(providerList).toContain('onSetDefault');
@@ -152,15 +161,14 @@ describe('settings information architecture', () => {
   });
 
   test('offers supported official model aliases', () => {
-    const provider = read('web/src/components/settings/ProviderEditor.tsx');
-    const officialModels = provider.slice(
-      provider.indexOf('/* ─── 官方模型选择 ─── */'),
-      provider.indexOf('/* ─── 环境变量 ─── */'),
-    );
+    const wizard = read('web/src/components/settings/AddModelWizard.tsx');
 
-    expect(officialModels).toMatch(
-      /value="">default（默认）[\s\S]*value="opus">opus[\s\S]*value="sonnet">sonnet[\s\S]*value="haiku">haiku[\s\S]*value="fable">fable/,
+    // What a Claude subscription offers when its model list cannot be read,
+    // next to leaving the model to Claude Code.
+    expect(wizard).toMatch(
+      /CLAUDE_MODEL_ALIASES = \['opus', 'sonnet', 'haiku', 'fable'\]/,
     );
+    expect(wizard).toContain("label: '不指定（由 Claude Code 选择）'");
   });
 
   test('keeps Agent add-ons, project context, and Provider settings in distinct layers', () => {
@@ -273,7 +281,7 @@ describe('settings information architecture', () => {
     expect(bindings).toContain('resolveBindingTargetType(rebindGroup)');
     expect(bindings).toContain("resolveBindingTargetType(item) === 'session'");
     expect(bindings).toContain('解除渠道绑定');
-    expect(mobileChat).toMatch(/onRename=|onTogglePin=|onDelete=/);
+    expect(mobileChat).toMatch(/onRename[:=]|onTogglePin[:=]|onDelete[:=]/);
     expect(createWorkspace).toContain('effective_runtime_policy');
     expect(bindingRoute).toContain(
       "threadCapable ? 'thread_map' : 'single_session'",

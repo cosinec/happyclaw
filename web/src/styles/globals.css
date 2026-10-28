@@ -3,6 +3,9 @@
 @plugin "tailwindcss-animate";
 
 @custom-variant dark (&:is(.dark *));
+/* A phone: below the desktop layout and driven by touch. useIsPhone
+   (components/layout/phone.ts) tests the same query in JS. */
+@custom-variant phone (@media (max-width: 1023px) and (pointer: coarse));
 
 /* Inter (UI) and Geist Mono (code) are self-hosted via @fontsource-variable,
    imported in main.tsx so Vite fingerprints the files under the app base path. */
@@ -63,6 +66,8 @@
   --color-success: var(--success);
   --color-success-bg: var(--success-bg);
   --color-warning: var(--warning);
+  /* A run at work (RunStatusBar), after cindy's status orange. */
+  --color-status-accent: var(--warning);
   --color-warning-bg: var(--warning-bg);
   --color-error: var(--error);
   --color-error-bg: var(--error-bg);
@@ -119,6 +124,9 @@
   --text-body--line-height: 1.25rem;
   --text-body-lg: 0.9375rem;
   --text-body-lg--line-height: 1.625rem;
+  /* A reply's text on a phone (17/26, cindy's reading size). */
+  --text-reply: 1.0625rem;
+  --text-reply--line-height: 1.625rem;
   --text-title-sm: 0.875rem;
   --text-title-sm--line-height: 1.25rem;
   --text-title-sm--font-weight: 600;
@@ -573,38 +581,6 @@ body {
   animation-timing-function: steps(40);
 }
 
-/* A quiet dot after the last streamed text while a reply is being written
- * (StreamingMarkdown `caret`): the text itself shows where the reply goes on,
- * not only the status row. Pseudo-element, so it never enters a copy. */
-[data-streaming-caret='true']
-  > :last-child
-  > :is(p, h1, h2, h3, h4, h5, h6):last-child::after,
-[data-streaming-caret='true']
-  > :last-child
-  > [data-markdown-root]
-  > :is(p, h1, h2, h3, h4, h5, h6):last-child::after,
-[data-streaming-caret='true']
-  > :last-child
-  > :is(ul, ol):last-child
-  > li:last-child::after {
-  content: '';
-  display: inline-block;
-  width: 0.5em;
-  height: 0.5em;
-  margin-left: 0.3em;
-  border-radius: 9999px;
-  background: currentColor;
-  vertical-align: 0.05em;
-  opacity: 0.45;
-  animation: hc-caret-pulse 1.2s ease-in-out infinite;
-}
-
-@keyframes hc-caret-pulse {
-  50% {
-    opacity: 0.15;
-  }
-}
-
 /* Words of a streamed block fade in as they arrive (rehype-stream-fade).
  * Opacity only, delayed to the start time the renderer gave the word
  * (`--hc-fade-delay`, negative for a word remounted part-way), so no
@@ -625,6 +601,81 @@ body {
   .hc-stream-word {
     animation: none;
   }
+}
+
+/* Chat composer (Tiptap). Placeholder, structured lists, chips and command
+ * pills, adapted from cindy's composer styles. The Placeholder extension marks
+ * the empty first paragraph; after a cleared document it may only carry
+ * `is-empty`, so the sole-empty-paragraph selector covers that too. */
+[data-hc-composer] .ProseMirror > p.is-editor-empty:first-child::before,
+[data-hc-composer] .ProseMirror > p.is-empty:first-child:only-child::before {
+  content: attr(data-placeholder);
+  color: var(--faint-foreground);
+  float: left;
+  height: 0;
+  pointer-events: none;
+}
+
+[data-hc-composer] .ProseMirror p {
+  margin: 0;
+}
+
+/* Markers and body text share one layout tree, so wrapped lines follow the
+ * item's content edge. Wider ordinals get a wider marker column. */
+[data-hc-composer] .ProseMirror :is(ul, ol) {
+  margin: 0;
+  --composer-list-padding: 1.5em;
+  --composer-list-marker-extra: 0em;
+  padding-inline-start: calc(
+    var(--composer-list-padding) + var(--composer-list-marker-extra)
+  );
+}
+[data-hc-composer] .ProseMirror ol[data-marker='、'] {
+  --composer-list-marker-extra: 0.7em;
+}
+[data-hc-composer] .ProseMirror ol[data-marker-digits='2'] {
+  --composer-list-padding: 2.2em;
+}
+[data-hc-composer] .ProseMirror ol[data-marker-digits='3'] {
+  --composer-list-padding: 2.8em;
+}
+[data-hc-composer] .ProseMirror ol[data-marker-digits='4'] {
+  --composer-list-padding: 3.4em;
+}
+[data-hc-composer] .ProseMirror ul {
+  list-style-type: disc;
+}
+[data-hc-composer] .ProseMirror ol {
+  list-style-type: decimal;
+}
+[data-hc-composer] .ProseMirror ol[data-marker=')'] > li::marker {
+  content: counter(list-item) ') ';
+}
+[data-hc-composer] .ProseMirror ol[data-marker='、'] > li::marker {
+  content: counter(list-item) '、';
+}
+[data-hc-composer] .ProseMirror li {
+  padding-inline-start: 0.15em;
+  overflow-wrap: anywhere;
+}
+[data-hc-composer] .ProseMirror li > p {
+  margin: 0;
+}
+
+/* Atomic chips are selected and removed as a whole. */
+[data-hc-composer] .ProseMirror .composer-chip {
+  -webkit-user-drag: element;
+}
+[data-hc-composer] .ProseMirror .composer-chip.ProseMirror-selectednode {
+  border-color: var(--ring);
+  outline: none;
+}
+
+/* A typed `/command` that names a known command or Skill. */
+[data-hc-composer] .ProseMirror .slash-cmd-pill {
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  color: var(--primary-text, var(--primary));
 }
 
 /* Native scrollbar styling is deliberately scoped to the chat context panes.
@@ -896,13 +947,31 @@ pre code.language-diff .hljs-deletion {
   }
 }
 
+/* Room a page leaves under its content for the bottom navigation: the
+   floating capsule of narrow windows, or only the home indicator on phones,
+   which navigate from a drawer. `--nav-cover` is how much of it a sticky
+   footer (SettingsStickySaveBar) covers so nothing scrolls through below. */
+:root {
+  --nav-clearance: calc(7rem + env(safe-area-inset-bottom, 0px));
+  --nav-cover: calc(
+    max(24px, env(safe-area-inset-bottom, 0px)) + 58px + 0.5rem
+  );
+}
+@media (max-width: 1023px) and (pointer: coarse) {
+  :root {
+    --nav-clearance: calc(1.5rem + env(safe-area-inset-bottom, 0px));
+    --nav-cover: env(safe-area-inset-bottom, 0px);
+  }
+}
+
 /* Bottom padding for content above floating nav — accounts for safe area */
 /* A utility (not a bare class) so responsive overrides such as lg:pb-0 win. */
 @utility pb-nav-safe {
-  padding-bottom: calc(7rem + env(safe-area-inset-bottom, 0px));
+  padding-bottom: var(--nav-clearance);
 }
 
-/* Floating mobile navigation capsule */
+/* Floating navigation capsule of narrow desktop windows (phones use the
+   drawer instead). */
 .floating-nav-container {
   position: fixed;
   bottom: 24px;

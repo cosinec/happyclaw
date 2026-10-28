@@ -229,6 +229,19 @@ function sessionProjectRoots(
   }
 }
 
+/** The SDK transcript of one session, or null when it is not on disk. */
+export function sessionTranscriptPath(
+  groupFolder: string,
+  agentId: string | null,
+  sessionId: string,
+): string | null {
+  return (
+    sessionProjectRoots(groupFolder, agentId)
+      .map((root) => path.join(root, `${sessionId}.jsonl`))
+      .find((candidate) => fs.existsSync(candidate)) ?? null
+  );
+}
+
 function usageValue(
   usage: Record<string, unknown>,
   snakeCase: string,
@@ -278,9 +291,11 @@ function loadSessionAssistantUsage(input: {
   agentId: string | null;
   sessionId: string;
 }): Map<string, SessionAssistantUsage> {
-  const transcript = sessionProjectRoots(input.groupFolder, input.agentId)
-    .map((root) => path.join(root, `${input.sessionId}.jsonl`))
-    .find((candidate) => fs.existsSync(candidate));
+  const transcript = sessionTranscriptPath(
+    input.groupFolder,
+    input.agentId,
+    input.sessionId,
+  );
   const cacheKey = `${input.groupFolder}:${input.agentId ?? 'main'}:${input.sessionId}`;
   if (!transcript) {
     assistantUsageCache.delete(cacheKey);

@@ -102,6 +102,8 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  // A test may pin Date.now; restore it even when its expectations failed.
+  vi.restoreAllMocks();
   releaseRun?.();
   await tick();
   await tick();
@@ -254,6 +256,68 @@ describe('GroupQueue IPC delivery receipts', () => {
       expect(fs.existsSync(path.join(inputDir(), '_drain'))).toBe(false);
     },
   );
+
+  test('one warm host runner takes Feishu, Web and Telegram inputs in turn', async () => {
+    // The Runner therefore cannot pick one channel's format guidance for its
+    // system prompt; each input carries its own (turn-notes.ts).
+    await startRunner({ feishuCliAccountId: 'account-a' });
+    // All three inputs land in one millisecond, the case that reorders them.
+    vi.spyOn(Date, 'now').mockReturnValue(Date.UTC(2026, 9, 28));
+    const context = (provider: string) => ({
+      schemaVersion: 1 as const,
+      provider,
+      channelAccountId: `${provider}-account`,
+      sourceJid: `${provider}:chat-1`,
+      chat: { id: 'chat-1', type: 'group' },
+      message: { id: `${provider}-1` },
+    });
+    const send = (
+      text: string,
+      sourceJid: string,
+      channelContext?: ReturnType<typeof context>,
+      requirements?: { feishuCliAccountId: string | null },
+    ) =>
+      queue.sendMessage(
+        JID,
+        text,
+        undefined,
+        undefined,
+        sourceJid,
+        undefined,
+        undefined,
+        channelContext,
+        undefined,
+        requirements,
+      );
+
+    expect(send('from feishu', 'feishu:chat-1', context('feishu'))).toBe(
+      'sent',
+    );
+    expect(
+      send('from the web', JID, undefined, { feishuCliAccountId: null }),
+    ).toBe('sent');
+    expect(send('from telegram', 'telegram:chat-1', context('telegram'))).toBe(
+      'sent',
+    );
+    // IPC files are named `${Date.now()}-${random}`, so files written in the
+    // same millisecond list in random order: match each input by its text.
+    expect(
+      Object.fromEntries(
+        readPayloads().map((payload) => {
+          const { text, channelContext } = payload as {
+            text: string;
+            channelContext?: { provider: string };
+          };
+          return [text, channelContext?.provider ?? 'web'];
+        }),
+      ),
+    ).toEqual({
+      'from feishu': 'feishu',
+      'from the web': 'web',
+      'from telegram': 'telegram',
+    });
+    expect(fs.existsSync(path.join(inputDir(), '_drain'))).toBe(false);
+  });
 
   test('restarts a Bot-bound container for an explicitly unbound request', async () => {
     await startRunner({

@@ -1,11 +1,8 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 import { AnimatePresence, m } from 'motion/react';
-import { Link2, Pencil, Search, Trash2 } from 'lucide-react';
-import { DropdownMenuItem } from '@/components/ui/dropdown-menu';
+import { Link2, Search, Trash2 } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
-import { PromptDialog } from '@/components/common/PromptDialog';
 import { cn } from '@/lib/utils';
-import { isLiveStream, useChatStore } from '../../../stores/chat';
 import { useShellStore } from '../../../stores/shell';
 import { useSessionActions } from '../../../hooks/useSessionActions';
 import {
@@ -14,7 +11,6 @@ import {
   type NavigateToPath,
 } from '../../../lib/chat-navigation';
 import {
-  buildConversationSessions,
   formatSessionTime,
   isNativeManagedSession,
   messagePreview,
@@ -24,11 +20,15 @@ import type { AgentInfo } from '../../../types';
 import type { GroupEntry } from '../../../utils/group-utils';
 import { sidebarRowClass } from './SidebarItem';
 import { RowMenu, revealOnRowHover, rowIconButtonClass } from './WorkspaceTree';
+import {
+  MAIN_BINDING,
+  RenameSessionDialog,
+  SessionMenuItems,
+  useWorkspaceSessions,
+} from './workspace-sessions';
 
-const EMPTY_AGENTS: AgentInfo[] = [];
 const INITIAL_VISIBLE = 8;
 const SEARCH_THRESHOLD = 8;
-const MAIN_BINDING = '__main__';
 
 interface SessionTreeListProps {
   group: GroupEntry;
@@ -53,51 +53,14 @@ export const SessionTreeList = memo(function SessionTreeList({
   depth = 0,
   navigate,
 }: SessionTreeListProps) {
-  const loadAgents = useChatStore((s) => s.loadAgents);
-  const renameConversation = useChatStore((s) => s.renameConversation);
-  const agents = useChatStore((s) => s.agents[group.jid] ?? EMPTY_AGENTS);
-  // A joined id string keeps streaming deltas from re-rendering the tree:
-  // it only changes when a session starts or stops answering.
-  // A card frozen by a stop is not a running query.
-  const activeQueryIds = useChatStore((s) =>
-    (s.agents[group.jid] ?? EMPTY_AGENTS)
-      .filter(
-        (a) => s.agentWaiting[a.id] || isLiveStream(s.agentStreaming[a.id]),
-      )
-      .map((a) => a.id)
-      .join(','),
+  const { containerRef, sessions } = useWorkspaceSessions<HTMLDivElement>(
+    group.jid,
   );
   const requestBinding = useShellStore((s) => s.requestBinding);
   const { deleteSession } = useSessionActions();
   const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE);
   const [query, setQuery] = useState('');
   const [renameTarget, setRenameTarget] = useState<AgentInfo | null>(null);
-
-  // Fetch the session list once the subtree scrolls into view: an expanded
-  // workspace far down the tree should not cost a request on every load.
-  const containerRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const node = containerRef.current;
-    if (!node || typeof IntersectionObserver === 'undefined') {
-      void loadAgents(group.jid);
-      return;
-    }
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (!entries.some((entry) => entry.isIntersecting)) return;
-        observer.disconnect();
-        void loadAgents(group.jid);
-      },
-      { rootMargin: '200px' },
-    );
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [group.jid, loadAgents]);
-
-  const sessions = useMemo(() => {
-    const active = new Set(activeQueryIds ? activeQueryIds.split(',') : []);
-    return buildConversationSessions(agents, (id) => active.has(id));
-  }, [agents, activeQueryIds]);
 
   const canModify = !!group.can_modify;
   const normalizedQuery = query.trim().toLocaleLowerCase();
@@ -162,10 +125,7 @@ export const SessionTreeList = memo(function SessionTreeList({
           onSelect={() => openWorkspaceSession(navigate, group, null)}
           menu={
             canModify ? (
-              <DropdownMenuItem onClick={() => openBinding(MAIN_BINDING)}>
-                <Link2 />
-                会话绑定
-              </DropdownMenuItem>
+              <SessionMenuItems onBind={() => openBinding(MAIN_BINDING)} />
             ) : undefined
           }
           menuLabel={`${mainLabel}的更多操作`}
@@ -204,29 +164,13 @@ export const SessionTreeList = memo(function SessionTreeList({
                   menuLabel={`${session.name}的更多操作`}
                   menu={
                     canModify && !nativeManaged ? (
-                      <>
-                        <DropdownMenuItem
-                          onClick={() => openBinding(session.id)}
-                        >
-                          <Link2 />
-                          会话绑定
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          onClick={() => setRenameTarget(session)}
-                        >
-                          <Pencil />
-                          重命名
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          variant="destructive"
-                          onClick={() =>
-                            deleteSession(group.jid, session.id, openBinding)
-                          }
-                        >
-                          <Trash2 />
-                          删除
-                        </DropdownMenuItem>
-                      </>
+                      <SessionMenuItems
+                        onBind={() => openBinding(session.id)}
+                        onRename={() => setRenameTarget(session)}
+                        onDelete={() =>
+                          deleteSession(group.jid, session.id, openBinding)
+                        }
+                      />
                     ) : undefined
                   }
                 />
@@ -249,16 +193,9 @@ export const SessionTreeList = memo(function SessionTreeList({
           没有匹配的会话
         </p>
       )}
-      <PromptDialog
-        open={renameTarget !== null}
-        title="重命名对话"
-        label="对话名称"
-        placeholder="输入新名称"
-        defaultValue={renameTarget?.name ?? ''}
-        onConfirm={(name) => {
-          if (renameTarget)
-            void renameConversation(group.jid, renameTarget.id, name);
-        }}
+      <RenameSessionDialog
+        groupJid={group.jid}
+        session={renameTarget}
         onClose={() => setRenameTarget(null)}
       />
     </div>

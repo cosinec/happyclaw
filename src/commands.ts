@@ -12,6 +12,7 @@ import {
   getMessageCursor,
 } from './db.js';
 import { logger } from './logger.js';
+import { notifyConversationContextCleared } from './context-usage-events.js';
 import { clearSessionFiles } from './session-files.js';
 import type { NewMessage, MessageCursor } from './types.js';
 
@@ -162,6 +163,7 @@ export async function executeSessionReset(
   if (!agentId) {
     delete deps.sessions[folder];
   }
+  notifyConversationContextCleared(folder, agentId ?? null);
 
   // 4. Insert a divider on every JID whose cursor we will advance. Reusing
   //    one message id across sibling chats leaves those cursors at sequence 0

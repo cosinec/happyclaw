@@ -78,6 +78,8 @@ function makeOutputRuntime(lane: 'main' | 'session') {
       discard: vi.fn(),
     },
     persistProactiveTurnTrace: vi.fn(),
+    // The context ring has its own tests.
+    broadcastContextUsage: vi.fn(),
     crypto,
     getChannelType,
     channelTurnScope,
@@ -270,6 +272,13 @@ describe('actual runtime callbacks preserve per-input reply destinations', () =>
       );
       expect(fixture.commitCursor).toHaveBeenCalledWith(fixture.inputId);
       expect(fixture.globals.hadError).toBe(false);
+      // A side conversation's completed turn refreshes its context ring.
+      if (lane === 'session') {
+        expect(fixture.globals.broadcastContextUsage).toHaveBeenCalledWith(
+          'routing-fixture',
+          'session',
+        );
+      }
     },
   );
 

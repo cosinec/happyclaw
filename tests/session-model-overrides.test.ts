@@ -295,9 +295,121 @@ describe('resolveSessionLaunchOverrides', () => {
     );
     expect(mocks.logger.warn).not.toHaveBeenCalled();
   });
+
+  test('within another configuration, returns a model its list offers', () => {
+    setProviders(chatGpt('gpt'), {
+      ...thirdParty('glm'),
+      models: [
+        { id: 'glm-model' },
+        { id: 'glm-air' },
+        { id: 'glm-old', hidden: true },
+      ],
+    });
+    const glm = () =>
+      overrides.resolveSessionLaunchOverrides(
+        'grp',
+        null,
+        mocks.providers[1] as never,
+      );
+    db.setSessionModelSelection('grp', null, 'glm', 'member-1', {
+      model: 'glm-air',
+    });
+    expect(glm()).toEqual({ model: 'glm-air' });
+    // Left out of the picker, still the conversation's choice.
+    db.setSessionModelSelection('grp', null, 'glm', 'member-1', {
+      model: 'glm-old',
+    });
+    expect(glm()).toEqual({ model: 'glm-old' });
+    expect(mocks.logger.warn).not.toHaveBeenCalled();
+    // An effort goes with a model that takes it...
+    setProviders(chatGpt('gpt'), {
+      ...thirdParty('glm'),
+      models: [{ id: 'glm-model' }, { id: 'glm-air' }, { id: 'glm-5.3' }],
+    });
+    db.setSessionModelSelection('grp', null, 'glm', 'member-1', {
+      model: 'glm-5.3',
+      effort: 'high',
+    });
+    expect(glm()).toEqual({ model: 'glm-5.3', effort: 'high' });
+    // ...and is ignored, with a warning, on one that takes none.
+    db.setSessionModelSelection('grp', null, 'glm', 'member-1', {
+      model: 'glm-air',
+      effort: 'high',
+    });
+    expect(glm()).toEqual({ model: 'glm-air' });
+    expect(mocks.logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ providerId: 'glm', effort: 'high' }),
+      expect.any(String),
+    );
+  });
+
+  test('within another configuration, a model it dropped is ignored, quietly when predicting', () => {
+    db.setSessionModelSelection('grp', null, 'glm', 'member-1', {
+      model: 'glm-air',
+    });
+    const glm = mocks.providers[1] as never;
+    expect(
+      overrides.resolveSessionLaunchOverrides('grp', null, glm, {
+        warn: false,
+      }),
+    ).toEqual({});
+    expect(mocks.logger.warn).not.toHaveBeenCalled();
+    expect(overrides.resolveSessionLaunchOverrides('grp', null, glm)).toEqual(
+      {},
+    );
+    expect(mocks.logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ providerId: 'glm', model: 'glm-air' }),
+      expect.any(String),
+    );
+  });
 });
 
 describe('a pinned ChatGPT launch', () => {
+  test("an Agent's model is judged against the account catalog", () => {
+    const bound = runner.trySelectPoolProvider(
+      'grp',
+      null,
+      'gpt',
+      null,
+      'gpt-6-astra',
+    );
+    providerPool.releaseSession('gpt');
+    expect(bound).toMatchObject({
+      profileId: 'gpt',
+      chosenModel: 'gpt-6-astra',
+      sessionModel: 'gpt-6-astra',
+      resolved: { config: { anthropicModel: 'gpt-6-astra' } },
+    });
+    expect(bound).not.toHaveProperty('sessionEffort');
+
+    // The account's own list rules out a model it does not have.
+    mocks.catalog = { models: CATALOG, source: 'live' };
+    const stale = runner.trySelectPoolProvider(
+      'grp',
+      null,
+      'gpt',
+      null,
+      'gpt-7-new',
+    );
+    providerPool.releaseSession('gpt');
+    expect(stale?.resolved.config.anthropicModel).toBe('gpt-6.1-sol');
+    expect(mocks.logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ providerId: 'gpt', model: 'gpt-7-new' }),
+      expect.any(String),
+    );
+  });
+
+  test('a model list never reaches a ChatGPT launch', () => {
+    setProviders(
+      { ...chatGpt('gpt'), models: [{ id: 'gpt-6.1-sol', effort: 'low' }] },
+      thirdParty('glm'),
+    );
+    db.setSessionModelSelection('grp', null, 'gpt', 'member-1');
+    const selected = runner.trySelectPoolProvider('grp', null);
+    providerPool.releaseSession('gpt');
+    expect(selected?.resolved.customEnv).toEqual({});
+  });
+
   test('runs the pinned model and hands the effort to the gateway lease', () => {
     db.setSessionModelSelection('grp', null, 'gpt', 'ops-1', {
       model: 'gpt-6-astra',
@@ -340,9 +452,11 @@ describe('a pinned ChatGPT launch', () => {
     const selected = runner.trySelectPoolProvider('grp', null);
     providerPool.releaseSession('glm');
     expect(selected).toMatchObject({ profileId: 'glm' });
-    expect(selected).not.toHaveProperty('sessionModel');
+    // Every configuration records the model its session runs on; only a
+    // ChatGPT one gets a gateway effort.
+    expect(selected).toMatchObject({ sessionModel: 'glm-model' });
     expect(selected).not.toHaveProperty('sessionEffort');
-    expect(db.getSessionModel('grp', null)).toBeNull();
+    expect(db.getSessionModel('grp', null)).toBe('glm-model');
   });
 
   test('records the model beside the provider binding', () => {

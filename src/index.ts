@@ -645,6 +645,7 @@ import {
   startWebServer,
   broadcastToWebClients,
   broadcastNewMessage,
+  broadcastContextUsage,
   broadcastTyping,
   broadcastStreamEvent,
   broadcastAgentStatus,
@@ -2511,6 +2512,7 @@ function toContainerAgentProfile(
     identityPrompt: buildAgentProfilePrompt(profile),
     includeClaudePreset: profile.prompt_mode === 'append',
     modelConfigId: profile.model_config_id,
+    model: profile.model,
     runtimePolicy: profile.runtime_policy,
   };
 }
@@ -7357,6 +7359,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       effectiveGroup.folder,
       undefined,
       agentProfile?.model_config_id,
+      agentProfile?.model,
     )
   ) {
     // Proactive provider switch (sticky binding unhealthy/disabled) will clear
@@ -8191,7 +8194,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           text,
           { turnId: inputTurnId, sessionId: activeSessionId },
         );
-        if (progressStatus) broadcastStreamEvent(chatJid, progressStatus);
+        if (progressStatus) {
+          broadcastStreamEvent(chatJid, { ...progressStatus, inputTurnId });
+        }
         return true;
       },
       onFinalCandidate: (text) => {
@@ -9142,26 +9147,34 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               streamingAccumulatedText = answerProjection.visibleAnswerText;
             }
 
+            const outputInputTurnId = resolveContainerOutputInputTurnId(
+              result,
+              lastProcessed.id,
+            );
             // The turn's process is kept for turn_traces whatever the Web is
             // shown live; the tracker applies the mode's own limits.
-            turnTraces.observe(
-              resolveContainerOutputInputTurnId(result, lastProcessed.id),
-              result.streamEvent,
-            );
+            turnTraces.observe(outputInputTurnId, result.streamEvent);
             const processVisibility = resolveProcessVisibility();
+            // Every Web frame names the input it answers, the `turn_id` of the
+            // final row: a warm turn's presentation `turnId` is the Runner's
+            // own, so it alone cannot pair the live card with its final.
+            const inputStreamEvent: StreamEvent = {
+              ...result.streamEvent,
+              inputTurnId: outputInputTurnId,
+            };
             // The narration before a tool call goes out ahead of the call.
             for (const note of commentaryRelay.take(
               interactionMode,
               processVisibility,
-              result.streamEvent,
-              resolveContainerOutputInputTurnId(result, lastProcessed.id),
+              inputStreamEvent,
+              outputInputTurnId,
             )) {
               broadcastStreamEvent(chatJid, note);
             }
             const webStreamEvent = projectSdkStreamEventForWeb(
               interactionMode,
               processVisibility,
-              result.streamEvent,
+              inputStreamEvent,
             );
             if (webStreamEvent) {
               if (
@@ -9807,17 +9820,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                     'host_turn_settlement_failed: Proactive output did not reach a durable terminal state',
                   );
                 }
-                commitCursor(
-                  resolveContainerOutputInputTurnId(result, lastProcessed.id),
+                const inputTurnId = resolveContainerOutputInputTurnId(
+                  result,
+                  lastProcessed.id,
                 );
+                commitCursor(inputTurnId);
                 finalizeProactiveOutputCoordinators(result);
-                persistProactiveTurnTrace(
-                  resolveContainerOutputInputTurnId(result, lastProcessed.id),
-                );
+                persistProactiveTurnTrace(inputTurnId);
                 broadcastStreamEvent(chatJid, {
                   eventType: 'status',
                   statusText: 'idle',
                   turnId: result.inputTurnId ?? lastProcessed.id,
+                  inputTurnId,
                   sessionId: activeSessionId,
                 });
               }
@@ -11651,6 +11665,38 @@ function ensureTerminalContainerStarted(chatJid: string): boolean {
   return true;
 }
 
+/**
+ * What one runner output of the main conversation settles: the SDK session it
+ * ran on, and, once its turn completed, the context ring, whose answer is now
+ * in the transcript. Scheduled group-mode tasks run in this conversation and
+ * count too; isolated tasks have sessions of their own and never come here.
+ */
+function settleMainConversationOutput(
+  group: RegisteredGroup,
+  output: ContainerOutput,
+  agentProfile: AgentProfile | undefined,
+  interactionMode: InteractionMode,
+): void {
+  // 仅从成功的输出中更新 session ID；
+  // error 输出可能携带 stale ID，会覆盖流式传递的有效 session
+  if (
+    output.newSessionId &&
+    output.status !== 'error' &&
+    !output.providerFailure
+  ) {
+    sessions[group.folder] = output.newSessionId;
+    setSession(group.folder, output.newSessionId, undefined, {
+      agentProfileId: agentProfile?.id,
+      agentProfileVersion: agentProfile?.version,
+      identityHash: agentProfile?.identity_hash,
+    });
+    setSessionInteractionMode(group.folder, undefined, interactionMode);
+  }
+  if (output.inputTurnCompleted === true) {
+    void broadcastContextUsage(group.folder, null);
+  }
+}
+
 async function runAgent(
   group: RegisteredGroup,
   prompt: string,
@@ -11754,21 +11800,12 @@ async function runAgent(
         output.sourceKind === 'auto_continue';
       queue.markRunnerQueryIdle(chatJid, { preserveIpcDebt });
     }
-    // 仅从成功的输出中更新 session ID；
-    // error 输出可能携带 stale ID，会覆盖流式传递的有效 session
-    if (
-      output.newSessionId &&
-      output.status !== 'error' &&
-      !output.providerFailure
-    ) {
-      sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId, undefined, {
-        agentProfileId: resolvedAgentProfile?.id,
-        agentProfileVersion: resolvedAgentProfile?.version,
-        identityHash: resolvedAgentProfile?.identity_hash,
-      });
-      setSessionInteractionMode(group.folder, undefined, interactionMode);
-    }
+    settleMainConversationOutput(
+      group,
+      output,
+      resolvedAgentProfile,
+      interactionMode,
+    );
     await onOutput?.(output);
     // A runner receipt proves model consumption, not successful Host
     // persistence/projection. Commit it only after the Host callback resolves;
@@ -14075,6 +14112,10 @@ async function processTaskIpc(
     query?: string;
     kind?: string;
     maxChars?: number;
+    /** Snapshot: also report items changed after this store revision. */
+    changedSince?: number;
+    /** Snapshot: the items the conversation holds, checked for expiry. */
+    heldIds?: string[];
     itemId?: string;
     title?: string;
     content?: string;
@@ -14536,6 +14577,8 @@ async function processTaskIpc(
                 | undefined,
               limit: data.limit,
               maxChars: data.maxChars,
+              changedSince: data.changedSince,
+              heldIds: data.heldIds,
             });
             result = { snapshot };
             logger.info(
@@ -16852,6 +16895,7 @@ async function processAgentConversation(
       effectiveGroup.folder,
       agentId,
       agentProfile?.model_config_id,
+      agentProfile?.model,
     );
   let historyContext: ReturnType<typeof buildRecentConversationHistoryContext> =
     null;
@@ -17538,7 +17582,11 @@ async function processAgentConversation(
           { turnId: inputTurnId, sessionId: currentAgentSessionId },
         );
         if (progressStatus) {
-          broadcastStreamEvent(chatJid, progressStatus, agentId);
+          broadcastStreamEvent(
+            chatJid,
+            { ...progressStatus, inputTurnId },
+            agentId,
+          );
         }
         return true;
       },
@@ -18172,6 +18220,7 @@ async function processAgentConversation(
         effectiveGroup.folder,
         agentId,
         agentProfile?.model_config_id,
+        agentProfile?.model,
       )
     ) {
       try {
@@ -18207,6 +18256,9 @@ async function processAgentConversation(
         interactionMode,
       );
       currentAgentSessionId = output.newSessionId;
+    }
+    if (output.inputTurnCompleted === true) {
+      void broadcastContextUsage(effectiveGroup.folder, agentId);
     }
 
     if (
@@ -18331,24 +18383,30 @@ async function processAgentConversation(
       if (agentAnswerProjection?.visibleAnswerChanged) {
         agentStreamingAccText = agentAnswerProjection.visibleAnswerText;
       }
-      turnTraces.observe(
-        resolveContainerOutputInputTurnId(output, lastProcessed.id),
-        output.streamEvent,
+      const outputInputTurnId = resolveContainerOutputInputTurnId(
+        output,
+        lastProcessed.id,
       );
+      turnTraces.observe(outputInputTurnId, output.streamEvent);
       const processVisibility = resolveProcessVisibility();
+      // Every Web frame names the input it answers (see the main Session).
+      const inputStreamEvent: StreamEvent = {
+        ...output.streamEvent,
+        inputTurnId: outputInputTurnId,
+      };
       // The narration before a tool call goes out ahead of the call.
       for (const note of commentaryRelay.take(
         interactionMode,
         processVisibility,
-        output.streamEvent,
-        resolveContainerOutputInputTurnId(output, lastProcessed.id),
+        inputStreamEvent,
+        outputInputTurnId,
       )) {
         broadcastStreamEvent(chatJid, note, agentId);
       }
       const webStreamEvent = projectSdkStreamEventForWeb(
         interactionMode,
         processVisibility,
-        output.streamEvent,
+        inputStreamEvent,
       );
       if (webStreamEvent) {
         if (webStreamEvent.eventType !== 'usage' || usageProjectionEvent) {
@@ -18608,19 +18666,20 @@ async function processAgentConversation(
               'host_turn_settlement_failed: Proactive agent output did not reach a durable terminal state',
             );
           }
-          commitCursor(
-            resolveContainerOutputInputTurnId(output, lastProcessed.id),
+          const inputTurnId = resolveContainerOutputInputTurnId(
+            output,
+            lastProcessed.id,
           );
+          commitCursor(inputTurnId);
           finalizeProactiveAgentOutputCoordinators(output);
-          persistProactiveTurnTrace(
-            resolveContainerOutputInputTurnId(output, lastProcessed.id),
-          );
+          persistProactiveTurnTrace(inputTurnId);
           broadcastStreamEvent(
             chatJid,
             {
               eventType: 'status',
               statusText: 'idle',
               turnId: output.inputTurnId ?? lastProcessed.id,
+              inputTurnId,
               sessionId: currentAgentSessionId,
             },
             agentId,

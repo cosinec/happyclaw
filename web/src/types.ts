@@ -76,6 +76,11 @@ export interface AgentProfile {
   avatar_url: string | null;
   /** Null means select automatically from enabled model configurations. */
   model_config_id: string | null;
+  /**
+   * The model within that configuration; null runs the configuration's
+   * default. Older servers do not send it.
+   */
+  model?: string | null;
   runtime_policy: AgentProfileRuntimePolicy;
   /** Policy after applying system defaults and current authorization. */
   effective_runtime_policy?: AgentProfileRuntimePolicy;
@@ -95,6 +100,11 @@ export interface ModelConfigOption {
   anthropic_model: string;
   /** The global default: what an Agent without a binding follows. */
   is_default?: boolean;
+  /**
+   * The models an Agent may pin within this configuration, its default
+   * included (ChatGPT: the catalog). Older servers do not send it.
+   */
+  models?: Array<{ id: string; hidden: boolean }>;
 }
 
 export type AgentProfilePromptMode = 'append' | 'replace';

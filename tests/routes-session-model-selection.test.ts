@@ -120,8 +120,14 @@ function savedProviders() {
       name: 'GLM',
       type: 'third_party',
       enabled: false,
+      anthropicBaseUrl: 'https://glm.example.test',
       anthropicModel: 'glm-5.3[1m]',
       anthropicAuthToken: 'glm-token',
+      models: [
+        { id: 'glm-5.3[1m]' },
+        { id: 'glm-5.3-air', effort: 'low' },
+        { id: 'glm-5.3-legacy', hidden: true },
+      ],
       codexOAuthCredentials: null,
     },
     {
@@ -234,8 +240,8 @@ describe('GET /:jid/model-selection', () => {
     expect(body.selectedModel).toBeNull();
     expect(body.selectedEffort).toBeNull();
     expect(body.default).toMatchObject({ source: 'pool', enabledCount: 2 });
-    // Only ChatGPT configurations carry a model list; the others keep the
-    // shape older clients know.
+    // A ChatGPT configuration offers its account catalog (`codex`); every
+    // other one offers its own model list, the default model always in it.
     expect(body.options.map(({ codex, ...option }: any) => option)).toEqual([
       {
         id: 'official',
@@ -244,6 +250,17 @@ describe('GET /:jid/model-selection', () => {
         enabled: true,
         model: 'opus',
         usable: true,
+        // What the model takes, from its capabilities. With no effort of its
+        // own and none from the endpoint, Claude Code picks the level: no
+        // default effort is claimed.
+        models: [
+          {
+            id: 'opus',
+            hidden: false,
+            efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+            contextWindow: 1_000_000,
+          },
+        ],
       },
       {
         id: 'chatgpt',
@@ -260,6 +277,19 @@ describe('GET /:jid/model-selection', () => {
         enabled: false,
         model: 'glm-5.3[1m]',
         usable: true,
+        // A third-party endpoint runs at max unless a model says otherwise;
+        // a model without known capabilities offers no efforts to pick.
+        models: [
+          {
+            id: 'glm-5.3[1m]',
+            hidden: false,
+            efforts: ['low', 'high', 'max'],
+            defaultEffort: 'max',
+            contextWindow: 1_000_000,
+          },
+          { id: 'glm-5.3-air', hidden: false, defaultEffort: 'low' },
+          { id: 'glm-5.3-legacy', hidden: true, defaultEffort: 'max' },
+        ],
       },
       {
         id: 'copy',
@@ -268,6 +298,14 @@ describe('GET /:jid/model-selection', () => {
         enabled: false,
         model: 'glm-5.3',
         usable: false,
+        models: [
+          {
+            id: 'glm-5.3',
+            hidden: false,
+            efforts: ['low', 'high', 'max'],
+            contextWindow: 1_000_000,
+          },
+        ],
       },
     ]);
     expect(
@@ -278,12 +316,26 @@ describe('GET /:jid/model-selection', () => {
     expect(JSON.stringify(body)).not.toContain('secret');
   });
 
+  test('claims no default effort where Claude Code picks the level itself', async () => {
+    // An official connection without an effort of its own: opus takes
+    // efforts, but nothing here sets one.
+    mocks.defaultConfigId = 'official';
+    const { body } = await call('GET');
+    expect(body.default).toMatchObject({
+      source: 'default',
+      model: 'opus',
+      effort: null,
+    });
+  });
+
   test('reports the global default as what an unselected conversation runs on', async () => {
     mocks.defaultConfigId = 'glm';
     const { body } = await call('GET');
     expect(body.default).toEqual({
       source: 'default',
       modelConfigId: 'glm',
+      model: 'glm-5.3[1m]',
+      effort: 'max',
       enabledCount: 2,
     });
     expect(body.selectedModelConfigId).toBeNull();
@@ -396,15 +448,23 @@ describe('GET /:jid/model-selection', () => {
     expect(body.selectedEffort).toBe('ultra');
   });
 
-  test('a configuration that is not ChatGPT never reports a model or effort', async () => {
+  test('a model the list no longer offers, or an effort the model does not take, reads as unset', async () => {
+    // The stale model runs the default, which takes `high`.
     db.setSessionModelSelection(GROUP_FOLDER, null, 'glm', OWNER_ID, {
       model: 'gpt-6-astra',
       effort: 'high',
     });
-    const { body } = await call('GET');
-    expect(body).toMatchObject({
+    expect((await call('GET')).body).toMatchObject({
       selectedModelConfigId: 'glm',
       selectedModel: null,
+      selectedEffort: 'high',
+    });
+    db.setSessionModelSelection(GROUP_FOLDER, null, 'glm', OWNER_ID, {
+      model: 'glm-5.3-air',
+      effort: 'high',
+    });
+    expect((await call('GET')).body).toMatchObject({
+      selectedModel: 'glm-5.3-air',
       selectedEffort: null,
     });
   });
@@ -700,20 +760,18 @@ describe('PUT /:jid/model-selection inside a ChatGPT configuration', () => {
     expect(mocks.drainCalls).toEqual([]);
   });
 
-  test('only a ChatGPT configuration has models and efforts to pick', async () => {
+  test('a model outside the list, an effort the model does not take, a model without a configuration are refused', async () => {
     const other = await call('PUT', '', {
       modelConfigId: 'glm',
       model: 'gpt-6-astra',
     });
     expect(other.status).toBe(400);
-    expect(other.body).toMatchObject({ code: 'MODEL_SELECTION_UNSUPPORTED' });
+    expect(other.body).toMatchObject({ code: 'MODEL_NOT_IN_CONNECTION' });
     const effortOnly = await call('PUT', '', {
-      modelConfigId: 'official',
-      effort: 'high',
+      modelConfigId: 'glm',
+      effort: 'medium',
     });
-    expect(effortOnly.body).toMatchObject({
-      code: 'MODEL_SELECTION_UNSUPPORTED',
-    });
+    expect(effortOnly.body).toMatchObject({ code: 'EFFORT_NOT_SUPPORTED' });
     const orphan = await call('PUT', '', {
       modelConfigId: null,
       model: 'gpt-6-astra',
@@ -738,5 +796,164 @@ describe('PUT /:jid/model-selection inside a ChatGPT configuration', () => {
     expect(refused.status).toBe(400);
     expect(detail()).toMatchObject({ model: 'gpt-6-astra', effort: 'high' });
     expect(mocks.drainCalls).toEqual([]);
+  });
+});
+
+describe('model-selection inside a configuration that is not ChatGPT', () => {
+  const detail = () => db.getSessionModelSelectionDetail(GROUP_FOLDER, null);
+
+  test('pins a model of its list, hidden ones included, and reports it', async () => {
+    const { status, body } = await call('PUT', '', {
+      modelConfigId: 'glm',
+      model: 'glm-5.3-air',
+    });
+    expect(status).toBe(200);
+    expect(body).toMatchObject({
+      selectedModelConfigId: 'glm',
+      selectedModel: 'glm-5.3-air',
+      selectedEffort: null,
+    });
+    expect(detail()).toEqual({
+      modelConfigId: 'glm',
+      model: 'glm-5.3-air',
+      effort: null,
+      updatedBy: OWNER_ID,
+    });
+    // A model is involved: a runner already on this configuration would keep
+    // running the old one.
+    expect(mocks.drainCalls).toEqual([{ jids: [GROUP_JID], target: null }]);
+
+    const hidden = await call('PUT', '', {
+      modelConfigId: 'glm',
+      model: 'glm-5.3-legacy',
+    });
+    expect(hidden.status).toBe(200);
+    expect(hidden.body.selectedModel).toBe('glm-5.3-legacy');
+  });
+
+  test('refuses a model the configuration does not offer and changes nothing', async () => {
+    const refused = await call('PUT', '', {
+      modelConfigId: 'glm',
+      model: 'glm-9',
+    });
+    expect(refused.status).toBe(400);
+    expect(refused.body).toMatchObject({ code: 'MODEL_NOT_IN_CONNECTION' });
+    expect(refused.body.error).toContain('glm-9');
+    expect(detail()).toBeNull();
+    expect(mocks.drainCalls).toEqual([]);
+  });
+
+  test('an effort goes with a model that takes it', async () => {
+    // glm-5.3-air has no known efforts, though it is configured to run low.
+    const refused = await call('PUT', '', {
+      modelConfigId: 'glm',
+      model: 'glm-5.3-air',
+      effort: 'low',
+    });
+    expect(refused.status).toBe(400);
+    expect(refused.body).toMatchObject({ code: 'EFFORT_NOT_SUPPORTED' });
+    expect(detail()).toBeNull();
+
+    // Without a model, the configuration's default model decides.
+    const accepted = await call('PUT', '', {
+      modelConfigId: 'glm',
+      effort: 'low',
+    });
+    expect(accepted.status).toBe(200);
+    expect(accepted.body).toMatchObject({
+      selectedModel: null,
+      selectedEffort: 'low',
+    });
+    expect(detail()).toMatchObject({ model: null, effort: 'low' });
+  });
+
+  test('an effort-only change retires the runner but keeps the model', async () => {
+    await call('PUT', '', { modelConfigId: 'glm', model: 'glm-5.3[1m]' });
+    mocks.drainCalls = [];
+    const raised = await call('PUT', '', {
+      modelConfigId: 'glm',
+      model: 'glm-5.3[1m]',
+      effort: 'max',
+    });
+    expect(raised.status).toBe(200);
+    expect(raised.body.drained).toBe(1);
+    // Every runner of the conversation, even one on this configuration.
+    expect(mocks.drainCalls).toEqual([{ jids: [GROUP_JID], target: null }]);
+    mocks.drainCalls = [];
+    await call('PUT', '', {
+      modelConfigId: 'glm',
+      model: 'glm-5.3[1m]',
+      effort: 'max',
+    });
+    expect(mocks.drainCalls).toEqual([]);
+  });
+
+  test('accepts a model id up to the shared length limit', async () => {
+    const tooLong = await call('PUT', '', {
+      modelConfigId: 'glm',
+      model: 'm'.repeat(201),
+    });
+    expect(tooLong.status).toBe(400);
+    expect(tooLong.body.error).toBe('Invalid request body');
+    // Within the limit, the configuration's list alone decides.
+    const unlisted = await call('PUT', '', {
+      modelConfigId: 'glm',
+      model: 'm'.repeat(200),
+    });
+    expect(unlisted.body).toMatchObject({ code: 'MODEL_NOT_IN_CONNECTION' });
+  });
+
+  test('naming the default model is no change, another model is', async () => {
+    await call('PUT', '', { modelConfigId: 'glm' });
+    expect(mocks.drainCalls).toEqual([{ jids: [GROUP_JID], target: 'glm' }]);
+    mocks.drainCalls = [];
+    await call('PUT', '', { modelConfigId: 'glm', model: 'glm-5.3[1m]' });
+    expect(mocks.drainCalls).toEqual([]);
+    await call('PUT', '', { modelConfigId: 'glm', model: 'glm-5.3-air' });
+    expect(mocks.drainCalls).toEqual([{ jids: [GROUP_JID], target: null }]);
+    // Back to the configuration's own model.
+    await call('PUT', '', { modelConfigId: 'glm' });
+    expect(mocks.drainCalls).toEqual([
+      { jids: [GROUP_JID], target: null },
+      { jids: [GROUP_JID], target: null },
+    ]);
+  });
+
+  test('reports a stored model only while the list still offers it', async () => {
+    db.setSessionModelSelection(GROUP_FOLDER, null, 'glm', OWNER_ID, {
+      model: 'glm-5.3-legacy',
+    });
+    expect((await call('GET')).body.selectedModel).toBe('glm-5.3-legacy');
+    db.setSessionModelSelection(GROUP_FOLDER, null, 'glm', OWNER_ID, {
+      model: 'glm-5.2',
+    });
+    expect((await call('GET')).body).toMatchObject({
+      selectedModelConfigId: 'glm',
+      selectedModel: null,
+    });
+  });
+
+  test("a conversation that ran the Agent's model is not spared on the Agent's configuration", async () => {
+    const profile = db.createAgentProfile({
+      ownerUserId: OWNER_ID,
+      name: 'GLM Agent',
+      modelConfigId: 'glm',
+      model: 'glm-5.3-air',
+    });
+    db.assignWorkspaceAgentProfile(GROUP_FOLDER, profile.id);
+    try {
+      // Unpicked, the conversation ran glm-5.3-air; picking GLM runs its
+      // default, so a runner already on GLM must go too.
+      await call('PUT', '', { modelConfigId: 'glm' });
+      expect(mocks.drainCalls).toEqual([{ jids: [GROUP_JID], target: null }]);
+
+      db.setSessionModelSelection(GROUP_FOLDER, null, null);
+      db.updateAgentProfile(profile.id, OWNER_ID, { model: null });
+      mocks.drainCalls = [];
+      await call('PUT', '', { modelConfigId: 'glm' });
+      expect(mocks.drainCalls).toEqual([{ jids: [GROUP_JID], target: 'glm' }]);
+    } finally {
+      db.deleteWorkspaceAgentProfile(GROUP_FOLDER);
+    }
   });
 });

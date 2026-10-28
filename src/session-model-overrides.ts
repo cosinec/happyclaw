@@ -1,12 +1,14 @@
 /**
  * What a conversation chose in the chat composer, as a runner launch sees it.
  *
- * A ChatGPT subscription exposes a whole catalog of models, and a conversation
- * may pin one of them and a reasoning effort. The choice is stored when it is
- * made (session_model_selections) but can go stale before the next launch: the
- * catalog moves, the plan changes, the person who chose loses a permission.
- * Everything here re-checks it against the world as it is now, and degrades to
- * the configuration's own default instead of failing the turn.
+ * Every model configuration offers a list of models, and a conversation may
+ * pin one of them; a ChatGPT subscription offers its account catalog instead
+ * and also lets the conversation pick a reasoning effort. The choice is stored
+ * when it is made (session_model_selections) but can go stale before the next
+ * launch: the list or the catalog moves, the plan changes, the person who
+ * chose loses a permission. Everything here re-checks it against the world as
+ * it is now, and degrades to the configuration's own default instead of
+ * failing the turn.
  */
 import { logger } from './logger.js';
 import {
@@ -26,13 +28,78 @@ import {
   resolveCodexSessionChoice,
 } from './codex-gateway/model-catalog.js';
 import { listCodexModelsForProvider } from './codex-gateway/model-catalog-sync.js';
+import {
+  modelCapabilities,
+  splitOneMillionSuffix,
+  type ModelEffort,
+  type ProviderModelEntry,
+} from './model-providers.js';
 import { hasPermission } from './permissions.js';
-import type { UnifiedProvider } from './runtime-config.js';
+import {
+  findProviderModel,
+  providerEffortLevel,
+  providerModels,
+  type UnifiedProvider,
+} from './runtime-config.js';
 
 type ChatGptProvider = Pick<
   UnifiedProvider,
   'id' | 'anthropicModel' | 'codexOAuthCredentials'
 >;
+
+/** A configuration of any kind, with what it offers to pick from. */
+type ModelConfiguration = ChatGptProvider &
+  Pick<UnifiedProvider, 'anthropicBaseUrl' | 'models' | 'customEnv'>;
+
+/**
+ * Whether `model` of a configuration takes `effort` as Claude Code's effort
+ * level. Only models whose capabilities list efforts do; a pass-through relay
+ * (no model) takes none.
+ */
+function modelTakesEffort(model: string, effort: string): boolean {
+  return !!modelCapabilities(model)?.efforts?.includes(effort as ModelEffort);
+}
+
+/**
+ * A conversation's stored choice within a configuration that is not a
+ * ChatGPT subscription, as it holds today: a model the list no longer offers
+ * and an effort the model does not take read as unset.
+ */
+function checkConnectionChoice(
+  provider: ModelConfiguration,
+  stored: { model: string | null; effort: string | null },
+): {
+  model: string | null;
+  effort: string | null;
+  staleModel: boolean;
+  staleEffort: boolean;
+} {
+  // Hidden models count: hiding only leaves a model out of the picker.
+  const model =
+    stored.model && findProviderModel(provider, stored.model)
+      ? stored.model
+      : null;
+  const effort =
+    stored.effort &&
+    modelTakesEffort(model ?? provider.anthropicModel, stored.effort)
+      ? stored.effort
+      : null;
+  return {
+    model,
+    effort,
+    staleModel: !!stored.model && !model,
+    staleEffort: !!stored.effort && !effort,
+  };
+}
+
+/** The picker's reading of what a conversation stored for `provider`. */
+export function readStoredConnectionChoice(
+  provider: ModelConfiguration,
+  stored: { model: string | null; effort: string | null },
+): { model: string | null; effort: string | null } {
+  const { model, effort } = checkConnectionChoice(provider, stored);
+  return { model, effort };
+}
 
 export interface SessionLaunchOverrides {
   /** Upstream model to run on instead of the configuration's own. */
@@ -71,10 +138,9 @@ export function chatGptDefaultModel(
 export function resolveSessionLaunchOverrides(
   groupFolder: string,
   agentId: string | null | undefined,
-  provider: ChatGptProvider,
+  provider: ModelConfiguration,
   options: { warn?: boolean } = {},
 ): SessionLaunchOverrides {
-  if (!provider.codexOAuthCredentials) return {};
   const detail = getSessionModelSelectionDetail(groupFolder, agentId);
   if (
     !detail ||
@@ -82,6 +148,35 @@ export function resolveSessionLaunchOverrides(
     (!detail.model && !detail.effort)
   ) {
     return {};
+  }
+  if (!provider.codexOAuthCredentials) {
+    const choice = checkConnectionChoice(provider, detail);
+    if (choice.staleModel && options.warn !== false) {
+      logger.warn(
+        {
+          groupFolder,
+          agentId: agentId || null,
+          providerId: provider.id,
+          model: detail.model,
+        },
+        'Conversation model is no longer offered by its configuration; following the configuration default',
+      );
+    }
+    if (choice.staleEffort && options.warn !== false) {
+      logger.warn(
+        {
+          groupFolder,
+          agentId: agentId || null,
+          providerId: provider.id,
+          effort: detail.effort,
+        },
+        'Conversation effort is not taken by the model it runs; following the configured effort',
+      );
+    }
+    return {
+      ...(choice.model ? { model: choice.model } : {}),
+      ...(choice.effort ? { effort: choice.effort } : {}),
+    };
   }
   const { models, source } = listCodexModelsForProvider(provider);
   const choice = resolveCodexSessionChoice({
@@ -111,9 +206,76 @@ export function resolveSessionLaunchOverrides(
 }
 
 /**
+ * The model an Agent's binding names within `provider`, or nothing when it
+ * names none or the configuration no longer offers it: the Agent then runs
+ * the configuration's default instead of failing the turn. A ChatGPT model is
+ * judged like a stored conversation choice, against the account catalog.
+ */
+export function resolveAgentLaunchModel(
+  provider: ModelConfiguration,
+  agentModel: string | null | undefined,
+  context: {
+    groupFolder: string;
+    agentId?: string | null;
+    warn?: boolean;
+  },
+): string | undefined {
+  if (!agentModel) return undefined;
+  let model: string | null;
+  if (provider.codexOAuthCredentials) {
+    const { models, source } = listCodexModelsForProvider(provider);
+    model = resolveCodexSessionChoice({
+      catalog: models,
+      defaultModel: chatGptDefaultModel(provider),
+      model: agentModel,
+      canExceedCeiling: false,
+      strict: false,
+      authoritative: source === 'live',
+    }).model;
+  } else {
+    model = findProviderModel(provider, agentModel) ? agentModel : null;
+  }
+  if (!model && context.warn !== false) {
+    logger.warn(
+      {
+        groupFolder: context.groupFolder,
+        agentId: context.agentId || null,
+        providerId: provider.id,
+        model: agentModel,
+      },
+      'Agent model is no longer offered by its configuration; following the configuration default',
+    );
+  }
+  return model ?? undefined;
+}
+
+/**
+ * The model a launch on `provider` runs when the conversation picked none:
+ * the Agent's model when the Agent's binding is what pins the launch and the
+ * configuration still offers it, else the configuration's own. Null for a
+ * pass-through relay, which names no model.
+ */
+export function unpickedLaunchModel(
+  provider: ModelConfiguration,
+  agentModel: string | null | undefined,
+  groupFolder: string,
+): string | null {
+  const model =
+    resolveAgentLaunchModel(provider, agentModel, {
+      groupFolder,
+      warn: false,
+    }) ?? provider.anthropicModel;
+  return provider.codexOAuthCredentials
+    ? chatGptLaunchModel(model, provider)
+    : model || null;
+}
+
+/**
  * Whether a launch on `effectiveModel` changes the model under a Session that
  * still has an SDK session to resume. Encrypted reasoning only verifies for the
- * model that issued it, so such a session cannot simply continue.
+ * model that issued it, so such a session cannot simply continue; sessions of
+ * every other configuration follow the same rule, so one SDK session always
+ * runs on one model.
  *
  * A session from before models were tracked ran on the configuration's own
  * model; one without an SDK session has nothing to carry over.
@@ -124,11 +286,14 @@ export function sessionModelHasChanged(
   effectiveModel: string,
   providerDefaultModel: string,
 ): boolean {
+  // `[1m]` only widens the context window Claude Code works with; the
+  // upstream model, and so the session's reasoning, stays the same.
+  const upstream = (model: string) => splitOneMillionSuffix(model).model;
   const recorded = getSessionModel(groupFolder, agentId);
-  if (recorded) return recorded !== effectiveModel;
+  if (recorded) return upstream(recorded) !== upstream(effectiveModel);
   return (
     !!getSession(groupFolder, agentId) &&
-    providerDefaultModel !== effectiveModel
+    upstream(providerDefaultModel) !== upstream(effectiveModel)
   );
 }
 
@@ -145,6 +310,92 @@ export function chatGptLaunchModel(
 }
 
 // ─── What the chat composer is shown ───────────────────────────────────
+
+/** A model a conversation or an Agent may pick within a configuration. */
+export interface ConnectionModelChoice {
+  id: string;
+  /** Left out of the chat picker; an explicit choice may still name it. */
+  hidden: boolean;
+  /** Efforts a conversation may pick on this model; absent: none. */
+  efforts?: readonly ModelEffort[];
+  /** The effort this model runs at when no effort is picked. */
+  defaultEffort?: ModelEffort;
+  contextWindow?: number;
+}
+
+/**
+ * What a model of a configuration offers beyond its id. Its effort without a
+ * pick follows the launch: an Agent's own effort, else the model's
+ * configured one, else the configuration's environment. With none of them
+ * Claude Code chooses the level itself, so none is claimed.
+ */
+function connectionModelCapabilities(
+  provider: ModelConfiguration,
+  entry: ProviderModelEntry,
+  agentEffort: ModelEffort | undefined,
+): Omit<ConnectionModelChoice, 'id' | 'hidden'> {
+  const capabilities = modelCapabilities(entry.id);
+  const defaultEffort =
+    agentEffort ?? entry.effort ?? providerEffortLevel(provider);
+  return {
+    ...(capabilities?.efforts ? { efforts: capabilities.efforts } : {}),
+    ...(defaultEffort ? { defaultEffort } : {}),
+    ...(capabilities?.contextWindow
+      ? { contextWindow: capabilities.contextWindow }
+      : {}),
+  };
+}
+
+/**
+ * The effort a launch on `provider` runs at when the conversation picked
+ * none, or null when the model it runs takes no effort level (or is a
+ * ChatGPT subscription, whose view says it).
+ */
+export function unpickedLaunchEffort(
+  provider: ModelConfiguration,
+  model: string | null,
+  agentEffort: ModelEffort | undefined,
+): ModelEffort | null {
+  if (provider.codexOAuthCredentials || !model) return null;
+  const entry = findProviderModel(provider, model) ?? { id: model };
+  const offered = connectionModelCapabilities(provider, entry, agentEffort);
+  return offered.efforts ? (offered.defaultEffort ?? null) : null;
+}
+
+/**
+ * The models a configuration offers to pick from: its own list, or a ChatGPT
+ * subscription's account catalog, where nothing is hidden.
+ */
+export function listConnectionModels(
+  provider: ModelConfiguration,
+): ConnectionModelChoice[] {
+  if (provider.codexOAuthCredentials) {
+    return listCodexModelsForProvider(provider).models.map((entry) => ({
+      id: entry.value,
+      hidden: false,
+    }));
+  }
+  return providerModels(provider).map((entry) => ({
+    id: entry.id,
+    hidden: entry.hidden === true,
+  }));
+}
+
+/**
+ * What the chat picker offers within a configuration that is not a ChatGPT
+ * subscription (that one shows its catalog view): each model with the
+ * efforts it takes and the one it runs at without a pick.
+ */
+export function listSessionPickerModels(
+  provider: ModelConfiguration,
+  agentEffort: ModelEffort | undefined,
+): ConnectionModelChoice[] {
+  return providerModels(provider).map((entry) => ({
+    id: entry.id,
+    hidden: entry.hidden === true,
+    ...connectionModelCapabilities(provider, entry, agentEffort),
+  }));
+}
 
 export interface CodexModelChoice {
   /** The upstream model slug. */
@@ -232,6 +483,8 @@ export function readStoredChoice(
 
 export type SessionChoiceRejectionCode =
   | 'MODEL_SELECTION_UNSUPPORTED'
+  | 'MODEL_NOT_IN_CONNECTION'
+  | 'EFFORT_NOT_SUPPORTED'
   | 'MODEL_UNAVAILABLE'
   | 'EFFORT_UNSUPPORTED'
   | 'EFFORT_RESTRICTED';
@@ -243,24 +496,45 @@ export interface SessionChoiceRejection {
 
 /**
  * Check a model and effort a chooser submits for `provider`. Unlike a stored
- * choice, a new one must be confirmed by the catalog, and efforts above the
- * ceiling need the chooser's `manage_system_config`.
+ * choice, a new one must be confirmed by the configuration's model list (a
+ * ChatGPT subscription: its catalog), and efforts, which only a ChatGPT
+ * subscription offers, above the ceiling need the chooser's
+ * `manage_system_config`.
  */
 export function validateSessionChoice(
-  provider: ChatGptProvider,
+  provider: ModelConfiguration,
   requested: { model?: string | null; effort?: string | null },
   chooser: Parameters<typeof hasPermission>[0],
 ):
   | { ok: true; model: string | null; effort: string | null }
   | { ok: false; rejection: SessionChoiceRejection } {
   if (!provider.codexOAuthCredentials) {
-    return {
-      ok: false,
-      rejection: {
-        error: '该模型配置不支持选择具体模型或推理档位',
-        code: 'MODEL_SELECTION_UNSUPPORTED',
-      },
-    };
+    const model = requested.model?.trim() || null;
+    const effort = requested.effort?.trim() || null;
+    // Hidden models count: the picker leaves them out, an explicit choice may
+    // still name one.
+    if (model && !findProviderModel(provider, model)) {
+      return {
+        ok: false,
+        rejection: {
+          error: `模型 ${model} 不在该模型配置的模型列表中，请刷新后重新选择`,
+          code: 'MODEL_NOT_IN_CONNECTION',
+        },
+      };
+    }
+    const runs = model ?? provider.anthropicModel;
+    if (effort && !modelTakesEffort(runs, effort)) {
+      return {
+        ok: false,
+        rejection: {
+          error: runs
+            ? `模型 ${runs} 不支持推理档位 ${effort}`
+            : '未指定模型时不能选择推理档位',
+          code: 'EFFORT_NOT_SUPPORTED',
+        },
+      };
+    }
+    return { ok: true, model, effort };
   }
   const { models, source } = listCodexModelsForProvider(provider);
   const choice = resolveCodexSessionChoice({

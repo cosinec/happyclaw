@@ -10,10 +10,8 @@ import {
   type McpContext,
   type WorkspaceMemorySnapshot,
 } from '../container/agent-runner/src/mcp-tools.js';
-import {
-  createSerializedAsyncTrigger,
-  loadWorkspaceMemoryTurnContext,
-} from '../container/agent-runner/src/workspace-memory-context.js';
+import { createSerializedAsyncTrigger } from '../container/agent-runner/src/workspace-memory-context.js';
+import { TurnNoteLedger } from '../container/agent-runner/src/turn-notes.js';
 import { signWorkspaceMemoryMutation } from '../container/agent-runner/src/workspace-memory-auth.js';
 import {
   createWorkspaceMemoryWriteGuard,
@@ -557,33 +555,104 @@ describe('Workspace Memory runtime boundary', () => {
     await expect(pending).resolves.toBeNull();
   });
 
-  test('warm turn fetches a fresh B snapshot and never reuses A snapshot', async () => {
-    const seenQueries: string[] = [];
-    const fetchSnapshot = async (
-      query: string,
-    ): Promise<WorkspaceMemorySnapshot> => {
-      seenQueries.push(query);
-      return {
-        workspaceJid: 'web:workspace',
-        storeRevision: seenQueries.length,
-        items: [],
-        renderedText: `memory-for-${query}`,
-        retrievalTrace: {
-          itemRevisions: [
-            { id: `memory-${query}`, revision: seenQueries.length },
-          ],
-          query,
-          generatedAt: '2026-07-28T00:00:00.000Z',
+  test('a snapshot asks for the changes since the revision the session holds', async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'workspace-memory-snapshot-'),
+    );
+    roots.push(root);
+    const pending = fetchWorkspaceMemorySnapshot(context(root), 'query C', {
+      timeoutMs: 2_000,
+      changedSince: 4,
+      heldIds: ['gone', 'kept'],
+    });
+    const request = await readMemoryRequest(root);
+    expect(request).toMatchObject({
+      operation: 'snapshot',
+      changedSince: 4,
+      heldIds: ['gone', 'kept'],
+    });
+    const base = {
+      workspaceJid: 'web:workspace',
+      storeRevision: 6,
+      items: [],
+      renderedText: '',
+      retrievalTrace: {
+        itemRevisions: [],
+        generatedAt: '2026-07-28T00:00:00.000Z',
+      },
+    };
+    acknowledge(root, request.requestId as string, {
+      snapshot: {
+        ...base,
+        changes: {
+          reset: false,
+          items: [{ id: 'gone', revision: 2, status: 'deleted' }],
         },
-      };
+      },
+    });
+    await expect(pending).resolves.toMatchObject({
+      changes: {
+        reset: false,
+        items: [{ id: 'gone', revision: 2, status: 'deleted' }],
+      },
+    });
+
+    // Malformed changes are dropped; the snapshot itself still holds.
+    const other = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'workspace-memory-snapshot-'),
+    );
+    roots.push(other);
+    const next = fetchWorkspaceMemorySnapshot(context(other), 'query D', {
+      timeoutMs: 2_000,
+    });
+    const second = await readMemoryRequest(other);
+    expect(second).not.toHaveProperty('changedSince');
+    expect(second).not.toHaveProperty('heldIds');
+    acknowledge(other, second.requestId as string, {
+      snapshot: { ...base, changes: { reset: 'no', items: [] } },
+    });
+    const parsed = await next;
+    expect(parsed).not.toBeNull();
+    expect(parsed).not.toHaveProperty('changes');
+  });
+
+  test("a warm turn carries B's snapshot and never A's again", () => {
+    const snapshot = (...ids: string[]): WorkspaceMemorySnapshot => ({
+      workspaceJid: 'web:workspace',
+      storeRevision: 3,
+      items: ids.map((id) => ({
+        id,
+        revision: 1,
+        kind: 'fact',
+        content: `memory-for-${id}`,
+      })),
+      renderedText: ids
+        .map((id) => `<memory id="${id}">memory-for-${id}</memory>`)
+        .join('\n'),
+      retrievalTrace: {
+        itemRevisions: ids.map((id) => ({ id, revision: 1 })),
+        generatedAt: '2026-07-28T00:00:00.000Z',
+      },
+    });
+    const ledger = new TurnNoteLedger();
+    ledger.beginQuery(undefined);
+    const turn = (uuid: string, memory: WorkspaceMemorySnapshot) => {
+      const notes = ledger.stage(uuid, {
+        memory,
+        ownerProfile: null,
+        channelContext: undefined,
+      });
+      ledger.observeAnswered([uuid]);
+      ledger.commitAnswered();
+      return notes.memory;
     };
 
-    const initial = await loadWorkspaceMemoryTurnContext('A', fetchSnapshot);
-    const warm = await loadWorkspaceMemoryTurnContext('B', fetchSnapshot);
-    expect(seenQueries).toEqual(['A', 'B']);
-    expect(initial.block).toContain('memory-for-A');
-    expect(warm.block).toContain('memory-for-B');
-    expect(warm.block).not.toContain('memory-for-A');
+    expect(turn('cold', snapshot('A'))).toContain('memory-for-A');
+    // Retrieved again for B's query, A is already in the conversation.
+    const warm = turn('warm', snapshot('A', 'B'));
+    expect(warm).toContain('memory-for-B');
+    expect(warm).not.toContain('memory-for-A');
+    expect(turn('again', snapshot('A', 'B'))).toBe('');
   });
 
   test('async warm-turn drains are serialized in trigger order', async () => {

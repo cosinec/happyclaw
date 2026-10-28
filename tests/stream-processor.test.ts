@@ -729,6 +729,41 @@ describe('StreamEventProcessor card-consumer data contracts', () => {
     });
   });
 
+  test("a sub-agent's AskUserQuestion streams no questions: the runner refuses it", () => {
+    const { processor, outputs } = makeProcessor();
+    processor.processStreamEvent({
+      type: 'stream_event',
+      parent_tool_use_id: 'task-parent-1',
+      event: {
+        type: 'content_block_start',
+        index: 0,
+        content_block: {
+          type: 'tool_use',
+          name: 'AskUserQuestion',
+          id: 'ask-sub-1',
+          input: {},
+        },
+      },
+    });
+    processor.processStreamEvent({
+      type: 'stream_event',
+      parent_tool_use_id: 'task-parent-1',
+      event: {
+        type: 'content_block_delta',
+        index: 0,
+        delta: {
+          type: 'input_json_delta',
+          partial_json: JSON.stringify({
+            questions: [{ question: '选哪个?', options: [{ label: 'A' }] }],
+          }),
+        },
+      },
+    });
+
+    const events = outputs.map((o) => o.streamEvent).filter(Boolean);
+    expect(events.some((e) => e?.toolInput)).toBe(false);
+  });
+
   test('sub-agent text_delta carries parentToolUseId so consumers can isolate it from the main card', () => {
     const { processor, outputs } = makeProcessor();
 
