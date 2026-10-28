@@ -122,12 +122,19 @@ const state = (over: Partial<StreamingState> = {}): StreamingState => ({
 });
 
 const mount = async (
-  streaming: StreamingState,
-  props: { settled?: boolean; isWaiting?: boolean } = {},
+  streaming: StreamingState | undefined,
+  props: {
+    settled?: boolean;
+    isWaiting?: boolean;
+    /** The input whose turn already ended while the run closes. */
+    answered?: string;
+    proactive?: boolean;
+  } = {},
 ) => {
+  const shown = streaming ? { [JID]: streaming } : {};
   useChatStore.setState({
-    streaming: props.settled ? {} : { [JID]: streaming },
-    settledStreaming: props.settled ? { [JID]: streaming } : {},
+    streaming: props.settled ? {} : shown,
+    settledStreaming: props.settled ? shown : {},
     activeRuns: props.settled
       ? {}
       : {
@@ -136,8 +143,20 @@ const mount = async (
             runId: 'run-1',
             startedAt: new Date(Date.now() - 20_000).toISOString(),
             phase: 'running',
+            ...(props.answered ? { answered: props.answered } : {}),
           },
         },
+    groups: props.proactive
+      ? {
+          [JID]: {
+            name: 'Proactive',
+            folder: 'proactive',
+            added_at: '2026-10-10T00:00:00.000Z',
+            interaction_mode: 'proactive',
+            process_visibility: 'activity',
+          } as never,
+        }
+      : {},
   });
   await act(async () => {
     root.render(
@@ -145,6 +164,7 @@ const mount = async (
         groupJid={JID}
         isWaiting={props.isWaiting ?? !props.settled}
         settled={props.settled}
+        interactionMode={props.proactive ? 'proactive' : 'assistant'}
       />,
     );
   });
@@ -278,60 +298,17 @@ describe('StreamingDisplay, the classic layout', () => {
 });
 
 describe('StreamingDisplay, a run whose turn already ended', () => {
-  // The reply is in the list and the run is only closing (the CLI exits a
-  // moment later): the live slot shows nothing, not "preparing" or a spinner.
-  const run = (answered?: string) => ({
-    [JID]: {
-      chatJid: JID,
-      runId: 'run-1',
-      startedAt: new Date(Date.now() - 5000).toISOString(),
-      phase: 'running' as const,
-      ...(answered ? { answered } : {}),
-    },
-  });
-
-  const show = async (
-    answered: string | undefined,
-    streaming?: StreamingState,
-    proactive = false,
-  ) => {
-    useChatStore.setState({
-      streaming: streaming ? { [JID]: streaming } : {},
-      activeRuns: run(answered),
-      groups: proactive
-        ? {
-            [JID]: {
-              name: 'Proactive',
-              folder: 'proactive',
-              added_at: '2026-10-10T00:00:00.000Z',
-              interaction_mode: 'proactive',
-              process_visibility: 'activity',
-            } as never,
-          }
-        : {},
-    });
-    await act(async () => {
-      root.render(
-        <StreamingDisplay
-          groupJid={JID}
-          isWaiting
-          interactionMode={proactive ? 'proactive' : 'assistant'}
-        />,
-      );
-    });
-  };
-
-  afterEach(() => useChatStore.setState({ groups: {} }));
-
+  // The reply is in the list and the run is only closing: the live slot
+  // shows nothing, not "preparing" or a spinner.
   it('shows nothing once the turn ended, though the run still closes', async () => {
-    await show(undefined);
+    await mount(undefined);
     expect(text()).toContain('正在准备回复');
-    await show('input-1');
+    await mount(undefined, { answered: 'input-1' });
     expect(container.innerHTML).toBe('');
   });
 
   it('shows the next turn of the same run as it streams', async () => {
-    await show('input-1', state({ inputTurnId: 'input-2' }));
+    await mount(state({ inputTurnId: 'input-2' }), { answered: 'input-1' });
     expect(card()?.getAttribute('data-mode')).toBe('live');
   });
 
@@ -339,7 +316,7 @@ describe('StreamingDisplay, a run whose turn already ended', () => {
     vi.useFakeTimers();
     try {
       // Before its reply: the spinner, and the panel of the work.
-      await show(undefined, state({ inputTurnId: 'input-1' }), true);
+      await mount(state({ inputTurnId: 'input-1' }), { proactive: true });
       expect(text()).toContain('正在处理…');
       expect(container.querySelector('[data-hc-process-panel]')).not.toBeNull();
 
@@ -351,7 +328,7 @@ describe('StreamingDisplay, a run whose turn already ended', () => {
         activeTools: [],
         traceEvents: [],
       });
-      await show('input-1', reasoning, true);
+      await mount(reasoning, { answered: 'input-1', proactive: true });
       expect(container.innerHTML).toBe('');
       await act(async () => {
         vi.advanceTimersByTime(2900);
@@ -366,7 +343,10 @@ describe('StreamingDisplay, a run whose turn already ended', () => {
       expect(container.querySelector('[data-hc-process-panel]')).toBeNull();
 
       // New work brings the panel back at once.
-      await show('input-1', state({ inputTurnId: 'input-1' }), true);
+      await mount(state({ inputTurnId: 'input-1' }), {
+        answered: 'input-1',
+        proactive: true,
+      });
       expect(container.querySelector('[data-hc-process-panel]')).not.toBeNull();
     } finally {
       vi.useRealTimers();

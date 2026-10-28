@@ -9820,18 +9820,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                     'host_turn_settlement_failed: Proactive output did not reach a durable terminal state',
                   );
                 }
-                commitCursor(
-                  resolveContainerOutputInputTurnId(result, lastProcessed.id),
+                const inputTurnId = resolveContainerOutputInputTurnId(
+                  result,
+                  lastProcessed.id,
                 );
+                commitCursor(inputTurnId);
                 finalizeProactiveOutputCoordinators(result);
-                persistProactiveTurnTrace(
-                  resolveContainerOutputInputTurnId(result, lastProcessed.id),
-                );
+                persistProactiveTurnTrace(inputTurnId);
                 broadcastStreamEvent(chatJid, {
                   eventType: 'status',
                   statusText: 'idle',
                   turnId: result.inputTurnId ?? lastProcessed.id,
-                  inputTurnId: result.inputTurnId ?? lastProcessed.id,
+                  inputTurnId,
                   sessionId: activeSessionId,
                 });
               }
@@ -18660,20 +18660,20 @@ async function processAgentConversation(
               'host_turn_settlement_failed: Proactive agent output did not reach a durable terminal state',
             );
           }
-          commitCursor(
-            resolveContainerOutputInputTurnId(output, lastProcessed.id),
+          const inputTurnId = resolveContainerOutputInputTurnId(
+            output,
+            lastProcessed.id,
           );
+          commitCursor(inputTurnId);
           finalizeProactiveAgentOutputCoordinators(output);
-          persistProactiveTurnTrace(
-            resolveContainerOutputInputTurnId(output, lastProcessed.id),
-          );
+          persistProactiveTurnTrace(inputTurnId);
           broadcastStreamEvent(
             chatJid,
             {
               eventType: 'status',
               statusText: 'idle',
               turnId: output.inputTurnId ?? lastProcessed.id,
-              inputTurnId: output.inputTurnId ?? lastProcessed.id,
+              inputTurnId,
               sessionId: currentAgentSessionId,
             },
             agentId,

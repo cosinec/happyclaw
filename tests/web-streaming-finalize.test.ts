@@ -54,6 +54,7 @@ vi.mock('../web/src/utils/messageSnapshotCache', () => ({
 
 const { useChatStore, MAX_STEPS_CACHE_CHARS } =
   await import('../web/src/stores/chat');
+const { hasVisibleWork } = await import('../web/src/lib/process-visibility');
 const initialState = useChatStore.getState();
 
 const JID = 'web:finalize';
@@ -1024,6 +1025,23 @@ describe('the steps cache across a finish', () => {
   });
 });
 
+/** What is on screen after each store update one call makes. */
+function updatesOf(fn: () => void, runtimeJid = JID, agentId?: string) {
+  const updates: Array<{ live: boolean; settled: boolean; ids: string[] }> = [];
+  const unsubscribe = useChatStore.subscribe((s) =>
+    updates.push({
+      live: agentId ? !!s.agentStreaming[agentId] : !!s.streaming[JID],
+      settled: !!s.settledStreaming[runtimeJid],
+      ids: (agentId ? s.agentMessages[agentId] : s.messages[JID]).map(
+        (m) => m.id,
+      ),
+    }),
+  );
+  fn();
+  unsubscribe();
+  return updates;
+}
+
 describe('a final that arrives while its run is still closing', () => {
   // A final can reach the Web while its run is still closing, before
   // run_finished. The live card of that very turn settles in place; anything
@@ -1063,24 +1081,6 @@ describe('a final that arrives while its run is still closing', () => {
     );
     // The last frame is still waiting for rAF when the final arrives.
     emit({ eventType: 'text_delta', text: answer, ...turn }, runId, agentId);
-  }
-
-  /** What is on screen after each store update one call makes. */
-  function updatesOf(fn: () => void, runtimeJid = JID, agentId?: string) {
-    const updates: Array<{ live: boolean; settled: boolean; ids: string[] }> =
-      [];
-    const unsubscribe = useChatStore.subscribe((s) =>
-      updates.push({
-        live: agentId ? !!s.agentStreaming[agentId] : !!s.streaming[JID],
-        settled: !!s.settledStreaming[runtimeJid],
-        ids: (agentId ? s.agentMessages[agentId] : s.messages[JID]).map(
-          (m) => m.id,
-        ),
-      }),
-    );
-    fn();
-    unsubscribe();
-    return updates;
   }
 
   it('settles a cold start in place, in one update, and run_finished brings nothing back', () => {
@@ -1342,6 +1342,25 @@ describe('a final that arrives while its run is still closing', () => {
     expect(state.activeRuns[JID]?.answered).toBe('input-r');
   });
 
+  it("keeps another turn's settled card when a refresh settles in place", async () => {
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    streamTurn('run-a', { turnId: 'p-a', inputTurnId: 'input-a' });
+    useChatStore.getState().handleRunFinished(JID, 'run-a');
+    useChatStore.getState().handleRunStarted(JID, 'run-b');
+    streamTurn('run-b', { turnId: 'p-b', inputTurnId: 'input-b' });
+    flushRaf();
+    apiGetMock.mockResolvedValueOnce({
+      messages: [finalMessage('final-b', '最终答案。', { turn_id: 'input-b' })],
+    });
+    await useChatStore.getState().refreshMessages(JID);
+
+    const state = useChatStore.getState();
+    expect(state.streaming[JID]).toBeUndefined();
+    expect(state.thinkingCache['final-b']).toBe('想一想 run-b');
+    // A's card waits for A's own final, as it would over the WebSocket.
+    expect(state.settledStreaming[JID]?.inputTurnId).toBe('input-a');
+  });
+
   it('settles a session reply in place on refresh too', async () => {
     useChatStore.setState({ agentWaiting: { [AGENT]: true } });
     useChatStore.getState().handleRunStarted(AGENT_JID, 'run-a');
@@ -1453,33 +1472,29 @@ describe("a proactive turn's reply", () => {
     );
   }
 
-  const visibleWork = async () => {
-    const { hasVisibleWork } =
-      await import('../web/src/lib/process-visibility');
-    return hasVisibleWork(useChatStore.getState().streaming[JID]);
-  };
+  const visibleWork = () =>
+    hasVisibleWork(useChatStore.getState().streaming[JID]);
 
-  it('gives the panel way to the reply, quiet while the turn decides it is done', async () => {
+  it('gives the panel way to the reply, quiet while the turn decides it is done', () => {
     proactive('activity');
     useChatStore.getState().handleRunStarted(JID, 'run-a');
     reason();
     tool('tool-1');
-    expect(await visibleWork()).toBe(true);
+    expect(visibleWork()).toBe(true);
 
-    const updates: boolean[] = [];
-    const unsubscribe = useChatStore.subscribe((s) =>
-      updates.push(!!s.streaming[JID]),
-    );
-    speak('utterance-1');
-    unsubscribe();
+    const updates = updatesOf(() => speak('utterance-1'));
     // The reply lands and the panel goes in the same update.
+    expect(updates.find((u) => u.ids.length > 0)).toEqual({
+      live: false,
+      settled: false,
+      ids: ['utterance-1'],
+    });
     let state = useChatStore.getState();
-    expect(state.messages[JID].map((m) => m.id)).toEqual(['utterance-1']);
     expect(state.activeRuns[JID]?.answered).toBe('input-1');
 
     // The closing request: reasoning only, so nothing is shown.
     reason();
-    expect(await visibleWork()).toBe(false);
+    expect(visibleWork()).toBe(false);
     state = useChatStore.getState();
     expect(state.activeRuns[JID]?.answered).toBe('input-1');
     expect(state.waiting[JID]).toBe(true);
@@ -1490,16 +1505,16 @@ describe("a proactive turn's reply", () => {
     expect(state.waiting[JID]).toBe(false);
   });
 
-  it('brings the panel back when the turn goes on working after its reply', async () => {
+  it('brings the panel back when the turn goes on working after its reply', () => {
     proactive('activity');
     useChatStore.getState().handleRunStarted(JID, 'run-a');
     reason();
     tool('tool-1');
     speak('utterance-1');
     reason();
-    expect(await visibleWork()).toBe(false);
+    expect(visibleWork()).toBe(false);
     tool('tool-2');
-    expect(await visibleWork()).toBe(true);
+    expect(visibleWork()).toBe(true);
     // Only the work since the reply: the earlier steps went with it.
     const steps = useChatStore.getState().streaming[JID]?.steps ?? [];
     expect(steps.filter((step) => step.kind === 'tool')).toHaveLength(1);
@@ -1551,16 +1566,8 @@ describe("a proactive turn's reply", () => {
   });
 
   it('gives a Runtime Session panel way to its reply too', () => {
+    proactive('activity');
     useChatStore.setState({
-      groups: {
-        [JID]: {
-          name: 'Proactive',
-          folder: 'proactive',
-          added_at: '2026-10-10T00:00:00.000Z',
-          interaction_mode: 'proactive',
-          process_visibility: 'activity',
-        } as never,
-      },
       agents: {
         [JID]: [
           {
@@ -1587,6 +1594,27 @@ describe("a proactive turn's reply", () => {
     expect(state.agentStreaming[AGENT]?.steps ?? []).toEqual([]);
     expect(state.activeRuns[AGENT_JID]?.answered).toBe('input-1');
     expect(state.agentWaiting[AGENT]).toBe(true);
+  });
+
+  it('gives the panel way to a reply that comes back by refresh', async () => {
+    proactive('activity');
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    reason();
+    tool('tool-1');
+    apiGetMock.mockResolvedValueOnce({
+      messages: [
+        finalMessage('utterance-r', '刚回完你上一条问题', {
+          source_kind: 'sdk_send_message',
+          turn_id: 'input-1',
+        }),
+      ],
+    });
+    await useChatStore.getState().refreshMessages(JID);
+
+    const state = useChatStore.getState();
+    expect(state.streaming[JID]).toBeUndefined();
+    expect(state.activeRuns[JID]?.answered).toBe('input-1');
+    expect(state.stepsCache['utterance-r']).toBeUndefined();
   });
 
   it('never makes an Assistant workspace send_message the reply', () => {

@@ -218,30 +218,36 @@ async function endRun(page: Page, runId: string) {
   });
 }
 
+/** The final reply of `runId`'s turn-1, as a new_message frame. */
+function finalFrame(runId: string) {
+  return {
+    chatJid: JID,
+    message: {
+      id: `final-${runId}`,
+      chat_jid: JID,
+      sender: 'happyclaw-agent',
+      sender_name: '测试智能体',
+      content: REPLY,
+      timestamp: new Date().toISOString(),
+      is_from_me: true,
+      source_kind: 'sdk_final',
+      finalization_reason: 'completed',
+      turn_id: 'turn-1',
+    },
+  };
+}
+
 /** run_finished, then the final message 60ms later, as the server sends them. */
 async function finishLikeServer(page: Page, runId: string) {
   await page.evaluate(
-    ({ runId, chatJid, content }) => {
+    ({ runId, frame }) => {
       window.__chatScroll.runFinished(runId);
-      window.setTimeout(() => {
-        window.__chatScroll.wsEmit('new_message', {
-          chatJid,
-          message: {
-            id: `final-${runId}`,
-            chat_jid: chatJid,
-            sender: 'happyclaw-agent',
-            sender_name: '测试智能体',
-            content,
-            timestamp: new Date().toISOString(),
-            is_from_me: true,
-            source_kind: 'sdk_final',
-            finalization_reason: 'completed',
-            turn_id: 'turn-1',
-          },
-        });
-      }, 60);
+      window.setTimeout(
+        () => window.__chatScroll.wsEmit('new_message', frame),
+        60,
+      );
     },
-    { runId, chatJid: JID, content: REPLY },
+    { runId, frame: finalFrame(runId) },
   );
   await page.waitForTimeout(1200);
   return page.evaluate(() => {
@@ -294,23 +300,8 @@ test('a final that lands while the run still closes takes the card away at once'
 
   // The final first, while the run is still closing.
   await page.evaluate(
-    ({ chatJid, content }) =>
-      window.__chatScroll.wsEmit('new_message', {
-        chatJid,
-        message: {
-          id: 'final-run-closing',
-          chat_jid: chatJid,
-          sender: 'happyclaw-agent',
-          sender_name: '测试智能体',
-          content,
-          timestamp: new Date().toISOString(),
-          is_from_me: true,
-          source_kind: 'sdk_final',
-          finalization_reason: 'completed',
-          turn_id: 'turn-1',
-        },
-      }),
-    { chatJid: JID, content: REPLY },
+    (frame) => window.__chatScroll.wsEmit('new_message', frame),
+    finalFrame('run-closing'),
   );
   await page.waitForTimeout(800);
 
@@ -327,12 +318,7 @@ test('a final that lands while the run still closes takes the card away at once'
   ).toContainText(/2 个工具.*2 段思考/);
 
   // run_finished brings nothing back.
-  await page.evaluate(() => window.__chatScroll.runFinished('run-closing'));
-  await page.waitForTimeout(600);
-  const frames = await page.evaluate(() => {
-    window.__sampling = false;
-    return window.__frames;
-  });
+  const frames = await endRun(page, 'run-closing');
   await expect(block).toHaveText('');
   await expect(stop).toHaveCount(0);
 

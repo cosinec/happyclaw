@@ -518,10 +518,11 @@ export function StreamingDisplay({
     (s) => !settled && !!s.stopRequests[runtimeJid],
   );
   // The run's turn ended in place (its reply is in the list) and the run is
-  // only closing: there is nothing to show until another turn of it streams.
-  const turnAnswered = useChatStore(
-    (s) => !settled && runTurnAnswered(s, runtimeJid),
+  // only closing: there is nothing to show until another input of it streams.
+  const answered = useChatStore((s) =>
+    settled ? undefined : s.activeRuns[runtimeJid]?.answered,
   );
+  const turnAnswered = runTurnAnswered(answered, streaming);
   // Fire-and-forget spawn Agents retain Assistant streaming semantics even in
   // a proactive Workspace. The Workspace contract applies to main and
   // conversation Agent loops.

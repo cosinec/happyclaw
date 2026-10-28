@@ -1149,13 +1149,36 @@ describe('settleInterruptedChannelTurn', () => {
   });
 });
 
+type Level = 'hidden' | 'activity' | 'full';
+
+/** A main Session run with the real Web projection, narration and traces. */
+function mainWith(name: string, mode: 'assistant' | 'proactive', level: Level) {
+  const run = mainRun(name);
+  const traceStore = vi.fn();
+  Object.assign(run.globals, {
+    interactionMode: mode,
+    projectSdkStreamEventForWeb,
+    shouldBroadcastTaskAgentStatus,
+    resolveProcessVisibility: () => (mode === 'proactive' ? level : 'full'),
+    commentaryRelay: new ProactiveCommentaryRelay(),
+    turnTraces: new TurnTraceTracker({
+      mode,
+      getVisibility: () => level,
+      store: traceStore,
+    }),
+  });
+  const broadcasts = () =>
+    (run.globals.broadcastStreamEvent as ReturnType<typeof vi.fn>).mock.calls
+      .map(([, event]) => event)
+      .filter((event) => event.eventType !== 'usage');
+  return { run, traceStore, broadcasts };
+}
+
 /**
  * Process visibility at the host: the real output handlers decide, per event,
  * what the Web is told and what an IM card is fed.
  */
 describe('process visibility in the real output handlers (behavioural)', () => {
-  type Level = 'hidden' | 'activity' | 'full';
-
   async function streamThrough(
     handler: (output: unknown) => Promise<unknown>,
     inputId: string,
@@ -1193,32 +1216,6 @@ describe('process visibility in the real output handlers (behavioural)', () => {
     { eventType: 'memory_recall', summary: '回忆' },
     { eventType: 'context_audit', title: 'Agent Context' },
   ];
-
-  function mainWith(
-    name: string,
-    mode: 'assistant' | 'proactive',
-    level: Level,
-  ) {
-    const run = mainRun(name);
-    const traceStore = vi.fn();
-    Object.assign(run.globals, {
-      interactionMode: mode,
-      projectSdkStreamEventForWeb,
-      shouldBroadcastTaskAgentStatus,
-      resolveProcessVisibility: () => (mode === 'proactive' ? level : 'full'),
-      commentaryRelay: new ProactiveCommentaryRelay(),
-      turnTraces: new TurnTraceTracker({
-        mode,
-        getVisibility: () => level,
-        store: traceStore,
-      }),
-    });
-    const broadcasts = () =>
-      (run.globals.broadcastStreamEvent as ReturnType<typeof vi.fn>).mock.calls
-        .map(([, event]) => event)
-        .filter((event) => event.eventType !== 'usage');
-    return { run, traceStore, broadcasts };
-  }
 
   test('a hidden proactive workspace shows the spinner and nothing of the process', async () => {
     const { run, broadcasts } = mainWith('vis-hidden', 'proactive', 'hidden');
@@ -1625,9 +1622,8 @@ describe('every Web stream frame names the input it answers (behavioural)', () =
   });
 
   function main(name: string) {
-    const run = mainRun(name);
+    const { run } = mainWith(name, 'assistant', 'hidden');
     Object.assign(run.globals, {
-      projectSdkStreamEventForWeb,
       resolveContainerOutputInputTurnId,
       rejectedChannelInputTurns: new Set<string>(),
     });
@@ -1639,42 +1635,41 @@ describe('every Web stream frame names the input it answers (behavioural)', () =
     return { run, finalTurnId };
   }
 
-  test('a cold start: the host input, which is also the presentation turn', async () => {
-    const { run, finalTurnId } = main('input-cold');
-    const output = frame(run.inputId, run.inputId);
-    await run.output(output);
-    const [[, event]] = sent(run.globals);
-    expect(event).toMatchObject({ turnId: run.inputId });
-    expect(event.inputTurnId).toBe(run.inputId);
-    expect(event.inputTurnId).toBe(finalTurnId(output));
-  });
-
-  test("a warm turn: the delivery it answers, not the Runner's own turn", async () => {
-    const { run, finalTurnId } = main('input-warm');
-    const output = frame('delivery-warm', 'presentation-warm');
+  // `host` stands for the input the host gave the Runner (`lastProcessed`).
+  test.each([
+    {
+      name: 'cold',
+      label:
+        'a cold start: the host input, which is also the presentation turn',
+      input: 'host',
+      turn: 'host',
+    },
+    {
+      name: 'warm',
+      label: "a warm turn: the delivery it answers, not the Runner's own turn",
+      input: 'delivery-warm',
+      turn: 'presentation-warm',
+    },
+    {
+      name: 'legacy',
+      label: 'an older Runner without an input id: the host input it was given',
+      input: undefined,
+      turn: 'presentation-legacy',
+    },
+  ])('$label', async ({ name, input, turn }) => {
+    const { run, finalTurnId } = main(`input-${name}`);
+    const host = (id: string | undefined) => (id === 'host' ? run.inputId : id);
+    const output = frame(host(input), host(turn)!);
     await run.output(output);
     const [[, event]] = sent(run.globals);
     // The presentation turn is left as it is; the input is added beside it.
-    expect(event.turnId).toBe('presentation-warm');
-    expect(event.inputTurnId).toBe('delivery-warm');
-    expect(event.inputTurnId).toBe(finalTurnId(output));
-  });
-
-  test('an older Runner without an input id: the host input it was given', async () => {
-    const { run, finalTurnId } = main('input-legacy');
-    const output = frame(undefined, 'presentation-legacy');
-    await run.output(output);
-    const [[, event]] = sent(run.globals);
-    expect(event.inputTurnId).toBe(run.inputId);
+    expect(event.turnId).toBe(host(turn));
+    expect(event.inputTurnId).toBe(host(input) ?? run.inputId);
     expect(event.inputTurnId).toBe(finalTurnId(output));
   });
 
   test("a proactive turn's narration names its input too", async () => {
-    const { run } = main('input-note');
-    Object.assign(run.globals, {
-      interactionMode: 'proactive',
-      resolveProcessVisibility: () => 'full',
-    });
+    const { run } = mainWith('input-note', 'proactive', 'full');
     for (const streamEvent of [
       { eventType: 'status', statusText: 'requesting', turnId: 'p-note' },
       { eventType: 'text_delta', text: '先看目录', turnId: 'p-note' },

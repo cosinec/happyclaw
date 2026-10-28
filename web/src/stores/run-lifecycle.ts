@@ -5,7 +5,7 @@ export interface ClientActiveRun {
   phase: 'preparing' | 'running';
   /**
    * The input whose turn already ended in place (its final, or a proactive
-   * turn's end): the run is still closing, and nothing of it is left to show.
+   * turn's reply) while the run is still closing.
    */
   answered?: string;
 }
@@ -42,6 +42,17 @@ export function applyRunFinished(
   const runs = { ...current };
   delete runs[chatJid];
   return { runs, applied: true };
+}
+
+/** The turn of `inputTurnId` ended in place while its run still closes. */
+export function markRunAnswered(
+  current: ClientActiveRuns,
+  chatJid: string,
+  inputTurnId: string | null | undefined,
+): ClientActiveRuns {
+  const run = current[chatJid];
+  if (!run || !inputTurnId || run.answered === inputTurnId) return current;
+  return { ...current, [chatJid]: { ...run, answered: inputTurnId } };
 }
 
 /** Reconnect snapshots are authoritative for server-owned query attempts. */
