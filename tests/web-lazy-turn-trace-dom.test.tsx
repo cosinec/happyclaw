@@ -395,8 +395,11 @@ describe('in the timeline layout', () => {
     // The row is gone; the card says what it did and is open on the steps.
     expect(rowButton('处理过程')).toBeUndefined();
     expect(card()?.getAttribute('data-mode')).toBe('settled');
-    expect(summary()?.textContent).toBe('已处理 8 秒 · 1 个工具 · 2 段思考');
+    expect(summary()?.textContent).toBe('已工作 8s');
     expect(summary()?.getAttribute('aria-expanded')).toBe('true');
+    expect(card()?.querySelector('[data-hc-work-counts]')?.textContent).toBe(
+      '1 个工具 · 2 段思考',
+    );
     const list = container?.querySelector('[aria-label="处理步骤"]');
     const rows = [...(list?.querySelectorAll('[role="listitem"]') ?? [])];
     expect(rows.map((row) => row.textContent).join('|')).toMatch(

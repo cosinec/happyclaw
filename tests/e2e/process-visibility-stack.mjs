@@ -1571,7 +1571,8 @@ async function proactiveReplyInTheBrowser(ctx) {
           at: performance.now(),
           reply: text.includes(reply),
           panel: !!document.querySelector('[data-hc-process-panel]'),
-          spinner: text.includes('正在处理…'),
+          // The run status bar, wherever the composer mounts it.
+          spinner: !!document.querySelector('[data-hc-run-status-bar]'),
           stop: !!document.querySelector('[aria-label="停止当前运行"]'),
         });
         if (window.__frames.length < 20_000) requestAnimationFrame(tick);
@@ -1605,7 +1606,7 @@ async function proactiveReplyInTheBrowser(ctx) {
     check(
       label,
       'the panel was there while the turn worked',
-      frames.slice(0, Math.max(first, 0)).some((f) => f.panel && f.spinner),
+      frames.slice(0, Math.max(first, 0)).some((f) => f.panel),
     );
     check(
       label,

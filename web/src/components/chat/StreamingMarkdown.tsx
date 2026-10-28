@@ -230,14 +230,12 @@ function MarkdownBlocks({
   groupJid,
   variant,
   streaming,
-  caret = false,
 }: {
   content: string;
   groupJid?: string;
   variant: 'chat' | 'docs';
   /** The last block is still open and re-parses as text arrives. */
   streaming: boolean;
-  caret?: boolean;
 }) {
   // Streamed text only grows: extend the previous split instead of
   // re-scanning a long reply on every render.
@@ -267,10 +265,7 @@ function MarkdownBlocks({
     `${groupJid ?? ''}\0${variant}`,
   );
   return (
-    <div
-      className={BLOCKS_CLASS}
-      data-streaming-caret={caret ? 'true' : undefined}
-    >
+    <div className={BLOCKS_CLASS}>
       {blocks.map((block, index) => (
         <MarkdownBlock
           // Blocks only ever append, so the index is a stable identity.
@@ -297,13 +292,10 @@ export function StreamingMarkdown({
   content,
   groupJid,
   variant = 'chat',
-  caret = false,
 }: {
   content: string;
   groupJid?: string;
   variant?: 'chat' | 'docs';
-  /** Show the trailing "still writing" indicator after the last text. */
-  caret?: boolean;
 }) {
   return (
     <MarkdownBlocks
@@ -311,7 +303,6 @@ export function StreamingMarkdown({
       groupJid={groupJid}
       variant={variant}
       streaming
-      caret={caret}
     />
   );
 }

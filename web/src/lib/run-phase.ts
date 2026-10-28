@@ -17,7 +17,7 @@ export function hasRunningTask(
   );
 }
 
-/** What a run is doing, as its status line tells (`describeRunPhase`). */
+/** What a run is doing, as the run status bar and the proactive panel tell. */
 export type RunPhaseKind =
   | 'stopping'
   | 'preparing'
@@ -62,7 +62,7 @@ const PHASE_TEXT: Record<Exclude<RunPhaseKind, 'tool'>, string> = {
   'sub-agent': '正在等待子 Agent',
 };
 
-/** Present-tense phase for the run status next to the agent name. */
+/** Present-tense phase as a sentence, for the proactive panel's line. */
 export function describeRunPhase(
   streaming: StreamingState | null | undefined,
   stopping: boolean,
@@ -74,6 +74,32 @@ export function describeRunPhase(
   const tool =
     [...tools].reverse().find((t) => !t.isNested) ?? tools[tools.length - 1];
   return describeToolActivity(tool.toolName);
+}
+
+/** The phases in the run status bar's pill (`describeRunStatus`). */
+const STATUS_TEXT: Record<Exclude<RunPhaseKind, 'tool'>, string> = {
+  stopping: '正在停止…',
+  preparing: '等待中',
+  compacting: '整理上下文',
+  thinking: '思考中',
+  'deep-thinking': '思考中',
+  replying: '正在回复',
+  hook: '执行 Hook',
+  'sub-agent': '等待子 Agent',
+};
+
+/**
+ * The phase in the run status bar's pill: the same phases, said short (the
+ * pill sits beside the composer, not in a sentence).
+ */
+export function describeRunStatus(
+  streaming: StreamingState | null | undefined,
+  stopping: boolean,
+): string {
+  const kind = runPhaseKind(streaming, stopping);
+  return kind === 'tool'
+    ? describeRunPhase(streaming, false).replace(/^正在/, '')
+    : STATUS_TEXT[kind];
 }
 
 export function formatRunElapsed(seconds: number): string {

@@ -66,6 +66,8 @@
   --color-success: var(--success);
   --color-success-bg: var(--success-bg);
   --color-warning: var(--warning);
+  /* A run at work (RunStatusBar), after cindy's status orange. */
+  --color-status-accent: var(--warning);
   --color-warning-bg: var(--warning-bg);
   --color-error: var(--error);
   --color-error-bg: var(--error-bg);
@@ -122,6 +124,9 @@
   --text-body--line-height: 1.25rem;
   --text-body-lg: 0.9375rem;
   --text-body-lg--line-height: 1.625rem;
+  /* A reply's text on a phone (17/26, cindy's reading size). */
+  --text-reply: 1.0625rem;
+  --text-reply--line-height: 1.625rem;
   --text-title-sm: 0.875rem;
   --text-title-sm--line-height: 1.25rem;
   --text-title-sm--font-weight: 600;
@@ -574,38 +579,6 @@ body {
 .shimmer {
   will-change: transform;
   animation-timing-function: steps(40);
-}
-
-/* A quiet dot after the last streamed text while a reply is being written
- * (StreamingMarkdown `caret`): the text itself shows where the reply goes on,
- * not only the status row. Pseudo-element, so it never enters a copy. */
-[data-streaming-caret='true']
-  > :last-child
-  > :is(p, h1, h2, h3, h4, h5, h6):last-child::after,
-[data-streaming-caret='true']
-  > :last-child
-  > [data-markdown-root]
-  > :is(p, h1, h2, h3, h4, h5, h6):last-child::after,
-[data-streaming-caret='true']
-  > :last-child
-  > :is(ul, ol):last-child
-  > li:last-child::after {
-  content: '';
-  display: inline-block;
-  width: 0.5em;
-  height: 0.5em;
-  margin-left: 0.3em;
-  border-radius: 9999px;
-  background: currentColor;
-  vertical-align: 0.05em;
-  opacity: 0.45;
-  animation: hc-caret-pulse 1.2s ease-in-out infinite;
-}
-
-@keyframes hc-caret-pulse {
-  50% {
-    opacity: 0.15;
-  }
 }
 
 /* Words of a streamed block fade in as they arrive (rehype-stream-fade).

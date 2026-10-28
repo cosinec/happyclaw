@@ -40,6 +40,8 @@ vi.mock('../src/utils/messageSnapshotCache', () => ({
 }));
 
 const { MessageBubble } = await import('../src/components/chat/MessageBubble');
+const { forgetProcessOpenChoices } =
+  await import('../src/lib/process-open-memory');
 const { useChatStore } = await import('../src/stores/chat');
 const initialState = useChatStore.getState();
 
@@ -211,6 +213,9 @@ const click = (el: Element | null | undefined) =>
 const card = () =>
   container.querySelector<HTMLElement>('[data-hc-process-card]');
 const summaryRow = () => card()?.querySelector('button') ?? null;
+/** What an opened card says it used. */
+const counts = () =>
+  container.querySelector('[data-hc-work-counts]')?.textContent ?? '';
 const text = () => container.textContent ?? '';
 const timeline = () =>
   container.querySelector('[role="list"][aria-label="处理步骤"]');
@@ -219,6 +224,8 @@ beforeEach(() => {
   apiGetMock.mockReset();
   apiPatchMock.mockReset();
   memory.clear();
+  // Every reply here is turn-1: what one test opened must not carry over.
+  forgetProcessOpenChoices();
   Object.defineProperty(window, 'localStorage', {
     configurable: true,
     value: {
@@ -262,9 +269,7 @@ describe('a finished reply that has its steps', () => {
     await mount();
 
     expect(card()?.getAttribute('data-mode')).toBe('settled');
-    expect(summaryRow()?.textContent).toBe(
-      '已处理 11 秒 · 2 个工具 · 2 段思考',
-    );
+    expect(summaryRow()?.textContent).toBe('已工作 11s');
     expect(summaryRow()?.getAttribute('aria-expanded')).toBe('false');
     // Collapsed: the steps are not listed, and the two old rows are not there.
     expect(timeline()).toBeNull();
@@ -291,9 +296,7 @@ describe('a finished reply that has its steps', () => {
     });
     await mount();
     expect(card()?.getAttribute('data-mode')).toBe('settled');
-    expect(summaryRow()?.textContent).toBe(
-      '已处理 11 秒 · 2 个工具 · 2 段思考',
-    );
+    expect(summaryRow()?.textContent).toBe('已工作 11s');
     expect(text()).not.toContain('执行详情');
     expect(text()).not.toMatch(/已思考 \d/);
   });
@@ -409,7 +412,7 @@ describe('a finished reply that has its steps', () => {
       duration: 9000,
     });
     await mount();
-    expect(summaryRow()?.textContent).toContain('9 秒');
+    expect(summaryRow()?.textContent).toBe('已工作 9s');
   });
 
   it('says how many steps were dropped from the front when it is opened', async () => {
@@ -524,7 +527,7 @@ describe('what a proactive workspace lets its owner see', () => {
     seed({ steps: secretSteps });
     await mount(reply({ source_kind: 'sdk_send_message' }));
     await click(summaryRow());
-    expect(summaryRow()?.textContent).toContain('1 个工具');
+    expect(counts()).toContain('1 个工具');
     expect(text()).not.toContain('内部推理标题');
     expect(text()).not.toContain('不该出现的推理');
     expect(text()).not.toContain('不该出现的过程说明');
@@ -806,7 +809,7 @@ describe('steps this tab rebuilt after joining the run part-way', () => {
   it('are shown as they are, and nothing is asked for until the card is opened', async () => {
     seed({ steps: REBUILT, provisional: true });
     await mount();
-    expect(summaryRow()?.textContent).toContain('1 个工具');
+    expect(summaryRow()?.textContent).toMatch(/^已工作/);
     expect(apiGetMock).not.toHaveBeenCalled();
   });
 
@@ -820,7 +823,7 @@ describe('steps this tab rebuilt after joining the run part-way', () => {
     expect(apiGetMock).toHaveBeenCalledWith(url);
     // Still open, and now the server's: two reasoning blocks, not one.
     expect(summaryRow()?.getAttribute('aria-expanded')).toBe('true');
-    expect(summaryRow()?.textContent).toContain('2 段思考');
+    expect(counts()).toContain('2 段思考');
     expect(text()).toContain('服务端的第二段');
     expect(text()).not.toContain('重建的思考');
     expect(useChatStore.getState().stepsCache.m1.provisional).toBeUndefined();
@@ -1026,5 +1029,132 @@ describe('what a tool returned, once the workspace is a proactive one', () => {
     await loadGroupsAs({ name: '改了名', interaction_mode: 'assistant' });
     expect(card()).toBeTruthy();
     expect(useChatStore.getState().stepsCache.m1).toBeDefined();
+  });
+});
+
+describe('a reply on a phone', () => {
+  // `phone:` is a media query: these pin what each layout is given.
+  const identityRow = () =>
+    container.querySelector<HTMLElement>('.group > div.h-6');
+
+  it('has no identity row in an Assistant workspace, and the time in its action row', async () => {
+    await act(async () => {
+      root.render(
+        <MessageBubble message={reply({ has_trace: false })} showTime />,
+      );
+    });
+    expect(identityRow()?.className).toContain('phone:hidden');
+    const actionTime = [...container.querySelectorAll('span')].find((el) =>
+      el.className.includes('phone:inline'),
+    );
+    expect(actionTime).toBeTruthy();
+  });
+
+  it("keeps a proactive workspace's identity row, with its time", async () => {
+    useChatStore.setState({
+      groups: {
+        [JID]: group({
+          interaction_mode: 'proactive',
+          process_visibility: 'activity',
+        }),
+      },
+    });
+    await mount(reply({ source_kind: 'sdk_send_message', has_trace: false }));
+    expect(identityRow()?.className).not.toContain('phone:hidden');
+  });
+
+  it('keeps the usage behind 详情 on a phone, inline elsewhere', async () => {
+    await mount(
+      reply({
+        has_trace: false,
+        token_usage: JSON.stringify({
+          inputTokens: 1200,
+          outputTokens: 300,
+          durationMs: 4200,
+        }),
+      }),
+    );
+    const inline = [...container.querySelectorAll('span')].find((el) =>
+      /tokens/.test(el.textContent ?? ''),
+    );
+    expect(inline?.className).toContain('phone:hidden');
+    const details = [...container.querySelectorAll('button')].find(
+      (el) => el.textContent === '详情',
+    );
+    expect(details?.className).toContain('phone:inline-flex');
+    expect(details?.className).toContain('hidden');
+  });
+
+  it('gives the user a raised bubble, and 「⋯」 below it', async () => {
+    await mount(
+      reply({
+        id: 'u1',
+        is_from_me: false,
+        sender: 'user-1',
+        source_kind: null,
+        content: '帮我看看',
+      }),
+    );
+    const bubble = container.querySelector('p')?.parentElement;
+    expect(bubble?.className).toContain('phone:bg-surface-raised');
+    expect(bubble?.className).toContain('phone:rounded-xl');
+    expect(bubble?.className).toContain('phone:p-3');
+    const menus = container.querySelectorAll('[aria-label="消息菜单"]');
+    expect(menus).toHaveLength(2);
+    // Beside the bubble elsewhere; below it, right-aligned, on a phone.
+    expect(menus[0].closest('.phone\\:hidden')).not.toBeNull();
+    expect(menus[1].closest('.phone\\:inline-flex')).not.toBeNull();
+  });
+});
+
+describe("a proactive reply whose turn's trace is on its way", () => {
+  const awaited = () =>
+    useChatStore.setState({
+      groups: {
+        [JID]: group({
+          interaction_mode: 'proactive',
+          process_visibility: 'activity',
+        }),
+      },
+      traceAwaited: { [JID]: 'm1' },
+    });
+  const row = () =>
+    [...container.querySelectorAll('button')].find((el) =>
+      el.textContent?.includes('处理过程'),
+    );
+
+  it('holds the row it will have, not yet to open', async () => {
+    awaited();
+    await mount(reply({ source_kind: 'sdk_send_message', has_trace: false }));
+    expect(row()).toBeTruthy();
+    expect(row()?.disabled).toBe(true);
+  });
+
+  it('opens the same row once the trace is stored', async () => {
+    awaited();
+    await mount(reply({ source_kind: 'sdk_send_message', has_trace: false }));
+    const held = row();
+    await mount(reply({ source_kind: 'sdk_send_message', has_trace: true }));
+    expect(row()).toBe(held);
+    expect(row()?.disabled).toBe(false);
+  });
+
+  it('holds nothing for another reply, or at the hidden level', async () => {
+    awaited();
+    await mount(
+      reply({ id: 'm2', source_kind: 'sdk_send_message', has_trace: false }),
+    );
+    expect(row()).toBeUndefined();
+    useChatStore.setState({
+      groups: {
+        [JID]: group({
+          interaction_mode: 'proactive',
+          process_visibility: 'hidden',
+        }),
+      },
+      traceAwaited: { [JID]: 'm1' },
+    });
+    await mount(reply({ source_kind: 'sdk_send_message', has_trace: false }));
+    expect(row()).toBeUndefined();
   });
 });
