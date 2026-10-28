@@ -10,7 +10,6 @@ import {
   type EffectiveSkillLayer,
   type ManagedSkillPolicy,
 } from './effective-skill-resolver.js';
-import { clearInheritedClaudeProviderEnv } from './runtime-config.js';
 
 /**
  * Native Claude Code capability directories that belong to the user config
@@ -168,16 +167,12 @@ function mergeSettings(
 }
 
 /**
- * Load the native user settings layer in Claude Code precedence order. The
- * caller applies HappyClaw's required env and effective MCP policy afterward,
- * so enabling native context cannot bypass those explicit controls.
- *
- * The bound connection owns every run's endpoint, credentials and model.
- * Claude Code applies a settings `env` over the process environment and calls
- * an `apiKeyHelper` for a key, so an administrator's own provider setup in
- * ~/.claude would send host_claude runs (and the connection's key) to another
- * endpoint or add a second credential. The layer keeps everything but the
- * provider variables HappyClaw sets itself, and turns any helper off.
+ * Load the complete native user settings layer in Claude Code precedence
+ * order. The caller applies HappyClaw's required env and effective MCP policy
+ * afterward, so enabling native context cannot bypass those explicit controls.
+ * Provider routing and credentials in it cannot redirect a run either: the
+ * Runner pins the bound connection in the flag settings layer, which
+ * outranks every settings file (container/agent-runner/src/provider-env-pin.ts).
  */
 export function loadHostClaudeSettings(
   plan: ClaudeContextPlan,
@@ -194,12 +189,7 @@ export function loadHostClaudeSettings(
       // directly. HappyClaw skips the invalid layer to keep startup usable.
     }
   }
-  if (isPlainRecord(merged.env)) {
-    const env = { ...merged.env } as Record<string, string | undefined>;
-    clearInheritedClaudeProviderEnv(env);
-    merged.env = env;
-  }
-  return { ...merged, apiKeyHelper: '' };
+  return merged;
 }
 
 function linkEntries(

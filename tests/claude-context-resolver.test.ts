@@ -134,26 +134,21 @@ describe('ClaudeContextResolver', () => {
     );
   });
 
-  test("native settings cannot replace the bound connection's endpoint or credentials", () => {
+  test("the admin's provider tuning stays in the native layer", () => {
+    // Routing and credentials are pinned by the Runner's flag settings
+    // (agent-runner-provider-pin), so the layer itself is loaded whole.
     const external = path.join(tmp, 'external-claude');
     writeFile(
       path.join(external, 'settings.json'),
       JSON.stringify({
         env: {
           ANTHROPIC_BASE_URL: 'https://admin-gateway.example',
-          ANTHROPIC_AUTH_TOKEN: 'admin-token',
-          ANTHROPIC_API_KEY: 'admin-key',
-          ANTHROPIC_MODEL: 'admin-model',
-          CLAUDE_CODE_OAUTH_TOKEN: 'admin-oauth',
-          HOST_BASE: '1',
+          API_TIMEOUT_MS: '600000',
+          ANTHROPIC_BETAS: 'context-1m-2025-08-07',
+          CLAUDE_CODE_MAX_CONTEXT_TOKENS: '400000',
         },
-        apiKeyHelper: '~/bin/admin-key.sh',
         model: 'opus',
       }),
-    );
-    writeFile(
-      path.join(external, 'settings.local.json'),
-      JSON.stringify({ env: { ANTHROPIC_CUSTOM_HEADERS: 'x-admin: 1' } }),
     );
     const plan = buildClaudeContextPlan({
       executionMode: 'host',
@@ -165,11 +160,13 @@ describe('ClaudeContextResolver', () => {
       groupSessionsDir: path.join(tmp, 'sessions', 'main', '.claude'),
       includeHostClaudeContext: true,
     });
-
-    // Everything else in the layer stays; an empty helper turns it off.
     expect(loadHostClaudeSettings(plan)).toEqual({
-      env: { HOST_BASE: '1' },
-      apiKeyHelper: '',
+      env: {
+        ANTHROPIC_BASE_URL: 'https://admin-gateway.example',
+        API_TIMEOUT_MS: '600000',
+        ANTHROPIC_BETAS: 'context-1m-2025-08-07',
+        CLAUDE_CODE_MAX_CONTEXT_TOKENS: '400000',
+      },
       model: 'opus',
     });
   });

@@ -120,6 +120,7 @@ import {
   buildClaudeRuntimeEnv,
   type ClaudeRuntimeEnv,
 } from './claude-runtime-env.js';
+import { pinBoundProviderSettings } from './provider-env-pin.js';
 import {
   resolveClaudeProviderRuntime,
   resolveClaudeQueryModelRuntime,
@@ -2926,7 +2927,13 @@ async function runQueryAttempt(
   // variables: they outrank the `autoCompactWindow` setting and apply to the
   // window Claude Code resolved for the model, 1M-native models included.
   const claudeRuntimeEnv: ClaudeRuntimeEnv = buildClaudeRuntimeEnv(process.env);
-  const flagSettings: Record<string, unknown> = {};
+  // The bound connection outranks every settings file the CLI reads (the
+  // admin's, the workspace's project and local ones), in host and container
+  // mode alike.
+  const flagSettings: Record<string, unknown> = pinBoundProviderSettings({
+    ...process.env,
+    ...claudeRuntimeEnv,
+  });
   const claudeMdExcludes = resolveManagedHostClaudeMdExcludes({
     executionMode: contextAuditBase.executionMode,
     runtimePolicy: containerInput.agentProfile?.runtimePolicy,
@@ -3061,9 +3068,7 @@ async function runQueryAttempt(
       // stream events: the card's sub-agent transcript advances block by block
       // instead of only filling in when the subagent completes.
       forwardSubagentText: true,
-      ...(Object.keys(flagSettings).length > 0
-        ? { settings: flagSettings as any }
-        : {}),
+      settings: flagSettings as any,
       ...(userPlugins && { plugins: userPlugins }),
       ...(activeAgentMcpPolicy.strictMcpConfig
         ? { strictMcpConfig: true }
