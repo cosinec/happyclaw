@@ -468,45 +468,41 @@ describe('layout', () => {
     expect(animate).toHaveBeenCalledTimes(1);
   });
 
-  test('the context ring has its own row under a docked card, off phones', async () => {
+  test('the context ring sits in the toolbar after the tools, off phones', async () => {
     const ring = <span data-testid="ring" />;
-    await render(
+    const view = (layout: 'docked' | 'centered') => (
       <MessageInput
         groupJid="web:g1"
         onSend={vi.fn()}
-        layout="docked"
+        onResetSession={vi.fn()}
+        onToggleTerminal={vi.fn()}
+        layout={layout}
         contextUsage={ring}
-      />,
+      />
     );
-    const footer = container!.querySelector('[data-composer-footer]')!;
-    expect(footer.querySelector('[data-testid="ring"]')).not.toBeNull();
-    // Kept at a fixed height whatever the ring renders, so it never moves
-    // the card.
-    expect(footer.classList).toContain('h-5');
-    expect(
-      container!.querySelector('[data-composer-card]')!.contains(footer),
-    ).toBe(false);
+    await render(view('docked'));
+    const tools = container!.querySelector(
+      '[data-composer-toolbar] [data-composer-tools]',
+    )!;
+    const slot = tools.querySelector('[data-composer-context]')!;
+    expect(slot.querySelector('[data-testid="ring"]')).not.toBeNull();
+    // After the tool buttons, at a width kept whatever the ring renders.
+    expect(slot.previousElementSibling?.getAttribute('aria-label')).toBe(
+      '终端',
+    );
+    expect(slot.classList).toContain('w-[3.25rem]');
+    expect(slot.classList).toContain('shrink-0');
+    // Nothing is left under the card (or the palette anchor around it).
+    const card = container!.querySelector('[data-composer-card]')!;
+    expect(card.nextElementSibling).toBeNull();
+    expect(card.parentElement!.nextElementSibling).toBeNull();
 
-    await render(
-      <MessageInput
-        groupJid="web:g1"
-        onSend={vi.fn()}
-        layout="centered"
-        contextUsage={ring}
-      />,
-    );
-    expect(container!.querySelector('[data-composer-footer]')).toBeNull();
+    await render(view('centered'));
+    expect(container!.querySelector('[data-testid="ring"]')).toBeNull();
 
     // Not mounted on a phone, so it does not load either.
     env.phoneWidth = true;
-    await render(
-      <MessageInput
-        groupJid="web:g1"
-        onSend={vi.fn()}
-        layout="docked"
-        contextUsage={ring}
-      />,
-    );
+    await render(view('docked'));
     expect(container!.querySelector('[data-testid="ring"]')).toBeNull();
   });
 

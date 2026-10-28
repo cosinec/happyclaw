@@ -42,6 +42,11 @@ interface ComposerToolbarProps {
   onToggleTerminal?: () => void;
   /** A narrow row: reset and terminal move into the + menu. */
   foldActions?: boolean;
+  /**
+   * The context ring, after the tools. Its slot keeps its width whether or
+   * not the ring has data, so the ring appearing moves nothing.
+   */
+  contextUsage?: ReactNode;
   modelSelector?: ReactNode;
   /** A stop control beside the primary action (a draft holds that spot). */
   showSideStop: boolean;
@@ -74,6 +79,7 @@ export function ComposerToolbar({
   onResetSession,
   onToggleTerminal,
   foldActions = false,
+  contextUsage,
   modelSelector,
   showSideStop,
   stopping,
@@ -160,6 +166,14 @@ export function ComposerToolbar({
             tooltipSide="top"
             className={COMPOSER_PILL}
           />
+        )}
+        {contextUsage && (
+          <div
+            data-composer-context
+            className="ml-1 flex h-[30px] w-[3.25rem] shrink-0 items-center"
+          >
+            {contextUsage}
+          </div>
         )}
       </div>
 

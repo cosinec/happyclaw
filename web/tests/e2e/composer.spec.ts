@@ -594,7 +594,7 @@ test.describe('desktop composer', () => {
     await expect(toolbar.locator('[title^="发送到"]')).toHaveCount(0);
   });
 
-  test('the context ring sits under the card on the right without moving it', async ({
+  test('the context ring sits in the toolbar after the tools, moving nothing', async ({
     page,
   }) => {
     // What the server holds; a push updates it as a finished turn would.
@@ -609,21 +609,52 @@ test.describe('desktop composer', () => {
       return route.fulfill({ json: server[session ?? 'main'] });
     });
     await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.setViewportSize({ width: 1280, height: 800 });
     await openHarness(page);
     const card = page.locator('[data-composer-card]');
-    const ring = page.locator('[data-context-usage]');
-    // Nothing ran yet: no ring, its row already in place.
-    await expect(page.locator('[data-composer-footer]')).toBeVisible();
+    const toolbar = page.locator('[data-composer-toolbar]');
+    const ring = toolbar.locator('[data-context-usage]');
+    const terminal = toolbar.getByRole('button', { name: '终端', exact: true });
+    const slot = page.locator('[data-composer-model-slot]');
+    const send = toolbar.getByRole('button', { name: '发送消息' });
+    const layout = () =>
+      Promise.all(
+        [card, terminal, slot, send].map((item) => item.boundingBox()),
+      );
+    // Nothing ran yet: no ring, its slot already in place.
+    await expect(toolbar.locator('[data-composer-context]')).toHaveCount(1);
     await expect(ring).toHaveCount(0);
-    const before = (await card.boundingBox())!;
+    const before = await layout();
+    // Nothing under the card but the bar's own bottom padding.
+    const composerBox = (await page
+      .locator('[data-hc-composer]')
+      .boundingBox())!;
+    expect(
+      composerBox.y + composerBox.height - (before[0]!.y + before[0]!.height),
+    ).toBeLessThanOrEqual(16);
 
     server.main = contextUsage(120_000, 1_000_000);
     await callHarness(page, 'pushContextUsage', server.main);
     await expect(ring).toHaveText('12%');
-    expect(await card.boundingBox()).toEqual(before);
-    const box = (await ring.boundingBox())!;
-    expect(box.y).toBeGreaterThanOrEqual(before.y + before.height);
-    expect(before.x + before.width - (box.x + box.width)).toBeLessThan(12);
+    expect(await layout()).toEqual(before);
+
+    // After the tools, centred on their 30px row, clear of the model slot.
+    for (const width of [1280, 640]) {
+      await page.setViewportSize({ width, height: 800 });
+      await expect(ring).toBeVisible();
+      const [, tool, model, sendBox] = await layout();
+      const box = (await ring.boundingBox())!;
+      expect(box.x, `${width}px`).toBeGreaterThanOrEqual(tool!.x + tool!.width);
+      expect(box.x + box.width, `${width}px`).toBeLessThanOrEqual(model!.x);
+      expect(model!.x + model!.width, `${width}px`).toBeLessThanOrEqual(
+        sendBox!.x + 0.5,
+      );
+      expect(
+        Math.abs(box.y + box.height / 2 - (tool!.y + tool!.height / 2)),
+        `${width}px`,
+      ).toBeLessThan(1.5);
+    }
+    await page.setViewportSize({ width: 1280, height: 800 });
     // Less motion: no fade, no sweep.
     expect(
       await ring.evaluate((element) => [
@@ -822,7 +853,7 @@ test.describe('touch composer', () => {
     await openHarness(page);
     await page.waitForLoadState('networkidle');
     // No room on the phone row: the ring is neither shown nor loaded.
-    await expect(page.locator('[data-composer-footer]')).toHaveCount(0);
+    await expect(page.locator('[data-composer-context]')).toHaveCount(0);
     expect(requests).toBe(0);
     const card = (await page.locator('[data-composer-card]').boundingBox())!;
     expect(card.height).toBeLessThan(110);
