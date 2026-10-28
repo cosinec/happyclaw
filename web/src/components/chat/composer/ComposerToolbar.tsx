@@ -94,7 +94,8 @@ export function ComposerToolbar({
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <IconButton
-                label="添加文件"
+                // Named after what the menu offers.
+                label={menuReset || menuTerminal ? '更多操作' : '添加文件'}
                 icon={<Plus />}
                 disabled={uploading && !menuReset && !menuTerminal}
                 tooltipSide="top"
@@ -104,7 +105,9 @@ export function ComposerToolbar({
             <DropdownMenuContent align="start" side="top" className="w-44">
               {canAttach && (
                 <>
-                  <DropdownMenuItem disabled={uploading} onClick={onPickImages}>
+                  {/* Images go inline with the message, not through the
+                      upload channel, so an upload in progress allows them. */}
+                  <DropdownMenuItem onClick={onPickImages}>
                     <ImageIcon />
                     添加图片
                   </DropdownMenuItem>

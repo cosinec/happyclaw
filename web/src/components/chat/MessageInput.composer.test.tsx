@@ -526,7 +526,7 @@ describe('layout', () => {
     expect(labels()).toEqual(['添加文件', '清除当前会话上下文', '终端']);
     env.narrow = true;
     await render(<MessageInput {...props} placeholder="b" />);
-    expect(labels()).toEqual(['添加文件']);
+    expect(labels()).toEqual(['更多操作']);
   });
 
   test('clearing the context shows a brush', async () => {
