@@ -4,9 +4,10 @@ import OSLog
 import SwiftUI
 
 /// Pushed onto the root NavigationStack. Web content is the stack's root;
-/// shell-owned screens (server address, diagnostics) push natively.
+/// shell-owned screens (servers, diagnostics) push natively.
 enum ShellRoute: Hashable {
   case serverSettings
+  case addServer
   case diagnostics
 }
 
@@ -14,7 +15,8 @@ enum ShellRoute: Hashable {
 /// SwiftUI chrome. Everything here runs on the main actor.
 @Observable
 final class ShellModel {
-  private(set) var server: ServerAddress?
+  private(set) var registry: ServerRegistry
+  var server: ServerAddress? { registry.active?.address }
   private(set) var session = BridgeSession() {
     didSet {
       if session.state != oldValue.state { Self.log.notice("bridge state → \(String(describing: self.session.state), privacy: .public)") }
@@ -40,13 +42,25 @@ final class ShellModel {
   let layout = LayoutBridge()
   let confirm = ConfirmBridge()
   let menu = MenuBridge()
-  @ObservationIgnored let web = WebController()
+  /// Replaced when the active server changes (its data store differs).
+  private(set) var web: WebController
   @ObservationIgnored private var handshakeTimer: Task<Void, Never>?
 
   private static let handshakeTimeout: Duration = .seconds(10)
   private static let log = Logger(subsystem: Bundle.main.bundleIdentifier ?? "HappyClaw", category: "bridge")
 
   init() {
+    let registry = ServerStore.load()
+    self.registry = registry
+    web = WebController(dataStore: registry.active?.dataStore ?? .shared)
+    DownloadHost.purge()
+    confirm.respond = { [weak self] id, confirmed in self?.send(.confirmResult(id: id, confirmed: confirmed)) }
+    menu.respond = { [weak self] id, selected in self?.send(.menuResult(id: id, selected: selected)) }
+    wire(web)
+    if let active = registry.active { show(active) }
+  }
+
+  private func wire(_ web: WebController) {
     web.channel.onMessage = { [weak self] result in self?.receive(result) }
     web.onDocumentCommitted = { [weak self] in self?.documentCommitted() }
     web.onLoadFailed = { [weak self] message in self?.loadFailed(message) }
@@ -55,7 +69,6 @@ final class ShellModel {
       self.discardRequests()
       self.apply(self.session.contentProcessLost())
     }
-    DownloadHost.purge()
     web.downloads.onFinished = { [weak self] file in
       guard let self else { return }
       Haptics.play(.success)
@@ -67,10 +80,6 @@ final class ShellModel {
       Haptics.play(.error)
       self?.downloadError = message
     }
-    confirm.respond = { [weak self] id, confirmed in self?.send(.confirmResult(id: id, confirmed: confirmed)) }
-    menu.respond = { [weak self] id, selected in self?.send(.menuResult(id: id, selected: selected)) }
-
-    if let saved = ServerStore.load() { connect(to: saved, persist: false) }
   }
 
   // MARK: Derived chrome state
@@ -111,13 +120,41 @@ final class ShellModel {
 
   // MARK: User intents
 
-  func connect(to address: ServerAddress, persist: Bool = true) {
-    if persist { ServerStore.save(address) }
-    server = address
+  /// First launch or 「添加服务器」: the address becomes the active server
+  /// (an already saved one is reused, keeping its login).
+  func connect(to address: ServerAddress) {
+    show(registry.activate(address))
+  }
+
+  func switchServer(to id: UUID) {
+    guard id != registry.activeID else {
+      path.removeAll()
+      return
+    }
+    registry.select(id)
+    if let active = registry.active { show(active) }
+  }
+
+  /// Forgets an inactive server and deletes its web data on this device.
+  func removeServer(_ id: UUID) {
+    guard let removed = registry.remove(id) else { return }
+    ServerStore.save(registry)
+    Task { await WebController.deleteData(of: removed) }
+  }
+
+  private func show(_ instance: ServerInstance) {
+    ServerStore.save(registry)
+    if web.dataStore != instance.dataStore {
+      discardRequests()
+      web = WebController(dataStore: instance.dataStore)
+      wire(web)
+    }
     path.removeAll()
+    sheet = nil
     resetDeclarations()
+    layout.reset()
     apply(session.retry())
-    web.load(address)
+    web.load(instance.address)
   }
 
   func retry() {

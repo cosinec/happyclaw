@@ -22,6 +22,15 @@ enum L10n {
   // Tabs / sheets
   static var tabMore: String { t("tab.more") }
   static var navBack: String { t("nav.back") }
+
+  // Servers
+  static var serverListTitle: String { t("server.list.title") }
+  static var serverListFooter: String { t("server.list.footer") }
+  static var serverAdd: String { t("server.add") }
+  static var serverCurrent: String { t("server.current") }
+  static var serverRemove: String { t("server.remove") }
+  static var serverRemoveTitle: String { t("server.remove.title") }
+  static var serverRemoveMessage: String { t("server.remove.message") }
   static var downloadFailed: String { t("download.failed") }
   static var moreTitle: String { t("more.title") }
   static var morePagesSection: String { t("more.pages") }

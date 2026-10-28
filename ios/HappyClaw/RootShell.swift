@@ -17,7 +17,9 @@ struct RootShell: View {
         .navigationDestination(for: ShellRoute.self) { route in
           switch route {
           case .serverSettings:
-            ConnectView(initial: model.server, isSettings: true) { model.connect(to: $0) }
+            ServerListView(model: model)
+          case .addServer:
+            ConnectView(initial: nil, isSettings: true) { model.connect(to: $0) }
           case .diagnostics:
             DiagnosticsView(model: model)
           }
@@ -67,6 +69,8 @@ struct RootShell: View {
         let screenBottom = proxy.frame(in: .global).maxY + proxy.safeAreaInsets.bottom
         ZStack(alignment: .bottom) {
           WebHostView(controller: model.web)
+            // A server switch brings a new web view; SwiftUI must embed it.
+            .id(ObjectIdentifier(model.web))
             .ignoresSafeArea()
 
           if let nav = model.navBar, !model.webModalOpen {

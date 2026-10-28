@@ -1,12 +1,16 @@
 import HappyClawCore
+import OSLog
 import SwiftUI
 import UIKit
 import WebKit
 
-/// Owns the single WKWebView for the app's lifetime. SwiftUI only embeds it
-/// (WebHostView), so tab switches and sheet presentations never recreate it.
+/// Owns the single WKWebView of the active server. SwiftUI only embeds it
+/// (WebHostView), so tab switches and sheet presentations never recreate it;
+/// switching servers replaces the whole controller, because a web view's
+/// data store is fixed at creation.
 final class WebController: NSObject {
   let webView: WKWebView
+  let dataStore: ServerInstance.DataStore
   let channel = BridgeChannel()
   let downloads = DownloadHost()
 
@@ -21,10 +25,12 @@ final class WebController: NSObject {
 
   private var processTerminations: [Date] = []
 
-  override init() {
+  init(dataStore: ServerInstance.DataStore) {
+    self.dataStore = dataStore
     let configuration = WKWebViewConfiguration()
-    // Persistent store: login cookies survive relaunches like in Safari.
-    configuration.websiteDataStore = .default()
+    // Persistent per-server store: logins survive relaunches like in Safari
+    // and never leak between servers.
+    configuration.websiteDataStore = Self.store(for: dataStore)
     configuration.allowsInlineMediaPlayback = true
     configuration.applicationNameForUserAgent = "HappyClawShell/\(ShellBuild.info.version)"
     configuration.userContentController.addUserScript(
@@ -47,6 +53,35 @@ final class WebController: NSObject {
     #if DEBUG
       webView.isInspectable = true
     #endif
+  }
+
+  private static func store(for dataStore: ServerInstance.DataStore) -> WKWebsiteDataStore {
+    switch dataStore {
+    case .shared: .default()
+    case let .isolated(id): WKWebsiteDataStore(forIdentifier: id)
+    }
+  }
+
+  /// Deletes a removed server's cookies, storage and caches on this device.
+  /// The server's own data is untouched.
+  static func deleteData(of instance: ServerInstance) async {
+    if let host = instance.address.url.host() {
+      for cookie in HTTPCookieStorage.shared.cookies ?? [] where cookie.domain.hasSuffix(host) {
+        HTTPCookieStorage.shared.deleteCookie(cookie)
+      }
+    }
+    switch instance.dataStore {
+    case .shared:
+      await WKWebsiteDataStore.default().removeData(
+        ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
+    case let .isolated(id):
+      do {
+        try await WKWebsiteDataStore.remove(forIdentifier: id)
+      } catch {
+        Logger(subsystem: Bundle.main.bundleIdentifier ?? "HappyClaw", category: "server")
+          .error("remove data store: \(error.localizedDescription, privacy: .public)")
+      }
+    }
   }
 
   func load(_ address: ServerAddress) {
