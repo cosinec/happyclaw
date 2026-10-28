@@ -12,6 +12,7 @@ import {
 import { ASSISTANT_NAME, DATA_DIR } from './config.js';
 import type { FeishuBrand } from './feishu-domain.js';
 import { logger } from './logger.js';
+import { HAPPYCLAW_OWNED_CLAUDE_ENV_KEYS } from './claude-provider-env.js';
 import { clearProviderQuotaObservation } from './provider-quota-observation.js';
 import {
   CODEX_GATEWAY_BASE_URL_PLACEHOLDER,
@@ -119,27 +120,18 @@ const RESERVED_CLAUDE_ENV_KEYS = new Set([
 
 const CLAUDE_ENDPOINT_KIND_ENV = 'HAPPYCLAW_CLAUDE_ENDPOINT_KIND';
 
-const INHERITED_CLAUDE_PROVIDER_ENV_KEYS = [
+/**
+ * Every Claude environment key HappyClaw owns (shared/claude-provider-env.ts),
+ * plus the provider tuning a connection sets and the endpoint kind marker.
+ */
+const INHERITED_CLAUDE_PROVIDER_ENV_KEYS: readonly string[] = [
+  ...HAPPYCLAW_OWNED_CLAUDE_ENV_KEYS,
   CLAUDE_ENDPOINT_KIND_ENV,
-  'CLAUDE_CODE_OAUTH_TOKEN',
-  'ANTHROPIC_BASE_URL',
-  'ANTHROPIC_AUTH_TOKEN',
-  'ANTHROPIC_API_KEY',
-  'ANTHROPIC_MODEL',
-  'ANTHROPIC_CUSTOM_HEADERS',
-  'ANTHROPIC_DEFAULT_OPUS_MODEL',
-  'ANTHROPIC_DEFAULT_SONNET_MODEL',
-  'ANTHROPIC_DEFAULT_HAIKU_MODEL',
-  'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
   'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
-  'CLAUDE_CODE_EFFORT_LEVEL',
   'CLAUDE_CODE_NO_FLICKER',
-  'CLAUDE_CODE_SUBAGENT_MODEL',
-  'CLAUDE_CODE_MAX_CONTEXT_TOKENS',
-  'ANTHROPIC_SMALL_FAST_MODEL',
   'ANTHROPIC_BETAS',
   'API_TIMEOUT_MS',
-] as const;
+];
 
 /**
  * Remove provider-owned values inherited from the HappyClaw parent process.

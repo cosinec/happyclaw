@@ -563,9 +563,14 @@ describe('Workspace Memory runtime boundary', () => {
     const pending = fetchWorkspaceMemorySnapshot(context(root), 'query C', {
       timeoutMs: 2_000,
       changedSince: 4,
+      heldIds: ['gone', 'kept'],
     });
     const request = await readMemoryRequest(root);
-    expect(request).toMatchObject({ operation: 'snapshot', changedSince: 4 });
+    expect(request).toMatchObject({
+      operation: 'snapshot',
+      changedSince: 4,
+      heldIds: ['gone', 'kept'],
+    });
     const base = {
       workspaceJid: 'web:workspace',
       storeRevision: 6,
@@ -602,6 +607,7 @@ describe('Workspace Memory runtime boundary', () => {
     });
     const second = await readMemoryRequest(other);
     expect(second).not.toHaveProperty('changedSince');
+    expect(second).not.toHaveProperty('heldIds');
     acknowledge(other, second.requestId as string, {
       snapshot: { ...base, changes: { reset: 'no', items: [] } },
     });

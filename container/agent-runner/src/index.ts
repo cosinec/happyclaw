@@ -1088,13 +1088,6 @@ const restoreTurnNotesAfterCompaction: HookCallback = async (input) => {
 };
 
 /**
- * Archive the full transcript to conversations/ before compaction.
- * Also flush any accumulated streaming text as a compact_partial message
- * so users don't lose the response that was being generated.
- * Finally, trim the JSONL file to remove already-compacted history.
- */
-/** Ends the main Agent's compaction phase; subagent compactions never start it. */
-/**
  * UserPromptSubmit runs for every streamed user message, before system/init,
  * and its additionalContext rides with that prompt (Claude CLI 2.1.296). A
  * prompt planned against another session gets its notes in full there.
@@ -1113,6 +1106,7 @@ const restoreTurnNotesOnSessionChange: HookCallback = async (input) => {
     : {};
 };
 
+/** Ends the main Agent's compaction phase; subagent compactions never start it. */
 function createPostCompactHook(onCompactionEnd: () => void): HookCallback {
   return async (input) => {
     if (!(input as PostCompactHookInput).agent_id) onCompactionEnd();
@@ -1120,6 +1114,12 @@ function createPostCompactHook(onCompactionEnd: () => void): HookCallback {
   };
 }
 
+/**
+ * Archive the full transcript to conversations/ before compaction.
+ * Also flush any accumulated streaming text as a compact_partial message
+ * so users don't lose the response that was being generated.
+ * Finally, trim the JSONL file to remove already-compacted history.
+ */
 function createPreCompactHook(deps: {
   emit: (output: ContainerOutput) => void;
   getFullText: () => string;
@@ -1889,9 +1889,11 @@ async function runQueryAttempt(
   activateCurrentInputTurn(coldInputTurnId);
   const [memorySnapshot, ownerProfile] = mcpToolsContext
     ? await Promise.all([
-        fetchWorkspaceMemorySnapshot(mcpToolsContext, prompt, {
-          changedSince: turnNotes.memoryChangedSince(),
-        }),
+        fetchWorkspaceMemorySnapshot(
+          mcpToolsContext,
+          prompt,
+          turnNotes.memoryHeld(),
+        ),
         fetchHappyClawOwnerProfileTurn(mcpToolsContext),
       ])
     : [null, null];
@@ -2592,9 +2594,11 @@ async function runQueryAttempt(
       );
       const [memorySnapshot, ownerProfile] = mcpToolsContext
         ? await Promise.all([
-            fetchWorkspaceMemorySnapshot(mcpToolsContext, msg.text, {
-              changedSince: turnNotes.memoryChangedSince(),
-            }),
+            fetchWorkspaceMemorySnapshot(
+              mcpToolsContext,
+              msg.text,
+              turnNotes.memoryHeld(),
+            ),
             fetchHappyClawOwnerProfileTurn(
               mcpToolsContext,
               8_000,

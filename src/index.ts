@@ -14114,6 +14114,8 @@ async function processTaskIpc(
     maxChars?: number;
     /** Snapshot: also report items changed after this store revision. */
     changedSince?: number;
+    /** Snapshot: the items the conversation holds, checked for expiry. */
+    heldIds?: string[];
     itemId?: string;
     title?: string;
     content?: string;
@@ -14576,6 +14578,7 @@ async function processTaskIpc(
               limit: data.limit,
               maxChars: data.maxChars,
               changedSince: data.changedSince,
+              heldIds: data.heldIds,
             });
             result = { snapshot };
             logger.info(

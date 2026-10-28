@@ -602,6 +602,8 @@ export function getWorkspaceMemorySnapshot(
      * items changed after it, so the conversation can withdraw what it holds.
      */
     changedSince?: number | null;
+    /** Items the conversation holds: report the ones expired by now. */
+    heldIds?: readonly string[] | null;
   },
 ) {
   const limit = clampLimit(input.limit, 12);
@@ -683,6 +685,9 @@ export function getWorkspaceMemorySnapshot(
       changes = listWorkspaceMemoryChangesSince({
         workspaceJid: input.workspaceJid,
         sinceRevision: input.changedSince,
+        heldIds: Array.isArray(input.heldIds)
+          ? input.heldIds.filter((id): id is string => typeof id === 'string')
+          : [],
       });
     } catch (error) {
       translateStoreError(error);

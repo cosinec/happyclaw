@@ -346,6 +346,32 @@ describe('buildClaudeEnvLines', () => {
     expect(official).toContain('HAPPYCLAW_CLAUDE_ENDPOINT_KIND=official');
   });
 
+  test('clears every routing and credential key a parent shell left, keeping network config', () => {
+    // HappyClaw started from an admin shell that runs its own Claude Code on Bedrock.
+    const env: Record<string, string | undefined> = {
+      CLAUDE_CODE_USE_BEDROCK: '1',
+      CLAUDE_CODE_USE_VERTEX: '1',
+      AWS_BEARER_TOKEN_BEDROCK: 'admin-bedrock',
+      ANTHROPIC_BEDROCK_BASE_URL: 'https://bedrock.admin.test',
+      ANTHROPIC_VERTEX_BASE_URL: 'https://vertex.admin.test',
+      ANTHROPIC_DEFAULT_FABLE_MODEL: 'admin-fable',
+      CLAUDE_CODE_OAUTH_REFRESH_TOKEN: 'admin-refresh',
+      ANTHROPIC_IDENTITY_TOKEN_FILE: '/home/admin/token',
+      CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '60',
+      HTTPS_PROXY: 'http://proxy.test:3128',
+      NODE_EXTRA_CA_CERTS: '/etc/ssl/corp.pem',
+      AWS_PROFILE: 'admin',
+      PATH: '/usr/bin',
+    };
+    clearInheritedClaudeProviderEnv(env);
+    expect(env).toEqual({
+      HTTPS_PROXY: 'http://proxy.test:3128',
+      NODE_EXTRA_CA_CERTS: '/etc/ssl/corp.pem',
+      AWS_PROFILE: 'admin',
+      PATH: '/usr/bin',
+    });
+  });
+
   test('clears inherited provider values before host-mode config is applied', () => {
     const env: Record<string, string | undefined> = {
       ANTHROPIC_BASE_URL: 'https://stale-proxy.test',

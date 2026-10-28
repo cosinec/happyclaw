@@ -463,9 +463,12 @@ describe('withdrawals and restores', () => {
   test('a forgotten memory is withdrawn, once', () => {
     const ledger = new TurnNoteLedger();
     ledger.beginQuery(undefined);
-    expect(ledger.memoryChangedSince()).toBeUndefined();
+    expect(ledger.memoryHeld()).toEqual({});
     turn(ledger, 'u1', sources({ memory: memory({ id: 'a' }, { id: 'b' }) }));
-    expect(ledger.memoryChangedSince()).toBe(7);
+    expect(ledger.memoryHeld()).toEqual({
+      changedSince: 7,
+      heldIds: ['a', 'b'],
+    });
     const next = turn(
       ledger,
       'u2',
@@ -481,7 +484,7 @@ describe('withdrawals and restores', () => {
       withdrawn: [{ id: 'a', status: 'deleted' }],
     });
     expect(next.memory).toContain('withdraws or replaces');
-    expect(ledger.memoryChangedSince()).toBe(9);
+    expect(ledger.memoryHeld()).toEqual({ changedSince: 9, heldIds: ['b'] });
     // Reported again (the host lists changes since the revision asked): no repeat.
     const again = turn(
       ledger,
@@ -543,20 +546,40 @@ describe('withdrawals and restores', () => {
     expect(replaced.withdrawnMemory).toEqual([]);
   });
 
-  test('a replaced store withdraws every memory held', () => {
+  test('a replaced store (or too many changes) withdraws what is held and resends the snapshot whole', () => {
     const ledger = new TurnNoteLedger();
     ledger.beginQuery(undefined);
     turn(ledger, 'u1', sources({ memory: memory({ id: 'a' }, { id: 'b' }) }));
     const next = turn(
       ledger,
       'u2',
-      sources({ memory: withChanges(memory({ id: 'c' }), [], true) }),
+      sources({
+        memory: withChanges(memory({ id: 'a' }, { id: 'c' }), [], true),
+      }),
     );
-    expect(next.withdrawnMemory).toEqual([
-      { id: 'a', status: 'deleted' },
-      { id: 'b', status: 'deleted' },
+    expect(next.withdrawnMemory).toEqual([{ id: 'b', status: 'deleted' }]);
+    expect(next.sentMemory).toEqual([
+      { id: 'a', revision: 1 },
+      { id: 'c', revision: 1 },
     ]);
-    expect(next.sentMemory).toEqual([{ id: 'c', revision: 1 }]);
+    expect(ledger.memoryHeld().heldIds).toEqual(['a', 'c']);
+  });
+
+  test('an expired memory is withdrawn', () => {
+    const ledger = new TurnNoteLedger();
+    ledger.beginQuery(undefined);
+    turn(ledger, 'u1', sources({ memory: memory({ id: 'a' }, { id: 'b' }) }));
+    const next = turn(
+      ledger,
+      'u2',
+      sources({
+        memory: withChanges(memory({ id: 'b' }), [
+          { id: 'a', revision: 1, status: 'expired' },
+        ]),
+      }),
+    );
+    expect(next.withdrawnMemory).toEqual([{ id: 'a', status: 'expired' }]);
+    expect(ledger.memoryHeld().heldIds).toEqual(['b']);
   });
 
   test("a compaction restores the continued turn's notes, not a queued one's", () => {

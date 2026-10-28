@@ -1,6 +1,10 @@
 import fs from 'fs';
 import path from 'path';
 
+import {
+  CLAUDE_CREDENTIAL_SETTING_KEYS,
+  HAPPYCLAW_OWNED_CLAUDE_ENV_KEYS,
+} from './claude-provider-env.js';
 import type { ClaudeContextAudit } from './stream-event.types.js';
 import type { RegisteredGroup } from './types.js';
 import {
@@ -167,12 +171,16 @@ function mergeSettings(
 }
 
 /**
- * Load the complete native user settings layer in Claude Code precedence
- * order. The caller applies HappyClaw's required env and effective MCP policy
+ * Load the native user settings layer in Claude Code precedence order. The
+ * caller applies HappyClaw's required env and effective MCP policy
  * afterward, so enabling native context cannot bypass those explicit controls.
- * Provider routing and credentials in it cannot redirect a run either: the
- * Runner pins the bound connection in the flag settings layer, which
- * outranks every settings file (container/agent-runner/src/provider-env-pin.ts).
+ *
+ * The layer is written into the session's settings.json, which a container
+ * mounts read-write for the agent, and it outranks the process environment.
+ * So everything HappyClaw owns leaves it: provider routing and credentials,
+ * the session's effort, compaction and context
+ * (HAPPYCLAW_OWNED_CLAUDE_ENV_KEYS), and the settings that run a command for
+ * credentials. Everything else (hooks, permissions, other env) stays.
  */
 export function loadHostClaudeSettings(
   plan: ClaudeContextPlan,
@@ -188,6 +196,12 @@ export function loadHostClaudeSettings(
       // Invalid native settings are surfaced by Claude Code when used
       // directly. HappyClaw skips the invalid layer to keep startup usable.
     }
+  }
+  for (const key of CLAUDE_CREDENTIAL_SETTING_KEYS) delete merged[key];
+  if (isPlainRecord(merged.env)) {
+    const env = { ...merged.env };
+    for (const key of HAPPYCLAW_OWNED_CLAUDE_ENV_KEYS) delete env[key];
+    merged.env = env;
   }
   return merged;
 }
