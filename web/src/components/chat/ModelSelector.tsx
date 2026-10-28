@@ -707,6 +707,13 @@ interface EffortMenuProps {
 function EffortMenu({ context, disabled, onPick }: EffortMenuProps) {
   const tooltip = useQuietTooltip();
   const level = context.effort ?? context.defaultEffort;
+  // The accessible name carries the level the control shows.
+  const current = context.effort
+    ? effortLabel(context.effort)
+    : context.defaultEffort
+      ? `默认（${effortLabel(context.defaultEffort)}）`
+      : '默认';
+  const name = `推理等级：${current}，选择推理等级`;
   return (
     <DropdownMenu onOpenChange={tooltip.onMenuOpenChange}>
       <Tooltip open={tooltip.open} onOpenChange={tooltip.onOpenChange}>
@@ -715,8 +722,8 @@ function EffortMenu({ context, disabled, onPick }: EffortMenuProps) {
             <button
               type="button"
               disabled={disabled}
-              aria-label="选择推理等级"
-              title={disabled ? '选择推理等级' : undefined}
+              aria-label={name}
+              title={disabled ? name : undefined}
               {...tooltip.triggerProps}
               className={cn(TRIGGER_CLASS, 'shrink-0')}
             >

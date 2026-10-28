@@ -226,7 +226,7 @@ const checked = () =>
 /** The reasoning effort control next to the model; null when hidden. */
 const effortTrigger = () =>
   container.querySelector<HTMLButtonElement>(
-    'button[aria-label="选择推理等级"]',
+    'button[aria-label$="选择推理等级"]',
   );
 async function openEffort() {
   await act(async () => {
@@ -1048,7 +1048,10 @@ describe('reasoning effort', () => {
     );
     await render(null);
     expect(effortTrigger()!.textContent).toBe('超高');
-    expect(effortTrigger()!.getAttribute('aria-label')).toBe('选择推理等级');
+    // Screen readers hear the level too.
+    expect(effortTrigger()!.getAttribute('aria-label')).toBe(
+      '推理等级：默认（超高），选择推理等级',
+    );
     await act(async () => effortTrigger()!.focus());
     expect(
       document.querySelector('[data-slot="tooltip-content"]')?.textContent,
@@ -1062,18 +1065,58 @@ describe('reasoning effort', () => {
     );
     await rerender();
     expect(effortTrigger()!.textContent).toBe('低');
+    expect(effortTrigger()!.getAttribute('aria-label')).toBe(
+      '推理等级：低，选择推理等级',
+    );
   });
 
-  test('reads 选择推理等级 when no default level is known', async () => {
-    const base = effortSelection({ selectedModelConfigId: 'official' });
+  test('reads 选择推理等级 when Claude Code picks the level itself', async () => {
+    // An official login with nothing configured: the server knows no level.
+    const base = effortSelection({
+      default: {
+        source: 'default',
+        modelConfigId: 'official',
+        enabledCount: 2,
+        model: 'opus',
+        effort: null,
+      },
+    });
     base.options[0].models![0] = {
       id: 'opus',
       hidden: false,
       efforts: ['low', 'high'],
     };
     mocks.get.mockResolvedValue(base);
+    mocks.put.mockResolvedValue({
+      ...base,
+      selectedModelConfigId: 'official',
+      selectedModel: 'opus',
+      selectedEffort: 'high',
+    });
     await render(null);
     expect(effortTrigger()!.textContent).toBe('选择推理等级');
+    expect(effortTrigger()!.getAttribute('aria-label')).toBe(
+      '推理等级：默认，选择推理等级',
+    );
+    await openEffort();
+    // 默认 stands alone, with no level after it.
+    expect(effortItems().map((item) => item.textContent)).toEqual([
+      '默认',
+      '低',
+      '高',
+    ]);
+    expect(effortItem('默认')?.getAttribute('aria-checked')).toBe('true');
+    await click(effortItem('高'));
+    expect(mocks.put).toHaveBeenCalledWith(
+      '/api/groups/web%3Aws/model-selection',
+      {
+        agentId: null,
+        modelConfigId: 'official',
+        model: 'opus',
+        effort: 'high',
+      },
+    );
+    expect(effortTrigger()!.textContent).toBe('高');
   });
 
   test('lists 默认 and the model levels, and saves a pick for the conversation', async () => {

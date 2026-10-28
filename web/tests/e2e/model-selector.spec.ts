@@ -95,7 +95,7 @@ const modelRow = (page: Page, model: string) =>
   page.locator(`[data-model-row][title="${model}"]`);
 /** The reasoning effort control next to the model. */
 const effortButton = (page: Page) =>
-  page.locator('[data-hc-composer] button[aria-label="选择推理等级"]');
+  page.locator('[data-hc-composer] button[aria-label$="选择推理等级"]');
 const effortItem = (page: Page, label: string) =>
   page.getByRole('menuitemradio', { name: label, exact: true });
 
