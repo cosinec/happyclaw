@@ -1,5 +1,5 @@
 import type { BridgeSession } from './session';
-import type { HapticStyle } from './protocol';
+import type { HapticStyle, MenuItemDeclaration } from './protocol';
 
 // Holder for the one bridge session of this page. Kept apart from install.ts
 // so stores (confirm, haptics) can ask "is the shell active?" without pulling
@@ -40,6 +40,34 @@ export async function nativeConfirm(
   });
   if (response?.type !== 'confirm.result') return false;
   return response.payload.confirmed;
+}
+
+/**
+ * Open a system menu from `anchor` (iOS shell with `anchoredmenu`).
+ * Resolves the chosen item id, null when dismissed, or undefined when the
+ * shell cannot do it, so the caller opens its web menu instead.
+ */
+export async function nativeAnchoredMenu(
+  anchor: Element,
+  items: MenuItemDeclaration[],
+  title: string | null = null,
+): Promise<string | null | undefined> {
+  const bridge = current;
+  if (!bridge?.supports('anchoredmenu')) return undefined;
+  const rect = anchor.getBoundingClientRect();
+  const response = await bridge.request('menu.request', {
+    title,
+    message: null,
+    items,
+    anchor: {
+      x: rect.left,
+      y: rect.top,
+      width: rect.width,
+      height: rect.height,
+    },
+  });
+  if (response?.type !== 'menu.result') return null;
+  return response.payload.selected;
 }
 
 /** Returns false when the shell is not active, so callers can fall back. */

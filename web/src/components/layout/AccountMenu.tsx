@@ -10,6 +10,8 @@ import {
   UserCog,
 } from 'lucide-react';
 import { useAuthStore } from '../../stores/auth';
+import { getNativeBridge, nativeAnchoredMenu } from '../../native/bridge';
+import type { MenuItemDeclaration } from '../../native/protocol';
 import { useTheme, type ColorScheme, type Theme } from '../../hooks/useTheme';
 import {
   DropdownMenuItem,
@@ -138,4 +140,90 @@ export function AccountMenuItems({
       </DropdownMenuItem>
     </>
   );
+}
+
+const THEME_SYMBOLS: Record<Theme, string> = {
+  light: 'sun.max',
+  dark: 'moon',
+  system: 'circle.lefthalf.filled',
+};
+
+/**
+ * The account menu as a native iOS menu, opened from the avatar. Returns an
+ * opener that reports whether the shell took over; when it returns false the
+ * caller opens the web dropdown as before. Items and actions match
+ * AccountMenuItems (inline appearance).
+ */
+export function useNativeAccountMenu({
+  onReportBug,
+  showUsage = false,
+}: Pick<AccountMenuItemsProps, 'onReportBug' | 'showUsage'>) {
+  const navigate = useNavigate();
+  const { theme, colorScheme, setTheme, setColorScheme } = useTheme();
+
+  return (anchor: Element, title: string | null = null): boolean => {
+    if (!getNativeBridge()?.supports('anchoredmenu')) return false;
+    const items: MenuItemDeclaration[] = [
+      {
+        id: 'account',
+        title: '',
+        inline: true,
+        children: [
+          { id: 'profile', title: '个人设置', symbol: 'person.crop.circle' },
+          ...(showUsage
+            ? [{ id: 'usage', title: '用量统计', symbol: 'chart.bar' }]
+            : []),
+        ],
+      },
+      {
+        id: 'theme',
+        title: '主题',
+        inline: true,
+        children: THEME_OPTIONS.map(({ value, label }) => ({
+          id: `theme:${value}`,
+          title: label,
+          symbol: THEME_SYMBOLS[value],
+          checked: theme === value,
+        })),
+      },
+      {
+        id: 'scheme',
+        title: '配色',
+        inline: true,
+        children: SCHEME_OPTIONS.map(({ value, label }) => ({
+          id: `scheme:${value}`,
+          title: label,
+          checked: colorScheme === value,
+        })),
+      },
+      {
+        id: 'support',
+        title: '',
+        inline: true,
+        children: [{ id: 'bug', title: '报告问题', symbol: 'ladybug' }],
+      },
+      {
+        id: 'logout',
+        title: '退出登录',
+        symbol: 'rectangle.portrait.and.arrow.right',
+        destructive: true,
+      },
+    ];
+
+    void nativeAnchoredMenu(anchor, items, title).then(async (selected) => {
+      if (!selected) return;
+      if (selected === 'profile') navigate('/settings?tab=profile');
+      else if (selected === 'usage') navigate('/usage');
+      else if (selected === 'bug') onReportBug();
+      else if (selected.startsWith('theme:'))
+        setTheme(selected.slice('theme:'.length) as Theme);
+      else if (selected.startsWith('scheme:'))
+        setColorScheme(selected.slice('scheme:'.length) as ColorScheme);
+      else if (selected === 'logout') {
+        await useAuthStore.getState().logout();
+        navigate('/login');
+      }
+    });
+    return true;
+  };
 }

@@ -43,8 +43,9 @@ private struct MenuBridgeModifier: ViewModifier {
       titleVisibility: bridge.pending?.request.title == nil ? .hidden : .visible,
       presenting: bridge.pending
     ) { pending in
-      ForEach(pending.request.items) { item in
-        Button(item.title, role: item.destructive == true ? .destructive : nil) {
+      // Sections and submenus are flattened; checked choices are marked.
+      ForEach(pending.request.items.flatMap(\.leaves)) { item in
+        Button(item.checked == true ? "✓ \(item.title)" : item.title, role: item.destructive == true ? .destructive : nil) {
           bridge.resolve(item.id)
         }
         .disabled(item.disabled == true)
