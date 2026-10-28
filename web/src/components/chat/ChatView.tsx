@@ -28,6 +28,7 @@ import {
 } from './composer/EmptyConversation';
 import { MessageInput, type MessageInputHandle } from './MessageInput';
 import { ModelSelector } from './ModelSelector';
+import { RunStatusBar } from './RunStatusBar';
 import { ConversationContextUsage } from './composer/ContextUsageRing';
 import { ActionSheet, type SheetAction } from './composer/ActionSheet';
 import {
@@ -577,6 +578,18 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       />
     ),
     [groupJid, composerAgentId, canModifyWorkspaceConfig],
+  );
+
+  // The run's phase and pace, shown above the composer while it runs.
+  const statusBar = useMemo(
+    () => (
+      <RunStatusBar
+        key={composerAgentId ?? 'main'}
+        groupJid={groupJid}
+        agentId={composerAgentId}
+      />
+    ),
+    [groupJid, composerAgentId],
   );
   const contextUsage = useMemo(
     () => <ConversationContextUsage jid={groupJid} agentId={composerAgentId} />,
@@ -1553,6 +1566,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
               onToggleTerminal={toggleTerminal}
               modelSelector={modelSelector}
               contextUsage={contextUsage}
+              statusBar={statusBar}
             />
             {heroCentered && (
               <div
