@@ -1381,3 +1381,196 @@ describe('reasoning effort', () => {
     expect(effortTrigger()!.textContent).toBe('超高');
   });
 });
+
+const PHONE = '(max-width: 1023px) and (pointer: coarse)';
+const NARROW = '(max-width: 639px)';
+
+/** Media queries answer as on a device matching `matching`. */
+function emulate(...matching: string[]) {
+  vi.spyOn(window, 'matchMedia').mockImplementation(
+    (query: string) =>
+      ({
+        matches: matching.includes(query),
+        media: query,
+        onchange: null,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        addListener: () => {},
+        removeListener: () => {},
+        dispatchEvent: () => false,
+      }) as MediaQueryList,
+  );
+}
+
+const pill = () =>
+  container.querySelector<HTMLButtonElement>('button[data-model-pill]');
+const sheet = () =>
+  document.querySelector<HTMLElement>('[data-slot="sheet-content"]');
+const segments = () =>
+  document.querySelector<HTMLFieldSetElement>('[data-effort-segments]');
+const segment = (text: string) =>
+  [...(segments()?.querySelectorAll('button') ?? [])].find(
+    (button) => button.textContent === text,
+  );
+
+describe('on a phone', () => {
+  beforeEach(() => emulate(PHONE, NARROW));
+  afterEach(() => vi.restoreAllMocks());
+
+  test('one 12px pill names the model and its level', async () => {
+    mocks.get.mockResolvedValue(
+      effortSelection({ selectedModelConfigId: 'official' }),
+    );
+    await render(null);
+    expect(trigger()).toBe(pill());
+    expect(effortTrigger()).toBeNull();
+    expect(pill()!.textContent).toBe('opus·超高');
+    expect(pill()!.getAttribute('aria-label')).toBe(
+      '模型：Claude 官方 · opus，推理等级：默认（超高）',
+    );
+    expect(pill()!.className).toContain('h-[34px]');
+    expect(pill()!.className).toContain('text-caption');
+    expect(pill()!.className).toContain('font-medium');
+    // The model name gives way first; the level stays whole.
+    const [name, level] = [...pill()!.querySelectorAll(':scope > span')].slice(
+      1,
+    );
+    expect(name.className).toContain('truncate');
+    expect(level.className).toContain('shrink-0');
+    expect(pill()!.querySelector('[data-vendor="anthropic"]')).not.toBeNull();
+
+    // A model without efforts: the model alone.
+    mocks.get.mockResolvedValue(
+      effortSelection({
+        selectedModelConfigId: 'official',
+        selectedModel: 'haiku',
+      }),
+    );
+    await rerender();
+    expect(pill()!.textContent).toBe('haiku');
+    expect(pill()!.getAttribute('aria-label')).toBe(
+      '模型：Claude 官方 · haiku',
+    );
+  });
+
+  test('a level Claude Code picks itself leaves the pill to the model', async () => {
+    const base = effortSelection({ selectedModelConfigId: 'official' });
+    base.options[0].models![0] = {
+      id: 'opus',
+      hidden: false,
+      efforts: ['low', 'high'],
+    };
+    mocks.get.mockResolvedValue(base);
+    await render(null);
+    expect(pill()!.textContent).toBe('opus');
+    expect(pill()!.getAttribute('aria-label')).toBe(
+      '模型：Claude 官方 · opus，推理等级：默认',
+    );
+  });
+
+  test('the sheet opens at half height with the levels under the model in use', async () => {
+    const pinned = effortSelection({ selectedModelConfigId: 'official' });
+    mocks.get.mockResolvedValue(pinned);
+    mocks.put.mockResolvedValue({ ...pinned, selectedEffort: 'high' });
+    await render(null);
+    await open();
+    expect(sheet()?.dataset.snap).toBe('half');
+    expect(segments()?.previousElementSibling).toBe(checked()[0]);
+    expect(checked()[0].getAttribute('title')).toBe('opus');
+    expect(
+      [...segments()!.querySelectorAll('button')].map(
+        (button) => button.textContent,
+      ),
+    ).toEqual(['默认', '低', '中', '高', '超高', '最高']);
+    expect(segment('默认')?.getAttribute('aria-pressed')).toBe('true');
+    expect(segments()!.textContent).toContain('推理等级 · 默认超高');
+    // Screen readers hear the default level with the group.
+    expect(
+      segments()!.querySelector('[role="group"]')?.getAttribute('aria-label'),
+    ).toBe('推理等级（默认超高）');
+    expect(document.body.textContent).not.toContain('推理等级在输入框旁调整');
+
+    await click(segment('高'));
+    expect(mocks.put).toHaveBeenCalledWith(
+      '/api/groups/web%3Aws/model-selection',
+      { agentId: null, modelConfigId: 'official', model: null, effort: 'high' },
+    );
+    // Applied in place: the sheet stays, the pick is pressed.
+    expect(sheet()).not.toBeNull();
+    expect(segment('高')?.getAttribute('aria-pressed')).toBe('true');
+    expect(pill()!.textContent).toBe('opus·高');
+  });
+
+  test('following the default, the levels sit under 默认 and name its model', async () => {
+    const following = effortSelection({
+      default: {
+        source: 'default',
+        modelConfigId: 'official',
+        enabledCount: 2,
+        model: 'opus',
+        effort: 'high',
+      },
+    });
+    mocks.get.mockResolvedValue(following);
+    mocks.put.mockResolvedValue(following);
+    await render(null);
+    await open();
+    expect(checked()[0].getAttribute('title')).toMatch(/^默认/);
+    expect(segments()?.previousElementSibling).toBe(checked()[0]);
+    await click(segment('最高'));
+    expect(mocks.put).toHaveBeenCalledWith(
+      '/api/groups/web%3Aws/model-selection',
+      {
+        agentId: null,
+        modelConfigId: 'official',
+        model: 'opus',
+        effort: 'max',
+      },
+    );
+  });
+
+  test('a model without efforts gets no row', async () => {
+    mocks.get.mockResolvedValue(
+      effortSelection({
+        selectedModelConfigId: 'official',
+        selectedModel: 'haiku',
+      }),
+    );
+    await render(null);
+    await open();
+    expect(checked()[0].getAttribute('title')).toBe('haiku');
+    expect(segments()).toBeNull();
+  });
+
+  test('the levels are read-only while the login must be redone', async () => {
+    mocks.get.mockResolvedValue(
+      chatGptSelection(
+        { selectedModelConfigId: 'chatgpt' },
+        { needsReauth: true },
+      ),
+    );
+    await render(null);
+    await open();
+    expect(segments()!.disabled).toBe(true);
+    await click(segment('高'));
+    expect(mocks.put).not.toHaveBeenCalled();
+  });
+});
+
+describe('in a narrow window with a mouse', () => {
+  beforeEach(() => emulate(NARROW));
+  afterEach(() => vi.restoreAllMocks());
+
+  test('keeps the separate effort control and opens the sheet without levels', async () => {
+    mocks.get.mockResolvedValue(
+      effortSelection({ selectedModelConfigId: 'official' }),
+    );
+    await render(null);
+    expect(pill()).toBeNull();
+    expect(effortTrigger()!.textContent).toBe('超高');
+    await open();
+    expect(sheet()?.dataset.snap).toBe('half');
+    expect(segments()).toBeNull();
+    expect(document.body.textContent).toContain('推理等级在输入框旁调整');
+  });
+});
