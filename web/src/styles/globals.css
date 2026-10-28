@@ -896,10 +896,32 @@ pre code.language-diff .hljs-deletion {
   }
 }
 
+/* Space the mobile bottom navigation takes from page content.
+   --mobile-nav-reserve: padding kept below scrolling content.
+   --mobile-nav-clearance: height the floating nav covers, for sticky footers.
+   Inside the iOS shell (data-native-chrome) the native tab bar replaces the
+   web capsule and reports its own height as --native-bottom. */
+:root {
+  --mobile-nav-reserve: calc(7rem + env(safe-area-inset-bottom, 0px));
+  --mobile-nav-clearance: calc(
+    max(24px, env(safe-area-inset-bottom, 0px)) + 58px
+  );
+}
+
+html[data-native-chrome='active'] {
+  --mobile-nav-reserve: calc(var(--native-bottom, 0px) + 1rem);
+  --mobile-nav-clearance: var(--native-bottom, 0px);
+}
+
+html[data-native-chrome='active'] .floating-nav-container,
+html[data-native-chrome='active'] .pwa-bottom-guard {
+  display: none;
+}
+
 /* Bottom padding for content above floating nav — accounts for safe area */
 /* A utility (not a bare class) so responsive overrides such as lg:pb-0 win. */
 @utility pb-nav-safe {
-  padding-bottom: calc(7rem + env(safe-area-inset-bottom, 0px));
+  padding-bottom: var(--mobile-nav-reserve);
 }
 
 /* Floating mobile navigation capsule */

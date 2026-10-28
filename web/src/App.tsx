@@ -340,7 +340,17 @@ export function createAppRouter(useHashRouter = shouldUseHashRouter()) {
 let appRouter: ReturnType<typeof createAppRouter> | undefined;
 
 function getAppRouter() {
-  appRouter ??= createAppRouter();
+  if (!appRouter) {
+    const router = createAppRouter();
+    appRouter = router;
+    // Only the iOS shell injects HappyClawNative; browsers and the PWA never
+    // download the bridge chunk.
+    if (typeof window !== 'undefined' && window.HappyClawNative) {
+      void import('./native/install').then((m) =>
+        m.installNativeBridge(router),
+      );
+    }
+  }
   return appRouter;
 }
 

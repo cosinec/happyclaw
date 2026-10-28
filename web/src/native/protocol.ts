@@ -1,0 +1,239 @@
+/**
+ * HappyClaw native shell bridge protocol (web side).
+ *
+ * The iOS shell (ios/HappyClaw) hosts this app in a WKWebView and takes over
+ * window chrome (tab bar, confirm dialogs, menus, haptics). Only declarations
+ * and results cross the bridge — never business data. Permission filtering
+ * stays on the web side: the shell renders whatever the web declares.
+ *
+ * Every message is an envelope `{ v, type, id?, payload }`. `v` is the
+ * negotiated protocol version (the hello carries the highest version the web
+ * speaks). Request/response pairs share `id`. The Swift mirror lives in
+ * ios/HappyClawCore/Sources/HappyClawCore/BridgeProtocol.swift and both sides
+ * must change together; ios/README.md documents the wire format.
+ */
+
+/** Versions this web build can speak, ascending. */
+export const SUPPORTED_PROTOCOL_VERSIONS = [1] as const;
+export const CURRENT_PROTOCOL_VERSION = 1;
+
+/** Name of the WKScriptMessageHandler the shell registers. */
+export const NATIVE_HANDLER_NAME = 'happyclaw';
+
+export type WebCapability =
+  | 'layout'
+  | 'tabs'
+  | 'confirm'
+  | 'menu'
+  | 'haptic'
+  | 'theme';
+
+export type NativeCapability = WebCapability | 'share' | 'picker' | 'passkey';
+
+export interface Insets {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
+/** A tab or overflow entry declared by the web. `symbol` is an SF Symbol. */
+export interface TabDeclaration {
+  id: string;
+  title: string;
+  symbol: string;
+  path: string;
+}
+
+export interface MenuItemDeclaration {
+  id: string;
+  title: string;
+  symbol?: string;
+  destructive?: boolean;
+  disabled?: boolean;
+}
+
+export type HapticStyle = 'light' | 'medium' | 'success' | 'warning' | 'error';
+
+export type BridgeErrorCode =
+  | 'invalid_message'
+  | 'unsupported_type'
+  | 'version_unsupported'
+  | 'not_ready'
+  | 'busy'
+  | 'cancelled';
+
+// ---------------------------------------------------------------------------
+// Web → Native
+
+export interface WebToNativePayloads {
+  'bridge.hello': {
+    versions: readonly number[];
+    capabilities: WebCapability[];
+    client: { name: 'happyclaw-web'; build: string };
+  };
+  'bridge.ready': { session: string };
+  'chrome.tabs': { tabs: TabDeclaration[]; more: TabDeclaration[] };
+  'route.changed': {
+    path: string;
+    title: string | null;
+    tabId: string | null;
+    canGoBack: boolean;
+    tabBar: boolean;
+  };
+  'theme.changed': { scheme: 'light' | 'dark' };
+  'confirm.request': {
+    title: string;
+    message: string;
+    confirmText: string;
+    cancelText: string;
+    destructive: boolean;
+  };
+  'menu.request': {
+    title: string | null;
+    message: string | null;
+    items: MenuItemDeclaration[];
+  };
+  haptic: { style: HapticStyle };
+  'bridge.error': { code: BridgeErrorCode; message: string; ref?: string };
+}
+
+// ---------------------------------------------------------------------------
+// Native → Web
+
+export interface NativeToWebPayloads {
+  'bridge.welcome': {
+    session: string;
+    version: number;
+    capabilities: NativeCapability[];
+    shell: { platform: 'ios'; version: string; build: string; os: string };
+  };
+  'bridge.reject': {
+    code: 'version_unsupported';
+    message: string;
+    supported: number[];
+  };
+  'layout.update': {
+    /** Area covered by native chrome, measured from the web view's edges. */
+    contentInsets: Insets;
+    /** System safe area of the web view (informational; env() also has it). */
+    safeArea: Insets;
+    /** Height of the software keyboard overlapping the web view. */
+    keyboard: number;
+  };
+  'nav.select': { tabId: string };
+  'nav.back': Record<string, never>;
+  'confirm.result': { confirmed: boolean };
+  'menu.result': { selected: string | null };
+  'app.lifecycle': { state: 'active' | 'inactive' | 'background' };
+  'bridge.error': { code: BridgeErrorCode; message: string; ref?: string };
+}
+
+export type WebToNativeType = keyof WebToNativePayloads;
+export type NativeToWebType = keyof NativeToWebPayloads;
+
+export interface Envelope<T extends string, P> {
+  v: number;
+  type: T;
+  id?: string;
+  payload: P;
+}
+
+export type WebToNativeMessage = {
+  [K in WebToNativeType]: Envelope<K, WebToNativePayloads[K]>;
+}[WebToNativeType];
+
+export type NativeToWebMessage = {
+  [K in NativeToWebType]: Envelope<K, NativeToWebPayloads[K]>;
+}[NativeToWebType];
+
+// ---------------------------------------------------------------------------
+// Validation of inbound (native → web) messages. The shell is trusted code,
+// but a version skew must surface as a bridge error, not a crash.
+
+type ParseResult =
+  | { ok: true; message: NativeToWebMessage }
+  | { ok: false; code: BridgeErrorCode; message: string; ref?: string };
+
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const isFiniteNumber = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value);
+
+function isInsets(value: unknown): value is Insets {
+  return (
+    isObject(value) &&
+    isFiniteNumber(value.top) &&
+    isFiniteNumber(value.right) &&
+    isFiniteNumber(value.bottom) &&
+    isFiniteNumber(value.left)
+  );
+}
+
+const payloadValidators: {
+  [K in NativeToWebType]: (payload: Record<string, unknown>) => boolean;
+} = {
+  'bridge.welcome': (p) =>
+    typeof p.session === 'string' &&
+    p.session.length > 0 &&
+    isFiniteNumber(p.version) &&
+    Array.isArray(p.capabilities) &&
+    isObject(p.shell),
+  'bridge.reject': (p) =>
+    typeof p.message === 'string' && Array.isArray(p.supported),
+  'layout.update': (p) =>
+    isInsets(p.contentInsets) &&
+    isInsets(p.safeArea) &&
+    isFiniteNumber(p.keyboard),
+  'nav.select': (p) => typeof p.tabId === 'string',
+  'nav.back': () => true,
+  'confirm.result': (p) => typeof p.confirmed === 'boolean',
+  'menu.result': (p) => p.selected === null || typeof p.selected === 'string',
+  'app.lifecycle': (p) =>
+    p.state === 'active' || p.state === 'inactive' || p.state === 'background',
+  'bridge.error': (p) =>
+    typeof p.code === 'string' && typeof p.message === 'string',
+};
+
+export function parseNativeMessage(raw: unknown): ParseResult {
+  if (!isObject(raw)) {
+    return { ok: false, code: 'invalid_message', message: 'not an object' };
+  }
+  const ref = typeof raw.id === 'string' ? raw.id : undefined;
+  if (!isFiniteNumber(raw.v) || typeof raw.type !== 'string') {
+    return {
+      ok: false,
+      code: 'invalid_message',
+      message: 'missing v/type',
+      ref,
+    };
+  }
+  if (!(SUPPORTED_PROTOCOL_VERSIONS as readonly number[]).includes(raw.v)) {
+    return {
+      ok: false,
+      code: 'version_unsupported',
+      message: `protocol v${raw.v} is not supported`,
+      ref,
+    };
+  }
+  const validate = payloadValidators[raw.type as NativeToWebType];
+  if (!validate) {
+    return {
+      ok: false,
+      code: 'unsupported_type',
+      message: `unknown type ${raw.type}`,
+      ref,
+    };
+  }
+  const payload = raw.payload ?? {};
+  if (!isObject(payload) || !validate(payload)) {
+    return {
+      ok: false,
+      code: 'invalid_message',
+      message: `invalid payload for ${raw.type}`,
+      ref,
+    };
+  }
+  return { ok: true, message: raw as unknown as NativeToWebMessage };
+}
