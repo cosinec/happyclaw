@@ -867,6 +867,769 @@ export function parseModelList(json: unknown): DiscoveredModel[] | null {
   return out;
 }
 
+// ─── Model capabilities ────────────────────────────────────────
+
+/**
+ * What a model can do, as far as the picker and the runtime care: its context
+ * window and the reasoning efforts it takes. Adapted from cindy's model
+ * registry (`catalog/model-registry.json` base models, Apache-2.0); only the
+ * efforts Claude Code accepts are kept. A model missing here takes no effort
+ * choice and gets the window its `[1m]` suffix implies.
+ */
+export interface ModelCapabilities {
+  id: string;
+  name?: string;
+  contextWindow?: number;
+  efforts?: readonly ModelEffort[];
+  defaultEffort?: ModelEffort;
+}
+
+interface ModelCapabilityEntry extends ModelCapabilities {
+  aliases: readonly string[];
+}
+
+const MODEL_CAPABILITY_ENTRIES: readonly ModelCapabilityEntry[] = [
+  {
+    id: 'openai/gpt-6.1-sol',
+    aliases: ['gpt-6.1-sol'],
+    name: 'GPT-6.1 Sol',
+    contextWindow: 1_050_000,
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'openai/gpt-6-sol',
+    aliases: ['gpt-6-sol'],
+    name: 'GPT-6 Sol',
+    contextWindow: 1_050_000,
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'openai/gpt-6-luna',
+    aliases: ['gpt-6-luna'],
+    name: 'GPT-6 Luna',
+    contextWindow: 1_050_000,
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'anthropic/claude-opus-5-5',
+    aliases: ['claude-opus-5-5'],
+    name: 'Opus 5.5',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'anthropic/claude-sonnet-5-5',
+    aliases: ['claude-sonnet-5-5'],
+    name: 'Sonnet 5.5',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'anthropic/claude-haiku-5-5',
+    aliases: ['claude-haiku-5-5'],
+    name: 'Haiku 5.5',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'openai/gpt-5.6-sol',
+    aliases: [
+      'codex/gpt-5.6-sol',
+      'gpt-5.6-sol',
+      'openai/gpt-5.6-sol[1m]',
+      'xd/codex-gpt-5.6-sol',
+      'xd/gpt-5.6-sol',
+    ],
+    name: 'GPT-5.6-Sol',
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'openai/gpt-5.6-terra',
+    aliases: [
+      'codex/gpt-5.6-terra',
+      'gpt-5.6-terra',
+      'xd/codex-gpt-5.6-terra',
+      'xd/gpt-5.6-terra',
+    ],
+    name: 'GPT-5.6-Terra',
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'openai/gpt-5.6-luna',
+    aliases: [
+      'codex/gpt-5.6-luna',
+      'gpt-5.6-luna',
+      'xd/codex-gpt-5.6-luna',
+      'xd/gpt-5.6-luna',
+    ],
+    name: 'GPT-5.6-Luna',
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'openai/gpt-5.5',
+    aliases: ['codex/gpt-5.5', 'gpt-5.5', 'xd/codex-gpt-5.5', 'xd/gpt-5.5'],
+    name: 'GPT-5.5',
+    efforts: ['low', 'medium', 'high', 'xhigh'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'openai/gpt-5.4',
+    aliases: ['codex/gpt-5.4', 'gpt-5.4', 'xd/codex-gpt-5.4', 'xd/gpt-5.4'],
+    name: 'GPT-5.4',
+    efforts: ['low', 'medium', 'high', 'xhigh'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'openai/gpt-5.4-mini',
+    aliases: [
+      'codex/gpt-5.4-mini',
+      'gpt-5.4-mini',
+      'xd/codex-gpt-5.4-mini',
+      'xd/gpt-5.4-mini',
+    ],
+    name: 'GPT-5.4-Mini',
+    efforts: ['low', 'medium', 'high', 'xhigh'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'openai/gpt-5.4-pro',
+    aliases: ['gpt-5.4-pro'],
+    name: 'GPT-5.4 Pro',
+    contextWindow: 1_050_000,
+    efforts: ['medium', 'high', 'xhigh'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'openai/gpt-5.5-pro',
+    aliases: ['gpt-5.5-pro'],
+    name: 'GPT-5.5 Pro',
+    contextWindow: 1_050_000,
+    efforts: ['medium', 'high', 'xhigh'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'openai/gpt-5.6-cyber',
+    aliases: ['gpt-5.6-cyber'],
+    name: 'GPT-5.6 Cyber',
+    contextWindow: 400_000,
+  },
+  {
+    id: 'openai/gpt-6-astra',
+    aliases: ['gpt-6-astra'],
+    name: 'GPT-6 Astra',
+    contextWindow: 1_050_000,
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'anthropic/claude-fable-5-1',
+    aliases: ['claude-fable-5-1'],
+    name: 'Fable 5.1',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'anthropic/claude-fable-5',
+    aliases: ['claude-fable-5'],
+    name: 'Fable 5',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'anthropic/claude-mythos-5',
+    aliases: ['claude-mythos-5'],
+    name: 'Mythos 5',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'anthropic/claude-opus-5',
+    aliases: ['claude-opus-5'],
+    name: 'Opus 5',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'anthropic/claude-opus-4-8',
+    aliases: ['claude-opus-4-8'],
+    name: 'Opus 4.8',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'anthropic/claude-opus-4-7',
+    aliases: ['claude-opus-4-7'],
+    name: 'Opus 4.7',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'anthropic/claude-opus-4-6',
+    aliases: ['claude-opus-4-6'],
+    name: 'Opus 4.6',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'medium', 'high', 'max'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'anthropic/claude-opus-4-5',
+    aliases: ['claude-opus-4-5'],
+    name: 'Opus 4.5',
+    contextWindow: 200_000,
+    efforts: ['low', 'medium', 'high'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'anthropic/claude-sonnet-5',
+    aliases: ['claude-sonnet-5'],
+    name: 'Sonnet 5',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'anthropic/claude-sonnet-4-6',
+    aliases: ['claude-sonnet-4-6'],
+    name: 'Sonnet 4.6',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'medium', 'high', 'max'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'anthropic/claude-sonnet-4-5',
+    aliases: ['claude-sonnet-4-5'],
+    name: 'Sonnet 4.5',
+    contextWindow: 200_000,
+  },
+  {
+    id: 'anthropic/claude-haiku-4-5',
+    aliases: ['claude-haiku-4-5'],
+    name: 'Haiku 4.5',
+    contextWindow: 200_000,
+  },
+  {
+    id: 'xai/grok-4.7',
+    aliases: ['grok-4.7'],
+    name: 'Grok 4.7',
+    contextWindow: 500_000,
+    efforts: ['low', 'medium', 'high', 'xhigh'],
+    defaultEffort: 'high',
+  },
+  {
+    id: 'xai/grok-4.7-build-fast',
+    aliases: ['grok-4.7-build-fast'],
+    name: 'Grok 4.7 Fast',
+    contextWindow: 500_000,
+    efforts: ['low', 'medium', 'high', 'xhigh'],
+    defaultEffort: 'high',
+  },
+  {
+    id: 'xai/grok-4.6',
+    aliases: ['grok-4.6'],
+    name: 'Grok 4.6',
+    contextWindow: 500_000,
+    efforts: ['low', 'medium', 'high', 'xhigh'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'xai/grok-4.5',
+    aliases: ['grok-4.5'],
+    name: 'Grok 4.5',
+    contextWindow: 500_000,
+    efforts: ['low', 'medium', 'high'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'xai/grok-4.3',
+    aliases: ['grok-4.3'],
+    name: 'Grok 4.3',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'medium', 'high'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'xai/grok-build-0.1',
+    aliases: ['grok-build-0.1'],
+    name: 'Grok Build 0.1',
+    contextWindow: 256_000,
+  },
+  {
+    id: 'xai/grok-4.20-multi-agent-0309',
+    aliases: ['grok-4.20-multi-agent-0309'],
+    name: 'Grok 4.20 Multi-Agent',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'medium', 'high', 'xhigh'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'xai/grok-4.20-0309-reasoning',
+    aliases: ['grok-4.20-0309-reasoning'],
+    name: 'Grok 4.20 Reasoning',
+    contextWindow: 1_000_000,
+  },
+  {
+    id: 'xai/grok-4.20-0309-non-reasoning',
+    aliases: ['grok-4.20-0309-non-reasoning'],
+    name: 'Grok 4.20 Non-Reasoning',
+    contextWindow: 1_000_000,
+  },
+  {
+    id: 'xai/grok-4.20',
+    aliases: ['grok-4.20'],
+    name: 'Grok 4.20 Legacy Alias',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'medium', 'high', 'xhigh'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'xai/grok-code-fast',
+    aliases: ['grok-code-fast'],
+    name: 'Grok Code Fast (Deprecated)',
+    contextWindow: 256_000,
+  },
+  {
+    id: 'google/gemini-4-argon',
+    aliases: ['gemini-4-argon'],
+    name: 'Gemini 4 Argon',
+    contextWindow: 1_048_576,
+    efforts: ['low', 'medium', 'high'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'google/gemini-3.7-flash',
+    aliases: ['gemini-3.7-flash'],
+    name: 'Gemini 3.7 Flash',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'medium', 'high'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'google/gemini-3.6-flash',
+    aliases: ['gemini-3.6-flash'],
+    name: 'Gemini 3.6 Flash',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'medium', 'high'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'google/gemini-3.5-flash',
+    aliases: ['gemini-3.5-flash'],
+    name: 'Gemini 3.5 Flash',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'medium', 'high'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'google/gemini-3.1-pro-preview',
+    aliases: ['gemini-3.1-pro-preview'],
+    name: 'Gemini 3.1 Pro',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'medium', 'high'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'google/gemini-3-flash-preview',
+    aliases: ['gemini-3-flash-preview'],
+    name: 'Gemini 3 Flash',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'medium', 'high'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'google/gemini-3.5-flash-lite',
+    aliases: ['gemini-3.5-flash-lite'],
+    name: 'Gemini 3.5 Flash-Lite',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'medium', 'high'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'google/gemini-3.1-flash-lite',
+    aliases: ['gemini-3.1-flash-lite'],
+    name: 'Gemini 3.1 Flash-Lite',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'medium', 'high'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'bytedance-seed/seed-2.1-pro',
+    aliases: ['seed-2.1-pro'],
+    name: 'Seed 2.1 Pro',
+    contextWindow: 256_000,
+    efforts: ['low', 'medium', 'high'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'qwen/qwen3.8-max',
+    aliases: ['qwen3.8-max'],
+    name: 'Qwen 3.8 Max',
+    contextWindow: 983_616,
+    efforts: ['low', 'medium', 'high', 'xhigh'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'qwen/qwen3.8-max-preview',
+    aliases: ['qwen3.8-max-preview'],
+    name: 'Qwen 3.8 Max Preview',
+    contextWindow: 983_616,
+    efforts: ['low', 'high', 'xhigh'],
+    defaultEffort: 'high',
+  },
+  {
+    id: 'qwen/qwen3.7-max',
+    aliases: ['qwen3.7-max'],
+    name: 'Qwen 3.7 Max',
+    contextWindow: 992_000,
+  },
+  {
+    id: 'moonshotai/kimi-k2.7-code',
+    aliases: ['kimi-k2.7-code'],
+    name: 'Kimi K2.7 Code',
+    contextWindow: 262_144,
+  },
+  {
+    id: 'moonshotai/kimi-k2.7-code-highspeed',
+    aliases: ['kimi-k2.7-code-highspeed'],
+    name: 'Kimi K2.7 Code Highspeed',
+    contextWindow: 262_144,
+  },
+  {
+    id: 'moonshotai/kimi-k2.6',
+    aliases: ['kimi-k2.6'],
+    name: 'Kimi K2.6',
+    contextWindow: 262_144,
+  },
+  {
+    id: 'z-ai/glm-5.1',
+    aliases: ['glm-5.1'],
+    name: 'GLM-5.1',
+    contextWindow: 200_000,
+  },
+  {
+    id: 'z-ai/glm-5.2',
+    aliases: ['glm-5.2'],
+    name: 'GLM-5.2',
+    contextWindow: 1_000_000,
+    efforts: ['high', 'max'],
+    defaultEffort: 'high',
+  },
+  {
+    id: 'z-ai/glm-5.3',
+    aliases: ['glm-5.3'],
+    name: 'GLM-5.3',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'high', 'max'],
+    defaultEffort: 'high',
+  },
+  {
+    id: 'z-ai/glm-5.3-flash',
+    aliases: ['glm-5.3-flash'],
+    name: 'GLM-5.3-Flash',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'high', 'max'],
+    defaultEffort: 'high',
+  },
+  {
+    id: 'xd/z-ai-glm-5.3-flash',
+    aliases: ['z-ai-glm-5.3-flash'],
+    name: 'GLM-5.3-Flash',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'high', 'max'],
+    defaultEffort: 'high',
+  },
+  {
+    id: 'deepseek/deepseek-v4-pro',
+    aliases: ['deepseek-v4-pro'],
+    name: 'DeepSeek V4 Pro',
+    contextWindow: 1_048_576,
+    efforts: ['low', 'high', 'max'],
+    defaultEffort: 'high',
+  },
+  {
+    id: 'deepseek/deepseek-v4-flash',
+    aliases: ['deepseek-v4-flash'],
+    name: 'DeepSeek V4 Flash',
+    contextWindow: 1_048_576,
+    efforts: ['low', 'high', 'max'],
+    defaultEffort: 'high',
+  },
+  {
+    id: 'openai/gpt-5.4-nano',
+    aliases: ['gpt-5.4-nano'],
+    name: 'GPT-5.4-Nano',
+    contextWindow: 400_000,
+    efforts: ['low', 'medium', 'high', 'xhigh'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'minimax/minimax-m3',
+    aliases: ['minimax-m3'],
+    name: 'MiniMax M3',
+    contextWindow: 1_000_000,
+  },
+  {
+    id: 'minimax/minimax-m2.7',
+    aliases: ['minimax-m2.7'],
+    name: 'MiniMax M2.7',
+    contextWindow: 204_800,
+  },
+  {
+    id: 'minimax/minimax-m2.7-highspeed',
+    aliases: ['minimax-m2.7-highspeed'],
+    name: 'MiniMax M2.7 Highspeed',
+    contextWindow: 204_800,
+  },
+  {
+    id: 'minimax/minimax-m2.5',
+    aliases: ['minimax-m2.5'],
+    name: 'MiniMax M2.5',
+    contextWindow: 204_800,
+  },
+  {
+    id: 'minimax/minimax-m2.5-highspeed',
+    aliases: ['minimax-m2.5-highspeed'],
+    name: 'MiniMax M2.5 Highspeed',
+    contextWindow: 204_800,
+  },
+  {
+    id: 'minimax/minimax-m2.1',
+    aliases: ['minimax-m2.1'],
+    name: 'MiniMax M2.1',
+    contextWindow: 204_800,
+  },
+  {
+    id: 'minimax/minimax-m2.1-highspeed',
+    aliases: ['minimax-m2.1-highspeed'],
+    name: 'MiniMax M2.1 Highspeed',
+    contextWindow: 204_800,
+  },
+  {
+    id: 'minimax/minimax-m2',
+    aliases: ['minimax-m2'],
+    name: 'MiniMax M2',
+    contextWindow: 204_800,
+  },
+  {
+    id: 'moonshotai/kimi-k2.8-preview',
+    aliases: ['kimi-for-coding', 'kimi-k2.8-preview'],
+    name: 'Kimi K2.8 Preview',
+    contextWindow: 1_048_576,
+    efforts: ['low', 'high', 'max'],
+    defaultEffort: 'max',
+  },
+  {
+    id: 'moonshotai/kimi-k3',
+    aliases: ['kimi-k3'],
+    name: 'Kimi K3',
+    contextWindow: 1_048_576,
+    efforts: ['low', 'high', 'max'],
+    defaultEffort: 'high',
+  },
+  {
+    id: 'qwen/qwen3.6-plus',
+    aliases: ['qwen3.6-plus'],
+    name: 'Qwen 3.6 Plus',
+    contextWindow: 1_048_576,
+  },
+  {
+    id: 'qwen/qwen3.6-plus-api',
+    aliases: ['qwen3.6-plus', 'qwen3.6-plus-api'],
+    name: 'Qwen 3.6 Plus API',
+    contextWindow: 991_808,
+  },
+  {
+    id: 'qwen/qwen3.7-flash',
+    aliases: ['qwen3.7-flash'],
+    name: 'Qwen 3.7 Flash',
+    contextWindow: 991_808,
+  },
+  {
+    id: 'qwen/qwen3.8-flash',
+    aliases: ['qwen3.8-flash'],
+    name: 'Qwen 3.8 Flash',
+    contextWindow: 991_808,
+    efforts: ['low', 'medium', 'xhigh'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'qwen/qwen3.7-plus',
+    aliases: ['qwen3.7-plus'],
+    name: 'Qwen 3.7 Plus',
+    contextWindow: 991_808,
+  },
+  {
+    id: 'qwen/qwen3.6-flash',
+    aliases: ['qwen3.6-flash'],
+    name: 'Qwen 3.6 Flash',
+    contextWindow: 991_808,
+  },
+  {
+    id: 'qwen/qwen3.8-27b',
+    aliases: ['qwen3.8-27b'],
+    name: 'Qwen3.8 27B',
+    contextWindow: 991_808,
+    efforts: ['low', 'medium', 'high', 'xhigh'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'tencent/hy3',
+    aliases: ['hy3'],
+    name: 'Hy3',
+    contextWindow: 262_144,
+    efforts: ['low', 'medium', 'high'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'xd/moonshotai-kimi-k3',
+    aliases: ['moonshot/kimi-k3', 'moonshotai-kimi-k3'],
+    name: 'Kimi K3',
+    contextWindow: 1_048_576,
+    efforts: ['low', 'medium', 'high', 'max'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'moonshotai/kimi-k3.1-pro',
+    aliases: ['k3.1-pro', 'kimi-k3.1-pro'],
+    name: 'Kimi K3.1 Pro',
+    contextWindow: 1_048_576,
+    efforts: ['low', 'high', 'max'],
+    defaultEffort: 'max',
+  },
+  {
+    id: 'moonshotai/kimi-k3.1-pro-highspeed',
+    aliases: ['k3.1-pro-highspeed', 'kimi-k3.1-pro-highspeed'],
+    name: 'Kimi K3.1 Pro Highspeed',
+    contextWindow: 1_048_576,
+    efforts: ['low', 'high', 'max'],
+    defaultEffort: 'max',
+  },
+  {
+    id: 'minimax/minimax-m3.1-flash',
+    aliases: ['minimax-m3.1-flash'],
+    name: 'MiniMax M3.1 Flash',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'deepseek/deepseek-v4.1-flash',
+    aliases: ['deepseek-flash', 'deepseek-v4-flash', 'deepseek-v4.1-flash'],
+    name: 'DeepSeek V4.1 Flash',
+    contextWindow: 1_048_576,
+    efforts: ['low', 'high', 'max'],
+    defaultEffort: 'high',
+  },
+  {
+    id: 'qwen/qwen3.8-flash-next',
+    aliases: ['qwen3.8-flash-next'],
+    name: 'Qwen3.8 Flash-Next',
+    efforts: ['low', 'medium', 'xhigh'],
+    defaultEffort: 'medium',
+  },
+  {
+    id: 'xiaomi/mimo-v2.6-pro',
+    aliases: ['mimo-v2.6-pro'],
+    name: 'MiMo V2.6 Pro',
+    contextWindow: 1_000_000,
+  },
+  {
+    id: 'xiaomi/mimo-v2.6-flash',
+    aliases: ['mimo-v2.6-flash'],
+    name: 'MiMo V2.6 Flash',
+    contextWindow: 1_000_000,
+  },
+  {
+    id: 'xiaomi/mimo-v2.6-pro-ultraspeed',
+    aliases: ['mimo-v2.6-pro-ultraspeed'],
+    name: 'MiMo V2.6 Pro UltraSpeed',
+    contextWindow: 1_000_000,
+  },
+  {
+    id: 'meta/muse-wonder-1.0',
+    aliases: ['muse-wonder-1.0'],
+    name: 'Muse Wonder',
+    contextWindow: 1_048_576,
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultEffort: 'medium',
+  },
+];
+
+/**
+ * Claude Code's own model aliases, as an official connection stores them.
+ * `default` lets Claude Code pick; every current Claude model takes the same
+ * efforts and window, so it reads like Opus.
+ */
+const CLAUDE_CODE_ALIASES: Record<string, string> = {
+  default: 'claude-opus-5-5',
+  opus: 'claude-opus-5-5',
+  sonnet: 'claude-sonnet-5-5',
+  haiku: 'claude-haiku-5-5',
+  fable: 'claude-fable-5-1',
+};
+
+let capabilityIndex: Map<string, ModelCapabilityEntry> | null = null;
+
+function capabilityLookup(): Map<string, ModelCapabilityEntry> {
+  if (capabilityIndex) return capabilityIndex;
+  const index = new Map<string, ModelCapabilityEntry>();
+  for (const entry of MODEL_CAPABILITY_ENTRIES) {
+    for (const key of [entry.id.toLowerCase(), ...entry.aliases]) {
+      // The first entry wins: cindy lists a model before its older aliases.
+      if (!index.has(key)) index.set(key, entry);
+    }
+  }
+  capabilityIndex = index;
+  return index;
+}
+
+/**
+ * The capabilities of a model id as a connection stores it: `[1m]` and case
+ * are ignored, a vendor prefix (`z-ai/glm-5.2` on OpenRouter) is tried with
+ * and without, and Claude Code aliases resolve to the model they stand for.
+ * A `[1m]` id always has the 1M window. Null when the model is unknown.
+ */
+export function modelCapabilities(id: string): ModelCapabilities | null {
+  const { model, oneMillion } = splitOneMillionSuffix(id);
+  const key = model.toLowerCase();
+  if (!key) return null;
+  const index = capabilityLookup();
+  const found =
+    index.get(CLAUDE_CODE_ALIASES[key] ?? key) ??
+    (key.includes('/')
+      ? index.get(key.slice(key.lastIndexOf('/') + 1))
+      : undefined);
+  if (!found) {
+    return oneMillion
+      ? { id: model, contextWindow: ONE_MILLION_CONTEXT }
+      : null;
+  }
+  const { aliases: _aliases, ...capabilities } = found;
+  return oneMillion
+    ? {
+        ...capabilities,
+        contextWindow: Math.max(
+          capabilities.contextWindow ?? 0,
+          ONE_MILLION_CONTEXT,
+        ),
+      }
+    : capabilities;
+}
+
 // ─── Upstream errors ───────────────────────────────────────────
 
 export const PROVIDER_ERROR_CODES = [

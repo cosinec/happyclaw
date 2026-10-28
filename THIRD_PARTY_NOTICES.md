@@ -19,7 +19,8 @@ below are adapted from other projects and remain under their own licenses.
 Adapted parts, each modified for HappyClaw (every adapted file says so in its
 header):
 
-- `shared/model-providers.ts`: the vendor preset catalog, the model list
+- `shared/model-providers.ts`: the vendor preset catalog, the model
+  capability table (context windows and reasoning efforts), the model list
   parsing and the upstream error classification.
 - `web/src/components/chat/composer/cindy/`: the chat composer's editor core
   (list nodes, punctuation and selection plugins, reference and long-paste

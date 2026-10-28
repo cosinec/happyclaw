@@ -12,6 +12,7 @@ import {
   getModelPreset,
   isValidModelId,
   mergeDiscoveredModels,
+  modelCapabilities,
   modelsUrlFor,
   normalizeProviderBaseUrl,
   normalizeProviderModels,
@@ -391,6 +392,60 @@ describe('upstream errors', () => {
     for (const each of PROVIDER_ERROR_CODES) {
       expect(PROVIDER_ERROR_COPY[each].title).toBeTruthy();
       expect(PROVIDER_ERROR_COPY[each].hint).toBeTruthy();
+    }
+  });
+});
+
+describe('model capabilities', () => {
+  test('known models carry their window and efforts', () => {
+    expect(modelCapabilities('claude-opus-5-5')).toMatchObject({
+      name: 'Opus 5.5',
+      efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      defaultEffort: 'medium',
+    });
+    expect(modelCapabilities('glm-5.3')?.efforts).toEqual([
+      'low',
+      'high',
+      'max',
+    ]);
+    expect(modelCapabilities('DeepSeek-Flash[1m]')?.efforts).toEqual([
+      'low',
+      'high',
+      'max',
+    ]);
+  });
+
+  test('Claude Code aliases and vendor prefixes resolve', () => {
+    for (const alias of ['opus', 'sonnet', 'haiku', 'fable', 'default']) {
+      expect(modelCapabilities(alias)?.efforts?.length, alias).toBeGreaterThan(
+        0,
+      );
+    }
+    expect(modelCapabilities('z-ai/glm-5.3')?.id).toBe('z-ai/glm-5.3');
+    expect(modelCapabilities('deepseek/deepseek-v4-pro')).not.toBeNull();
+  });
+
+  test('a model without efforts offers none, and [1m] means a 1M window', () => {
+    expect(modelCapabilities('claude-sonnet-4-5')?.efforts).toBeUndefined();
+    expect(modelCapabilities('some-relay-model')).toBeNull();
+    expect(modelCapabilities('some-relay-model[1m]')).toEqual({
+      id: 'some-relay-model',
+      contextWindow: 1_000_000,
+    });
+    expect(modelCapabilities('claude-haiku-4-5[1m]')?.contextWindow).toBe(
+      1_000_000,
+    );
+    expect(modelCapabilities('')).toBeNull();
+  });
+
+  test('every listed effort is one Claude Code accepts', () => {
+    for (const id of ['claude-opus-5-5', 'glm-5.3', 'kimi-k3', 'gpt-6-astra']) {
+      const caps = modelCapabilities(id);
+      for (const effort of caps?.efforts ?? []) {
+        expect(['low', 'medium', 'high', 'xhigh', 'max']).toContain(effort);
+      }
+      if (caps?.defaultEffort)
+        expect(caps.efforts).toContain(caps.defaultEffort);
     }
   });
 });
