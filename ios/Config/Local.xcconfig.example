@@ -1,0 +1,7 @@
+// Copy to Config/Local.xcconfig (git-ignored) and fill in your own values.
+// Team ID: the OU field of your "Apple Development" certificate, e.g.
+//   security find-certificate -c "Apple Development" -p | openssl x509 -noout -subject
+// A free Personal Team needs a globally unique bundle id.
+
+DEVELOPMENT_TEAM = ABCDE12345
+HAPPYCLAW_BUNDLE_ID = com.yourname.happyclaw
