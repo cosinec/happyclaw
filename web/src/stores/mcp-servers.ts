@@ -146,17 +146,14 @@ export const useMcpServersStore = create<McpServersState>((set, get) => ({
   },
 
   toggleServer: async (sourceKey, enabled) => {
-    try {
-      await api.patch(mcpServerEndpoint(sourceKey), {
-        enabled,
-      });
-      set({ error: null });
-      await get().loadServers();
-    } catch (err) {
-      // A row-level toggle failure must not replace the already loaded list
-      // with the page-level loading error state. The card reports it inline.
-      throw err;
-    }
+    // No catch: a row-level toggle failure must not replace the already
+    // loaded list with the page-level loading error state. The card reports
+    // it inline.
+    await api.patch(mcpServerEndpoint(sourceKey), {
+      enabled,
+    });
+    set({ error: null });
+    await get().loadServers();
   },
 
   deleteServer: async (sourceKey) => {

@@ -491,7 +491,7 @@ export function ImBindingDialog({
       }
     },
     [activationModes, imGroups],
-  ); // eslint-disable-line react-hooks/exhaustive-deps
+  );
 
   const handleAudienceModeChange = useCallback(
     async (imJid: string, audienceMode: 'everyone' | 'owner_only') => {
@@ -519,7 +519,7 @@ export function ImBindingDialog({
       }
     },
     [audienceModes, imGroups],
-  ); // eslint-disable-line react-hooks/exhaustive-deps
+  );
 
   const describeBindTarget = (group: AvailableImGroup): string => {
     if (

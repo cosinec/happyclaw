@@ -43,6 +43,8 @@ function isSafeContainerSuffix(value: string): boolean {
     value.length > 512 ||
     value.includes('\\') ||
     value.includes(':') ||
+    // Rejecting control characters is the point of this check.
+    // eslint-disable-next-line no-control-regex
     /[\u0000-\u001f\u007f]/.test(value)
   ) {
     return false;

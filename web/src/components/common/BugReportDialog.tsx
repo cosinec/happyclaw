@@ -218,7 +218,7 @@ export function BugReportDialog({ open, onClose }: BugReportDialogProps) {
           typeof err === 'object' && err !== null && 'message' in err
             ? (err as { message: string }).message
             : '生成报告失败';
-        throw new Error(msg);
+        throw new Error(msg, { cause: err });
       }
     }, [description, screenshots]);
 

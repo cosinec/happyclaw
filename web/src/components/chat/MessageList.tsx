@@ -953,7 +953,6 @@ export const MessageList = memo(function MessageList({
       );
     }
     return () => timers.forEach(clearTimeout);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flatMessages.length]);
 
   // Loading an older page inserts rows above the ones being read. Shift the
