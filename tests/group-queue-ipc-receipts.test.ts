@@ -102,6 +102,8 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  // A test may pin Date.now; restore it even when its expectations failed.
+  vi.restoreAllMocks();
   releaseRun?.();
   await tick();
   await tick();
@@ -314,7 +316,6 @@ describe('GroupQueue IPC delivery receipts', () => {
       'from the web': 'web',
       'from telegram': 'telegram',
     });
-    vi.restoreAllMocks();
     expect(fs.existsSync(path.join(inputDir(), '_drain'))).toBe(false);
   });
 
