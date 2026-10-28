@@ -2,14 +2,11 @@ import {
   Activity,
   Copy,
   Loader2,
-  MessageSquareText,
   MoreHorizontal,
   PlugZap,
   Plus,
   RotateCcw,
-  Server,
   Settings2,
-  ShieldCheck,
   Star,
   Trash2,
 } from 'lucide-react';
@@ -35,6 +32,8 @@ import {
 } from './model-connections';
 import type { ProviderWithHealth, ProviderHealthStatus } from './types';
 import { UsageBars } from './UsageBars';
+import { vendorOfConnection } from '../brand/vendor';
+import { VendorTile } from '../brand/VendorTile';
 
 interface ProviderListProps {
   providers: ProviderWithHealth[];
@@ -68,16 +67,23 @@ function healthDotClass(
 
 /** 类型图标 + 健康指示灯 */
 function ProviderMedia({ provider }: { provider: ProviderWithHealth }) {
-  const kind = connectionKind(provider);
-  const Icon =
-    kind === 'claude_subscription' || kind === 'anthropic_api'
-      ? ShieldCheck
-      : kind === 'chatgpt'
-        ? MessageSquareText
-        : Server;
+  const vendor = vendorOfConnection({
+    kind: provider.hasCodexOAuthCredentials
+      ? 'codex'
+      : provider.type === 'official'
+        ? 'official'
+        : 'third_party',
+    presetId: provider.presetId,
+    baseUrl: provider.anthropicBaseUrl,
+    model: provider.anthropicModel,
+  });
   return (
-    <span className="relative flex size-8 items-center justify-center rounded-lg bg-muted text-muted-foreground">
-      <Icon className="size-4" aria-hidden="true" />
+    <span className="relative flex">
+      <VendorTile
+        vendor={vendor}
+        name={provider.name}
+        className="size-8 rounded-lg"
+      />
       <span
         aria-hidden="true"
         className={cn(
