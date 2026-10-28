@@ -38,6 +38,7 @@ import {
 import {
   SPEECH_TOOL_NAME,
   filterProactiveStreamEvent,
+  hasVisibleWork,
   isSpeechToolEvent,
   normalizeProcessVisibility,
   scrubTaskStates,
@@ -788,7 +789,7 @@ function appendReplyText(
  * main and conversation sessions), so no final reply ever replaces its
  * card. Fire-and-forget spawn Agents keep the Assistant contract.
  */
-function isProactiveRuntime(
+export function isProactiveRuntime(
   s: Pick<ChatState, 'groups' | 'agents'>,
   runtimeJid: string,
 ): boolean {
@@ -1049,6 +1050,12 @@ interface ChatState {
    * `empty` when the server had nothing (or no longer shows it).
    */
   turnTraceStatus: Record<string, 'loading' | 'failed' | 'empty'>;
+  /**
+   * A proactive reply whose turn's trace is on its way, by runtime JID: the
+   * server stores it, and names the reply that carries it, when the turn ends.
+   * The reply holds the row meanwhile, so its text does not move.
+   */
+  traceAwaited: Record<string, string>;
   /** Stop requested for a runtime JID (ms); the run shows "正在停止…". */
   stopRequests: Record<string, number>;
   /**
@@ -1508,6 +1515,37 @@ export function runTurnAnswered(
   return !!answered && (!live || answersInput(live, answered));
 }
 
+/** The live projection of a runtime: the workspace's, or one session's. */
+export function liveStreamOf(
+  s: Pick<ChatState, 'streaming' | 'agentStreaming'>,
+  runtimeJid: string,
+): StreamingState | undefined {
+  const marker = runtimeJid.indexOf('#agent:');
+  return marker >= 0
+    ? s.agentStreaming[runtimeJid.slice(marker + '#agent:'.length)]
+    : s.streaming[runtimeJid];
+}
+
+/**
+ * A proactive turn has replied (`proactiveReplyLanded`) and since only
+ * reasons, as it does once more before it ends: its panel stays away, and so
+ * does the run status bar for a while. One rule for both.
+ */
+export function proactiveTurnQuiet(
+  s: Pick<
+    ChatState,
+    'groups' | 'agents' | 'activeRuns' | 'streaming' | 'agentStreaming'
+  >,
+  runtimeJid: string,
+): boolean {
+  if (!isProactiveRuntime(s, runtimeJid)) return false;
+  const live = liveStreamOf(s, runtimeJid);
+  return (
+    runTurnAnswered(s.activeRuns[runtimeJid]?.answered, live) &&
+    !hasVisibleWork(live)
+  );
+}
+
 /**
  * A proactive workspace answers through send_message: an utterance (checked by
  * the caller) of the turn the live panel streams is that turn's reply. The
@@ -1526,6 +1564,31 @@ function proactiveReplyLanded(
     isProactiveRuntime(s, runtimeJid) &&
     streamsInputOf(s.activeRuns, runtimeJid, live, utterance.turn_id)
   );
+}
+
+/**
+ * `traceAwaited` with `reply` as the proactive reply of `runtimeJid` whose
+ * trace is coming: only where the process is kept (not at `hidden`).
+ */
+function withAwaitedTrace(
+  s: ChatState,
+  runtimeJid: string,
+  reply: Message,
+): Record<string, string> {
+  return processViewOfRuntime(s, runtimeJid) === 'proactive:hidden'
+    ? s.traceAwaited
+    : { ...s.traceAwaited, [runtimeJid]: reply.id };
+}
+
+/** `traceAwaited` without the held row of `runtimeJid`, if it is `replyId`'s. */
+function releaseAwaitedTrace(
+  s: ChatState,
+  runtimeJid: string,
+  replyId: string,
+): ChatState | Pick<ChatState, 'traceAwaited'> {
+  return s.traceAwaited[runtimeJid] === replyId
+    ? { traceAwaited: withoutKey(s.traceAwaited, runtimeJid) }
+    : s;
 }
 
 /** How long a settled card waits for its final message before re-syncing. */
@@ -3144,6 +3207,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   turnTraceStatus: {},
   stopRequests: {},
   settledStreaming: {},
+  traceAwaited: {},
   pendingThinking: {},
   pendingThinkingDuration: {},
   clearing: {},
@@ -3401,6 +3465,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
             activeRuns: replyLanded
               ? markRunAnswered(s.activeRuns, jid, utterance?.turn_id)
               : (settlement?.activeRuns ?? s.activeRuns),
+            ...(replyLanded && utterance
+              ? { traceAwaited: withAwaitedTrace(s, jid, utterance) }
+              : {}),
             pendingMessageUsage: mergedUsage.pending,
             messages: { ...s.messages, [jid]: merged },
             waiting:
@@ -3935,6 +4002,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       return { messages, agentMessages };
     });
+    // The held row is the reply's own now (marked first, so it never lapses).
+    set((s) => releaseAwaitedTrace(s, messageChatJid, messageId));
     // A message with attachments is announced after its thumbnails are made, so
     // this can arrive first: keep the mark for the message when it does.
     if (!known) rememberPendingTraceMark(messageChatJid, messageId);
@@ -5160,6 +5229,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           activeRuns: replyLanded
             ? markRunAnswered(s.activeRuns, runtimeJid, msg.turn_id)
             : (settlement?.activeRuns ?? s.activeRuns),
+          ...(replyLanded
+            ? { traceAwaited: withAwaitedTrace(s, runtimeJid, msg) }
+            : {}),
           agentMessages: { ...s.agentMessages, [agentId]: updated },
           pendingMessageUsage: mergedUsage.pending,
           agentWaiting: nextAgentWaiting,
@@ -5370,6 +5442,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ? {
               streaming: withoutKey(s.streaming, chatJid),
               activeRuns: markRunAnswered(s.activeRuns, chatJid, msg.turn_id),
+              traceAwaited: withAwaitedTrace(s, chatJid, msg),
             }
           : {}),
         messages: { ...s.messages, [chatJid]: updated },
@@ -6008,6 +6081,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
             activeRuns: replyLanded
               ? markRunAnswered(s.activeRuns, runtimeJid, utterance?.turn_id)
               : (settlement?.activeRuns ?? s.activeRuns),
+            ...(replyLanded && utterance
+              ? { traceAwaited: withAwaitedTrace(s, runtimeJid, utterance) }
+              : {}),
             agentMessages: { ...s.agentMessages, [agentId]: merged },
             pendingMessageUsage: mergedUsage.pending,
             agentWaiting:
@@ -6486,6 +6562,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       };
     });
     if (settled.state) scheduleSettleFallback(chatJid, settled.state, set, get);
+    // The trace of a proactive reply is stored just after its run ends; a turn
+    // that kept nothing has none, and its reply lets the held row go.
+    const awaited = get().traceAwaited[chatJid];
+    if (awaited) {
+      setTimeout(
+        () => set((s) => releaseAwaitedTrace(s, chatJid, awaited)),
+        SETTLE_FALLBACK_MS,
+      );
+    }
   },
 
   handleActiveRunSnapshot: (runs, queuedChatJids = []) => {

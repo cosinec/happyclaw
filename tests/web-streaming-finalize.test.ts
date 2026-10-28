@@ -1617,6 +1617,41 @@ describe("a proactive turn's reply", () => {
     expect(state.stepsCache['utterance-r']).toBeUndefined();
   });
 
+  it('holds the row of the trace the reply will carry, where the process is kept', () => {
+    proactive('activity');
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    reason();
+    tool('tool-1');
+    speak('utterance-1');
+    expect(useChatStore.getState().traceAwaited[JID]).toBe('utterance-1');
+    // The trace is stored: the reply carries it, and the hold goes.
+    useChatStore.getState().handleMessageTrace(JID, 'utterance-1');
+    const state = useChatStore.getState();
+    expect(state.traceAwaited[JID]).toBeUndefined();
+    expect(state.messages[JID][0].has_trace).toBe(true);
+  });
+
+  it('holds nothing at the hidden level, where nothing is kept', () => {
+    proactive('hidden');
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    reason();
+    speak('utterance-1');
+    expect(useChatStore.getState().activeRuns[JID]?.answered).toBe('input-1');
+    expect(useChatStore.getState().traceAwaited[JID]).toBeUndefined();
+  });
+
+  it('lets the hold go a moment after a run whose turn kept nothing', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    proactive('activity');
+    useChatStore.getState().handleRunStarted(JID, 'run-a');
+    reason();
+    speak('utterance-1');
+    useChatStore.getState().handleRunFinished(JID, 'run-a');
+    expect(useChatStore.getState().traceAwaited[JID]).toBe('utterance-1');
+    await vi.advanceTimersByTimeAsync(1600);
+    expect(useChatStore.getState().traceAwaited[JID]).toBeUndefined();
+  });
+
   it('never makes an Assistant workspace send_message the reply', () => {
     useChatStore.getState().handleRunStarted(JID, 'run-a');
     emit({ eventType: 'text_delta', text: '答案', ...turn1 }, 'run-a');

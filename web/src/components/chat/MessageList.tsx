@@ -132,6 +132,10 @@ async function copyErrorText(text: string) {
   }
 }
 
+/** The floating jump buttons: 36px, round and translucent over the chat. */
+const JUMP_BUTTON_CLASS =
+  'relative flex size-9 cursor-pointer items-center justify-center rounded-full bg-surface-raised/80 text-muted-foreground shadow-menu ring-1 ring-surface-border backdrop-blur-sm transition-colors hover:text-foreground';
+
 // Memoized: ChatView re-renders for dialogs, panels and run status; the
 // transcript and composer only need to when their own props change.
 export const MessageList = memo(function MessageList({
@@ -609,7 +613,9 @@ export const MessageList = memo(function MessageList({
       if (!item) return 100;
       switch (item.type) {
         case 'date':
-          return 48;
+          // Its 24px margins around a 16px line: a row inserted with the
+          // final above a pinned reader must not correct itself after.
+          return 64;
         case 'divider':
         case 'spawn':
         case 'error':
@@ -1412,7 +1418,6 @@ export const MessageList = memo(function MessageList({
                       agentAvatarEmoji={agentAvatarEmoji}
                       agentAvatarColor={agentAvatarColor}
                       interactionMode={interactionMode}
-                      stopHint
                     />
                   </div>
                 )}
@@ -1442,22 +1447,25 @@ export const MessageList = memo(function MessageList({
       {/* Floating scroll buttons */}
       {showScrollButtons && (
         <div className="absolute right-4 bottom-[calc(1rem+var(--composer-dock-height,0px)+var(--composer-dock-lift,0px))] flex flex-col gap-1.5">
+          {/* A phone has only the jump to the bottom, as in cindy. */}
           {!atTop && (
             <button
               type="button"
               onClick={scrollToTop}
-              className="flex size-8 cursor-pointer items-center justify-center rounded-full bg-surface-raised text-muted-foreground shadow-menu ring-1 ring-surface-border transition-colors hover:text-foreground pointer-coarse:size-10"
+              className={cn(JUMP_BUTTON_CLASS, 'phone:hidden')}
               title="回到顶部"
               aria-label="回到顶部"
             >
-              <ChevronUp className="w-4 h-4" />
+              <ChevronUp className="size-4" />
             </button>
           )}
+          {/* After cindy: one translucent round button, with a dot once replies
+              arrived below the reader (the count is in its name). */}
           {!autoScroll && (
             <button
               type="button"
               onClick={scrollToBottom}
-              className="relative flex size-8 cursor-pointer items-center justify-center rounded-full bg-surface-raised text-muted-foreground shadow-menu ring-1 ring-surface-border transition-colors hover:text-foreground pointer-coarse:size-10"
+              className={JUMP_BUTTON_CLASS}
               title="回到底部"
               aria-label={
                 unseenCount > 0
@@ -1465,15 +1473,13 @@ export const MessageList = memo(function MessageList({
                   : '回到底部'
               }
             >
-              <ChevronDown className="w-4 h-4" />
+              <ChevronDown className="size-4" />
               {unseenCount > 0 && (
                 <span
                   aria-hidden="true"
-                  data-hc-unseen-count
-                  className="absolute -top-1.5 -right-1.5 h-4 min-w-4 rounded-full bg-primary px-1 text-center text-micro leading-4 font-medium text-primary-foreground tabular-nums ring-2 ring-background"
-                >
-                  {unseenCount > 99 ? '99+' : unseenCount}
-                </span>
+                  data-hc-unseen-dot
+                  className="absolute top-0.5 right-0.5 size-2 rounded-full bg-primary ring-2 ring-background"
+                />
               )}
             </button>
           )}
