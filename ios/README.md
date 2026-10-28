@@ -27,6 +27,7 @@ ios/
 │   ├── ShellModel.swift        WebView、桥接状态机与 SwiftUI chrome 的粘合层
 │   ├── NativeTabBar.swift      原生底部 Tab（由 Web 声明）
 │   ├── WebHostView.swift       WKWebView：持久数据存储、cookie 同步、导航代理、外链、JS 对话框
+│   ├── DownloadHost.swift      网页下载（blob: / 附件）→ 临时文件 → 系统分享面板
 │   ├── ConnectView.swift       服务器地址
 │   ├── Bridge/
 │   │   ├── BridgeChannel.swift 注入脚本 + 收发（只接受本实例顶层 frame）
@@ -90,6 +91,9 @@ Web 侧对应模块在 `web/src/native/`（`protocol.ts`、`session.ts`、`layou
 - **外链**：本实例同源（含 base path）的导航留在 WebView；其他 http(s) 顶层导航、
   `target=_blank` 和 `mailto:`/`tel:` 交给系统；未知 scheme（如 `javascript:`）丢弃。
   iframe 中的第三方内容保持内嵌。
+- **下载**：WKWebView 默认会静默丢弃 `<a download>`（Web 的 `utils/download.ts` 统一走
+  blob: URL）和附件响应。壳把它们转成 `WKDownload`，存到临时目录后弹出系统分享面板
+  （存到「文件」/「照片」、隔空投送、用其他 App 打开），面板关闭后删除临时文件；Web 不需要改。
 - **JS 对话框**：实现了 `alert/confirm/prompt` 的 WKUIDelegate。否则 WKWebView 里
   `confirm()` 会静默返回 false，Web 的「未保存离开」守卫会失效。
 - **登录**：`WKWebsiteDataStore.default()` 持久化 cookie；401 由 Web 跳登录页，原生不拦截。

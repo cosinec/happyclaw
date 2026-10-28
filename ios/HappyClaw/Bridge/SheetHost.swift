@@ -4,9 +4,17 @@ import SwiftUI
 /// Native sheets (medium/large detents with grabber). MVP hosts the 「更多」
 /// list: web-declared overflow pages plus shell-owned App entries. Complex
 /// business dialogs stay inside the web view (decision D4).
-enum ShellSheet: String, Identifiable {
+enum ShellSheet: Identifiable {
   case more
-  var id: String { rawValue }
+  /// A file the web downloaded, offered through the system share sheet.
+  case share(URL)
+
+  var id: String {
+    switch self {
+    case .more: "more"
+    case let .share(file): "share:\(file.path)"
+    }
+  }
 }
 
 struct MoreSheet: View {

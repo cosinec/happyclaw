@@ -25,8 +25,12 @@ struct RootShell: View {
     }
     .confirmBridge(model.confirm)
     .menuBridge(model.menu)
-    .sheet(item: $model.sheet) { sheet in
+    .sheet(item: $model.sheet, onDismiss: { model.sheetDismissed() }) { sheet in
       switch sheet {
+      case let .share(file):
+        ShareSheet(file: file)
+          .presentationDetents([.medium, .large])
+          .ignoresSafeArea()
       case .more:
         MoreSheet(
           items: model.more,
@@ -36,6 +40,13 @@ struct RootShell: View {
         )
       }
     }
+    .alert(
+      L10n.downloadFailed,
+      isPresented: Binding(get: { model.downloadError != nil }, set: { if !$0 { model.downloadError = nil } }),
+      presenting: model.downloadError
+    ) { _ in
+      Button(L10n.ok, role: .cancel) {}
+    } message: { Text($0) }
     .preferredColorScheme(model.webScheme.map { $0 == .dark ? .dark : .light })
     .onChange(of: scenePhase) { _, phase in model.scenePhaseChanged(phase) }
     .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
