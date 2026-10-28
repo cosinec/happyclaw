@@ -111,12 +111,13 @@ import { hasPermission } from '../permissions.js';
 import {
   buildCodexSelectionView,
   chatGptDefaultModel,
-  listConnectionModels,
+  listSessionPickerModels,
   readStoredChoice,
+  readStoredConnectionChoice,
+  unpickedLaunchEffort,
   unpickedLaunchModel,
   validateSessionChoice,
   type CodexSelectionView,
-  type ConnectionModelChoice,
 } from '../session-model-overrides.js';
 import { clearTargetAgentBindingsForDeletedAgents } from '../im-context-isolation.js';
 import { getChannelType } from '../im-channel.js';
@@ -2343,7 +2344,6 @@ function buildSessionModelSelectionPayload(
   }
 
   const codexViews = new Map<string, CodexSelectionView>();
-  const modelLists = new Map<string, ConnectionModelChoice[]>();
   const options = providers.map((provider) => {
     const option = {
       id: provider.id,
@@ -2358,9 +2358,10 @@ function buildSessionModelSelectionPayload(
     if (!provider.codexOAuthCredentials) {
       // The picker lists the visible ones; a hidden model stays pickable by
       // a choice that already names it.
-      const models = listConnectionModels(provider);
-      modelLists.set(provider.id, models);
-      return { ...option, models };
+      return {
+        ...option,
+        models: listSessionPickerModels(provider, agentEffort),
+      };
     }
     // The list is the account's own once its catalog has been fetched; ask for
     // a fresher one without making the picker wait for it.
@@ -2384,21 +2385,27 @@ function buildSessionModelSelectionPayload(
   const view = selectedModelConfigId
     ? codexViews.get(selectedModelConfigId)
     : undefined;
-  const models = selectedModelConfigId
-    ? modelLists.get(selectedModelConfigId)
-    : undefined;
+  const selectedProvider = providers.find(
+    (provider) => provider.id === selectedModelConfigId,
+  );
   // A stored model or effort the list, the catalog or the chooser's permission
   // no longer backs reads as unset, exactly as a runner launch would treat it.
   const selected =
     stored && view
       ? readStoredChoice(view, stored, canExceedCeiling)
-      : {
-          model:
-            stored?.model && models?.some((entry) => entry.id === stored.model)
-              ? stored.model
-              : null,
-          effort: null,
-        };
+      : stored && selectedProvider
+        ? readStoredConnectionChoice(selectedProvider, stored)
+        : { model: null, effort: null };
+  const defaultModel = defaultProvider
+    ? unpickedLaunchModel(
+        defaultProvider,
+        defaultSource === 'agent' ? profile?.model : null,
+        group.folder,
+      )
+    : null;
+  const defaultView = defaultProvider
+    ? codexViews.get(defaultProvider.id)
+    : undefined;
 
   return {
     selectedModelConfigId,
@@ -2408,13 +2415,13 @@ function buildSessionModelSelectionPayload(
       source: defaultSource,
       modelConfigId: defaultModelConfigId,
       // What "default" runs, resolved as a launch without a pick resolves it.
-      model: defaultProvider
-        ? unpickedLaunchModel(
-            defaultProvider,
-            defaultSource === 'agent' ? profile?.model : null,
-            group.folder,
-          )
-        : null,
+      model: defaultModel,
+      effort: defaultView
+        ? (defaultView.models.find((entry) => entry.value === defaultModel)
+            ?.defaultEffort ?? defaultView.defaultEffort)
+        : defaultProvider
+          ? unpickedLaunchEffort(defaultProvider, defaultModel, agentEffort)
+          : null,
       enabledCount: enabled.length,
     },
     options,
@@ -2428,9 +2435,11 @@ function buildSessionModelSelectionPayload(
  * message, so the warm runner is retired (one already on the chosen
  * configuration is spared only when no model is involved: neither choice
  * names one, and a conversation that had picked nothing did not run the
- * Agent's). A different effort needs no restart at all: the gateway reads it
- * per request, so the live runners of the chosen configuration are pointed at
- * it and keep running. Choosing nothing new does nothing.
+ * Agent's). A different effort on a ChatGPT subscription needs no restart at
+ * all: the gateway reads it per request, so the live runners of the chosen
+ * configuration are pointed at it and keep running. Elsewhere Claude Code
+ * takes its effort at start, so the runner is retired but the SDK session
+ * kept. Choosing nothing new does nothing.
  */
 function applySessionChoiceChange(
   deps: NonNullable<ReturnType<typeof getWebDeps>>,
@@ -2458,6 +2467,10 @@ function applySessionChoiceChange(
         : (choice.model ?? provider.anthropicModel);
     return `${choice.modelConfigId}\u0000${model}`;
   };
+  const jids = agentId
+    ? [`${jid}#agent:${agentId}`]
+    : getJidsByFolder(group.folder);
+  const effortChanged = (previous?.effort ?? null) !== next.effort;
   let drained = 0;
   if (launchKey(previous) !== launchKey(next)) {
     const profile = peekAgentProfileForWorkspace(
@@ -2470,13 +2483,18 @@ function applySessionChoiceChange(
       previous?.model || next.model || ranAgentModel
         ? null
         : next.modelConfigId;
-    drained = deps.queue.drainRunnersForModelSelection(
-      agentId ? [`${jid}#agent:${agentId}`] : getJidsByFolder(group.folder),
-      target,
-    );
+    drained = deps.queue.drainRunnersForModelSelection(jids, target);
+  } else if (
+    effortChanged &&
+    !providers.find((item) => item.id === next.modelConfigId)
+      ?.codexOAuthCredentials
+  ) {
+    // Claude Code reads its effort when the runner starts: a new one takes
+    // a new runner, on the same SDK session (the model did not change).
+    drained = deps.queue.drainRunnersForModelSelection(jids, null);
   }
   let liveUpdated = 0;
-  if ((previous?.effort ?? null) !== next.effort) {
+  if (effortChanged) {
     liveUpdated = updateLiveSessionEffort(
       {
         groupFolder: group.folder,

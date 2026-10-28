@@ -28,10 +28,16 @@ import {
   resolveCodexSessionChoice,
 } from './codex-gateway/model-catalog.js';
 import { listCodexModelsForProvider } from './codex-gateway/model-catalog-sync.js';
-import { splitOneMillionSuffix } from './model-providers.js';
+import {
+  modelCapabilities,
+  splitOneMillionSuffix,
+  type ModelEffort,
+  type ProviderModelEntry,
+} from './model-providers.js';
 import { hasPermission } from './permissions.js';
 import {
   findProviderModel,
+  providerEffortLevel,
   providerModels,
   type UnifiedProvider,
 } from './runtime-config.js';
@@ -43,7 +49,57 @@ type ChatGptProvider = Pick<
 
 /** A configuration of any kind, with what it offers to pick from. */
 type ModelConfiguration = ChatGptProvider &
-  Pick<UnifiedProvider, 'anthropicBaseUrl' | 'models'>;
+  Pick<UnifiedProvider, 'anthropicBaseUrl' | 'models' | 'customEnv'>;
+
+/**
+ * Whether `model` of a configuration takes `effort` as Claude Code's effort
+ * level. Only models whose capabilities list efforts do; a pass-through relay
+ * (no model) takes none.
+ */
+function modelTakesEffort(model: string, effort: string): boolean {
+  return !!modelCapabilities(model)?.efforts?.includes(effort as ModelEffort);
+}
+
+/**
+ * A conversation's stored choice within a configuration that is not a
+ * ChatGPT subscription, as it holds today: a model the list no longer offers
+ * and an effort the model does not take read as unset.
+ */
+function checkConnectionChoice(
+  provider: ModelConfiguration,
+  stored: { model: string | null; effort: string | null },
+): {
+  model: string | null;
+  effort: string | null;
+  staleModel: boolean;
+  staleEffort: boolean;
+} {
+  // Hidden models count: hiding only leaves a model out of the picker.
+  const model =
+    stored.model && findProviderModel(provider, stored.model)
+      ? stored.model
+      : null;
+  const effort =
+    stored.effort &&
+    modelTakesEffort(model ?? provider.anthropicModel, stored.effort)
+      ? stored.effort
+      : null;
+  return {
+    model,
+    effort,
+    staleModel: !!stored.model && !model,
+    staleEffort: !!stored.effort && !effort,
+  };
+}
+
+/** The picker's reading of what a conversation stored for `provider`. */
+export function readStoredConnectionChoice(
+  provider: ModelConfiguration,
+  stored: { model: string | null; effort: string | null },
+): { model: string | null; effort: string | null } {
+  const { model, effort } = checkConnectionChoice(provider, stored);
+  return { model, effort };
+}
 
 export interface SessionLaunchOverrides {
   /** Upstream model to run on instead of the configuration's own. */
@@ -94,13 +150,8 @@ export function resolveSessionLaunchOverrides(
     return {};
   }
   if (!provider.codexOAuthCredentials) {
-    // Only a model is picked here, from the configuration's own list; hidden
-    // models count, since hiding only leaves a model out of the picker.
-    if (!detail.model) return {};
-    if (findProviderModel(provider, detail.model)) {
-      return { model: detail.model };
-    }
-    if (options.warn !== false) {
+    const choice = checkConnectionChoice(provider, detail);
+    if (choice.staleModel && options.warn !== false) {
       logger.warn(
         {
           groupFolder,
@@ -111,7 +162,21 @@ export function resolveSessionLaunchOverrides(
         'Conversation model is no longer offered by its configuration; following the configuration default',
       );
     }
-    return {};
+    if (choice.staleEffort && options.warn !== false) {
+      logger.warn(
+        {
+          groupFolder,
+          agentId: agentId || null,
+          providerId: provider.id,
+          effort: detail.effort,
+        },
+        'Conversation effort is not taken by the model it runs; following the configured effort',
+      );
+    }
+    return {
+      ...(choice.model ? { model: choice.model } : {}),
+      ...(choice.effort ? { effort: choice.effort } : {}),
+    };
   }
   const { models, source } = listCodexModelsForProvider(provider);
   const choice = resolveCodexSessionChoice({
@@ -251,6 +316,52 @@ export interface ConnectionModelChoice {
   id: string;
   /** Left out of the chat picker; an explicit choice may still name it. */
   hidden: boolean;
+  /** Efforts a conversation may pick on this model; absent: none. */
+  efforts?: readonly ModelEffort[];
+  /** The effort this model runs at when no effort is picked. */
+  defaultEffort?: ModelEffort;
+  contextWindow?: number;
+}
+
+/**
+ * What a model of a configuration offers beyond its id. Its effort without a
+ * pick follows the launch: an Agent's own effort, else the model's
+ * configured one, else the configuration's environment, else the model's.
+ */
+function connectionModelCapabilities(
+  provider: ModelConfiguration,
+  entry: ProviderModelEntry,
+  agentEffort: ModelEffort | undefined,
+): Omit<ConnectionModelChoice, 'id' | 'hidden'> {
+  const capabilities = modelCapabilities(entry.id);
+  const defaultEffort =
+    agentEffort ??
+    entry.effort ??
+    providerEffortLevel(provider) ??
+    capabilities?.defaultEffort;
+  return {
+    ...(capabilities?.efforts ? { efforts: capabilities.efforts } : {}),
+    ...(defaultEffort ? { defaultEffort } : {}),
+    ...(capabilities?.contextWindow
+      ? { contextWindow: capabilities.contextWindow }
+      : {}),
+  };
+}
+
+/**
+ * The effort a launch on `provider` runs at when the conversation picked
+ * none, or null when the model it runs takes no effort level (or is a
+ * ChatGPT subscription, whose view says it).
+ */
+export function unpickedLaunchEffort(
+  provider: ModelConfiguration,
+  model: string | null,
+  agentEffort: ModelEffort | undefined,
+): ModelEffort | null {
+  if (provider.codexOAuthCredentials || !model) return null;
+  const entry = findProviderModel(provider, model) ?? { id: model };
+  const offered = connectionModelCapabilities(provider, entry, agentEffort);
+  return offered.efforts ? (offered.defaultEffort ?? null) : null;
 }
 
 /**
@@ -269,6 +380,22 @@ export function listConnectionModels(
   return providerModels(provider).map((entry) => ({
     id: entry.id,
     hidden: entry.hidden === true,
+  }));
+}
+
+/**
+ * What the chat picker offers within a configuration that is not a ChatGPT
+ * subscription (that one shows its catalog view): each model with the
+ * efforts it takes and the one it runs at without a pick.
+ */
+export function listSessionPickerModels(
+  provider: ModelConfiguration,
+  agentEffort: ModelEffort | undefined,
+): ConnectionModelChoice[] {
+  return providerModels(provider).map((entry) => ({
+    id: entry.id,
+    hidden: entry.hidden === true,
+    ...connectionModelCapabilities(provider, entry, agentEffort),
   }));
 }
 
@@ -359,6 +486,7 @@ export function readStoredChoice(
 export type SessionChoiceRejectionCode =
   | 'MODEL_SELECTION_UNSUPPORTED'
   | 'MODEL_NOT_IN_CONNECTION'
+  | 'EFFORT_NOT_SUPPORTED'
   | 'MODEL_UNAVAILABLE'
   | 'EFFORT_UNSUPPORTED'
   | 'EFFORT_RESTRICTED';
@@ -383,16 +511,8 @@ export function validateSessionChoice(
   | { ok: true; model: string | null; effort: string | null }
   | { ok: false; rejection: SessionChoiceRejection } {
   if (!provider.codexOAuthCredentials) {
-    if (requested.effort) {
-      return {
-        ok: false,
-        rejection: {
-          error: '该模型配置不支持选择推理档位',
-          code: 'MODEL_SELECTION_UNSUPPORTED',
-        },
-      };
-    }
     const model = requested.model?.trim() || null;
+    const effort = requested.effort?.trim() || null;
     // Hidden models count: the picker leaves them out, an explicit choice may
     // still name one.
     if (model && !findProviderModel(provider, model)) {
@@ -404,7 +524,19 @@ export function validateSessionChoice(
         },
       };
     }
-    return { ok: true, model, effort: null };
+    const runs = model ?? provider.anthropicModel;
+    if (effort && !modelTakesEffort(runs, effort)) {
+      return {
+        ok: false,
+        rejection: {
+          error: runs
+            ? `模型 ${runs} 不支持推理档位 ${effort}`
+            : '未指定模型时不能选择推理档位',
+          code: 'EFFORT_NOT_SUPPORTED',
+        },
+      };
+    }
+    return { ok: true, model, effort };
   }
   const { models, source } = listCodexModelsForProvider(provider);
   const choice = resolveCodexSessionChoice({

@@ -108,15 +108,20 @@ Public：
 （唯一启用的配置）、`pool`（已启用配置间自动轮换）、`none`，顺序与运行时解析一致；
 `default.model` 是不选择时实际运行的模型：`agent` 为智能体绑定的模型（配置已不再
 提供时为该配置的默认模型），`default`、`single` 为该配置的默认模型（ChatGPT 订阅按
-其目录解析），其余来源与直通中转为 `null`。
+其目录解析），其余来源与直通中转为 `null`；`default.effort` 是不选择时运行的推理档位
+（该模型可选推理档位时才有，否则为 `null`）。
 PUT 的 `modelConfigId` 为 `null` 时恢复默认。会话选择的（配置, 模型）优先于智能体
 绑定的（配置, 模型），可以选择未启用的配置；切换后该会话的暖 Runner 在当前轮次结束
 后退出，下一条消息使用新选择。
 
 每个配置都可以在配置内选择具体模型。ChatGPT 订阅以外的选项带
-`models[]`（`id`、`hidden`）：该配置的模型列表，默认模型（选项的 `model`）总在其中且
-不隐藏；`hidden: true` 的模型不在选择器中列出，但显式选择仍可使用。直通中转没有默认
-模型时 `model` 为空字符串。
+`models[]`（`id`、`hidden`、`efforts?`、`defaultEffort?`、`contextWindow?`）：该配置的
+模型列表，默认模型（选项的 `model`）总在其中且不隐藏；`hidden: true` 的模型不在选择器
+中列出，但显式选择仍可使用。`efforts` 与 `contextWindow` 来自模型能力表
+（`modelCapabilities`），没有 `efforts` 的模型不能选推理档位；`defaultEffort` 是不选
+档位时运行的档位：智能体显式档位，其次该模型在连接里配置的档位，其次连接环境变量
+`CLAUDE_CODE_EFFORT_LEVEL`（第三方端点缺省 `max`），最后是模型自己的默认档位。直通
+中转没有默认模型时 `model` 为空字符串。
 
 ChatGPT 订阅配置（`kind: "codex"`）不带 `models`，而是带 `codex`，并且还能选择推理
 档位：`defaultModel`（配置自己的模型）、`defaultEffort`（不选档位时实际使用的档位，
@@ -126,18 +131,19 @@ Agent 显式档位优先，其次是配置档位，按模型目录钳制）、`s
 的实时目录并按套餐过滤，同步读取、后台刷新，不等待网络；`efforts` 按 low 到 ultra
 排序，只含当前用户可以选择的档位。
 
-响应顶层另有 `selectedModel`（所有类型）与 `selectedEffort`（仅 ChatGPT）：已存的
-模型若已不在配置的模型列表（ChatGPT 为账号目录）中，或档位不再被目录或当前用户权限
-支持，按未选择返回，与 Runner 启动时的处理一致。
+响应顶层另有 `selectedModel` 与 `selectedEffort`（所有类型）：已存的模型若已不在配置
+的模型列表（ChatGPT 为账号目录）中，或档位不被所运行的模型（ChatGPT 为目录或当前用户
+权限）支持，按未选择返回，与 Runner 启动时的处理一致。
 
 PUT 可以携带 `model`、`effort`，请求整体替换该会话的选择：只写 `modelConfigId`
 会清掉之前的模型和档位，换配置也不会继承旧配置的模型。`model` 最长 200 个字符，
 必须在所选配置的模型列表内（可以是隐藏模型），ChatGPT 订阅则必须在该账号当前目录
-内；`effort` 只能用于 ChatGPT 订阅配置，且必须在（所选或配置自己的）模型的
-`efforts` 内；两者都要同时给出 `modelConfigId`。否则返回 400 与 `code`：
-`MODEL_NOT_IN_CONNECTION`、`MODEL_UNAVAILABLE`、`EFFORT_UNSUPPORTED`、
-`EFFORT_RESTRICTED`、`MODEL_SELECTION_UNSUPPORTED`（非 ChatGPT 配置携带 `effort`）、
-`MODEL_CONFIG_REQUIRED`。高于 `max` 的档位（目前是
+内；`effort` 必须在（所选或配置默认的）模型的 `efforts` 内，否则 ChatGPT 以外返回
+`EFFORT_NOT_SUPPORTED`；两者都要同时给出 `modelConfigId`。否则返回 400 与 `code`：
+`MODEL_NOT_IN_CONNECTION`、`EFFORT_NOT_SUPPORTED`、`MODEL_UNAVAILABLE`、
+`EFFORT_UNSUPPORTED`、`EFFORT_RESTRICTED`、`MODEL_CONFIG_REQUIRED`。会话档位优先于
+智能体档位，其次模型配置的档位，最后是连接环境变量；ChatGPT 以外只改档位时退出暖
+Runner（下一条消息重启），但保留 SDK 会话。高于 `max` 的档位（目前是
 `ultra`）只允许具备 `manage_system_config` 的用户选择，GET 不列出，PUT 返回
 `EFFORT_RESTRICTED`，Runner 启动时若选择者已失去该权限则回到默认档；放宽只需改
 `CODEX_SESSION_EFFORT_CEILING`。响应附带 `drained`（被退出的暖 Runner 数）与

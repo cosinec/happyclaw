@@ -114,14 +114,11 @@ beforeEach(() => {
   }
 });
 
-function pick(modelConfigId: string | null, model?: string) {
-  db.setSessionModelSelection(
-    FOLDER,
-    null,
-    modelConfigId,
-    'user-1',
-    model ? { model } : undefined,
-  );
+function pick(modelConfigId: string | null, model?: string, effort?: string) {
+  db.setSessionModelSelection(FOLDER, null, modelConfigId, 'user-1', {
+    model: model ?? null,
+    effort: effort ?? null,
+  });
 }
 
 function select(agent: { modelConfigId?: string; model?: string } = {}) {
@@ -322,6 +319,58 @@ describe("a model's own effort", () => {
       }),
     });
     expect(env('CLAUDE_CODE_EFFORT_LEVEL')).toBeUndefined();
+  });
+
+  test("a conversation's effort wins over the model's and the Agent's", () => {
+    pick(kimi.id, 'kimi-k3', 'low');
+    const selection = select();
+    expect(selection.sessionEffort).toBe('low');
+    expect(envOf(selection)('CLAUDE_CODE_EFFORT_LEVEL')).toBe('low');
+
+    // The Agent's own effort is replaced for this launch, so the runner's
+    // SDK effort and the environment agree on the conversation's.
+    const agent = {
+      id: 'agent',
+      name: 'Agent',
+      version: 1,
+      isDefault: false,
+      identityHash: '',
+      identityPrompt: '',
+      includeClaudePreset: true,
+      runtimePolicy: db.normalizeAgentProfileRuntimePolicy({
+        reasoning: { effort: 'max' },
+      }),
+    };
+    const input = runner.withConversationEffort(
+      {
+        prompt: '',
+        groupFolder: FOLDER,
+        chatJid: 'web:model-launch',
+        isMain: true,
+        agentProfile: agent,
+      } as never,
+      selection,
+    );
+    expect(input.agentProfile?.runtimePolicy?.reasoning?.effort).toBe('low');
+    expect(agent.runtimePolicy.reasoning?.effort).toBe('max');
+  });
+
+  test('an effort the model does not take is ignored', () => {
+    pick(glm.id, 'glm-5-air', 'high');
+    const selection = select();
+    expect(selection).not.toHaveProperty('sessionEffort');
+    expect(envOf(selection)('CLAUDE_CODE_EFFORT_LEVEL')).toBe('low');
+  });
+
+  test('an effort-only change keeps the SDK session', () => {
+    legacySession(kimi.id);
+    pick(kimi.id, 'kimi-k3');
+    expect(launch()).toMatchObject({ predicted: false, reset: false });
+    pick(kimi.id, 'kimi-k3', 'low');
+    expect(launch()).toMatchObject({ predicted: false, reset: false });
+    pick(kimi.id, 'kimi-k3', 'max');
+    expect(launch()).toMatchObject({ predicted: false, reset: false });
+    expect(db.getSession(FOLDER, null)).toBe('sdk-legacy');
   });
 
   test('a model without one keeps the configuration effort', () => {

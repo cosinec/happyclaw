@@ -194,6 +194,7 @@ import { resolveRunnerLivenessTimeouts } from './runner-liveness.js';
 import {
   removeProviderEffortEnv,
   resolveAgentSdkEffort,
+  type SdkAgentEffort,
 } from './agent-effort.js';
 
 /**
@@ -1699,8 +1700,10 @@ export interface PoolProviderSelection {
    */
   sessionModel?: string;
   /**
-   * ChatGPT launches: the reasoning effort this conversation picked. It is
-   * minted into the gateway grant, never into the runner's environment.
+   * The reasoning effort this conversation picked. A ChatGPT launch mints it
+   * into the gateway grant, never into the runner's environment; any other
+   * launch runs Claude Code at it (CLAUDE_CODE_EFFORT_LEVEL, and in place of
+   * the Agent's own effort, see withConversationEffort).
    */
   sessionEffort?: string;
 }
@@ -1756,12 +1759,14 @@ function withSessionModel(
 }
 
 /**
- * A model of a configuration's list may carry its own effort. It applies to
- * the model the launch really runs on (a pool's fallback tier is judged as
- * itself) and replaces the configuration's CLAUDE_CODE_EFFORT_LEVEL; an
- * Agent's explicit effort still wins when the environment is built
- * (removeProviderEffortEnv). ChatGPT subscriptions take their effort from the
- * gateway and keep no list.
+ * The effort a launch runs Claude Code at, highest first: the conversation's
+ * pick, the Agent's own effort, the effort configured for the model the
+ * launch really runs on (a pool's fallback tier is judged as itself), the
+ * configuration's CLAUDE_CODE_EFFORT_LEVEL. The first and third go into the
+ * environment here; the Agent's still wins over the model's when the
+ * environment is built (removeProviderEffortEnv), and the conversation's
+ * then replaces the Agent's (withConversationEffort). ChatGPT subscriptions
+ * take their effort from the gateway and keep no list.
  */
 function withModelEffort(
   selection: PoolProviderSelection,
@@ -1773,13 +1778,49 @@ function withModelEffort(
   );
   const model = selection.modelOverride || config.anthropicModel;
   const effort =
-    provider && model ? findProviderModel(provider, model)?.effort : undefined;
+    selection.sessionEffort ??
+    (provider && model
+      ? findProviderModel(provider, model)?.effort
+      : undefined);
   if (!effort) return selection;
   return {
     ...selection,
     resolved: {
       config,
       customEnv: { ...customEnv, CLAUDE_CODE_EFFORT_LEVEL: effort },
+    },
+  };
+}
+
+/**
+ * A conversation's effort replaces the Agent's for this launch, everywhere
+ * the Agent's is read (the environment, the SDK `effort` option). ChatGPT
+ * launches carry theirs in the gateway grant instead.
+ */
+export function withConversationEffort(
+  input: ContainerInput,
+  selection: PoolProviderSelection | null,
+): ContainerInput {
+  const effort = selection?.sessionEffort;
+  if (
+    !effort ||
+    isCodexGatewayBaseUrl(selection.resolved.config.anthropicBaseUrl) ||
+    !input.agentProfile
+  ) {
+    return input;
+  }
+  const policy = input.agentProfile.runtimePolicy;
+  return {
+    ...input,
+    agentProfile: {
+      ...input.agentProfile,
+      runtimePolicy: {
+        ...policy,
+        reasoning: {
+          ...policy?.reasoning,
+          effort: effort as SdkAgentEffort,
+        },
+      } as AgentProfileRuntimePolicy,
     },
   };
 }
@@ -3231,7 +3272,10 @@ export async function runContainerAgent(
   let providerFailureTerminal: boolean | undefined;
   let providerFailureMaintenance = false;
   let healthyInputTurnCompleted = false;
-  input = applyProviderSwitchToInput(input, poolResult, sessionAgentId);
+  input = withConversationEffort(
+    applyProviderSwitchToInput(input, poolResult, sessionAgentId),
+    poolResult,
+  );
 
   const workspaceMemoryCapabilityScope: WorkspaceMemoryCapabilityScope = {
     groupFolder: group.folder,
@@ -4370,7 +4414,10 @@ export async function runHostAgent(
   let hostProviderFailureMaintenance = false;
   let hostHealthyInputTurnCompleted = false;
   let hostOauthLaunch: OAuthLaunchSnapshot | null = null;
-  input = applyProviderSwitchToInput(input, hostPoolResult, sessionAgentId);
+  input = withConversationEffort(
+    applyProviderSwitchToInput(input, hostPoolResult, sessionAgentId),
+    hostPoolResult,
+  );
 
   const workspaceMemoryCapabilityScope: WorkspaceMemoryCapabilityScope = {
     groupFolder: group.folder,

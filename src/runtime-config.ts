@@ -33,6 +33,7 @@ import {
   normalizeProviderBaseUrl,
   normalizeProviderModels,
   PROVIDER_ERROR_CODES,
+  type ModelEffort,
   type ProviderErrorCode,
   type ProviderModelEntry,
   type ProviderTestRecord,
@@ -2962,6 +2963,23 @@ export function toPublicProvider(
     customEnv: provider.customEnv || {},
     updatedAt: provider.updatedAt,
   };
+}
+
+/**
+ * The effort a connection's own environment runs Claude Code at:
+ * CLAUDE_CODE_EFFORT_LEVEL when set, else the level a third-party endpoint
+ * gets by default. Undefined lets the model choose.
+ */
+export function providerEffortLevel(
+  provider: Pick<UnifiedProvider, 'anthropicBaseUrl' | 'customEnv'>,
+): ModelEffort | undefined {
+  const configured = provider.customEnv?.CLAUDE_CODE_EFFORT_LEVEL?.trim();
+  if (configured && PROVIDER_EFFORT_LEVELS.has(configured)) {
+    return configured as ModelEffort;
+  }
+  return provider.anthropicBaseUrl && !isCodexGatewayProvider(provider)
+    ? THIRD_PARTY_RUNTIME_DEFAULTS.CLAUDE_CODE_EFFORT_LEVEL
+    : undefined;
 }
 
 /**

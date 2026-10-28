@@ -148,6 +148,7 @@ async function labelled(): Promise<{
   source: string;
   modelConfigId: string | null;
   model: string | null;
+  effort: string | null;
 }> {
   const res = await groupRoutes.request(
     `/${encodeURIComponent(JID)}/model-selection`,
@@ -157,7 +158,12 @@ async function labelled(): Promise<{
 }
 
 /** What a launch without a conversation pick runs. */
-function launched(): { profileId: string; model: string | null } {
+function launched(): {
+  profileId: string;
+  model: string | null;
+  /** CLAUDE_CODE_EFFORT_LEVEL in the environment the launch builds. */
+  effort: string | null;
+} {
   const profile = agentId ? db.getAgentProfile(agentId) : undefined;
   const selection = runner.trySelectPoolProvider(
     FOLDER,
@@ -167,27 +173,42 @@ function launched(): { profileId: string; model: string | null } {
     profile?.model,
   )!;
   providerPool.releaseSession(selection.profileId);
+  const effortLine = runtimeConfig
+    .buildClaudeEnvLines(
+      selection.resolved.config,
+      selection.resolved.customEnv,
+    )
+    .find((line) => line.startsWith('CLAUDE_CODE_EFFORT_LEVEL='));
   return {
     profileId: selection.profileId,
     model: selection.sessionModel || null,
+    effort: effortLine?.split('=')[1] ?? null,
   };
 }
 
 async function expectLabelMatchesLaunch(expected: {
   source: string;
   model: string | null;
+  effort?: string | null;
 }) {
   const label = await labelled();
   const launch = launched();
   expect(label).toMatchObject(expected);
   expect(label.modelConfigId).toBe(launch.profileId);
   expect(label.model).toBe(launch.model);
+  // A model that takes efforts runs at the one the label names.
+  if (expected.effort) expect(label.effort).toBe(launch.effort);
 }
 
 describe('default.model names what an unpicked launch runs', () => {
   test("an Agent's model within its configuration", async () => {
     bindAgent(glm.id, 'glm-5-air');
-    await expectLabelMatchesLaunch({ source: 'agent', model: 'glm-5-air' });
+    // glm-5-air runs low, but takes no effort a conversation could pick.
+    await expectLabelMatchesLaunch({
+      source: 'agent',
+      model: 'glm-5-air',
+      effort: null,
+    });
   });
 
   test("an Agent's model the configuration no longer offers", async () => {
@@ -197,12 +218,20 @@ describe('default.model names what an unpicked launch runs', () => {
 
   test('an Agent bound to a configuration without a model', async () => {
     bindAgent(kimi.id);
-    await expectLabelMatchesLaunch({ source: 'agent', model: 'kimi-k3' });
+    await expectLabelMatchesLaunch({
+      source: 'agent',
+      model: 'kimi-k3',
+      effort: 'max',
+    });
   });
 
   test('the global default', async () => {
     runtimeConfig.setDefaultModelConfig(kimi.id);
-    await expectLabelMatchesLaunch({ source: 'default', model: 'kimi-k3' });
+    await expectLabelMatchesLaunch({
+      source: 'default',
+      model: 'kimi-k3',
+      effort: 'max',
+    });
   });
 
   test('the single enabled configuration', async () => {
@@ -212,6 +241,17 @@ describe('default.model names what an unpicked launch runs', () => {
   test('a ChatGPT subscription, as default and as an Agent model', async () => {
     runtimeConfig.setDefaultModelConfig(chatgpt.id);
     await expectLabelMatchesLaunch({ source: 'default', model: 'gpt-6-sol' });
+    // ChatGPT's effort is the gateway's, as its catalog view reports it.
+    const chatgptView = (
+      await (
+        await groupRoutes.request(`/${encodeURIComponent(JID)}/model-selection`)
+      ).json()
+    ).options.find((option: { id: string }) => option.id === chatgpt.id).codex;
+    expect((await labelled()).effort).toBe(
+      chatgptView.models.find(
+        (model: { value: string }) => model.value === 'gpt-6-sol',
+      ).defaultEffort,
+    );
 
     bindAgent(chatgpt.id, 'gpt-6.1-sol');
     await expectLabelMatchesLaunch({ source: 'agent', model: 'gpt-6.1-sol' });
