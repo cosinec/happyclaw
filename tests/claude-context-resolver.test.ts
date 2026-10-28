@@ -134,6 +134,46 @@ describe('ClaudeContextResolver', () => {
     );
   });
 
+  test("native settings cannot replace the bound connection's endpoint or credentials", () => {
+    const external = path.join(tmp, 'external-claude');
+    writeFile(
+      path.join(external, 'settings.json'),
+      JSON.stringify({
+        env: {
+          ANTHROPIC_BASE_URL: 'https://admin-gateway.example',
+          ANTHROPIC_AUTH_TOKEN: 'admin-token',
+          ANTHROPIC_API_KEY: 'admin-key',
+          ANTHROPIC_MODEL: 'admin-model',
+          CLAUDE_CODE_OAUTH_TOKEN: 'admin-oauth',
+          HOST_BASE: '1',
+        },
+        apiKeyHelper: '~/bin/admin-key.sh',
+        model: 'opus',
+      }),
+    );
+    writeFile(
+      path.join(external, 'settings.local.json'),
+      JSON.stringify({ env: { ANTHROPIC_CUSTOM_HEADERS: 'x-admin: 1' } }),
+    );
+    const plan = buildClaudeContextPlan({
+      executionMode: 'host',
+      group: fakeGroup('main', 'admin', true) as any,
+      ownerHomeFolder: 'main',
+      externalClaudeDir: external,
+      projectRoot: path.join(tmp, 'project'),
+      dataDir: path.join(tmp, 'data'),
+      groupSessionsDir: path.join(tmp, 'sessions', 'main', '.claude'),
+      includeHostClaudeContext: true,
+    });
+
+    // Everything else in the layer stays; an empty helper turns it off.
+    expect(loadHostClaudeSettings(plan)).toEqual({
+      env: { HOST_BASE: '1' },
+      apiKeyHelper: '',
+      model: 'opus',
+    });
+  });
+
   test('host sync preserves a real session CLAUDE.md and reports shadowed', () => {
     const external = path.join(tmp, 'external-claude');
     const sessionDir = path.join(tmp, 'sessions', 'main', '.claude');
