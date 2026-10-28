@@ -286,8 +286,15 @@ ios/scripts/install-device.sh <UDID>     # 指定设备
   卸载后才会清空。
 - 免费账号限制：每台设备最多 3 个自签 App；每 7 天最多注册 10 个 App ID。**不支持推送
   （APNs）和 App Groups**，所以原生推送和 Widget 需要付费账号；本轮推送先走 Web Push（PWA）。
-- 想减少手动续签：可以把未签名产物交给 SideStore/AltStore 自动续签，这一轮还没做未签名
-  IPA 打包脚本（见执行记录的下一步）。
+- 想减少手动续签：打一个不签名的 IPA，交给 SideStore / AltStore 用自己的 Apple ID 重签，
+  它们会在后台自动续 7 天签名，手机不用每周连 Mac：
+
+  ```bash
+  ios/scripts/build-unsigned-ipa.sh        # → ios/build/HappyClaw-<版本>-<build>-unsigned.ipa
+  ```
+
+  用 AirDrop / 文件 App 把 IPA 传到手机，在 SideStore 里「+」导入即可。重签工具会改写
+  bundle id，所以它和 `install-device.sh` 装的是两个不同的 App，登录状态不共享。
 
 ## 许可
 
