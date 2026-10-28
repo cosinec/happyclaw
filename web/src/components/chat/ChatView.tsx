@@ -1633,7 +1633,9 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       </aside>
 
       {mobileSessionsVisible && (
-        <div className="flex h-full min-w-0 flex-1 bg-background pt-[env(safe-area-inset-top)] lg:hidden">
+        // AppLayout's root already pads the status bar (.safe-area-top);
+        // padding it again here left a double gap above the session list.
+        <div className="flex h-full min-w-0 flex-1 bg-background lg:hidden">
           {renderSessionSidebar(true)}
         </div>
       )}
