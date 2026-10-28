@@ -42,12 +42,12 @@ function currentScheme(): 'light' | 'dark' {
 }
 
 /**
- * --background may be hex, rgb() or oklch(); painting one pixel lets the
+ * Palette tokens may be hex, rgb() or oklch(); painting one pixel lets the
  * browser resolve any CSS color to sRGB for the shell.
  */
-function currentBackground(): string | undefined {
+function cssColorHex(token: string): string | undefined {
   const css = getComputedStyle(document.documentElement)
-    .getPropertyValue('--background')
+    .getPropertyValue(token)
     .trim();
   const context = document.createElement('canvas').getContext('2d');
   if (!css || !context) return undefined;
@@ -58,7 +58,11 @@ function currentBackground(): string | undefined {
 }
 
 function currentTheme() {
-  return { scheme: currentScheme(), background: currentBackground() };
+  return {
+    scheme: currentScheme(),
+    background: cssColorHex('--background'),
+    accent: cssColorHex('--primary'),
+  };
 }
 
 /**
@@ -123,7 +127,8 @@ export function installNativeBridge(router: AppRouter) {
         const next = currentTheme();
         if (
           next.scheme === theme.scheme &&
-          next.background === theme.background
+          next.background === theme.background &&
+          next.accent === theme.accent
         )
           return;
         theme = next;

@@ -165,8 +165,9 @@ public enum WebMessage: Equatable, Sendable {
   case ready(session: String)
   case tabs(tabs: [TabDeclaration], more: [TabDeclaration])
   case routeChanged(RouteState)
-  /// `background` is the page color as #rrggbb (optional within v1).
-  case themeChanged(ColorSchemeName, background: RGBColor?)
+  /// `background` (page color) and `accent` (palette --primary) are #rrggbb,
+  /// both optional within v1.
+  case themeChanged(ColorSchemeName, background: RGBColor?, accent: RGBColor?)
   case confirmRequest(id: String, ConfirmRequest)
   case menuRequest(id: String, MenuRequest)
   case haptic(HapticStyle)
@@ -222,7 +223,7 @@ private struct TabsPayload: Decodable {
   var tabs: [TabDeclaration]
   var more: [TabDeclaration]
 }
-private struct ThemePayload: Decodable { var scheme: ColorSchemeName; var background: String? }
+private struct ThemePayload: Decodable { var scheme: ColorSchemeName; var background: String?; var accent: String? }
 private struct HapticPayload: Decodable { var style: HapticStyle }
 private struct ErrorPayload: Decodable {
   var code: String
@@ -271,7 +272,10 @@ extension BridgeProtocol {
     case "theme.changed":
       let theme = try payload(ThemePayload.self)
       // An unparseable color is dropped rather than failing the message.
-      message = .themeChanged(theme.scheme, background: theme.background.flatMap(RGBColor.init(hex:)))
+      message = .themeChanged(
+        theme.scheme,
+        background: theme.background.flatMap(RGBColor.init(hex:)),
+        accent: theme.accent.flatMap(RGBColor.init(hex:)))
     case "confirm.request":
       message = .confirmRequest(id: try requestId(), try payload(ConfirmRequest.self))
     case "menu.request":

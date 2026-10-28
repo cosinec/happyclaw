@@ -30,7 +30,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "服务器"
+            "value": "服务器地址"
           }
         }
       }
@@ -151,7 +151,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "服务器地址"
+            "value": "服务器"
           }
         }
       }
@@ -251,6 +251,28 @@
           "stringUnit": {
             "state": "translated",
             "value": "会同时清除它在本机的登录状态和缓存，服务器上的数据不受影响。"
+          }
+        }
+      }
+    },
+    "connecting": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在连接…"
+          }
+        }
+      }
+    },
+    "connect.timeout": {
+      "extractionState": "manual",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接超时：15 秒内没有收到服务器响应。"
           }
         }
       }

@@ -96,6 +96,8 @@ final class WebController: NSObject {
     webView.load(URLRequest(url: address.url))
   }
 
+  func stopLoading() { webView.stopLoading() }
+
   func reload() {
     if webView.url == nil, let server {
       webView.load(URLRequest(url: server.url))

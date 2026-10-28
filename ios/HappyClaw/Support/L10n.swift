@@ -18,6 +18,8 @@ enum L10n {
   static var connectErrorEmpty: String { t("connect.error.empty") }
   static var connectErrorInvalid: String { t("connect.error.invalid") }
   static var connectErrorScheme: String { t("connect.error.scheme") }
+  static var connecting: String { t("connecting") }
+  static var connectTimeout: String { t("connect.timeout") }
 
   // Tabs / sheets
   static var tabMore: String { t("tab.more") }

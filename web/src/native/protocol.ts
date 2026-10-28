@@ -112,6 +112,8 @@ export interface WebToNativePayloads {
     scheme: 'light' | 'dark';
     /** Page background as #rrggbb, for native bars that sit over it. */
     background?: string;
+    /** Palette accent (--primary) as #rrggbb, tints native controls. */
+    accent?: string;
   };
   'confirm.request': {
     title: string;

@@ -31,6 +31,8 @@ struct ServerListView: View {
               }
             }
           }
+          // Rows read as content, not as tinted button text.
+          .foregroundStyle(.primary)
           .swipeActions {
             if !active {
               Button(L10n.serverRemove, systemImage: "trash", role: .destructive) {

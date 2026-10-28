@@ -39,9 +39,9 @@ private let shell = ShellInfo(version: "0.1.0", build: "1", os: "27.1")
     } else { Issue.record("wrong case") }
 
     let theme = try BridgeProtocol.decode(json(#"""
-      {"v":1,"type":"theme.changed","payload":{"scheme":"light","background":"#faf9f5"}}
+      {"v":1,"type":"theme.changed","payload":{"scheme":"light","background":"#faf9f5","accent":"#f97316"}}
       """#))
-    #expect(theme.message == .themeChanged(.light, background: RGBColor(hex: "#faf9f5")))
+    #expect(theme.message == .themeChanged(.light, background: RGBColor(hex: "#faf9f5"), accent: RGBColor(hex: "#f97316")))
     #expect(RGBColor(hex: "#ff0000")?.red == 1)
     #expect(RGBColor(hex: "oklch(0.1 0 0)") == nil)
 
