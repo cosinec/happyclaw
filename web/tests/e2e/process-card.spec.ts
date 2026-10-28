@@ -470,8 +470,8 @@ test.describe('the settled card', () => {
     await open(page, 'scenario=settled');
     const card = page.locator('[data-hc-stream-card="settled"]');
     const summary = card.locator('[data-hc-process-card] > button');
-    await expect(summary).toContainText('已处理');
-    await expect(summary).toContainText('6 个工具');
+    // How long it worked; what it used is inside.
+    await expect(summary).toHaveText(/^已工作 \d+s$/);
     await expect(summary).toHaveAttribute('aria-expanded', 'false');
     expect((await summary.boundingBox())!.height).toBeGreaterThanOrEqual(40);
     await expect(win(page)).toHaveCount(0);
@@ -480,6 +480,9 @@ test.describe('the settled card', () => {
     await summary.click();
     await expect(summary).toHaveAttribute('aria-expanded', 'true');
     await expect(win(page)).toBeVisible();
+    await expect(win(page).locator('[data-hc-work-counts]')).toContainText(
+      '6 个工具',
+    );
     const { height } = await scrollState(page);
     expect(height).toBeLessThanOrEqual(0.6 * 844 + 1);
     await expect(

@@ -1,8 +1,8 @@
 import { expect, test, type Page } from '@playwright/test';
 
-// The run status line's output speed, through chat-render-harness's `live`
+// The run status bar's output speed, through chat-render-harness's `live`
 // scenario: the real reducer, fed reply text at a steady pace from inside the
-// page. The phases and timing rules are pinned by run-status-rate.test.tsx;
+// page. The phases and timing rules are pinned by run-status-bar.test.tsx;
 // this is what only a browser shows.
 
 const HARNESS = '/tests/e2e/chat-render-harness.html';
@@ -21,10 +21,15 @@ declare global {
 // Ten CJK characters every 100 ms: about 100 tok/s.
 const CHUNK = '流式输出速度估算正文';
 
-const rate = (page: Page) => page.getByText(/^· 约 \d+ tok\/s$/);
+const bar = (page: Page) => page.locator('[data-hc-run-status-bar]');
+/** The bar's right pill once it has a speed: "15s · 100 tok/s". */
+const rate = (page: Page) =>
+  bar(page)
+    .locator('.tabular-nums')
+    .filter({ hasText: /tok\/s/ });
 
 async function reading(page: Page): Promise<number> {
-  return Number((await rate(page).textContent())?.match(/\d+/)?.[0]);
+  return Number((await rate(page).textContent())?.match(/(\d+) tok/)?.[1]);
 }
 
 const emit = (page: Page, event: Record<string, unknown>) =>
@@ -61,12 +66,12 @@ test.describe('on a wide screen', () => {
     const value = await reading(page);
     expect(value).toBeGreaterThan(60);
     expect(value).toBeLessThan(140);
-    await expect(rate(page).locator('..')).toContainText(
-      /正在回复.*\d+s· 约 \d+ tok\/s/,
+    await expect(bar(page).locator('[data-hc-run-phase]')).toHaveText(
+      '正在回复',
     );
+    await expect(rate(page)).toHaveText(/^\d+s · \d+ tok\/s$/);
     await expect(rate(page)).toHaveCSS('font-variant-numeric', 'tabular-nums');
     // A reading, not a status: nothing announces it.
-    await expect(rate(page)).toHaveAttribute('aria-hidden', 'true');
     await expect(
       page.locator('[aria-live]').filter({ hasText: 'tok/s' }),
     ).toHaveCount(0);
@@ -112,13 +117,12 @@ test.describe('on a wide screen', () => {
   });
 });
 
-test('keeps it off a narrow screen, where the phase needs the room', async ({
+test('shows it on a narrow screen too: the bar has room beside the phase', async ({
   page,
 }) => {
   await startRun(page);
   expect(await page.evaluate(() => window.innerWidth)).toBeLessThan(640);
-  await expect(page.getByText('正在回复', { exact: true })).toBeVisible();
-  await expect(rate(page)).toHaveCount(1, { timeout: 5000 });
-  await expect(rate(page)).toBeHidden();
+  await expect(bar(page).locator('[data-hc-run-phase]')).toHaveText('正在回复');
+  await expect(rate(page)).toBeVisible({ timeout: 5000 });
   await stopWriting(page);
 });

@@ -15,6 +15,8 @@ import { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { MemoryRouter } from 'react-router-dom';
 import { ChatView } from '../../src/components/chat/ChatView';
+import { MotionProvider } from '../../src/lib/motion';
+import { HarnessRunStatusBar } from './run-status-bar-slot';
 import { wsManager } from '../../src/api/ws';
 import { useGlobalStreamSubscriptions } from '../../src/hooks/useStreamSubscriptions';
 import { useAuthStore, type UserPublic } from '../../src/stores/auth';
@@ -327,13 +329,21 @@ function HarnessRoot() {
     useChatStore.setState({ currentGroup: next });
     setJid(next);
   };
-  return <ChatView key={jid} groupJid={jid} />;
+  return (
+    <>
+      <ChatView key={jid} groupJid={jid} />
+      <HarnessRunStatusBar groupJid={jid} />
+    </>
+  );
 }
 
+// As AppLayout does: without it a changed headline stays at its first frame.
 createRoot(document.getElementById('root')!).render(
-  <MemoryRouter initialEntries={['/chat/e2e-scroll']}>
-    <main className="h-[100dvh] overflow-hidden bg-background">
-      <HarnessRoot />
-    </main>
-  </MemoryRouter>,
+  <MotionProvider>
+    <MemoryRouter initialEntries={['/chat/e2e-scroll']}>
+      <main className="h-[100dvh] overflow-hidden bg-background">
+        <HarnessRoot />
+      </main>
+    </MemoryRouter>
+  </MotionProvider>,
 );
