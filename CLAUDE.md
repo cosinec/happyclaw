@@ -497,7 +497,9 @@ npm run self-test
   测试、模型发现用同一套预设和错误分类。
 - 修改 Prompt 后确保 `scripts/check-agent-runner-prompts.sh` 通过。
 - 修改文档后运行 `npm run docs:check`。
-- SDK/CLI 升级必须显式执行 `make update-sdk`，验证后提交 package.json 与 lockfile。
+- SDK/CLI 升级必须显式执行 `make update-sdk`，验证后提交 package.json 与 lockfile；
+  升级后重跑 `node tests/e2e/turn-context-dedup.mjs`，它固定 SessionStart(compact)
+  补发的位置。
 - 容器以非 root 用户执行 Agent；修改 Dockerfile 或 entrypoint 后需要重建镜像。
 - 停止服务只能杀监听进程：`lsof -ti:PORT -sTCP:LISTEN | xargs kill`。
 - 不要使用会杀死连接方或 Docker 网络代理的宽泛端口 kill 命令。
