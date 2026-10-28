@@ -135,16 +135,14 @@ test.describe('model slot in the composer toolbar', () => {
       .boundingBox())!;
     const model = (await modelButton(page).boundingBox())!;
     const send = (await sendButton(page).boundingBox())!;
-    const terminal = (await page
-      .getByRole('button', { name: '终端' })
-      .boundingBox())!;
-    // Left: attach, reset, terminal. Right: the model slot, then send.
-    expect(terminal.x + terminal.width).toBeLessThan(slot.x);
+    const tools = (await page.locator('[data-composer-tools]').boundingBox())!;
+    // Left: the tools. Right: the model slot, then send.
+    expect(tools.x + tools.width).toBeLessThan(slot.x);
     expect(send.x - (slot.x + slot.width)).toBeLessThan(8);
     expect(model.x + model.width).toBeLessThanOrEqual(send.x + 0.5);
   });
 
-  test('a 320px window truncates the model, never the send button', async ({
+  test('412px and 320px windows truncate the model, never the tools or send', async ({
     page,
     hasTouch,
   }) => {
@@ -153,15 +151,73 @@ test.describe('model slot in the composer toolbar', () => {
       selectedModel: 'gpt-6-astra',
       selectedEffort: 'high',
     });
-    await page.setViewportSize({ width: 320, height: 700 });
     const size = hasTouch ? 40 : 30;
-    await expect
-      .poll(async () => {
-        const box = (await sendButton(page).boundingBox())!;
-        return [Math.round(box.width), Math.round(box.height)];
-      })
-      .toEqual([size, size]);
-    await expectRowFits(page);
+    for (const width of [412, 320]) {
+      await page.setViewportSize({ width, height: 700 });
+      await expect
+        .poll(async () => {
+          const box = (await sendButton(page).boundingBox())!;
+          return [Math.round(box.width), Math.round(box.height)];
+        })
+        .toEqual([size, size]);
+      await expectRowFits(page);
+      // The tools on the left keep their size and end before the slot.
+      const slot = (await page
+        .locator('[data-composer-model-slot]')
+        .boundingBox())!;
+      const tools = page.locator('[data-composer-tools] button');
+      for (let i = 0; i < (await tools.count()); i += 1) {
+        const tool = (await tools.nth(i).boundingBox())!;
+        expect(Math.round(tool.width), `tool ${i} at ${width}px`).toBe(size);
+        expect(
+          tool.x + tool.width,
+          `tool ${i} at ${width}px`,
+        ).toBeLessThanOrEqual(slot.x + 0.5);
+      }
+    }
+  });
+
+  test('at 390px the model shows at least 8 characters of its name', async ({
+    page,
+  }) => {
+    await openHarness(page, {
+      selectedModelConfigId: 'official',
+      selectedModel: 'claude-opus-5-5',
+    });
+    await page.setViewportSize({ width: 390, height: 800 });
+    await expect(modelButton(page)).toContainText('claude-opus-5-5');
+    // Characters left of the ellipsis in the element that truncates the name.
+    const visible = await modelButton(page).evaluate((button) => {
+      const name = 'claude-opus-5-5';
+      const walker = document.createTreeWalker(button, NodeFilter.SHOW_TEXT);
+      let text: Text | null = null;
+      while (walker.nextNode()) {
+        if ((walker.currentNode as Text).data.includes(name)) {
+          text = walker.currentNode as Text;
+          break;
+        }
+      }
+      if (!text) return 0;
+      let clip = text.parentElement!;
+      while (clip !== button && getComputedStyle(clip).overflow === 'visible') {
+        clip = clip.parentElement!;
+      }
+      if (clip.scrollWidth <= clip.clientWidth) return name.length;
+      const canvas = document.createElement('canvas').getContext('2d')!;
+      canvas.font = getComputedStyle(clip).font;
+      const room = clip.clientWidth - canvas.measureText('…').width;
+      const start = text.data.indexOf(name);
+      const range = document.createRange();
+      let shown = 0;
+      for (let count = 1; count <= name.length; count += 1) {
+        range.setStart(text, start);
+        range.setEnd(text, start + count);
+        if (range.getBoundingClientRect().width > room) break;
+        shown = count;
+      }
+      return shown;
+    });
+    expect(visible).toBeGreaterThanOrEqual(8);
   });
 });
 

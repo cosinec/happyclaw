@@ -27,6 +27,7 @@ import {
 } from './composer/EmptyConversation';
 import { MessageInput, type MessageInputHandle } from './MessageInput';
 import { ModelSelector } from './ModelSelector';
+import { ConversationContextUsage } from './composer/ContextUsageRing';
 import {
   Sheet,
   SheetContent,
@@ -300,6 +301,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   );
   const loadFollowUps = useChatStore((s) => s.loadFollowUps);
   const handleFollowUpUpdate = useChatStore((s) => s.handleFollowUpUpdate);
+  const setContextUsage = useChatStore((s) => s.setContextUsage);
   const actOnFollowUp = useChatStore((s) => s.actOnFollowUp);
 
   // URL `?agent=` is the source of truth for the active sub-conversation tab.
@@ -569,6 +571,10 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     ),
     [groupJid, composerAgentId, canModifyWorkspaceConfig],
   );
+  const contextUsage = useMemo(
+    () => <ConversationContextUsage jid={groupJid} agentId={composerAgentId} />,
+    [groupJid, composerAgentId],
+  );
   const isTopicWorkspace =
     group?.conversation_nav_mode === 'vertical_threads' ||
     group?.conversation_source === 'native_thread' ||
@@ -721,13 +727,20 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         : groupJid;
       handleFollowUpUpdate(targetJid, data.items, data.transition);
     });
+    // How full a conversation's context is, after each of its turns; kept
+    // for every conversation here, shown or not.
+    const unsub6 = wsManager.on('context_usage', (data: any) => {
+      if (data.chatJid !== groupJid) return;
+      setContextUsage(groupJid, data.agentId ?? null, data);
+    });
     // agent_status 已提升到 AppLayout 全局监听
     return () => {
       unsub2();
       unsub3();
       unsub5();
+      unsub6();
     };
-  }, [groupJid, handleWsNewMessage, handleFollowUpUpdate]);
+  }, [groupJid, handleWsNewMessage, handleFollowUpUpdate, setContextUsage]);
 
   useEffect(() => {
     void loadFollowUps(followUpChatJid);
@@ -1427,7 +1440,6 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
               placeholder={`向 ${agentProfileLabel} 发送消息…`}
               onSend={sessionTab ? sendActiveAgent : sendMain}
               groupJid={groupJid}
-              contextLabel={sessionTab ? currentContextName : undefined}
               isRunning={currentContextWaiting}
               onStop={
                 sessionTab
@@ -1451,6 +1463,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                 !sessionTab && canUseTerminal ? handleTerminalToggle : undefined
               }
               modelSelector={modelSelector}
+              contextUsage={contextUsage}
             />
             {heroCentered && (
               <div

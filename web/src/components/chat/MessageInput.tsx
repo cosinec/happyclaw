@@ -110,13 +110,18 @@ interface MessageInputProps {
    */
   draftKey?: string;
   disabled?: boolean;
-  contextLabel?: string;
   /** Composer placeholder, e.g. naming the agent being addressed. */
   placeholder?: string;
   onResetSession?: () => void;
   onToggleTerminal?: () => void;
   /** Conversation-scoped model picker shown in the action bar. */
   modelSelector?: ReactNode;
+  /**
+   * How full the conversation's context is, under the card on the right
+   * while docked and wider than a phone. Its row is kept even while this
+   * renders nothing, so the ring appearing never moves the composer.
+   */
+  contextUsage?: ReactNode;
   /** Stop the active run when the composer has no follow-up to send. */
   onStop?: () => Promise<boolean> | boolean;
   isRunning?: boolean;
@@ -174,11 +179,11 @@ export const MessageInput = memo(function MessageInput({
   groupJid,
   draftKey,
   disabled = false,
-  contextLabel,
   placeholder = '输入消息...',
   onResetSession,
   onToggleTerminal,
   modelSelector,
+  contextUsage,
   onStop,
   isRunning = false,
   queuedFollowUps = [],
@@ -295,6 +300,8 @@ export const MessageInput = memo(function MessageInput({
   const isCompact = displayMode === 'compact';
   const isTouchInput = useMediaQuery('(pointer: coarse) and (hover: none)');
   const isPhoneWidth = useMediaQuery('(max-width: 639px)');
+  // Too narrow for every tool beside a readable model name.
+  const foldToolbarActions = useMediaQuery('(max-width: 479px)');
   const isWideViewport = useMediaQuery('(min-width: 1024px)');
 
   // iOS keyboard adaptation
@@ -948,7 +955,7 @@ export const MessageInput = memo(function MessageInput({
             <div
               className={cn(
                 'flex flex-col justify-between px-[11px] pt-[11px] pb-[6px]',
-                centered ? 'min-h-[140px]' : 'min-h-[86px]',
+                centered ? 'min-h-[140px]' : 'min-h-[96px] sm:min-h-[118px]',
               )}
               onMouseDown={focusFromBlankArea}
             >
@@ -974,8 +981,8 @@ export const MessageInput = memo(function MessageInput({
                 onPickFolder={() => folderInputRef.current?.click()}
                 onResetSession={onResetSession}
                 onToggleTerminal={onToggleTerminal}
+                foldActions={foldToolbarActions}
                 modelSelector={modelSelector}
-                contextLabel={contextLabel}
                 // A draft turns the primary action into queue/send; keep
                 // stop reachable next to it.
                 showSideStop={canStop && hasPayload && !sending}
@@ -1012,6 +1019,15 @@ export const MessageInput = memo(function MessageInput({
             </div>
           </div>
         </div>
+        {/* A phone's row is full of touch targets; the ring stays off it. */}
+        {contextUsage && !centered && !isPhoneWidth && (
+          <div
+            data-composer-footer
+            className="mt-1 flex h-5 items-center justify-end px-1"
+          >
+            {contextUsage}
+          </div>
+        )}
       </div>
 
       {attachments.previewIndex !== null &&

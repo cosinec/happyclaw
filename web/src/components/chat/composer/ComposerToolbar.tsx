@@ -1,10 +1,10 @@
 import type { ReactNode } from 'react';
 import {
-  Eraser,
   FileUp,
   FolderUp,
   Image as ImageIcon,
   Loader2,
+  Paintbrush,
   Plus,
   TerminalSquare,
 } from 'lucide-react';
@@ -13,6 +13,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import {
@@ -39,8 +40,9 @@ interface ComposerToolbarProps {
   onPickFolder: () => void;
   onResetSession?: () => void;
   onToggleTerminal?: () => void;
+  /** A narrow row: reset and terminal move into the + menu. */
+  foldActions?: boolean;
   modelSelector?: ReactNode;
-  contextLabel?: string;
   /** A stop control beside the primary action (a draft holds that spot). */
   showSideStop: boolean;
   stopping: boolean;
@@ -60,7 +62,8 @@ interface ComposerToolbarProps {
 /**
  * cindy's toolbar: attach, reset and terminal on the left; the model, stop
  * and send on the right. The model trigger gives way first, so a narrow row
- * truncates it and never squeezes the send button.
+ * truncates it and never squeezes the tools or the send button. Below 480px
+ * reset and terminal fold into the + menu, leaving the model more room.
  */
 export function ComposerToolbar({
   canAttach,
@@ -70,61 +73,83 @@ export function ComposerToolbar({
   onPickFolder,
   onResetSession,
   onToggleTerminal,
+  foldActions = false,
   modelSelector,
-  contextLabel,
   showSideStop,
   stopping,
   stopDisabled,
   onStop,
   send,
 }: ComposerToolbarProps) {
+  const menuReset = foldActions && !!onResetSession;
+  const menuTerminal = foldActions && !!onToggleTerminal;
   return (
     <div
       data-composer-toolbar
       className="mt-[2px] flex min-w-0 items-center gap-1 select-none"
     >
-      <div className="flex min-w-0 items-center gap-1">
-        {canAttach && (
+      {/* Fixed buttons: only the model slot gives way. */}
+      <div data-composer-tools className="flex shrink-0 items-center gap-1">
+        {(canAttach || menuReset || menuTerminal) && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <IconButton
                 label="添加文件"
                 icon={<Plus />}
-                disabled={uploading}
+                disabled={uploading && !menuReset && !menuTerminal}
                 tooltipSide="top"
                 className={COMPOSER_PILL}
               />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" side="top" className="w-44">
-              <DropdownMenuItem onClick={onPickImages}>
-                <ImageIcon />
-                添加图片
-              </DropdownMenuItem>
-              <DropdownMenuItem disabled={uploading} onClick={onPickFiles}>
-                <FileUp />
-                上传文件
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                disabled={uploading}
-                className="max-lg:hidden"
-                onClick={onPickFolder}
-              >
-                <FolderUp />
-                上传文件夹
-              </DropdownMenuItem>
+              {canAttach && (
+                <>
+                  <DropdownMenuItem disabled={uploading} onClick={onPickImages}>
+                    <ImageIcon />
+                    添加图片
+                  </DropdownMenuItem>
+                  <DropdownMenuItem disabled={uploading} onClick={onPickFiles}>
+                    <FileUp />
+                    上传文件
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    disabled={uploading}
+                    className="max-lg:hidden"
+                    onClick={onPickFolder}
+                  >
+                    <FolderUp />
+                    上传文件夹
+                  </DropdownMenuItem>
+                </>
+              )}
+              {canAttach && (menuReset || menuTerminal) && (
+                <DropdownMenuSeparator />
+              )}
+              {menuReset && (
+                <DropdownMenuItem onClick={onResetSession}>
+                  <Paintbrush />
+                  清除上下文
+                </DropdownMenuItem>
+              )}
+              {menuTerminal && (
+                <DropdownMenuItem onClick={onToggleTerminal}>
+                  <TerminalSquare />
+                  终端
+                </DropdownMenuItem>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
         )}
-        {onResetSession && (
+        {onResetSession && !foldActions && (
           <IconButton
             label="清除当前会话上下文"
-            icon={<Eraser />}
+            icon={<Paintbrush />}
             onClick={onResetSession}
             tooltipSide="top"
             className={COMPOSER_PILL}
           />
         )}
-        {onToggleTerminal && (
+        {onToggleTerminal && !foldActions && (
           <IconButton
             label="终端"
             icon={<TerminalSquare />}
@@ -132,14 +157,6 @@ export function ComposerToolbar({
             tooltipSide="top"
             className={COMPOSER_PILL}
           />
-        )}
-        {contextLabel && (
-          <span
-            className="ml-1 inline-flex h-6 max-w-[min(42vw,180px)] min-w-0 items-center rounded-full bg-muted px-2 text-micro font-medium text-muted-foreground"
-            title={`发送到：${contextLabel}`}
-          >
-            <span className="truncate">{contextLabel}</span>
-          </span>
         )}
       </div>
 

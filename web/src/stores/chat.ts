@@ -169,6 +169,38 @@ export interface FollowUpTransition {
   delivery_updated_at: string;
 }
 
+/**
+ * What a conversation's Claude context holds now, from
+ * `GET /api/groups/:jid/context-usage` and the `context_usage` push after
+ * each turn. All null until a turn ran (and again after a reset).
+ */
+export interface ContextUsage {
+  usedTokens: number | null;
+  contextWindow: number | null;
+  percentage: number | null;
+}
+
+/** Store key of a conversation's context usage, like the follow-up queue's. */
+export function contextUsageKey(jid: string, agentId?: string | null): string {
+  return agentId ? `${jid}#agent:${agentId}` : jid;
+}
+
+function toContextUsage(
+  data: Partial<ContextUsage> | null,
+): ContextUsage | null {
+  if (!data) return null;
+  const usage: ContextUsage = {
+    usedTokens: data.usedTokens ?? null,
+    contextWindow: data.contextWindow ?? null,
+    percentage: data.percentage ?? null,
+  };
+  return usage.usedTokens === null && usage.percentage === null ? null : usage;
+}
+
+// Bumped by every push or reset per key, so a GET that started before one
+// does not overwrite it with an older answer.
+const contextUsageRevisions = new Map<string, number>();
+
 // Streaming event types (canonical source: shared/stream-event.ts)
 import type { StreamEventType, StreamEvent } from '../stream-event.types';
 export type { StreamEventType, StreamEvent };
@@ -985,6 +1017,8 @@ interface ChatState {
   /** Usage received before its canonical final row; bounded and session-scoped. */
   pendingMessageUsage: Record<string, PendingMessageUsage>;
   followUps: Record<string, QueuedFollowUp[]>;
+  /** By `contextUsageKey`; null once known to be empty. */
+  contextUsage: Record<string, ContextUsage | null>;
   hasMore: Record<string, boolean>;
   loading: boolean;
   error: string | null;
@@ -1055,6 +1089,13 @@ interface ChatState {
     followUpBehavior?: FollowUpMode,
   ) => Promise<boolean>;
   loadFollowUps: (chatJid: string) => Promise<void>;
+  loadContextUsage: (jid: string, agentId?: string | null) => Promise<void>;
+  /** A `context_usage` push (or a reset, with null). */
+  setContextUsage: (
+    jid: string,
+    agentId: string | null | undefined,
+    usage: Partial<ContextUsage> | null,
+  ) => void;
   handleFollowUpUpdate: (
     chatJid: string,
     items: QueuedFollowUp[],
@@ -2955,6 +2996,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   activeRuns: {},
   pendingMessageUsage: {},
   followUps: {},
+  contextUsage: {},
   hasMore: {},
   loading: false,
   error: null,
@@ -3352,6 +3394,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
+  loadContextUsage: async (jid, agentId) => {
+    const key = contextUsageKey(jid, agentId);
+    const revision = contextUsageRevisions.get(key) ?? 0;
+    try {
+      const query = agentId ? `?${new URLSearchParams({ agentId })}` : '';
+      const data = await api.get<Partial<ContextUsage>>(
+        `/api/groups/${encodeURIComponent(jid)}/context-usage${query}`,
+      );
+      if ((contextUsageRevisions.get(key) ?? 0) !== revision) return;
+      set((s) => ({
+        contextUsage: { ...s.contextUsage, [key]: toContextUsage(data) },
+      }));
+    } catch (err) {
+      console.warn('[context-usage] failed to load', err);
+    }
+  },
+
+  setContextUsage: (jid, agentId, usage) => {
+    const key = contextUsageKey(jid, agentId);
+    contextUsageRevisions.set(key, (contextUsageRevisions.get(key) ?? 0) + 1);
+    set((s) => ({
+      contextUsage: { ...s.contextUsage, [key]: toContextUsage(usage) },
+    }));
+  },
+
   loadFollowUps: async (chatJid) => {
     try {
       const data = await api.get<{ items: QueuedFollowUp[] }>(
@@ -3483,6 +3550,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       } else {
         get().clearStreaming(jid, { preserveThinking: false });
       }
+      get().setContextUsage(jid, agentId, null);
       succeeded = true;
     } catch (err) {
       set({ error: extractErrorMessage(err) });
@@ -4839,6 +4907,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       msg.sender === '__system__' &&
       (msg.content === 'context_reset' ||
         msg.content === 'context_fresh_window');
+    // The conversation starts over, wherever the reset came from (Web, IM,
+    // the agent itself): no context until its next turn.
+    if (resetsContext) get().setContextUsage(chatJid, agentId, null);
     const isProactiveUtterance =
       msg.is_from_me &&
       msg.sender !== '__system__' &&
