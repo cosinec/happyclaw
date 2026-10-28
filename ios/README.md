@@ -1,7 +1,7 @@
 # HappyClaw iOS 原生壳
 
-SwiftUI 原生壳 + WKWebView + 版本化 JSON 桥接。原生只接管 chrome（TabBar、导航栈、
-边缘返回、Sheet、操作菜单、确认框、触感、安全区/键盘、Liquid Glass），聊天和所有业务
+SwiftUI 原生壳 + WKWebView + 版本化 JSON 桥接。原生只接管 chrome（TabBar、导航栏标题与
+返回按钮、导航栈、边缘返回、Sheet、操作菜单、确认框、触感、安全区/键盘、Liquid Glass），聊天和所有业务
 页面继续由 `web/` 的 React 前端渲染。普通浏览器和 PWA 的行为不变。
 
 方案背景见 `docs/frontend-ios-plan-2026-10/03-ios-native.md`；执行记录与对方案的偏离见
@@ -22,7 +22,8 @@ ios/
 │   └── Info.plist              ATS / 本地网络 / 相机相册说明（与生成的 Info.plist 合并）
 ├── HappyClaw/                  App（SwiftUI，默认 MainActor 隔离，Swift 6）
 │   ├── App.swift               入口
-│   ├── RootShell.swift         NavigationStack + 全屏 WebView + 浮动 TabBar + 恢复页
+│   ├── RootShell.swift         NavigationStack + 全屏 WebView + 导航栏 + 浮动 TabBar + 恢复页
+│   ├── NativeNavBar.swift      原生导航栏（标题、返回、一个右侧按钮，由 Web 声明）
 │   ├── ShellModel.swift        WebView、桥接状态机与 SwiftUI chrome 的粘合层
 │   ├── NativeTabBar.swift      原生底部 Tab（由 Web 声明）
 │   ├── WebHostView.swift       WKWebView：持久数据存储、cookie 同步、导航代理、外链、JS 对话框
@@ -42,7 +43,7 @@ ios/
 ```
 
 Web 侧对应模块在 `web/src/native/`（`protocol.ts`、`session.ts`、`layout.ts`、
-`navigation.ts`、`bridge.ts`、`install.ts`）。
+`navigation.ts`、`nav-bar.ts`、`bridge.ts`、`install.ts`）。
 
 ## 架构
 
@@ -67,6 +68,18 @@ Web 侧对应模块在 `web/src/native/`（`protocol.ts`、`session.ts`、`layou
   `env(safe-area-inset-*)` 含义与 Safari/PWA 完全一致。原生只额外报告浮动 TabBar 覆盖的
   高度：`--native-bottom`。`globals.css` 只在 `html[data-native-chrome="active"]` 下隐藏
   Web 底部胶囊导航，并把 `--mobile-nav-reserve` / `--mobile-nav-clearance` 切到原生高度。
+- **导航栏**：每次 `route.changed` 带一份 `nav` 声明（是否显示、标题、返回、一个右侧按钮）。
+  - 默认规则在 `navigation.ts`：Tab 与「更多」页面显示标题；`/users`、`/monitor` 是推入页，带返回
+    （没有历史时回到 `/settings`）；工作台列表和打开的会话保留 Web 自己的页头，不显示原生栏。
+  - 页内下钻（新建智能体面板、记忆详情）用 `useNativeNavBar({ title, onBack, action })` 覆盖；
+    原生返回 / 右侧按钮回到 Web 执行（`nav.back` / `nav.action`），业务逻辑不进原生。
+  - 原生栏上报 `--native-top`（屏幕顶到栏底，含状态栏），Web 据此给根布局留白并设
+    `data-native-nav="visible"`，隐藏标了 `data-native-title` / `data-native-replaced` 的
+    Web 标题、返回按钮和移动端页头；浏览器里这些标记不生效。
+  - 栏底色取 Web 的 `--background`（`theme.changed.background`），键盘把整页推上去时内容
+    被遮住而不是叠在标题上。
+  - Web 打开 Dialog / Sheet / AlertDialog 时 `route.changed.modal=true`，原生暂时隐藏导航栏和
+    TabBar，但继续上报原来的 inset，避免弹窗背后的页面跳动。
 - **识别容器**：注入脚本在顶层 frame 定义只读的 `window.HappyClawNative`。Web 只靠它
   判断是否在 App 内，不看 UA。浏览器里该对象不存在，桥接代码（独立 chunk）根本不会下载。
 - **失败策略**：
@@ -91,7 +104,7 @@ TS：`web/src/native/protocol.ts`。两边必须同时修改。
 ### 信封
 
 ```json
-{ "v": 1, "type": "route.changed", "id": "w3", "payload": { } }
+{ "v": 1, "type": "route.changed", "id": "w3", "payload": {} }
 ```
 
 - `v`：协议版本。`bridge.hello` 携带 Web 最高版本；之后双方都用协商结果。
@@ -124,31 +137,32 @@ bridge.ready {session} ──────────────▶ nativeNavig
 
 ### 消息（Web → 原生）
 
-| type | payload | 说明 |
-| --- | --- | --- |
-| `bridge.hello` | `versions[]`, `capabilities[]`, `client.build` | 任意 `v` 都接受，以便回复 reject |
-| `bridge.ready` | `session` | Web 已提交原生布局 |
-| `chrome.tabs` | `tabs[]`, `more[]`（`id/title/symbol/path`） | `symbol` 为 SF Symbol；计费等过滤已在 Web 完成 |
-| `route.changed` | `path`, `title`, `tabId`, `canGoBack`, `tabBar` | `tabBar=false`：打开的会话、登录/初始化页 |
-| `theme.changed` | `scheme: light/dark` | 原生 chrome 跟随 Web 主题 |
-| `confirm.request` | `title`, `message`, `confirmText`, `cancelText`, `destructive` | 来自 `confirmDialog()` |
-| `menu.request` | `title?`, `message?`, `items[]`（`id/title/symbol?/destructive?/disabled?`） | 原生操作菜单 |
-| `haptic` | `style: light/medium/success/warning/error` | 来自 `useHaptic` |
-| `bridge.error` | `code`, `message`, `ref?` | Web 无法处理原生消息时回报 |
+| type              | payload                                                                      | 说明                                                                                                                    |
+| ----------------- | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `bridge.hello`    | `versions[]`, `capabilities[]`, `client.build`                               | 任意 `v` 都接受，以便回复 reject                                                                                        |
+| `bridge.ready`    | `session`                                                                    | Web 已提交原生布局                                                                                                      |
+| `chrome.tabs`     | `tabs[]`, `more[]`（`id/title/symbol/path`）                                 | `symbol` 为 SF Symbol；计费等过滤已在 Web 完成                                                                          |
+| `route.changed`   | `path`, `title`, `tabId`, `canGoBack`, `tabBar`, `nav?`, `modal?`            | `tabBar=false`：打开的会话、登录/初始化页；`nav`：`visible/title/back/action{id,title,symbol}`；`modal`：Web 弹窗打开中 |
+| `theme.changed`   | `scheme: light/dark`, `background?`（`#rrggbb`）                             | 原生 chrome 跟随 Web 主题和底色                                                                                         |
+| `confirm.request` | `title`, `message`, `confirmText`, `cancelText`, `destructive`               | 来自 `confirmDialog()`                                                                                                  |
+| `menu.request`    | `title?`, `message?`, `items[]`（`id/title/symbol?/destructive?/disabled?`） | 原生操作菜单                                                                                                            |
+| `haptic`          | `style: light/medium/success/warning/error`                                  | 来自 `useHaptic`                                                                                                        |
+| `bridge.error`    | `code`, `message`, `ref?`                                                    | Web 无法处理原生消息时回报                                                                                              |
 
 ### 消息（原生 → Web）
 
-| type | payload | 说明 |
-| --- | --- | --- |
-| `bridge.welcome` | `session`, `version`, `capabilities[]`, `shell` | |
-| `bridge.reject` | `code`, `message`, `supported[]` | 原生随即显示恢复页 |
-| `layout.update` | `contentInsets`, `safeArea`, `keyboard` | → `--native-top/right/bottom/left`、`--native-keyboard-occlusion` |
-| `nav.select` | `tabId` | 原生 Tab / 「更多」项被点击 |
-| `nav.back` | `{}` | Web 有历史时后退（预留给原生返回按钮） |
-| `confirm.result` | `confirmed` | 带请求 `id` |
-| `menu.result` | `selected: string \| null` | `null` 为取消 |
-| `app.lifecycle` | `state: active/inactive/background` | 预留给 Phase 4 回前台重连 |
-| `bridge.error` | `code`, `message`, `ref?` | 带 `ref` 时 Web 把对应请求按取消处理 |
+| type             | payload                                         | 说明                                                              |
+| ---------------- | ----------------------------------------------- | ----------------------------------------------------------------- |
+| `bridge.welcome` | `session`, `version`, `capabilities[]`, `shell` |                                                                   |
+| `bridge.reject`  | `code`, `message`, `supported[]`                | 原生随即显示恢复页                                                |
+| `layout.update`  | `contentInsets`, `safeArea`, `keyboard`         | → `--native-top/right/bottom/left`、`--native-keyboard-occlusion` |
+| `nav.select`     | `tabId`                                         | 原生 Tab / 「更多」项被点击                                       |
+| `nav.back`       | `{}`                                            | 原生返回按钮：页内覆盖的 `onBack` → 历史后退 → 推入页的父路由     |
+| `nav.action`     | `id`                                            | 导航栏右侧按钮被点击                                              |
+| `confirm.result` | `confirmed`                                     | 带请求 `id`                                                       |
+| `menu.result`    | `selected: string \| null`                      | `null` 为取消                                                     |
+| `app.lifecycle`  | `state: active/inactive/background`             | 预留给 Phase 4 回前台重连                                         |
+| `bridge.error`   | `code`, `message`, `ref?`                       | 带 `ref` 时 Web 把对应请求按取消处理                              |
 
 错误码：`invalid_message`、`unsupported_type`、`version_unsupported`、`not_ready`、`busy`、
 `cancelled`。
@@ -163,7 +177,8 @@ bridge.ready {session} ──────────────▶ nativeNavig
 
 ### 版本演进
 
-- 新增可选字段：不升版本，旧端忽略未知字段（Swift `Codable` 默认如此）。
+- 新增可选字段：不升版本，旧端忽略未知字段（Swift `Codable` 默认如此）。`nav`、`modal`、
+  `background` 和 `navbar` 能力都是这样加进 v1 的：旧前端不发 `nav`，原生就不显示导航栏。
 - 新增消息类型：对端回 `unsupported_type`，发送方应按能力（`capabilities`）判断后再发。
 - 破坏性修改：升 `v`。原生的 `supportedVersions` 与 Web 的 `SUPPORTED_PROTOCOL_VERSIONS`
   以区间重叠协商；没有交集时原生显示恢复页，提示更新前端或 App。
@@ -222,7 +237,7 @@ Debug 构建的 WebView 可以用 Safari「开发」菜单远程检查（`isInsp
      security find-certificate -c "Apple Development" -p | openssl x509 -noout -subject
      ```
    - `HAPPYCLAW_BUNDLE_ID`：全局唯一，例如 `com.<你的名字>.happyclaw`。
-   该文件已 gitignore，团队信息和证书不进仓库。
+     该文件已 gitignore，团队信息和证书不进仓库。
 2. **Xcode 账号**：Xcode → Settings → Accounts 已登录对应 Apple ID（自动签名要用它生成
    描述文件）。
 3. **连接 iPhone**：数据线连接、解锁，点「信任这台电脑」。
@@ -256,10 +271,10 @@ ios/scripts/install-device.sh <UDID>     # 指定设备
 
 ## 签名有效期与续签
 
-| 账号类型 | 描述文件有效期 | 到期表现 | 续签 |
-| --- | --- | --- | --- |
-| 免费 Apple ID（Personal Team） | **7 天** | App 闪退、无法打开 | 重新运行 `ios/scripts/install-device.sh`（或 Xcode ⌘R） |
-| 付费 Apple Developer Program（$99/年） | 开发描述文件 **1 年**（证书同样 1 年） | 同上 | 到期前重新构建安装；证书过期需在 Xcode 里重新生成 |
+| 账号类型                               | 描述文件有效期                         | 到期表现           | 续签                                                    |
+| -------------------------------------- | -------------------------------------- | ------------------ | ------------------------------------------------------- |
+| 免费 Apple ID（Personal Team）         | **7 天**                               | App 闪退、无法打开 | 重新运行 `ios/scripts/install-device.sh`（或 Xcode ⌘R） |
+| 付费 Apple Developer Program（$99/年） | 开发描述文件 **1 年**（证书同样 1 年） | 同上               | 到期前重新构建安装；证书过期需在 Xcode 里重新生成       |
 
 - 本机当前是**免费 Personal Team**（描述文件 TeamName 为个人姓名、7 天到期），
   `install-device.sh` 每次都会打印到期时间。

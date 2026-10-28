@@ -58,7 +58,23 @@ struct RootShell: View {
           WebHostView(controller: model.web)
             .ignoresSafeArea()
 
-          if model.tabBarVisible {
+          if let nav = model.navBar, !model.webModalOpen {
+            NativeNavBar(
+              state: nav,
+              background: model.webBackground,
+              onBack: { model.goBack() },
+              onAction: { model.performNavAction($0) }
+            )
+            .onGeometryChange(for: CGFloat.self) { bar in bar.frame(in: .global).maxY } action: { bottom in
+              // The root view's global frame starts at the screen top.
+              model.layout.navBarOccupancy = max(0, bottom)
+              model.layoutChanged()
+            }
+            .frame(maxHeight: .infinity, alignment: .top)
+            .transition(.opacity)
+          }
+
+          if model.tabBarVisible, !model.webModalOpen {
             NativeTabBar(
               tabs: model.tabs,
               showsMore: !model.more.isEmpty,
@@ -84,6 +100,8 @@ struct RootShell: View {
           }
         }
         .animation(.snappy(duration: 0.25), value: model.tabBarVisible)
+        .animation(.snappy(duration: 0.2), value: model.navBar)
+        .animation(.snappy(duration: 0.2), value: model.webModalOpen)
         .onChange(of: proxy.safeAreaInsets, initial: true) { _, insets in
           model.layout.safeArea = Insets(
             top: insets.top, right: insets.trailing, bottom: insets.bottom, left: insets.leading

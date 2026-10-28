@@ -26,6 +26,8 @@ final class ShellModel {
   private(set) var more: [TabDeclaration] = []
   private(set) var route: RouteState?
   private(set) var webScheme: ColorSchemeName?
+  /// Page background, so the navigation bar matches whatever palette is on.
+  private(set) var webBackground: RGBColor?
   private(set) var webBuild: String?
   private(set) var lastError: String?
 
@@ -61,6 +63,16 @@ final class ShellModel {
   var tabBarVisible: Bool {
     session.isNativeChromeActive && (route?.tabBar ?? false) && layout.keyboardHeight == 0
   }
+
+  /// Declared by the web per screen; nil when hidden or before bridge.ready.
+  var navBar: NavBarState? {
+    guard session.isNativeChromeActive, let nav = route?.nav, nav.visible else { return nil }
+    return nav
+  }
+
+  /// While a web dialog or sheet is open the bars step aside so they never
+  /// cover it. Layout keeps the declared values: the page behind stays put.
+  var webModalOpen: Bool { route?.modal ?? false }
 
   /// Highlighted bar slot: a primary tab id, or "more" for overflow pages.
   var selectedTabSlot: String? {
@@ -99,6 +111,16 @@ final class ShellModel {
     send(.navSelect(tabId: tab.id))
   }
 
+  func goBack() {
+    Haptics.play(.light)
+    send(.navBack)
+  }
+
+  func performNavAction(_ action: NavBarState.Action) {
+    Haptics.play(.light)
+    send(.navAction(id: action.id))
+  }
+
   func openMore() {
     Haptics.play(.light)
     sheet = .more
@@ -121,7 +143,7 @@ final class ShellModel {
   /// Re-send layout when geometry, keyboard or tab bar visibility changed.
   func layoutChanged() {
     guard let version = session.version,
-      let update = layout.pendingUpdate(tabBarVisible: tabBarVisible)
+      let update = layout.pendingUpdate(tabBarVisible: tabBarVisible, navBarVisible: navBar != nil)
     else { return }
     web.channel.send(update, version: version)
   }
@@ -170,7 +192,10 @@ final class ShellModel {
       apply(session.receiveHello(versions: versions, shell: ShellBuild.info))
       // The web commits native chrome on its first layout after welcome.
       if let version = session.version {
-        web.channel.send(layout.pendingUpdate(tabBarVisible: tabBarVisible, force: true)!, version: version)
+        web.channel.send(
+          layout.pendingUpdate(tabBarVisible: tabBarVisible, navBarVisible: navBar != nil, force: true)!,
+          version: version
+        )
       }
     case let .ready(id):
       apply(session.receiveReady(session: id))
@@ -181,8 +206,9 @@ final class ShellModel {
     case let .routeChanged(state):
       route = state
       layoutChanged()
-    case let .themeChanged(scheme):
+    case let .themeChanged(scheme, background):
       webScheme = scheme
+      webBackground = background
     case let .confirmRequest(id, request):
       confirm.present(id: id, request)
     case let .menuRequest(id, request):
