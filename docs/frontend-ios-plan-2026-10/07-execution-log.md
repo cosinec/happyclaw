@@ -144,6 +144,25 @@
 - 桌面快捷操作「新建对话」「任务」（`app.shortcut`）。自动化无法长按主屏图标，真机待人工验证。
 - 代码推送到 fork `cosinec/happyclaw` 的 `feat/ios-native-shell`（对 `flipped0119/happyclaw` 没有推送权限）。
 
+## 2026-10-29 第五轮：跟上上游手机抽屉，顶栏改玻璃
+
+- 分支改为基于上游 `riba2534/happyclaw` main（`7139473`）的 `feat/ios-native-shell-main`；
+  原 `feat/ios-native-shell` 保留不动。上游 10/28 把手机导航从底部标签栏换成了汉堡 + 左侧抽屉，
+  聊天页换成透明悬浮头部和悬浮输入框。冲突按上游为准：`--mobile-nav-*` 改用上游的
+  `--nav-clearance` / `--nav-cover`，原生覆盖规则挂在它们上面。
+- 决定（用户确认）：壳里跟上游走抽屉，去掉原生底栏。新增 `drawer` 能力和 `nav.menu`：
+  原生栏左侧画菜单按钮，Web 打开自己的抽屉；没有 `drawer` 的旧 App 仍拿到 TabBar 声明。
+- 顶栏改为浮在页面上：根布局不再留白，滚动容器留出 `--native-top`，内容滚到栏下，
+  栏底是页面色叠模糊材质并向下渐隐；按钮是 Liquid Glass。
+- 手机首页和会话页改用原生栏。会话页的文件和 ⋯ 收进同一个玻璃胶囊；⋯ 直接从按钮弹系统菜单
+  （`nav.action.item`），不再是 Web 底部面板。抽屉里的账户行继续弹原生玻璃账户菜单。
+- rebase 时第一处冲突用 `git add -A` 解决，当时树里还没有 `ios/.gitignore`，误收了
+  `ios/build`、`.build` 和 `Local.xcconfig`。推送前用 `filter-branch` 从整段历史里删除，
+  `Local.xcconfig` 已从旧提交恢复到本地（仍被忽略）。以后解决冲突只 `git add` 冲突文件。
+- 上游新代码里有 1 处 lint error（有意的控制字符正则），按仓库已有写法加了行内豁免。
+- 验证：浏览器假壳抽屉测试 17 项通过（含旧 App 保留底栏），Web 单测全过，模拟器构建通过；
+  agent-runner 集成测试因本机未装 Claude CLI 失败，与本轮无关。真机玻璃效果待验证。
+
 ## 待决问题
 
 - 无。
