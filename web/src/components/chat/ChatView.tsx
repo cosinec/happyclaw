@@ -161,6 +161,7 @@ import { CHANNEL_LABEL } from '../settings/channel-meta';
 import { getAgentProfileDisplayName } from '../../utils/agent-product';
 import { normalizeInteractionMode } from '../../lib/interaction-mode';
 import { normalizeProcessVisibility } from '../../lib/process-visibility';
+import { useNativeNavBar } from '@/native/nav-bar';
 
 /** Sentinel value for binding the main conversation (vs. a specific agent) */
 const MAIN_BINDING = '__main__' as const;
@@ -1195,16 +1196,6 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     </div>
   );
 
-  if (!group) {
-    return (
-      <div className="h-full flex items-center justify-center bg-background">
-        <div className="text-center">
-          <p className="text-muted-foreground">群组不存在</p>
-        </div>
-      </div>
-    );
-  }
-
   const showImBanner =
     isOwnHome &&
     !!imStatus &&
@@ -1225,25 +1216,92 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
           {
             label: '工作区设置',
             icon: Settings2,
+            symbol: 'slider.horizontal.3',
             onSelect: () => setShowInteractionModeDialog(true),
           },
           {
             label: '渠道绑定',
             icon: Link,
+            symbol: 'link',
             onSelect: () => setBindingAgentId(WORKSPACE_BINDING),
           },
         ]
       : [],
     [
       ...(toggleTerminal
-        ? [{ label: '终端', icon: TerminalSquare, onSelect: toggleTerminal }]
+        ? [
+            {
+              label: '终端',
+              icon: TerminalSquare,
+              symbol: 'apple.terminal',
+              onSelect: toggleTerminal,
+            },
+          ]
         : []),
       ...(resetCurrent
-        ? [{ label: '清除上下文', icon: Paintbrush, onSelect: resetCurrent }]
+        ? [
+            {
+              label: '清除上下文',
+              icon: Paintbrush,
+              symbol: 'paintbrush',
+              onSelect: resetCurrent,
+            },
+          ]
         : []),
     ],
   ];
   const hasHeaderActions = headerActions.some((group) => group.length > 0);
+  // iOS shell on a phone: the header is the native bar. Back (or the
+  // drawer's menu button), the conversation's name, files, and ⋯ as a
+  // system menu with the same actions as the web sheet.
+  useNativeNavBar(
+    isPhone && group
+      ? {
+          title:
+            activeAgentTab && isConversationTab
+              ? currentContextName
+              : workspaceDisplayName,
+          onBack: onBack ? handleBackAction : undefined,
+          actions: [
+            {
+              symbol: 'folder',
+              title: '文件',
+              onPress: handleContextPanelToggle,
+            },
+            ...(hasHeaderActions
+              ? [
+                  {
+                    symbol: 'ellipsis',
+                    title: '更多选项',
+                    menu: headerActions
+                      .filter((section) => section.length > 0)
+                      .map((section) =>
+                        section.map((action) => ({
+                          id: action.label,
+                          title: action.label,
+                          symbol: action.symbol,
+                          destructive: action.label === '清除上下文',
+                          onSelect: action.onSelect,
+                        })),
+                      ),
+                  },
+                ]
+              : []),
+          ],
+        }
+      : null,
+  );
+
+  if (!group) {
+    return (
+      <div className="h-full flex items-center justify-center bg-background">
+        <div className="text-center">
+          <p className="text-muted-foreground">群组不存在</p>
+        </div>
+      </div>
+    );
+  }
+
   // A phone's header controls sit on a translucent round capsule.
   const phoneCapsule =
     'phone:rounded-full phone:border phone:border-surface-border phone:bg-surface-raised/85';
@@ -1268,7 +1326,11 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       >
         {/* Header. On a phone it is transparent over the conversation, which
             scrolls under a blur that fades out toward its bottom edge. */}
-        <header className="flex h-12 shrink-0 items-center gap-2 border-b border-surface-border px-4 max-lg:h-13 max-lg:bg-background/80 max-lg:backdrop-blur-xl lg:px-5 phone:absolute phone:inset-x-0 phone:top-0 phone:z-30 phone:h-(--chat-header-height) phone:border-b-0 phone:bg-transparent phone:px-3 phone:backdrop-blur-none phone:before:pointer-events-none phone:before:absolute phone:before:inset-x-0 phone:before:top-0 phone:before:-bottom-4 phone:before:-z-10 phone:before:bg-background/70 phone:before:backdrop-blur-xl phone:before:[mask-image:linear-gradient(to_bottom,black_55%,transparent)]">
+        <header
+          // On a phone in the iOS shell the native bar replaces it.
+          data-native-replaced={isPhone || undefined}
+          className="flex h-12 shrink-0 items-center gap-2 border-b border-surface-border px-4 max-lg:h-13 max-lg:bg-background/80 max-lg:backdrop-blur-xl lg:px-5 phone:absolute phone:inset-x-0 phone:top-0 phone:z-30 phone:h-(--chat-header-height) phone:border-b-0 phone:bg-transparent phone:px-3 phone:backdrop-blur-none phone:before:pointer-events-none phone:before:absolute phone:before:inset-x-0 phone:before:top-0 phone:before:-bottom-4 phone:before:-z-10 phone:before:bg-background/70 phone:before:backdrop-blur-xl phone:before:[mask-image:linear-gradient(to_bottom,black_55%,transparent)]"
+        >
           {onBack && (
             <IconButton
               label="返回"

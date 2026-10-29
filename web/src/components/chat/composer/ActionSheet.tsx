@@ -14,6 +14,8 @@ export interface SheetAction {
   icon: LucideIcon;
   onSelect: () => void;
   disabled?: boolean;
+  /** SF Symbol when the iOS shell shows these actions as a native menu. */
+  symbol?: string;
 }
 
 interface ActionSheetProps extends Omit<
