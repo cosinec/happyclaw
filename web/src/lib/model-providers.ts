@@ -73,6 +73,7 @@ export function isValidModelId(id: string): boolean {
     id.length > 0 &&
     id.length <= MAX_PROVIDER_MODEL_ID_LENGTH &&
     // No whitespace or control characters: the id lands in an env file.
+    // eslint-disable-next-line no-control-regex
     !/[\s\u0000-\u001f\u007f]/.test(id)
   );
 }
