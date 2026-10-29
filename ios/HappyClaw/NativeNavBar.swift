@@ -152,16 +152,18 @@ private struct EdgeFade: View {
     let page = color.map { Color(red: $0.red, green: $0.green, blue: $0.blue) } ?? Color(uiColor: .systemBackground)
     ZStack {
       Rectangle().fill(.ultraThinMaterial)
-      page.opacity(0.72)
+      page.opacity(0.86)
     }
+    // Solid down to the title's baseline so text scrolled underneath never
+    // competes with it; only the strip below the bar fades out.
     .mask {
       LinearGradient(
-        stops: [.init(color: .black, location: 0), .init(color: .black, location: 0.55), .init(color: .clear, location: 1)],
+        stops: [.init(color: .black, location: 0), .init(color: .black, location: 0.8), .init(color: .clear, location: 1)],
         startPoint: .top,
         endPoint: .bottom
       )
     }
-    .padding(.bottom, -16)
+    .padding(.bottom, -20)
     .ignoresSafeArea(edges: .top)
     .allowsHitTesting(false)
   }

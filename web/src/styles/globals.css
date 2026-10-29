@@ -1020,40 +1020,57 @@ html[data-native-nav='visible'] [data-native-title='space'] {
 /* The phone composer dock matches the native glass bar: messages scroll
    behind a translucent, blurred card with a light rim instead of ending at
    the dock's opaque fade. Only inside the iOS shell; browsers and the PWA
-   keep the solid card. Without backdrop-filter, or when the system asks
-   for less transparency, the card stays opaque. */
+   keep the solid card, as does WebKit without backdrop-filter. WebKit does
+   not report prefers-reduced-transparency, so the glass is the default and
+   only an explicit `reduce` brings the solid card back. */
 @supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
-  @media (prefers-reduced-transparency: no-preference) {
+  /* Clear behind the card, fading into the page below it, like the top
+     bar's edge, so text under the home indicator does not show through. */
+  html[data-native-chrome='active'] [data-composer-dock] {
+    background: linear-gradient(
+      to bottom,
+      transparent 55%,
+      color-mix(in oklab, var(--color-background) 92%, transparent)
+    );
+  }
+
+  html[data-native-chrome='active'] [data-composer-dock] [data-composer-card] {
+    background-color: color-mix(
+      in oklab,
+      var(--color-surface-raised) 50%,
+      transparent
+    );
+    -webkit-backdrop-filter: blur(18px) saturate(180%);
+    backdrop-filter: blur(18px) saturate(180%);
+    border-color: color-mix(in oklab, var(--color-foreground) 10%, transparent);
+    box-shadow:
+      inset 0 1px 0 color-mix(in oklab, white 55%, transparent),
+      0 8px 28px -12px rgb(0 0 0 / 0.28);
+  }
+
+  html.dark[data-native-chrome='active']
+    [data-composer-dock]
+    [data-composer-card] {
+    box-shadow:
+      inset 0 1px 0 color-mix(in oklab, white 14%, transparent),
+      0 8px 28px -12px rgb(0 0 0 / 0.6);
+  }
+
+  @media (prefers-reduced-transparency: reduce) {
     html[data-native-chrome='active'] [data-composer-dock] {
-      background: none;
+      background: linear-gradient(
+        to bottom,
+        transparent,
+        var(--color-background) 1.5rem
+      );
     }
 
     html[data-native-chrome='active']
       [data-composer-dock]
       [data-composer-card] {
-      background-color: color-mix(
-        in oklab,
-        var(--color-surface-raised) 50%,
-        transparent
-      );
-      -webkit-backdrop-filter: blur(18px) saturate(180%);
-      backdrop-filter: blur(18px) saturate(180%);
-      border-color: color-mix(
-        in oklab,
-        var(--color-foreground) 10%,
-        transparent
-      );
-      box-shadow:
-        inset 0 1px 0 color-mix(in oklab, white 55%, transparent),
-        0 8px 28px -12px rgb(0 0 0 / 0.28);
-    }
-
-    html.dark[data-native-chrome='active']
-      [data-composer-dock]
-      [data-composer-card] {
-      box-shadow:
-        inset 0 1px 0 color-mix(in oklab, white 14%, transparent),
-        0 8px 28px -12px rgb(0 0 0 / 0.6);
+      background-color: var(--color-surface-raised);
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
     }
   }
 }
