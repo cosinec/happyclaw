@@ -217,6 +217,8 @@ export function AppLayout() {
             {showPhoneTopBar && (
               <div
                 data-testid="phone-top-bar"
+                // In the iOS shell the native bar's menu button replaces it.
+                data-native-replaced
                 className="flex h-13 shrink-0 items-center px-2"
               >
                 <NavDrawerButton />

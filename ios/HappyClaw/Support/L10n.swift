@@ -24,6 +24,7 @@ enum L10n {
   // Tabs / sheets
   static var tabMore: String { t("tab.more") }
   static var navBack: String { t("nav.back") }
+  static var navMenu: String { t("nav.menu") }
 
   // Servers
   static var serverListTitle: String { t("server.list.title") }

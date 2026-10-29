@@ -79,7 +79,8 @@ struct RootShell: View {
               state: nav,
               background: model.webBackground,
               onBack: { model.goBack() },
-              onAction: { model.performNavAction($0) }
+              onMenu: { model.openDrawer() },
+              onAction: { model.performNavAction($0, item: $1) }
             )
             .onGeometryChange(for: CGFloat.self) { bar in bar.frame(in: .global).maxY } action: { bottom in
               // The root view's global frame starts at the screen top.

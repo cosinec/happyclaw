@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { ChevronsUpDown, Menu, Search, SquarePen } from 'lucide-react';
 import { useAuthStore } from '../../stores/auth';
@@ -20,7 +20,7 @@ import {
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { AccountMenuItems } from './AccountMenu';
+import { AccountMenuItems, useNativeAccountMenu } from './AccountMenu';
 import { filterNavItems } from './nav-items';
 
 const BugReportDialog = lazyBugReportDialog.Component;
@@ -58,6 +58,17 @@ export function NavDrawer() {
   const { startNewConversation, creatingSession } = useNewConversation();
   const [showBugReport, setShowBugReport] = useState(false);
   const bugReportMounted = useOpenedOnce(showBugReport);
+  const openBugReport = () => {
+    setOpen(false);
+    setShowBugReport(true);
+  };
+  // In the iOS shell the account row opens the native (glass) account menu;
+  // the web dropdown stays for browsers and older shells.
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const accountTriggerRef = useRef<HTMLButtonElement>(null);
+  const openNativeAccountMenu = useNativeAccountMenu({
+    onReportBug: openBugReport,
+  });
   const navItems = useMemo(
     () => filterNavItems(billingEnabled),
     [billingEnabled],
@@ -84,9 +95,21 @@ export function NavDrawer() {
           <SheetDescription className="sr-only">
             搜索、新对话和应用页面
           </SheetDescription>
-          <DropdownMenu>
+          <DropdownMenu
+            open={accountMenuOpen}
+            onOpenChange={(next) => {
+              if (
+                next &&
+                accountTriggerRef.current &&
+                openNativeAccountMenu(accountTriggerRef.current)
+              )
+                return;
+              setAccountMenuOpen(next);
+            }}
+          >
             <DropdownMenuTrigger asChild>
               <button
+                ref={accountTriggerRef}
                 type="button"
                 aria-label="账户菜单"
                 className="mx-2 flex min-h-16 cursor-pointer items-center gap-3 rounded-xl px-3 text-left outline-none active:bg-surface-hover focus-visible:ring-2 focus-visible:ring-ring/40"
@@ -111,13 +134,7 @@ export function NavDrawer() {
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="w-60">
-              <AccountMenuItems
-                inlineAppearance
-                onReportBug={() => {
-                  setOpen(false);
-                  setShowBugReport(true);
-                }}
-              />
+              <AccountMenuItems inlineAppearance onReportBug={openBugReport} />
             </DropdownMenuContent>
           </DropdownMenu>
 

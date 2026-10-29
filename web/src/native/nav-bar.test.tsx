@@ -10,7 +10,11 @@ import {
   useNativeNavBar,
   type NativeNavBarSpec,
 } from './nav-bar';
-import { buildTabDeclarations, describeRoute } from './navigation';
+import {
+  buildTabDeclarations,
+  describeRoute,
+  navActionIndex,
+} from './navigation';
 
 (
   globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
@@ -116,6 +120,65 @@ describe('native navigation bar declaration', () => {
     });
     // An override without a title keeps the route's title.
     expect(describeRoute('/settings', decl, false, {}).nav.title).toBe('设置');
+  });
+
+  test('drawer mode: no tab bar, top-level bars lead with the menu button', () => {
+    const tasks = describeRoute('/tasks', decl, false, null, false, true);
+    expect(tasks.tabBar).toBe(false);
+    expect(tasks.nav).toMatchObject({ visible: true, menu: true });
+    // A back button takes the leading slot instead.
+    expect(
+      describeRoute('/users', decl, false, null, false, true).nav.menu,
+    ).toBeUndefined();
+    // Without drawer support the tab bar stays, with no menu button.
+    expect(describeRoute('/tasks', decl, false).tabBar).toBe(true);
+    expect(describeRoute('/tasks', decl, false).nav.menu).toBeUndefined();
+  });
+
+  test('several trailing actions, one opening a menu of sections', () => {
+    const route = describeRoute(
+      '/chat/main',
+      decl,
+      false,
+      {
+        title: 'HappyClaw',
+        actions: [
+          { symbol: 'folder', title: '文件', onPress: () => {} },
+          {
+            symbol: 'ellipsis',
+            title: '更多选项',
+            menu: [
+              [{ id: '终端', title: '终端', onSelect: () => {} }],
+              [
+                {
+                  id: '清除上下文',
+                  title: '清除上下文',
+                  destructive: true,
+                  onSelect: () => {},
+                },
+              ],
+            ],
+          },
+        ],
+      },
+      false,
+      true,
+    );
+    expect(route.nav.menu).toBe(true);
+    expect(route.nav.action?.id).toBe('page');
+    expect(route.nav.actions?.map((action) => action.id)).toEqual([
+      'page',
+      'page:1',
+    ]);
+    const menu = route.nav.actions?.[1].menu;
+    expect(menu).toHaveLength(2);
+    expect(menu?.[1]).toMatchObject({
+      inline: true,
+      children: [{ id: '清除上下文', destructive: true }],
+    });
+    expect(navActionIndex('page')).toBe(0);
+    expect(navActionIndex('page:1')).toBe(1);
+    expect(navActionIndex('other')).toBeNull();
   });
 
   test('the html attribute follows the reported top inset', () => {

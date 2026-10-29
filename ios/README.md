@@ -70,17 +70,25 @@ Web 侧对应模块在 `web/src/native/`（`protocol.ts`、`session.ts`、`layou
 - **布局**：WebView 铺满屏幕（含状态栏和 Home 指示条区域），所以 Web 已有的
   `env(safe-area-inset-*)` 含义与 Safari/PWA 完全一致。原生只额外报告浮动 TabBar 覆盖的
   高度：`--native-bottom`。`globals.css` 只在 `html[data-native-chrome="active"]` 下隐藏
-  Web 底部胶囊导航，并把 `--mobile-nav-reserve` / `--mobile-nav-clearance` 切到原生高度。
-- **导航栏**：每次 `route.changed` 带一份 `nav` 声明（是否显示、标题、返回、一个右侧按钮）。
+  Web 底部胶囊导航，并把 `--nav-clearance` / `--nav-cover` 切到原生高度。
+- **手机抽屉**：Web 在手机上（`phone` 断点）用左上角汉堡 + 左侧抽屉导航，不再有底部标签栏。
+  原生声明 `drawer` 能力时，Web 在手机上不再声明 TabBar（`tabBar=false`），顶层页面的
+  `nav.menu=true`，原生在栏左侧画菜单按钮，点击发 `nav.menu`，Web 打开自己的抽屉。
+  没有 `drawer` 的旧 App 仍拿到 TabBar 声明，导航不会丢。
+- **导航栏**：每次 `route.changed` 带一份 `nav` 声明（是否显示、标题、返回或菜单按钮、右侧按钮）。
   - 默认规则在 `navigation.ts`：Tab 与「更多」页面显示标题；`/users`、`/monitor` 是推入页，带返回
-    （没有历史时回到 `/settings`）；工作台列表和打开的会话保留 Web 自己的页头，不显示原生栏。
+    （没有历史时回到 `/settings`）；工作台列表和打开的会话默认保留 Web 页头，手机上由页面自己声明原生栏
+    （首页：应用名 + 新建工作区；会话：返回、会话名、文件和 ⋯）。
   - 页内下钻（新建智能体面板、记忆详情）用 `useNativeNavBar({ title, onBack, action })` 覆盖；
-    原生返回 / 右侧按钮回到 Web 执行（`nav.back` / `nav.action`），业务逻辑不进原生。
-  - 原生栏上报 `--native-top`（屏幕顶到栏底，含状态栏），Web 据此给根布局留白并设
-    `data-native-nav="visible"`，隐藏标了 `data-native-title` / `data-native-replaced` 的
-    Web 标题、返回按钮和移动端页头；浏览器里这些标记不生效。
-  - 栏底色取 Web 的 `--background`（`theme.changed.background`），键盘把整页推上去时内容
-    被遮住而不是叠在标题上。
+    多个右侧按钮用 `actions`，原生放进同一个玻璃胶囊。按钮带 `menu`（分组的菜单项）时，原生直接从按钮
+    弹系统菜单，选中项随 `nav.action.item` 回传。原生返回 / 右侧按钮回到 Web 执行（`nav.back` /
+    `nav.action`），业务逻辑不进原生。
+  - 原生栏上报 `--native-top`（屏幕顶到栏底，含状态栏），Web 设 `data-native-nav="visible"`，
+    隐藏标了 `data-native-title` / `data-native-replaced` 的 Web 标题、返回按钮和移动端页头；
+    浏览器里这些标记不生效。
+  - 栏浮在页面上：根布局不留白，滚动容器（`main`、手机首页列表、会话消息列表）在第一行上方留出
+    `--native-top`，内容可以滚到栏下。栏底是页面色（`theme.changed.background`）叠在模糊材质上、
+    向下渐隐，状态栏区域一并覆盖；按钮在 iOS 26 上是 Liquid Glass。
   - Web 打开 Dialog / Sheet / AlertDialog 时 `route.changed.modal=true`，原生暂时隐藏导航栏和
     TabBar，但继续上报原来的 inset，避免弹窗背后的页面跳动。
 - **识别容器**：注入脚本在顶层 frame 定义只读的 `window.HappyClawNative`。Web 只靠它
@@ -151,18 +159,18 @@ bridge.ready {session} ──────────────▶ nativeNavig
 
 ### 消息（Web → 原生）
 
-| type                | payload                                                                                                            | 说明                                                                                                                                  |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `bridge.hello`      | `versions[]`, `capabilities[]`, `client.build`                                                                     | 任意 `v` 都接受，以便回复 reject                                                                                                      |
-| `bridge.ready`      | `session`                                                                                                          | Web 已提交原生布局                                                                                                                    |
-| `chrome.tabs`       | `tabs[]`, `more[]`（`id/title/symbol/path`）                                                                       | `symbol` 为 SF Symbol；计费等过滤已在 Web 完成                                                                                        |
-| `route.changed`     | `path`, `title`, `tabId`, `canGoBack`, `tabBar`, `nav?`, `modal?`                                                  | `tabBar=false`：打开的会话、登录/初始化页；`nav`：`visible/title/back/action{id,title,symbol}`；`modal`：Web 弹窗打开中               |
-| `theme.changed`     | `scheme: light/dark`, `background?`, `accent?`（`#rrggbb`）                                                        | 原生 chrome 跟随 Web 主题、底色和强调色（底栏选中色）；按服务器缓存，冷启动先用它铺底                                                 |
-| `confirm.request`   | `title`, `message`, `confirmText`, `cancelText`, `destructive`                                                     | 来自 `confirmDialog()`                                                                                                                |
-| `menu.request`      | `title?`, `message?`, `items[]`（`id/title/symbol?/destructive?/disabled?/checked?/children?/inline?`）, `anchor?` | 带 `anchor` 且原生有 `anchoredmenu`（iOS 17.4+）时从该位置弹系统菜单（iOS 26 玻璃、分组、勾选、子菜单）；否则底部动作面板（分组展平） |
-| `haptic`            | `style: light/medium/success/warning/error`                                                                        | 来自 `useHaptic`                                                                                                                      |
-| `contextmenu.offer` | `token`, `title?`, `rect`, `items[]`                                                                               | 手指按下带长按菜单的元素时发送；长按落在 `rect` 内且 2 秒内有效才弹系统菜单（元素截图浮起），否则交还 WebKit                          |
-| `bridge.error`      | `code`, `message`, `ref?`                                                                                          | Web 无法处理原生消息时回报                                                                                                            |
+| type                | payload                                                                                                            | 说明                                                                                                                                                   |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `bridge.hello`      | `versions[]`, `capabilities[]`, `client.build`                                                                     | 任意 `v` 都接受，以便回复 reject                                                                                                                       |
+| `bridge.ready`      | `session`                                                                                                          | Web 已提交原生布局                                                                                                                                     |
+| `chrome.tabs`       | `tabs[]`, `more[]`（`id/title/symbol/path`）                                                                       | `symbol` 为 SF Symbol；计费等过滤已在 Web 完成                                                                                                         |
+| `route.changed`     | `path`, `title`, `tabId`, `canGoBack`, `tabBar`, `nav?`, `modal?`                                                  | `tabBar=false`：打开的会话、登录/初始化页、抽屉模式；`nav`：`visible/title/back/action{id,title,symbol,menu?}/menu?/actions?`；`modal`：Web 弹窗打开中 |
+| `theme.changed`     | `scheme: light/dark`, `background?`, `accent?`（`#rrggbb`）                                                        | 原生 chrome 跟随 Web 主题、底色和强调色（底栏选中色）；按服务器缓存，冷启动先用它铺底                                                                  |
+| `confirm.request`   | `title`, `message`, `confirmText`, `cancelText`, `destructive`                                                     | 来自 `confirmDialog()`                                                                                                                                 |
+| `menu.request`      | `title?`, `message?`, `items[]`（`id/title/symbol?/destructive?/disabled?/checked?/children?/inline?`）, `anchor?` | 带 `anchor` 且原生有 `anchoredmenu`（iOS 17.4+）时从该位置弹系统菜单（iOS 26 玻璃、分组、勾选、子菜单）；否则底部动作面板（分组展平）                  |
+| `haptic`            | `style: light/medium/success/warning/error`                                                                        | 来自 `useHaptic`                                                                                                                                       |
+| `contextmenu.offer` | `token`, `title?`, `rect`, `items[]`                                                                               | 手指按下带长按菜单的元素时发送；长按落在 `rect` 内且 2 秒内有效才弹系统菜单（元素截图浮起），否则交还 WebKit                                           |
+| `bridge.error`      | `code`, `message`, `ref?`                                                                                          | Web 无法处理原生消息时回报                                                                                                                             |
 
 ### 消息（原生 → Web）
 
@@ -173,7 +181,8 @@ bridge.ready {session} ──────────────▶ nativeNavig
 | `layout.update`      | `contentInsets`, `safeArea`, `keyboard`         | → `--native-top/right/bottom/left`、`--native-keyboard-occlusion`                               |
 | `nav.select`         | `tabId`                                         | 原生 Tab / 「更多」项被点击                                                                     |
 | `nav.back`           | `{}`                                            | 原生返回按钮：页内覆盖的 `onBack` → 历史后退 → 推入页的父路由                                   |
-| `nav.action`         | `id`                                            | 导航栏右侧按钮被点击                                                                            |
+| `nav.menu`           | `{}`                                            | 导航栏左侧菜单按钮（`drawer`）：Web 打开导航抽屉                                                |
+| `nav.action`         | `id`, `item?`                                   | 导航栏右侧按钮被点击；按钮带菜单时 `item` 是选中的菜单项                                        |
 | `app.shortcut`       | `id`                                            | 桌面图标快捷操作（`new-conversation`）；Web 声明 `shortcuts` 能力才发，冷启动时排队到工作台挂载 |
 | `contextmenu.result` | `token`, `selected`                             | 长按菜单项被选中；菜单收起动画结束后才发，处理函数留在 Web                                      |
 | `confirm.result`     | `confirmed`                                     | 带请求 `id`                                                                                     |
@@ -195,7 +204,8 @@ bridge.ready {session} ──────────────▶ nativeNavig
 ### 版本演进
 
 - 新增可选字段：不升版本，旧端忽略未知字段（Swift `Codable` 默认如此）。`nav`、`modal`、
-  `background`、`app.shortcut` 和 `navbar` / `shortcuts` 能力都是这样加进 v1 的：旧前端不发 `nav`，原生就不显示导航栏。
+  `background`、`app.shortcut`、`nav.menu` 和 `navbar` / `shortcuts` / `drawer` 能力都是这样加进 v1 的：
+  旧前端不发 `nav`，原生就不显示导航栏；旧 App 不声明 `drawer`，Web 就继续给它 TabBar。
 - 新增消息类型：对端回 `unsupported_type`，发送方应按能力（`capabilities`）判断后再发。
 - 破坏性修改：升 `v`。原生的 `supportedVersions` 与 Web 的 `SUPPORTED_PROTOCOL_VERSIONS`
   以区间重叠协商；没有交集时原生显示恢复页，提示更新前端或 App。

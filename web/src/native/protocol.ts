@@ -34,6 +34,7 @@ export type NativeCapability =
   | WebCapability
   | 'contextmenu'
   | 'anchoredmenu'
+  | 'drawer'
   | 'share'
   | 'picker'
   | 'passkey';
@@ -71,6 +72,8 @@ export interface NavActionDeclaration {
   id: string;
   title: string;
   symbol: string;
+  /** The button opens this menu; `nav.action` then names the chosen item. */
+  menu?: MenuItemDeclaration[];
 }
 
 /**
@@ -82,6 +85,10 @@ export interface NavBarDeclaration {
   title: string | null;
   back: boolean;
   action: NavActionDeclaration | null;
+  /** A leading button opening the navigation drawer (shells with `drawer`). */
+  menu?: boolean;
+  /** Trailing buttons in one group; supersedes `action` where read. */
+  actions?: NavActionDeclaration[];
 }
 
 export type HapticStyle = 'light' | 'medium' | 'success' | 'warning' | 'error';
@@ -183,7 +190,10 @@ export interface NativeToWebPayloads {
   };
   'nav.select': { tabId: string };
   'nav.back': Record<string, never>;
-  'nav.action': { id: string };
+  /** The bar's leading menu button: open the navigation drawer. */
+  'nav.menu': Record<string, never>;
+  /** `item`: the entry chosen from the action's menu, when it has one. */
+  'nav.action': { id: string; item?: string };
   /** A home-screen quick action the web handles (e.g. `new-conversation`). */
   'app.shortcut': { id: string };
   /** A long-press menu item was chosen (after the menu finished closing). */
@@ -253,7 +263,10 @@ const payloadValidators: {
     isFiniteNumber(p.keyboard),
   'nav.select': (p) => typeof p.tabId === 'string',
   'nav.back': () => true,
-  'nav.action': (p) => typeof p.id === 'string',
+  'nav.menu': () => true,
+  'nav.action': (p) =>
+    typeof p.id === 'string' &&
+    (p.item === undefined || p.item === null || typeof p.item === 'string'),
   'app.shortcut': (p) => typeof p.id === 'string',
   'contextmenu.result': (p) =>
     typeof p.token === 'string' && typeof p.selected === 'string',

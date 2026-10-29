@@ -38,6 +38,21 @@ private let shell = ShellInfo(version: "0.1.0", build: "1", os: "27.1")
         action: .init(id: "page", title: "分区", symbol: "list.bullet")))
     } else { Issue.record("wrong case") }
 
+    // Drawer pages: a leading menu button and a group of trailing buttons,
+    // one of which opens a menu.
+    let drawer = try BridgeProtocol.decode(json(#"""
+      {"v":1,"type":"route.changed","payload":{"path":"/chat/main","title":null,"tabId":null,"canGoBack":false,"tabBar":false,
+       "nav":{"visible":true,"title":"HappyClaw","back":false,"action":null,"menu":true,
+        "actions":[{"id":"page:0","title":"文件","symbol":"folder"},
+                   {"id":"page:1","title":"更多","symbol":"ellipsis","menu":[{"id":"clear","title":"清除上下文","destructive":true}]}]}}}
+      """#))
+    if case let .routeChanged(state) = drawer.message {
+      #expect(state.nav?.menu == true)
+      #expect(state.nav?.trailing.map(\.id) == ["page:0", "page:1"])
+      #expect(state.nav?.trailing.last?.menu?.first?.id == "clear")
+    } else { Issue.record("wrong case") }
+    #expect(NavBarState(visible: true, title: nil, back: false, action: .init(id: "page", title: "a", symbol: "b")).trailing.count == 1)
+
     let theme = try BridgeProtocol.decode(json(#"""
       {"v":1,"type":"theme.changed","payload":{"scheme":"light","background":"#faf9f5","accent":"#f97316"}}
       """#))
@@ -82,6 +97,13 @@ private let shell = ShellInfo(version: "0.1.0", build: "1", os: "27.1")
 
     let back = try #require(try JSONSerialization.jsonObject(with: BridgeProtocol.encode(.navBack, version: 1)) as? [String: Any])
     #expect((back["payload"] as? [String: Any])?.isEmpty == true)
+
+    let pick = try #require(try JSONSerialization.jsonObject(
+      with: BridgeProtocol.encode(.navAction(id: "page:1", item: "clear"), version: 1)) as? [String: Any])
+    #expect(pick["type"] as? String == "nav.action")
+    #expect((pick["payload"] as? [String: Any])?["item"] as? String == "clear")
+    let menu = try #require(try JSONSerialization.jsonObject(with: BridgeProtocol.encode(.navMenu, version: 1)) as? [String: Any])
+    #expect(menu["type"] as? String == "nav.menu")
   }
 }
 

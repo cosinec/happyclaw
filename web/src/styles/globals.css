@@ -977,13 +977,34 @@ html[data-native-chrome='active'] .pwa-bottom-guard {
 }
 
 /* The native navigation bar reports the area from the screen top to its
-   bottom edge as --native-top (status bar included). Pages mark the title and
-   back button it replaces; marked elements stay as they are in a browser.
+   bottom edge as --native-top (status bar included). It floats over the
+   page: the root does not pad below it; each scroll container keeps that
+   much free above its first row, so content scrolls under the bar's fade.
+   Pages mark the title and back button it replaces; marked elements stay as
+   they are in a browser.
      data-native-title           hidden
      data-native-title="space"   invisible but keeps its flex space
      data-native-replaced        hidden (a web back button or mobile header) */
 html[data-native-nav='visible'] .safe-area-top {
-  padding-top: max(env(safe-area-inset-top), var(--native-top, 0px));
+  padding-top: 0;
+}
+
+html[data-native-nav='visible']
+  [data-app-scroll-root]:not(:has([data-hc-phone-home], [data-hc-chat-view])),
+html[data-native-nav='visible'] [data-hc-phone-home] {
+  padding-top: var(--native-top, 0px);
+  scroll-padding-top: var(--native-top, 0px);
+}
+
+html[data-native-nav='visible']
+  [data-app-scroll-root]:not(:has([data-hc-phone-home], [data-hc-chat-view]))
+  .sticky.top-0 {
+  top: var(--native-top, 0px);
+}
+
+/* A phone conversation already keeps room for its floating header. */
+html[data-native-nav='visible'] [data-hc-chat-view] > div {
+  --chat-header-height: var(--native-top, 0px);
 }
 
 html[data-native-nav='visible']

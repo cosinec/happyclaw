@@ -50,6 +50,7 @@ import { useDeleteWorkspace } from '../hooks/useDeleteWorkspace';
 import { useWorkspaceTree } from '../hooks/useWorkspaceTree';
 import { useNewConversation } from '../hooks/useNewConversation';
 import { useShellStore } from '../stores/shell';
+import { useNativeNavBar } from '@/native/nav-bar';
 import { Button } from '@/components/ui/button';
 import {
   Empty,
@@ -126,6 +127,20 @@ export function ChatPage() {
     showUsage: true,
   });
   const bugReportMounted = useOpenedOnce(showBugReport);
+  // iOS shell: the phone home's bar is native (menu button, name, new
+  // workspace); its web header steps aside.
+  useNativeNavBar(
+    showPhoneHome
+      ? {
+          title: appName,
+          action: {
+            symbol: 'folder.badge.plus',
+            title: '新建工作区',
+            onPress: () => setCreateOpen(true),
+          },
+        }
+      : null,
+  );
   const userInitial = (user?.display_name ||
     user?.username ||
     '?')[0].toUpperCase();
@@ -270,7 +285,10 @@ export function ChatPage() {
           data-hc-phone-home
           className="w-full overflow-y-auto overscroll-y-contain pb-[calc(83px+env(safe-area-inset-bottom,0px))]"
         >
-          <header className="sticky top-0 z-20 flex h-14 items-center gap-1 bg-background/85 px-2 backdrop-blur-xl">
+          <header
+            data-native-replaced
+            className="sticky top-0 z-20 flex h-14 items-center gap-1 bg-background/85 px-2 backdrop-blur-xl"
+          >
             <NavDrawerButton />
             <div className="flex min-w-0 flex-1 items-center gap-2 px-1">
               {brand}

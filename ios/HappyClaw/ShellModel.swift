@@ -219,9 +219,16 @@ final class ShellModel {
     send(.navBack)
   }
 
-  func performNavAction(_ action: NavBarState.Action) {
+  /// The web's navigation drawer, from the bar's leading menu button.
+  func openDrawer() {
     Haptics.play(.light)
-    send(.navAction(id: action.id))
+    send(.navMenu)
+  }
+
+  /// `item` is the entry chosen from the action's menu, if it has one.
+  func performNavAction(_ action: NavBarState.Action, item: String? = nil) {
+    if item == nil { Haptics.play(.light) }
+    send(.navAction(id: action.id, item: item))
   }
 
   /// Runs a pending home-screen quick action once native chrome is active;

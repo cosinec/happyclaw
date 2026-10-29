@@ -1,6 +1,7 @@
 import { filterNavItems } from '../components/layout/nav-items';
-import type { NativeNavBarSpec } from './nav-bar';
+import { navBarActions, type NativeNavBarSpec } from './nav-bar';
 import type {
+  NavActionDeclaration,
   NavBarDeclaration,
   TabDeclaration,
   WebToNativePayloads,
@@ -47,19 +48,57 @@ export const PUSHED_ROUTES: Record<string, { title: string; parent: string }> =
   };
 
 /**
- * The chat list keeps its brand header and an open conversation its rich
- * session header, so the native bar stays hidden there.
+ * The chat list and an open conversation keep their web headers unless the
+ * page declares a native bar itself (phones, via useNativeNavBar).
  */
 function routeOwnsHeader(pathname: string) {
   return matchesPrefix(pathname, '/chat');
 }
 
+/** `nav.action` id of a page's trailing button; the first keeps `page`. */
+export function navActionId(index: number) {
+  return index === 0 ? 'page' : `page:${index}`;
+}
+
+export function navActionIndex(id: string): number | null {
+  if (id === 'page') return 0;
+  const match = /^page:(\d+)$/.exec(id);
+  return match ? Number(match[1]) : null;
+}
+
+function declareActions(spec: NativeNavBarSpec): NavActionDeclaration[] {
+  return navBarActions(spec).map((action, index) => ({
+    id: navActionId(index),
+    title: action.title,
+    symbol: action.symbol,
+    ...(action.menu && {
+      menu: action.menu.map((section, sectionIndex) => ({
+        id: `section:${sectionIndex}`,
+        title: '',
+        inline: true,
+        children: section.map((item) => ({
+          id: item.id,
+          title: item.title,
+          symbol: item.symbol,
+          destructive: item.destructive,
+        })),
+      })),
+    }),
+  }));
+}
+
+/**
+ * `drawer`: the shell draws a menu button for the web's navigation drawer
+ * (phones, after the web's own phone layout), so no tab bar is declared and
+ * every top-level bar leads with that button.
+ */
 export function describeRoute(
   pathname: string,
   declarations: { tabs: TabDeclaration[]; more: TabDeclaration[] },
   canGoBack: boolean,
   override: NativeNavBarSpec | null = null,
   modal = false,
+  drawer = false,
 ): WebToNativePayloads['route.changed'] {
   const match = [...declarations.tabs, ...declarations.more]
     .filter((entry) => matchesPrefix(pathname, entry.path))
@@ -74,26 +113,23 @@ export function describeRoute(
     action: null,
   };
   if (override) {
+    const actions = declareActions(override);
     nav = {
       visible: true,
       title: override.title ?? title,
       back: nav.back || !!override.onBack,
-      action: override.action
-        ? {
-            id: 'page',
-            title: override.action.title,
-            symbol: override.action.symbol,
-          }
-        : null,
+      action: actions[0] ?? null,
+      ...(actions.length > 1 && { actions }),
     };
   }
+  if (drawer && nav.visible && !nav.back) nav.menu = true;
 
   return {
     path: pathname,
     title,
     tabId: match?.id ?? null,
     canGoBack,
-    tabBar: !!match && !CONVERSATION_ROUTE.test(pathname),
+    tabBar: !drawer && !!match && !CONVERSATION_ROUTE.test(pathname),
     nav,
     modal,
   };

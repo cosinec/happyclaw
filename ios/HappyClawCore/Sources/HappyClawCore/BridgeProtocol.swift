@@ -11,7 +11,7 @@ public enum BridgeProtocol {
   /// `window.webkit.messageHandlers.<name>` registered by the shell.
   public static let handlerName = "happyclaw"
   /// Capabilities the shell offers to the web (subset of web's list).
-  public static let shellCapabilities = ["layout", "tabs", "confirm", "menu", "haptic", "theme", "navbar", "shortcuts", "contextmenu", "anchoredmenu"]
+  public static let shellCapabilities = ["layout", "tabs", "confirm", "menu", "haptic", "theme", "navbar", "shortcuts", "contextmenu", "anchoredmenu", "drawer"]
 
   /// Highest version both sides speak, or nil when there is none.
   public static func negotiate(_ webVersions: [Int]) -> Int? {
@@ -98,11 +98,14 @@ public struct NavBarState: Codable, Equatable, Sendable {
     public var id: String
     public var title: String
     public var symbol: String
+    /// The button opens this menu instead; a choice reports its item id.
+    public var menu: [MenuItemDeclaration]?
 
-    public init(id: String, title: String, symbol: String) {
+    public init(id: String, title: String, symbol: String, menu: [MenuItemDeclaration]? = nil) {
       self.id = id
       self.title = title
       self.symbol = symbol
+      self.menu = menu
     }
   }
 
@@ -110,12 +113,26 @@ public struct NavBarState: Codable, Equatable, Sendable {
   public var title: String?
   public var back: Bool
   public var action: Action?
+  /// A leading button that opens the web's navigation drawer (`drawer`).
+  public var menu: Bool?
+  /// Trailing buttons, grouped; supersedes `action` when present.
+  public var actions: [Action]?
 
-  public init(visible: Bool, title: String?, back: Bool, action: Action?) {
+  public init(
+    visible: Bool, title: String?, back: Bool, action: Action?,
+    menu: Bool? = nil, actions: [Action]? = nil
+  ) {
     self.visible = visible
     self.title = title
     self.back = back
     self.action = action
+    self.menu = menu
+    self.actions = actions
+  }
+
+  /// The trailing buttons to draw, from either declaration form.
+  public var trailing: [Action] {
+    actions ?? action.map { [$0] } ?? []
   }
 }
 
@@ -371,7 +388,9 @@ public enum NativeMessage: Equatable, Sendable {
   case layout(contentInsets: Insets, safeArea: Insets, keyboard: Double)
   case navSelect(tabId: String)
   case navBack
-  case navAction(id: String)
+  case navMenu
+  /// `item` is the chosen entry when the action carries a menu.
+  case navAction(id: String, item: String? = nil)
   case appShortcut(id: String)
   case contextMenuResult(token: String, selected: String)
   case confirmResult(id: String, confirmed: Bool)
@@ -386,6 +405,7 @@ public enum NativeMessage: Equatable, Sendable {
     case .layout: "layout.update"
     case .navSelect: "nav.select"
     case .navBack: "nav.back"
+    case .navMenu: "nav.menu"
     case .navAction: "nav.action"
     case .appShortcut: "app.shortcut"
     case .contextMenuResult: "contextmenu.result"
@@ -429,9 +449,12 @@ extension BridgeProtocol {
     case let .navSelect(tabId):
       struct P: Encodable { var tabId: String }
       return envelope(P(tabId: tabId))
-    case .navBack:
+    case .navBack, .navMenu:
       return envelope(Empty())
-    case let .navAction(id), let .appShortcut(id):
+    case let .navAction(id, item):
+      struct P: Encodable { var id: String; var item: String? }
+      return envelope(P(id: id, item: item))
+    case let .appShortcut(id):
       struct P: Encodable { var id: String }
       return envelope(P(id: id))
     case let .contextMenuResult(token, selected):

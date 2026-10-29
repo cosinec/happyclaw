@@ -1,18 +1,25 @@
 import type { createBrowserRouter } from 'react-router-dom';
 import { useBillingStore } from '../stores/billing';
+import { useShellStore } from '../stores/shell';
+import { PHONE_MEDIA_QUERY } from '../components/layout/phone';
 import { setNativeBridge } from './bridge';
 import {
   activateNativeChrome,
   applyNativeLayout,
   releaseNativeChrome,
 } from './layout';
-import { currentNativeNavBar, subscribeNativeNavBar } from './nav-bar';
+import {
+  currentNativeNavBar,
+  navBarActions,
+  subscribeNativeNavBar,
+} from './nav-bar';
 import { emitNativeShortcut } from './shortcuts';
 import { handleNativeContextMenuResult } from './context-menu';
 import {
   buildTabDeclarations,
   describeRoute,
   findDeclaration,
+  navActionIndex,
   PUSHED_ROUTES,
 } from './navigation';
 import { BridgeSession } from './session';
@@ -81,6 +88,10 @@ export function installNativeBridge(router: AppRouter) {
   const teardown: Array<() => void> = [];
 
   let modal = false;
+  // Phones navigate from the web's drawer; a shell that can open it drops
+  // its tab bar for a menu button. An older shell keeps its tab bar.
+  const phone = window.matchMedia(PHONE_MEDIA_QUERY);
+  const drawer = () => phone.matches && session.supports('drawer');
   const sendRoute = () =>
     session.send(
       'route.changed',
@@ -90,6 +101,7 @@ export function installNativeBridge(router: AppRouter) {
         canGoBack(),
         currentNativeNavBar(),
         modal,
+        drawer(),
       ),
     );
 
@@ -123,6 +135,8 @@ export function installNativeBridge(router: AppRouter) {
 
       teardown.push(router.subscribe(sendRoute));
       teardown.push(subscribeNativeNavBar(sendRoute));
+      phone.addEventListener('change', sendRoute);
+      teardown.push(() => phone.removeEventListener('change', sendRoute));
       teardown.push(
         useBillingStore.subscribe((state, previous) => {
           if (state.billingEnabled === previous.billingEnabled) return;
@@ -200,8 +214,23 @@ export function installNativeBridge(router: AppRouter) {
   session.on('contextmenu.result', ({ token, selected }) =>
     handleNativeContextMenuResult(token, selected),
   );
-  session.on('nav.action', ({ id }) => {
-    if (id === 'page') currentNativeNavBar()?.action?.onPress();
+  session.on('nav.menu', () => {
+    useShellStore.getState().setNavDrawerOpen(true);
+  });
+  session.on('nav.action', ({ id, item }) => {
+    const page = currentNativeNavBar();
+    const index = navActionIndex(id);
+    const action =
+      page && index !== null ? navBarActions(page)[index] : undefined;
+    if (!action) return;
+    if (item) {
+      action.menu
+        ?.flat()
+        .find((entry) => entry.id === item)
+        ?.onSelect();
+    } else {
+      action.onPress?.();
+    }
   });
 
   window.__happyclawNativeReceive = (message) => session.receive(message);
